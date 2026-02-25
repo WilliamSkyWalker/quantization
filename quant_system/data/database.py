@@ -1,0 +1,810 @@
+"""
+数据库模块
+
+负责 MySQL 数据库的建表、读写操作封装。
+使用 SQLAlchemy ORM 定义表结构，提供统一的数据存取接口。
+
+表结构：
+    - stock_basic: 股票基本信息表（代码、名称、上市日期、行业、市值等）
+    - daily_price: 日线行情表（OHLCV + 复权因子）
+    - financial_data: 财务数据表（PE、PB、ROE、营收、净利润，按季度）
+    - industry_class: 行业分类表（申万一级行业）
+    - paper_account: 模拟盘账户状态
+    - paper_position: 模拟盘当前持仓
+    - paper_transaction: 模拟盘交易记录
+    - paper_nav: 模拟盘每日净值
+"""
+
+import logging
+from datetime import datetime
+from typing import Optional
+
+import pandas as pd
+from sqlalchemy import (
+    Column,
+    Float,
+    Integer,
+    String,
+    Date,
+    DateTime,
+    UniqueConstraint,
+    Index,
+    create_engine,
+    text,
+)
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+from config.settings import DB_URL, LOG_LEVEL
+
+# ============================================================
+# 日志配置
+# ============================================================
+
+logger = logging.getLogger(__name__)
+logger.setLevel(LOG_LEVEL)
+
+
+# ============================================================
+# ORM 基类
+# ============================================================
+
+class Base(DeclarativeBase):
+    pass
+
+
+# ============================================================
+# 表定义
+# ============================================================
+
+class StockBasic(Base):
+    """股票基本信息表"""
+    __tablename__ = "stock_basic"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts_code = Column(String(20), nullable=False, comment="股票代码，如 000001.SZ")
+    name = Column(String(50), nullable=False, comment="股票名称")
+    market = Column(String(10), comment="市场：主板/创业板/科创板")
+    list_date = Column(Date, comment="上市日期")
+    delist_date = Column(Date, comment="退市日期，NULL表示未退市")
+    is_st = Column(Integer, default=0, comment="是否ST：0=否，1=是")
+    total_share = Column(Float, comment="总股本（万股）")
+    float_share = Column(Float, comment="流通股本（万股）")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", name="uq_stock_basic_ts_code"),
+        Index("idx_stock_basic_list_date", "list_date"),
+    )
+
+
+class DailyPrice(Base):
+    """日线行情表（存储未复权价格 + 复权因子，查询时动态计算前复权）"""
+    __tablename__ = "daily_price"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts_code = Column(String(20), nullable=False, comment="股票代码")
+    trade_date = Column(Date, nullable=False, comment="交易日期")
+    open = Column(Float, comment="开盘价")
+    high = Column(Float, comment="最高价")
+    low = Column(Float, comment="最低价")
+    close = Column(Float, comment="收盘价")
+    volume = Column(Float, comment="成交量（手）")
+    amount = Column(Float, comment="成交额（千元）")
+    turnover_rate = Column(Float, comment="换手率（%）")
+    pct_chg = Column(Float, comment="涨跌幅（%）")
+    adj_factor = Column(Float, comment="复权因子")
+    is_limit_up = Column(Integer, default=0, comment="是否涨停：0=否，1=是")
+    is_limit_down = Column(Integer, default=0, comment="是否跌停：0=否，1=是")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "trade_date", name="uq_daily_ts_code_date"),
+        Index("idx_daily_trade_date", "trade_date"),
+        Index("idx_daily_ts_code", "ts_code"),
+    )
+
+
+class FinancialData(Base):
+    """财务数据表（季度频率）"""
+    __tablename__ = "financial_data"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts_code = Column(String(20), nullable=False, comment="股票代码")
+    ann_date = Column(Date, nullable=False, comment="公告日期（防止未来函数）")
+    end_date = Column(Date, nullable=False, comment="报告期（如 2024-03-31）")
+    pe_ttm = Column(Float, comment="市盈率TTM")
+    pb = Column(Float, comment="市净率")
+    roe_ttm = Column(Float, comment="ROE_TTM（%）")
+    gross_margin = Column(Float, comment="毛利率（%）")
+    revenue = Column(Float, comment="营业收入（元）")
+    net_profit = Column(Float, comment="净利润（元）")
+    bps = Column(Float, comment="每股净资产（元）")
+    total_mv = Column(Float, comment="总市值（万元）")
+    circ_mv = Column(Float, comment="流通市值（万元）")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "end_date", name="uq_financial_ts_code_end_date"),
+        Index("idx_financial_ann_date", "ann_date"),
+        Index("idx_financial_ts_code", "ts_code"),
+    )
+
+
+class IndustryClass(Base):
+    """行业分类表（申万一级行业）"""
+    __tablename__ = "industry_class"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts_code = Column(String(20), nullable=False, comment="股票代码")
+    industry_code = Column(String(20), comment="行业代码")
+    industry_name = Column(String(50), nullable=False, comment="行业名称（申万一级）")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", name="uq_industry_ts_code"),
+        Index("idx_industry_name", "industry_name"),
+    )
+
+
+# ============================================================
+# 模拟盘表定义
+# ============================================================
+
+class PaperAccount(Base):
+    """模拟盘账户"""
+    __tablename__ = "paper_account"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_name = Column(String(50), nullable=False, comment="账户名称，如 default")
+    initial_capital = Column(Float, nullable=False, comment="初始资金")
+    cash = Column(Float, nullable=False, comment="当前可用现金")
+    total_assets = Column(Float, nullable=False, comment="总资产（现金+持仓市值）")
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("account_name", name="uq_paper_account_name"),
+    )
+
+
+class PaperPosition(Base):
+    """模拟盘持仓"""
+    __tablename__ = "paper_position"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_name = Column(String(50), nullable=False, comment="账户名称")
+    ts_code = Column(String(20), nullable=False, comment="股票代码")
+    volume = Column(Integer, nullable=False, comment="持仓股数")
+    cost_basis = Column(Float, nullable=False, comment="持仓成本价（含佣金均摊）")
+    current_price = Column(Float, comment="最新价格")
+    market_value = Column(Float, comment="持仓市值")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("account_name", "ts_code", name="uq_paper_pos_acct_code"),
+        Index("idx_paper_pos_account", "account_name"),
+    )
+
+
+class PaperTransaction(Base):
+    """模拟盘交易记录"""
+    __tablename__ = "paper_transaction"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_name = Column(String(50), nullable=False, comment="账户名称")
+    trade_date = Column(Date, nullable=False, comment="交易日期")
+    ts_code = Column(String(20), nullable=False, comment="股票代码")
+    direction = Column(String(4), nullable=False, comment="BUY 或 SELL")
+    target_volume = Column(Integer, comment="目标交易股数")
+    filled_volume = Column(Integer, nullable=False, comment="实际成交股数")
+    price = Column(Float, nullable=False, comment="成交价格（收盘价±滑点）")
+    amount = Column(Float, nullable=False, comment="成交金额（不含费用）")
+    commission = Column(Float, nullable=False, comment="佣金")
+    stamp_tax = Column(Float, nullable=False, default=0, comment="印花税（仅卖出）")
+    slippage_cost = Column(Float, nullable=False, default=0, comment="滑点成本")
+    total_cost = Column(Float, nullable=False, comment="总交易费用")
+    reason = Column(String(100), comment="交易原因")
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        Index("idx_paper_txn_date", "account_name", "trade_date"),
+        Index("idx_paper_txn_code", "ts_code"),
+    )
+
+
+class PaperNav(Base):
+    """模拟盘每日净值"""
+    __tablename__ = "paper_nav"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_name = Column(String(50), nullable=False, comment="账户名称")
+    trade_date = Column(Date, nullable=False, comment="交易日期")
+    cash = Column(Float, nullable=False, comment="当日现金")
+    market_value = Column(Float, nullable=False, comment="当日持仓市值")
+    total_assets = Column(Float, nullable=False, comment="当日总资产")
+    nav = Column(Float, nullable=False, comment="单位净值（总资产/初始资金）")
+    daily_pnl = Column(Float, comment="当日盈亏")
+    daily_return = Column(Float, comment="当日收益率")
+    n_holdings = Column(Integer, comment="持仓股票数")
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("account_name", "trade_date", name="uq_paper_nav_acct_date"),
+        Index("idx_paper_nav_date", "trade_date"),
+    )
+
+
+# ============================================================
+# 数据库管理类
+# ============================================================
+
+class DatabaseManager:
+    """
+    数据库管理器
+
+    提供建表、批量写入、查询等操作的统一接口。
+    所有写入操作使用 upsert 语义（存在则更新，不存在则插入）。
+
+    用法:
+        db = DatabaseManager()
+        db.init_tables()
+        db.upsert_stock_basic(df)
+        result = db.query("SELECT * FROM stock_basic LIMIT 10")
+    """
+
+    def __init__(self, db_url: str = DB_URL):
+        """
+        初始化数据库连接。
+
+        Args:
+            db_url: SQLAlchemy 数据库连接字符串，默认使用 settings.py 中的配置。
+        """
+        engine_kwargs = {"echo": False}
+        # 连接池参数仅适用于 MySQL 等数据库，SQLite 不支持
+        if not db_url.startswith("sqlite"):
+            engine_kwargs.update(
+                pool_size=5,
+                max_overflow=10,
+                pool_recycle=3600,
+            )
+        self.engine = create_engine(db_url, **engine_kwargs)
+        self.SessionLocal = sessionmaker(bind=self.engine)
+        # 日志中隐藏密码
+        safe_url = db_url.split("@")[-1] if "@" in db_url else db_url
+        logger.info(f"数据库连接已建立: ...@{safe_url}")
+
+    def init_tables(self):
+        """
+        创建所有表。如果表已存在则跳过。
+        对已有表自动补齐新增列（如 adj_factor）。
+        """
+        Base.metadata.create_all(self.engine)
+        self._ensure_adj_factor_column()
+        self._ensure_new_columns()
+        logger.info("数据库表初始化完成")
+
+    def _ensure_adj_factor_column(self):
+        """已有 daily_price 表自动补齐 adj_factor 列。"""
+        try:
+            with self.engine.connect() as conn:
+                # 检查列是否存在
+                if str(self.engine.url).startswith("sqlite"):
+                    cols = [r[1] for r in conn.execute(text("PRAGMA table_info(daily_price)")).fetchall()]
+                else:
+                    cols = [r[0] for r in conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME='daily_price' AND TABLE_SCHEMA=DATABASE()"
+                    )).fetchall()]
+                if "adj_factor" not in cols:
+                    conn.execute(text("ALTER TABLE daily_price ADD COLUMN adj_factor FLOAT"))
+                    conn.commit()
+                    logger.info("daily_price 表: 已添加 adj_factor 列")
+        except Exception as e:
+            logger.debug(f"adj_factor 列检查跳过: {e}")
+
+    def _ensure_new_columns(self):
+        """已有表自动补齐新增列：financial_data.bps, stock_basic.total_share/float_share。"""
+        migrations = [
+            ("financial_data", "bps", "FLOAT"),
+            ("stock_basic", "total_share", "FLOAT"),
+            ("stock_basic", "float_share", "FLOAT"),
+        ]
+        try:
+            with self.engine.connect() as conn:
+                for table, col_name, col_type in migrations:
+                    if str(self.engine.url).startswith("sqlite"):
+                        cols = [r[1] for r in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()]
+                    else:
+                        cols = [r[0] for r in conn.execute(text(
+                            f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                            f"WHERE TABLE_NAME='{table}' AND TABLE_SCHEMA=DATABASE()"
+                        )).fetchall()]
+                    if col_name not in cols:
+                        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}"))
+                        conn.commit()
+                        logger.info(f"{table} 表: 已添加 {col_name} 列")
+        except Exception as e:
+            logger.debug(f"新列迁移检查跳过: {e}")
+
+    def get_session(self) -> Session:
+        """
+        获取数据库 Session。
+
+        Returns:
+            SQLAlchemy Session 实例。
+        """
+        return self.SessionLocal()
+
+    # ----------------------------------------------------------
+    # 通用查询
+    # ----------------------------------------------------------
+
+    def query(self, sql: str, params: Optional[dict] = None) -> pd.DataFrame:
+        """
+        执行 SQL 查询，返回 DataFrame。
+
+        Args:
+            sql: SQL 查询语句。
+            params: 查询参数字典（可选）。
+
+        Returns:
+            查询结果 DataFrame。
+        """
+        with self.engine.connect() as conn:
+            result = pd.read_sql(text(sql), conn, params=params)
+        return result
+
+    def table_count(self, table_name: str) -> int:
+        """
+        获取表的行数。
+
+        Args:
+            table_name: 表名。
+
+        Returns:
+            行数。
+        """
+        with self.engine.connect() as conn:
+            result = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}"))
+            return result.scalar()
+
+    # ----------------------------------------------------------
+    # 股票基本信息
+    # ----------------------------------------------------------
+
+    def upsert_stock_basic(self, df: pd.DataFrame):
+        """
+        批量写入/更新股票基本信息。
+
+        Args:
+            df: 包含以下列的 DataFrame:
+                - ts_code: 股票代码
+                - name: 股票名称
+                - market: 市场
+                - list_date: 上市日期
+                - delist_date: 退市日期（可选）
+                - is_st: 是否ST
+        """
+        if df.empty:
+            logger.warning("upsert_stock_basic: 输入DataFrame为空，跳过")
+            return
+
+        records = df.to_dict("records")
+        with self.get_session() as session:
+            for record in records:
+                existing = session.query(StockBasic).filter_by(
+                    ts_code=record["ts_code"]
+                ).first()
+                if existing:
+                    for key, value in record.items():
+                        if key != "ts_code" and hasattr(existing, key):
+                            setattr(existing, key, value)
+                elif "name" in record:
+                    # 只在有必填字段时才新增记录
+                    session.add(StockBasic(**record))
+            session.commit()
+        logger.info(f"stock_basic: 写入/更新 {len(records)} 条记录")
+
+    def get_stock_list(self, exclude_st: bool = True) -> pd.DataFrame:
+        """
+        获取股票列表。
+
+        Args:
+            exclude_st: 是否剔除ST股票，默认True。
+
+        Returns:
+            股票列表 DataFrame。
+        """
+        sql = "SELECT * FROM stock_basic WHERE delist_date IS NULL"
+        if exclude_st:
+            sql += " AND is_st = 0"
+        return self.query(sql)
+
+    # ----------------------------------------------------------
+    # 日线行情
+    # ----------------------------------------------------------
+
+    def upsert_daily_price(self, df: pd.DataFrame):
+        """
+        批量写入/更新日线行情数据。
+        使用 pandas to_sql 的 replace 策略，按股票分批写入。
+
+        Args:
+            df: 包含以下列的 DataFrame:
+                - ts_code, trade_date, open, high, low, close,
+                  volume, amount, turnover_rate, pct_chg,
+                  is_limit_up, is_limit_down
+        """
+        if df.empty:
+            logger.warning("upsert_daily_price: 输入DataFrame为空，跳过")
+            return
+
+        # 确保 trade_date 是 date 类型
+        if "trade_date" in df.columns:
+            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+
+        records = df.to_dict("records")
+
+        with self.get_session() as session:
+            batch_size = 500
+            for i in range(0, len(records), batch_size):
+                batch = records[i:i + batch_size]
+                for record in batch:
+                    existing = session.query(DailyPrice).filter_by(
+                        ts_code=record["ts_code"],
+                        trade_date=record["trade_date"],
+                    ).first()
+                    if existing:
+                        for key, value in record.items():
+                            if key not in ("ts_code", "trade_date") and hasattr(existing, key):
+                                setattr(existing, key, value)
+                    else:
+                        session.add(DailyPrice(**record))
+                session.flush()
+            session.commit()
+        logger.info(f"daily_price: 写入/更新 {len(records)} 条记录")
+
+    def bulk_insert_daily_price(self, df: pd.DataFrame):
+        """
+        批量插入日线行情（仅新增，速度更快）。
+        适用于首次全量下载场景，不做去重检查。
+
+        Args:
+            df: 日线行情 DataFrame。
+        """
+        if df.empty:
+            return
+
+        if "trade_date" in df.columns:
+            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+
+        # 添加 updated_at 列
+        df = df.copy()
+        df["updated_at"] = datetime.now()
+
+        df.to_sql(
+            "daily_price",
+            self.engine,
+            if_exists="append",
+            index=False,
+            method="multi",
+        )
+        logger.info(f"daily_price: 批量插入 {len(df)} 条记录")
+
+    def bulk_upsert_daily_price(self, df: pd.DataFrame):
+        """
+        批量 upsert 日线行情（MySQL ON DUPLICATE KEY UPDATE）。
+        适用于增量更新场景，遇到重复自动更新，比逐条 ORM upsert 快 50-100 倍。
+
+        SQLite 回退到 bulk_insert（忽略重复）。
+
+        Args:
+            df: 日线行情 DataFrame。
+        """
+        if df.empty:
+            return
+
+        if "trade_date" in df.columns:
+            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+
+        df = df.copy()
+        df["updated_at"] = datetime.now()
+
+        is_mysql = not str(self.engine.url).startswith("sqlite")
+
+        if is_mysql:
+            # MySQL: INSERT ... ON DUPLICATE KEY UPDATE
+            cols = [
+                "ts_code", "trade_date", "open", "high", "low", "close",
+                "volume", "amount", "turnover_rate", "pct_chg",
+                "adj_factor", "is_limit_up", "is_limit_down", "updated_at",
+            ]
+            existing_cols = [c for c in cols if c in df.columns]
+            update_cols = [c for c in existing_cols if c not in ("ts_code", "trade_date")]
+
+            placeholders = ", ".join([f":{c}" for c in existing_cols])
+            # open 是 MySQL 保留字，需要反引号
+            col_names = ", ".join([f"`{c}`" for c in existing_cols])
+            update_clause = ", ".join([f"`{c}` = VALUES(`{c}`)" for c in update_cols])
+
+            sql = text(
+                f"INSERT INTO daily_price ({col_names}) VALUES ({placeholders}) "
+                f"ON DUPLICATE KEY UPDATE {update_clause}"
+            )
+
+            records = df[existing_cols].to_dict("records")
+            batch_size = 1000
+            with self.engine.begin() as conn:
+                for i in range(0, len(records), batch_size):
+                    batch = records[i:i + batch_size]
+                    conn.execute(sql, batch)
+
+            logger.info(f"daily_price: 批量upsert {len(records)} 条记录")
+        else:
+            # SQLite: 回退到 INSERT OR IGNORE
+            try:
+                df.to_sql(
+                    "daily_price", self.engine,
+                    if_exists="append", index=False, method="multi",
+                )
+            except Exception:
+                # 忽略重复键错误
+                pass
+            logger.info(f"daily_price: 批量插入(SQLite) {len(df)} 条记录")
+
+    def batch_update_financial(self, updates: list[dict], end_date: str = None):
+        """
+        批量更新财务数据的估值字段（PE/PB/市值）。
+
+        对每只股票更新其自身最新报告期的记录（而非固定全局 end_date），
+        避免因各股票披露进度不同导致更新失败。
+
+        Args:
+            updates: [{"ts_code": "000001.SZ", "pe_ttm": 8.5, "pb": 0.7, ...}, ...]
+            end_date: 已废弃，保留参数兼容性但不再使用。
+        """
+        if not updates:
+            return
+
+        is_mysql = not str(self.engine.url).startswith("sqlite")
+
+        if is_mysql:
+            value_cols = ["pe_ttm", "pb", "total_mv", "circ_mv"]
+            ts_codes = [u["ts_code"] for u in updates]
+            codes_str = "','".join(ts_codes)
+
+            set_parts = []
+            for col in value_cols:
+                cases = []
+                for u in updates:
+                    val = u.get(col)
+                    if val is not None:
+                        cases.append(f"WHEN f.ts_code = '{u['ts_code']}' THEN {val}")
+                if cases:
+                    case_sql = " ".join(cases)
+                    set_parts.append(f"f.{col} = CASE {case_sql} ELSE f.{col} END")
+
+            if set_parts:
+                sql = (
+                    f"UPDATE financial_data f "
+                    f"INNER JOIN ("
+                    f"  SELECT ts_code, MAX(end_date) AS latest_end "
+                    f"  FROM financial_data "
+                    f"  WHERE ts_code IN ('{codes_str}') "
+                    f"  GROUP BY ts_code"
+                    f") sub ON f.ts_code = sub.ts_code AND f.end_date = sub.latest_end "
+                    f"SET {', '.join(set_parts)}"
+                )
+                with self.engine.begin() as conn:
+                    conn.execute(text(sql))
+                logger.info(f"financial_data: 批量更新 {len(updates)} 条估值数据")
+        else:
+            # SQLite 逐条：取每只股票最新报告期的记录
+            with self.get_session() as session:
+                for u in updates:
+                    existing = session.query(FinancialData).filter_by(
+                        ts_code=u["ts_code"],
+                    ).order_by(FinancialData.end_date.desc()).first()
+                    if existing:
+                        for col in ["pe_ttm", "pb", "total_mv", "circ_mv"]:
+                            if col in u and u[col] is not None:
+                                setattr(existing, col, u[col])
+                session.commit()
+
+    def get_daily_price(
+        self,
+        ts_code: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        查询日线行情。
+
+        Args:
+            ts_code: 股票代码（可选，为空则查全市场）。
+            start_date: 起始日期，格式 YYYYMMDD（可选）。
+            end_date: 结束日期，格式 YYYYMMDD（可选）。
+
+        Returns:
+            日线行情 DataFrame。
+        """
+        conditions = []
+        if ts_code:
+            conditions.append(f"ts_code = '{ts_code}'")
+        if start_date:
+            conditions.append(f"trade_date >= '{start_date}'")
+        if end_date:
+            conditions.append(f"trade_date <= '{end_date}'")
+
+        sql = "SELECT * FROM daily_price"
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY trade_date"
+
+        return self.query(sql)
+
+    def get_daily_price_qfq(
+        self,
+        ts_code: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        查询前复权日线行情（动态计算）。
+
+        使用 adj_factor 将存储的未复权价格转换为前复权价格：
+            qfq_price = price * adj_factor / latest_adj_factor
+
+        Args:
+            ts_code: 股票代码（可选）。
+            start_date: 起始日期 YYYYMMDD（可选）。
+            end_date: 结束日期 YYYYMMDD（可选）。
+
+        Returns:
+            前复权日线行情 DataFrame。
+        """
+        df = self.get_daily_price(ts_code, start_date, end_date)
+        if df.empty or "adj_factor" not in df.columns:
+            return df
+
+        price_cols = ["open", "high", "low", "close"]
+        for code, grp in df.groupby("ts_code"):
+            latest_adj = grp["adj_factor"].iloc[-1]
+            if pd.notna(latest_adj) and latest_adj != 0:
+                mask = df["ts_code"] == code
+                for col in price_cols:
+                    if col in df.columns:
+                        df.loc[mask, col] = df.loc[mask, col] * df.loc[mask, "adj_factor"] / latest_adj
+
+        return df
+
+    def get_latest_trade_date(self, ts_code: Optional[str] = None) -> Optional[str]:
+        """
+        获取数据库中最新的交易日期。
+
+        Args:
+            ts_code: 股票代码（可选）。
+
+        Returns:
+            最新交易日期字符串（YYYY-MM-DD），无数据返回 None。
+        """
+        sql = "SELECT MAX(trade_date) as max_date FROM daily_price"
+        if ts_code:
+            sql += f" WHERE ts_code = '{ts_code}'"
+        result = self.query(sql)
+        max_date = result["max_date"].iloc[0]
+        if pd.isna(max_date):
+            return None
+        return str(max_date)
+
+    # ----------------------------------------------------------
+    # 财务数据
+    # ----------------------------------------------------------
+
+    def upsert_financial_data(self, df: pd.DataFrame):
+        """
+        批量写入/更新财务数据。
+
+        Args:
+            df: 包含以下列的 DataFrame:
+                - ts_code, ann_date, end_date, pe_ttm, pb, roe_ttm,
+                  gross_margin, revenue, net_profit, total_mv, circ_mv
+        """
+        if df.empty:
+            logger.warning("upsert_financial_data: 输入DataFrame为空，跳过")
+            return
+
+        for col in ["ann_date", "end_date"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col]).dt.date
+
+        records = df.to_dict("records")
+        with self.get_session() as session:
+            for record in records:
+                existing = session.query(FinancialData).filter_by(
+                    ts_code=record["ts_code"],
+                    end_date=record["end_date"],
+                ).first()
+                if existing:
+                    for key, value in record.items():
+                        if key not in ("ts_code", "end_date") and hasattr(existing, key):
+                            setattr(existing, key, value)
+                else:
+                    session.add(FinancialData(**record))
+            session.commit()
+        logger.info(f"financial_data: 写入/更新 {len(records)} 条记录")
+
+    # ----------------------------------------------------------
+    # 行业分类
+    # ----------------------------------------------------------
+
+    def upsert_industry_class(self, df: pd.DataFrame):
+        """
+        批量写入/更新行业分类。
+
+        Args:
+            df: 包含以下列的 DataFrame:
+                - ts_code, industry_code（可选）, industry_name
+        """
+        if df.empty:
+            logger.warning("upsert_industry_class: 输入DataFrame为空，跳过")
+            return
+
+        records = df.to_dict("records")
+        with self.get_session() as session:
+            for record in records:
+                existing = session.query(IndustryClass).filter_by(
+                    ts_code=record["ts_code"]
+                ).first()
+                if existing:
+                    for key, value in record.items():
+                        if key != "ts_code" and hasattr(existing, key):
+                            setattr(existing, key, value)
+                else:
+                    session.add(IndustryClass(**record))
+            session.commit()
+        logger.info(f"industry_class: 写入/更新 {len(records)} 条记录")
+
+    def get_industry_map(self) -> pd.DataFrame:
+        """
+        获取全市场行业分类映射。
+
+        Returns:
+            DataFrame，包含 ts_code 和 industry_name 列。
+        """
+        return self.query("SELECT ts_code, industry_name FROM industry_class")
+
+
+# ============================================================
+# 便捷函数
+# ============================================================
+
+def get_db() -> DatabaseManager:
+    """
+    获取 DatabaseManager 单例（简化调用）。
+
+    Returns:
+        DatabaseManager 实例。
+    """
+    if not hasattr(get_db, "_instance"):
+        get_db._instance = DatabaseManager()
+        get_db._instance.init_tables()
+    return get_db._instance
+
+
+if __name__ == "__main__":
+    # 测试：初始化数据库并打印表信息
+    logging.basicConfig(
+        level=LOG_LEVEL,
+        format="%(asctime)s | %(name)-20s | %(levelname)-7s | %(message)s",
+    )
+
+    db = DatabaseManager()
+    db.init_tables()
+
+    # 验证表是否创建成功
+    with db.engine.connect() as conn:
+        tables = conn.execute(text("SHOW TABLES")).fetchall()
+        print("已创建的表:")
+        for t in tables:
+            print(f"  - {t[0]}")

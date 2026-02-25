@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(touch:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(python3:*)",
+      "WebSearch",
+      "WebFetch(domain:akshare.akfamily.xyz)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:akshare-hh.readthedocs.io)",
+      "WebFetch(domain:deepwiki.com)",
+      "WebFetch(domain:blog.csdn.net)",
+      "WebFetch(domain:tushare.pro)",
+      "Bash(cd /Users/daweilun/Documents/quantization/quant_system && python -m pytest tests/test_paper_trader.py -v 2>&1)"
+    ]
+  }
+}
