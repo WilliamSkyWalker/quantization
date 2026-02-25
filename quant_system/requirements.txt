@@ -1,0 +1,35 @@
+# A股量化投资系统 - 依赖清单
+# Python 3.10+
+
+# 数据获取
+tushare>=1.4.0
+
+# 数据处理
+pandas>=2.0.0
+numpy>=1.24.0
+
+# 数据库
+sqlalchemy>=2.0.0
+pymysql>=1.1.0
+
+# 配置文件
+python-dotenv>=1.0.0
+
+# 可视化
+matplotlib>=3.7.0
+plotly>=5.15.0
+
+# 机器学习（Phase 2+）
+lightgbm>=4.0.0
+
+# 优化（Phase 4+）
+cvxpy>=1.4.0
+
+# 进度条
+tqdm>=4.65.0
+
+# 测试
+pytest>=7.4.0
+
+# 日志着色（可选，便于调试）
+colorlog>=6.7.0
