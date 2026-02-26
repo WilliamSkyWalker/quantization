@@ -4,7 +4,7 @@
 负责从 Tushare Pro 获取以下数据并存入 MySQL：
     1. 季度财务数据（营收、净利润、ROE、毛利率，使用 fina_indicator）
     2. 估值快照（PE/PB/市值，使用 daily_basic）
-    3. 行业分类（申万一级行业，使用 index_classify + index_member）
+    3. 行业分类（申万一级 + 二级行业，使用 index_classify + index_member）
 
 Tushare Pro 接口说明：
     - fina_indicator(period): 财务指标，按报告期获取全市场，含公告日期
@@ -105,15 +105,20 @@ class FinancialUpdater:
 
         success_count = 0
         total_records = 0
-        fields = "ts_code,ann_date,end_date,roe_dt,grossprofit_margin,revenue,n_income,bps"
+        fina_fields = "ts_code,ann_date,end_date,roe_dt,grossprofit_margin,bps"
+        income_fields = "ts_code,ann_date,end_date,revenue,n_income"
 
         for ts_code in tqdm(stock_list, desc="下载财务数据"):
             try:
                 df = _tushare_call(
                     self.pro, "fina_indicator", self.limiter,
                     ts_code=ts_code, start_date=start_date, end_date=end_date,
-                    fields=fields,
+                    fields=fina_fields,
                 )
+
+                # 从 income 接口补充 revenue 和 net_profit
+                df_income = self._fetch_income(ts_code, start_date, end_date, income_fields)
+                df = self._merge_income(df, df_income)
 
                 if df.empty:
                     continue
@@ -188,6 +193,77 @@ class FinancialUpdater:
             df_write = df_write.dropna(subset=existing_value_cols, how="all")
 
         return df_write if not df_write.empty else None
+
+    def _fetch_income(
+        self,
+        ts_code: str,
+        start_date: str,
+        end_date: Optional[str],
+        fields: str,
+    ) -> pd.DataFrame:
+        """
+        从 income（利润表）接口获取 revenue 和 n_income。
+
+        fina_indicator 在低积分权限下不返回 revenue/n_income，
+        需要从 income 接口单独获取。
+        """
+        try:
+            kwargs = dict(ts_code=ts_code, start_date=start_date, fields=fields)
+            if end_date:
+                kwargs["end_date"] = end_date
+            df = _tushare_call(self.pro, "income", self.limiter, **kwargs)
+            return df
+        except Exception as e:
+            logger.debug(f"{ts_code} income 接口调用失败: {e}")
+            return pd.DataFrame()
+
+    @staticmethod
+    def _merge_income(df_fina: pd.DataFrame, df_income: pd.DataFrame) -> pd.DataFrame:
+        """
+        将 income 接口的 revenue/n_income 合并到 fina_indicator 的结果中。
+
+        以 (ts_code, end_date) 为键做 left join，补充缺失的 revenue 和 n_income 列。
+        """
+        if df_fina.empty:
+            return df_fina
+
+        if df_income.empty or df_income is None:
+            # 无 income 数据，确保列存在
+            if "revenue" not in df_fina.columns:
+                df_fina["revenue"] = None
+            if "n_income" not in df_fina.columns:
+                df_fina["n_income"] = None
+            return df_fina
+
+        # income 接口可能有重复行（同一 end_date 多次公告），去重保留最新
+        df_income = df_income.sort_values("ann_date", ascending=False).drop_duplicates(
+            subset=["ts_code", "end_date"], keep="first"
+        )
+
+        # 只取需要的列
+        income_cols = ["ts_code", "end_date"]
+        if "revenue" in df_income.columns:
+            income_cols.append("revenue")
+        if "n_income" in df_income.columns:
+            income_cols.append("n_income")
+        df_income = df_income[income_cols]
+
+        # 合并
+        df = df_fina.merge(df_income, on=["ts_code", "end_date"], how="left", suffixes=("", "_inc"))
+
+        # 如果 fina_indicator 已有 revenue/n_income 列但为空，用 income 的填充
+        for col in ["revenue", "n_income"]:
+            col_inc = f"{col}_inc"
+            if col_inc in df.columns:
+                if col in df.columns:
+                    df[col] = df[col].fillna(df[col_inc])
+                else:
+                    df[col] = df[col_inc]
+                df = df.drop(columns=[col_inc])
+            elif col not in df.columns:
+                df[col] = None
+
+        return df
 
     @staticmethod
     def _estimate_ann_date(quarter_date: str):
@@ -267,7 +343,8 @@ class FinancialUpdater:
 
         # 对缺失股票逐只拉取最近 2 个季度
         start_date = recent_quarters[-1]  # 较早的那个季度
-        fields = "ts_code,ann_date,end_date,roe_dt,grossprofit_margin,revenue,n_income,bps"
+        fina_fields = "ts_code,ann_date,end_date,roe_dt,grossprofit_margin,bps"
+        income_fields = "ts_code,ann_date,end_date,revenue,n_income"
         success_count = 0
 
         for ts_code in tqdm(missing_codes, desc="增量更新财务"):
@@ -275,8 +352,12 @@ class FinancialUpdater:
                 df = _tushare_call(
                     self.pro, "fina_indicator", self.limiter,
                     ts_code=ts_code, start_date=start_date,
-                    fields=fields,
+                    fields=fina_fields,
                 )
+
+                df_income = self._fetch_income(ts_code, start_date, None, income_fields)
+                df = self._merge_income(df, df_income)
+
                 if df.empty:
                     continue
 
@@ -288,6 +369,93 @@ class FinancialUpdater:
                 logger.debug(f"{ts_code} 增量更新失败: {e}")
 
         logger.info(f"财务数据增量更新完成: {success_count}/{len(missing_codes)} 只")
+        return success_count
+
+    # ----------------------------------------------------------
+    # 回填历史 revenue / net_profit
+    # ----------------------------------------------------------
+
+    def backfill_income(self) -> int:
+        """
+        回填历史财务数据中缺失的 revenue / net_profit。
+
+        只针对 financial_data 表中 revenue 或 net_profit 为 NULL 的记录，
+        从 income 接口补充数据，不重新下载 fina_indicator。
+
+        Returns:
+            成功更新的股票数量。
+        """
+        # 找出需要回填的股票
+        df_missing = self.db.query(
+            "SELECT DISTINCT ts_code FROM financial_data "
+            "WHERE revenue IS NULL OR net_profit IS NULL"
+        )
+
+        if df_missing.empty:
+            logger.info("所有财务记录的 revenue/net_profit 均已有值，无需回填")
+            return 0
+
+        missing_codes = df_missing["ts_code"].tolist()
+        logger.info(f"需回填 income 数据的股票: {len(missing_codes)} 只")
+
+        income_fields = "ts_code,ann_date,end_date,revenue,n_income"
+        start_date = DATA_START_DATE
+        success_count = 0
+        total_updated = 0
+
+        for ts_code in tqdm(missing_codes, desc="回填 income 数据"):
+            try:
+                df_income = self._fetch_income(ts_code, start_date, None, income_fields)
+                if df_income.empty:
+                    continue
+
+                # 去重：同一 end_date 保留最新公告
+                df_income = df_income.sort_values("ann_date", ascending=False).drop_duplicates(
+                    subset=["ts_code", "end_date"], keep="first"
+                )
+
+                # 逐条更新
+                updated = 0
+                with self.db.engine.begin() as conn:
+                    for _, row in df_income.iterrows():
+                        end_date = row.get("end_date")
+                        revenue = row.get("revenue")
+                        n_income = row.get("n_income")
+
+                        if pd.isna(end_date):
+                            continue
+
+                        # 只更新 NULL 字段
+                        set_parts = []
+                        params = {"ts_code": ts_code, "end_date": str(end_date)}
+
+                        if pd.notna(revenue):
+                            set_parts.append("revenue = CASE WHEN revenue IS NULL THEN :revenue ELSE revenue END")
+                            params["revenue"] = float(revenue)
+                        if pd.notna(n_income):
+                            set_parts.append("net_profit = CASE WHEN net_profit IS NULL THEN :net_profit ELSE net_profit END")
+                            params["net_profit"] = float(n_income)
+
+                        if set_parts:
+                            from sqlalchemy import text as sa_text
+                            sql = sa_text(
+                                f"UPDATE financial_data SET {', '.join(set_parts)} "
+                                f"WHERE ts_code = :ts_code AND end_date = :end_date"
+                            )
+                            result = conn.execute(sql, params)
+                            updated += result.rowcount
+
+                if updated > 0:
+                    success_count += 1
+                    total_updated += updated
+
+            except Exception as e:
+                logger.debug(f"{ts_code} income 回填失败: {e}")
+
+        logger.info(
+            f"income 回填完成: {success_count}/{len(missing_codes)} 只股票, "
+            f"共更新 {total_updated} 条记录"
+        )
         return success_count
 
     @staticmethod
@@ -409,36 +577,39 @@ class FinancialUpdater:
         return str(val)
 
     # ----------------------------------------------------------
-    # 行业分类（申万一级）
+    # 行业分类（申万一级 + 二级）
     # ----------------------------------------------------------
 
     def download_industry_classification(self) -> int:
         """
         下载全市场行业分类并存入数据库。
 
-        使用申万一级行业标准分类（SW2021）：
-            1. index_classify(level='L1', src='SW2021') 获取行业列表
-            2. index_member(index_code=c) 逐个获取成分股
+        使用申万行业标准分类（SW2021）：
+            1. index_classify(level='L1', src='SW2021') 获取一级行业列表
+            2. index_member(index_code=c) 逐个获取一级成分股
+            3. index_classify(level='L2', src='SW2021') 获取二级行业列表
+            4. index_member(index_code=c) 逐个获取二级成分股
+            5. 合并 L1 + L2 数据写入数据库
 
         Returns:
             写入的记录数。
         """
-        logger.info("开始下载行业分类（申万一级）...")
+        logger.info("开始下载行业分类（申万一级 + 二级）...")
 
-        # 获取申万一级行业列表
-        df_index = _tushare_call(self.pro, "index_classify", self.limiter,
-                                 level="L1", src="SW2021")
+        # ========== L1 一级行业 ==========
+        df_index_l1 = _tushare_call(self.pro, "index_classify", self.limiter,
+                                     level="L1", src="SW2021")
 
-        if df_index.empty:
-            logger.error("申万行业分类列表为空")
+        if df_index_l1.empty:
+            logger.error("申万一级行业分类列表为空")
             return 0
 
-        logger.info(f"共 {len(df_index)} 个申万一级行业")
+        logger.info(f"共 {len(df_index_l1)} 个申万一级行业")
 
         all_records = []
         failed_industries = []
 
-        for _, row in tqdm(df_index.iterrows(), total=len(df_index), desc="下载行业成分股"):
+        for _, row in tqdm(df_index_l1.iterrows(), total=len(df_index_l1), desc="下载L1行业成分股"):
             index_code = row.get("index_code")
             industry_name = row.get("industry_name", "")
 
@@ -465,21 +636,75 @@ class FinancialUpdater:
 
             except Exception as e:
                 failed_industries.append(industry_name)
-                logger.debug(f"行业 {industry_name}({index_code}) 获取失败: {e}")
+                logger.debug(f"L1 行业 {industry_name}({index_code}) 获取失败: {e}")
 
         if failed_industries:
             logger.warning(
-                f"{len(failed_industries)} 个行业获取失败: {failed_industries[:5]}..."
+                f"L1: {len(failed_industries)} 个行业获取失败: {failed_industries[:5]}..."
             )
 
         if not all_records:
-            logger.error("未获取到任何行业分类数据")
+            logger.error("未获取到任何 L1 行业分类数据")
             return 0
 
         df_industry = pd.DataFrame(all_records)
-
-        # 一只股票只保留一个行业
+        # 一只股票只保留一个 L1 行业
         df_industry = df_industry.drop_duplicates(subset=["ts_code"], keep="first")
+
+        # ========== L2 二级行业 ==========
+        logger.info("开始下载申万二级行业...")
+        df_index_l2 = _tushare_call(self.pro, "index_classify", self.limiter,
+                                     level="L2", src="SW2021")
+
+        if not df_index_l2.empty:
+            logger.info(f"共 {len(df_index_l2)} 个申万二级行业")
+
+            l2_map = {}  # ts_code -> (l2_code, l2_name)
+            failed_l2 = []
+
+            for _, row in tqdm(df_index_l2.iterrows(), total=len(df_index_l2), desc="下载L2行业成分股"):
+                index_code = row.get("index_code")
+                industry_name = row.get("industry_name", "")
+
+                if not index_code:
+                    continue
+
+                try:
+                    df_members = _tushare_call(self.pro, "index_member", self.limiter,
+                                               index_code=index_code,
+                                               fields="index_code,con_code,in_date,out_date")
+
+                    if not df_members.empty:
+                        current = df_members[df_members["out_date"].isna() | (df_members["out_date"] == "")]
+
+                        for _, m_row in current.iterrows():
+                            ts_code = m_row.get("con_code", "")
+                            if ts_code and ts_code[:2] in ("00", "30", "60", "68"):
+                                # 一只股票只保留第一个匹配的 L2 行业
+                                if ts_code not in l2_map:
+                                    l2_map[ts_code] = (index_code, industry_name)
+
+                except Exception as e:
+                    failed_l2.append(industry_name)
+                    logger.debug(f"L2 行业 {industry_name}({index_code}) 获取失败: {e}")
+
+            if failed_l2:
+                logger.warning(
+                    f"L2: {len(failed_l2)} 个行业获取失败: {failed_l2[:5]}..."
+                )
+
+            # 合并 L2 到 L1 DataFrame
+            df_industry["l2_industry_code"] = df_industry["ts_code"].map(
+                lambda x: l2_map.get(x, (None, None))[0]
+            )
+            df_industry["l2_industry_name"] = df_industry["ts_code"].map(
+                lambda x: l2_map.get(x, (None, None))[1]
+            )
+            logger.info(f"L2 行业匹配: {df_industry['l2_industry_name'].notna().sum()}/{len(df_industry)} 只股票")
+        else:
+            logger.warning("申万二级行业列表为空，跳过 L2")
+            df_industry["l2_industry_code"] = None
+            df_industry["l2_industry_name"] = None
 
         # 写入数据库
         self.db.upsert_industry_class(df_industry)
@@ -487,7 +712,11 @@ class FinancialUpdater:
 
         # 打印行业分布
         dist = df_industry["industry_name"].value_counts()
-        logger.info(f"行业分布（前10）:\n{dist.head(10).to_string()}")
+        logger.info(f"L1 行业分布（前10）:\n{dist.head(10).to_string()}")
+
+        l2_dist = df_industry["l2_industry_name"].value_counts()
+        if not l2_dist.empty:
+            logger.info(f"L2 行业分布（前10）:\n{l2_dist.head(10).to_string()}")
 
         return len(df_industry)
 

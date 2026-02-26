@@ -24,6 +24,8 @@ import pandas as pd
 from config.settings import (
     IPO_FILTER_DAYS,
     MIN_DAILY_TURNOVER,
+    EXCLUDE_STAR_MARKET,
+    ALLOWED_INDUSTRIES,
     LOG_LEVEL,
 )
 from data.database import DatabaseManager
@@ -114,6 +116,7 @@ def get_clean_universe(
     target_date: str,
     min_turnover: Optional[float] = None,
     lookback_days: int = 20,
+    skip_industry_filter: bool = False,
 ) -> pd.DataFrame:
     """
     获取某一日的可交易股票池（干净宇宙）。
@@ -175,6 +178,13 @@ def get_clean_universe(
     df_basic = df_basic[df_basic["is_st"] == 0]
     after_st = len(df_basic)
 
+    # 排除科创板（688 开头）
+    if EXCLUDE_STAR_MARKET:
+        df_basic = df_basic[~df_basic["ts_code"].str.startswith("68")]
+        after_star = len(df_basic)
+    else:
+        after_star = after_st
+
     # 排除上市不足 N 天的新股
     ipo_cutoff = target_dt - timedelta(days=IPO_FILTER_DAYS)
     ipo_cutoff_ts = pd.Timestamp(ipo_cutoff)
@@ -184,9 +194,10 @@ def get_clean_universe(
     ]
     after_ipo = len(df_basic)
 
+    star_msg = f" -> 科创板{after_star}" if EXCLUDE_STAR_MARKET else ""
     logger.info(
         f"基本面过滤: {initial_count} -> 退市{after_delist} -> "
-        f"ST{after_st} -> 新股{after_ipo}"
+        f"ST{after_st}{star_msg} -> 新股{after_ipo}"
     )
 
     if df_basic.empty:
@@ -272,10 +283,24 @@ def get_clean_universe(
     except Exception:
         df_result["industry_name"] = None
 
+    # 行业白名单过滤（同时检查 L1 和 L2 行业名）
+    if ALLOWED_INDUSTRIES and "industry_name" in df_result.columns and not skip_industry_filter:
+        before_ind = len(df_result)
+        l1_match = df_result["industry_name"].isin(ALLOWED_INDUSTRIES)
+        if "l2_industry_name" in df_result.columns:
+            l2_match = df_result["l2_industry_name"].isin(ALLOWED_INDUSTRIES)
+        else:
+            l2_match = False
+        df_result = df_result[l1_match | l2_match]
+        logger.info(
+            f"行业白名单过滤({','.join(ALLOWED_INDUSTRIES)}): "
+            f"{before_ind} -> {len(df_result)} 只"
+        )
+
     # 整理输出列
     output_cols = [
         "ts_code", "name", "market", "list_date", "industry_name",
-        "is_limit_up", "is_limit_down", "avg_amount",
+        "l2_industry_name", "is_limit_up", "is_limit_down", "avg_amount",
     ]
     df_result = df_result[[c for c in output_cols if c in df_result.columns]]
 

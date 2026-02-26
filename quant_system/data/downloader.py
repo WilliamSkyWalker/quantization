@@ -378,6 +378,154 @@ class TushareDownloader:
     # 增量更新
     # ----------------------------------------------------------
 
+    # ----------------------------------------------------------
+    # 指数日线下载
+    # ----------------------------------------------------------
+
+    def download_index_daily(
+        self,
+        index_code: str = "000300.SH",
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> int:
+        """
+        下载指数日线行情并存入 daily_price 表。
+
+        自动识别申万指数（.SI 后缀）并使用 sw_daily 接口，
+        其他指数使用 index_daily 接口。
+
+        Args:
+            index_code: 指数代码，默认沪深300（000300.SH）。
+            start_date: 起始日期，格式 YYYYMMDD，默认 DATA_START_DATE。
+            end_date: 结束日期，格式 YYYYMMDD，默认今天。
+
+        Returns:
+            下载的记录数。
+        """
+        # 申万指数使用专用接口
+        if index_code.endswith(".SI"):
+            return self._download_sw_index_daily(index_code, start_date, end_date)
+
+        if start_date is None:
+            start_date = DATA_START_DATE
+        if end_date is None:
+            end_date = datetime.now().strftime("%Y%m%d")
+
+        logger.info(f"下载指数日线: {index_code}, {start_date} ~ {end_date}")
+
+        df = _tushare_call(
+            self.pro, "index_daily", self.limiter,
+            ts_code=index_code,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        if df.empty:
+            logger.warning(f"指数 {index_code} 无数据")
+            return 0
+
+        # 对齐到 daily_price 表结构
+        df = df.rename(columns={"vol": "volume"})
+        df["turnover_rate"] = None
+        df["adj_factor"] = 1.0
+        df["is_limit_up"] = 0
+        df["is_limit_down"] = 0
+
+        keep_cols = [
+            "ts_code", "trade_date", "open", "high", "low", "close",
+            "volume", "amount", "turnover_rate", "pct_chg",
+            "adj_factor", "is_limit_up", "is_limit_down",
+        ]
+        df = df[[c for c in keep_cols if c in df.columns]]
+
+        self.db.bulk_upsert_daily_price(df)
+        logger.info(f"指数 {index_code}: 写入 {len(df)} 条日线")
+        return len(df)
+
+    def _download_sw_index_daily(
+        self,
+        index_code: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> int:
+        """
+        下载申万行业指数日线（使用 sw_daily 接口）。
+
+        Args:
+            index_code: 申万指数代码（如 801050.SI）。
+            start_date: 起始日期。
+            end_date: 结束日期。
+
+        Returns:
+            下载的记录数。
+        """
+        if start_date is None:
+            start_date = DATA_START_DATE
+        if end_date is None:
+            end_date = datetime.now().strftime("%Y%m%d")
+
+        logger.info(f"下载申万指数日线: {index_code}, {start_date} ~ {end_date}")
+
+        df = _tushare_call(
+            self.pro, "sw_daily", self.limiter,
+            ts_code=index_code,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        if df.empty:
+            logger.warning(f"申万指数 {index_code} 无数据")
+            return 0
+
+        # 对齐到 daily_price 表结构
+        # sw_daily 返回字段: ts_code, trade_date, name, open, low, high, close,
+        #                     change, pct_change, vol, amount, pe, pb, float_mv, total_mv
+        df = df.rename(columns={"vol": "volume", "pct_change": "pct_chg"})
+        df["turnover_rate"] = None
+        df["adj_factor"] = 1.0
+        df["is_limit_up"] = 0
+        df["is_limit_down"] = 0
+
+        keep_cols = [
+            "ts_code", "trade_date", "open", "high", "low", "close",
+            "volume", "amount", "turnover_rate", "pct_chg",
+            "adj_factor", "is_limit_up", "is_limit_down",
+        ]
+        df = df[[c for c in keep_cols if c in df.columns]]
+
+        self.db.bulk_upsert_daily_price(df)
+        logger.info(f"申万指数 {index_code}: 写入 {len(df)} 条日线")
+        return len(df)
+
+    def update_index_daily(self, index_code: str = "000300.SH") -> int:
+        """
+        增量更新指数日线。
+
+        从该指数在 daily_price 中的最新日期开始更新。
+
+        Args:
+            index_code: 指数代码。
+
+        Returns:
+            更新的记录数。
+        """
+        latest = self.db.get_latest_trade_date(ts_code=index_code)
+        if latest is None:
+            return self.download_index_daily(index_code)
+
+        start = (pd.to_datetime(latest) + pd.Timedelta(days=1)).strftime("%Y%m%d")
+        today = pd.Timestamp.now(tz="Asia/Shanghai").normalize().tz_localize(None).strftime("%Y%m%d")
+
+        if start > today:
+            logger.info(f"指数 {index_code} 数据已是最新")
+            return 0
+
+        return self.download_index_daily(index_code, start_date=start, end_date=today)
+
+    # ----------------------------------------------------------
+    # 增量更新
+    # ----------------------------------------------------------
+
     def update_daily_prices(self) -> int:
         """
         增量更新日线行情。

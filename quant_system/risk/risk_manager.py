@@ -23,6 +23,11 @@ from config.settings import (
     MAX_DRAWDOWN_THRESHOLD,
     DRAWDOWN_REDUCE_POSITION,
     MIN_DAILY_TURNOVER,
+    USE_VOL_TARGETING,
+    TARGET_VOL,
+    VOL_LOOKBACK_DAYS,
+    VOL_SCALE_MIN,
+    VOL_SCALE_MAX,
     LOG_LEVEL,
 )
 from data.database import DatabaseManager
@@ -49,6 +54,11 @@ class RiskManager:
         max_drawdown: float = MAX_DRAWDOWN_THRESHOLD,
         drawdown_position: float = DRAWDOWN_REDUCE_POSITION,
         min_turnover: float = MIN_DAILY_TURNOVER,
+        use_vol_targeting: bool = USE_VOL_TARGETING,
+        target_vol: float = TARGET_VOL,
+        vol_lookback: int = VOL_LOOKBACK_DAYS,
+        vol_scale_min: float = VOL_SCALE_MIN,
+        vol_scale_max: float = VOL_SCALE_MAX,
     ):
         """
         Args:
@@ -58,6 +68,11 @@ class RiskManager:
             max_drawdown: 最大回撤降仓阈值。
             drawdown_position: 触发降仓后的目标仓位。
             min_turnover: 日均成交额下限（元）。
+            use_vol_targeting: True 则使用波动率目标管理替代回撤缩仓。
+            target_vol: 目标年化波动率（默认 0.20）。
+            vol_lookback: 已实现波动率回看天数。
+            vol_scale_min: 仓位系数下限。
+            vol_scale_max: 仓位系数上限。
         """
         self.db = db
         self.max_single_weight = max_single_weight
@@ -65,6 +80,11 @@ class RiskManager:
         self.max_drawdown = max_drawdown
         self.drawdown_position = drawdown_position
         self.min_turnover = min_turnover
+        self.use_vol_targeting = use_vol_targeting
+        self.target_vol = target_vol
+        self.vol_lookback = vol_lookback
+        self.vol_scale_min = vol_scale_min
+        self.vol_scale_max = vol_scale_max
 
     def adjust_weights(
         self,
@@ -108,14 +128,22 @@ class RiskManager:
         # 4. 权重归一化（在降仓之前归一化）
         df = self._normalize_weights(df)
 
-        # 5. 最大回撤降仓（降仓后不再归一化，剩余部分视为现金）
+        # 5. 仓位管理（降仓后不再归一化，剩余部分视为现金）
         if nav_series is not None:
-            position_scale = self.check_drawdown(nav_series)
-            if position_scale < 1.0:
-                df["weight"] = df["weight"] * position_scale
-                logger.warning(
-                    f"触发回撤降仓: 仓位缩减至 {position_scale:.0%}"
-                )
+            if self.use_vol_targeting:
+                position_scale = self.calc_vol_scale(nav_series)
+                if position_scale < 1.0:
+                    df["weight"] = df["weight"] * position_scale
+                    logger.info(
+                        f"波动率目标管理: 仓位缩放至 {position_scale:.0%}"
+                    )
+            else:
+                position_scale = self.check_drawdown(nav_series)
+                if position_scale < 1.0:
+                    df["weight"] = df["weight"] * position_scale
+                    logger.warning(
+                        f"触发回撤降仓: 仓位缩减至 {position_scale:.0%}"
+                    )
 
         final_count = len(df)
         if final_count < initial_count:
@@ -278,6 +306,42 @@ class RiskManager:
             return self.drawdown_position
 
         return 1.0
+
+    # ----------------------------------------------------------
+    # 波动率目标管理
+    # ----------------------------------------------------------
+
+    def calc_vol_scale(self, nav_series: pd.Series) -> float:
+        """
+        基于已实现波动率计算仓位缩放系数。
+
+        scale = target_vol / realized_vol，clip 到 [vol_scale_min, vol_scale_max]。
+
+        Args:
+            nav_series: 策略净值时间序列。
+
+        Returns:
+            仓位缩放系数。
+        """
+        if len(nav_series) < self.vol_lookback + 1:
+            return self.vol_scale_max
+
+        daily_ret = nav_series.pct_change().dropna()
+        recent_ret = daily_ret.iloc[-self.vol_lookback:]
+
+        realized_vol = recent_ret.std() * np.sqrt(252)
+
+        if realized_vol <= 0 or np.isnan(realized_vol):
+            return self.vol_scale_max
+
+        scale = self.target_vol / realized_vol
+        scale = np.clip(scale, self.vol_scale_min, self.vol_scale_max)
+
+        logger.debug(
+            f"波动率目标: realized={realized_vol:.2%}, target={self.target_vol:.2%}, scale={scale:.2f}"
+        )
+
+        return float(scale)
 
     # ----------------------------------------------------------
     # 权重归一化

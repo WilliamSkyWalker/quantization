@@ -13,7 +13,8 @@
       "WebFetch(domain:deepwiki.com)",
       "WebFetch(domain:blog.csdn.net)",
       "WebFetch(domain:tushare.pro)",
-      "Bash(cd /Users/daweilun/Documents/quantization/quant_system && python -m pytest tests/test_paper_trader.py -v 2>&1)"
+      "Bash(cd /Users/daweilun/Documents/quantization/quant_system && python -m pytest tests/test_paper_trader.py -v 2>&1)",
+      "Bash(find:*)"
     ]
   }
 }

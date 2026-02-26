@@ -8,7 +8,7 @@
     - stock_basic: 股票基本信息表（代码、名称、上市日期、行业、市值等）
     - daily_price: 日线行情表（OHLCV + 复权因子）
     - financial_data: 财务数据表（PE、PB、ROE、营收、净利润，按季度）
-    - industry_class: 行业分类表（申万一级行业）
+    - industry_class: 行业分类表（申万一级 + 二级行业）
     - paper_account: 模拟盘账户状态
     - paper_position: 模拟盘当前持仓
     - paper_transaction: 模拟盘交易记录
@@ -35,6 +35,9 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from config.settings import DB_URL, LOG_LEVEL
+
+# 延迟导入舆情模型（避免循环依赖，在 init_tables 时触发）
+_sentiment_models_loaded = False
 
 # ============================================================
 # 日志配置
@@ -131,13 +134,15 @@ class FinancialData(Base):
 
 
 class IndustryClass(Base):
-    """行业分类表（申万一级行业）"""
+    """行业分类表（申万一级 + 二级行业）"""
     __tablename__ = "industry_class"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     ts_code = Column(String(20), nullable=False, comment="股票代码")
     industry_code = Column(String(20), comment="行业代码")
     industry_name = Column(String(50), nullable=False, comment="行业名称（申万一级）")
+    l2_industry_code = Column(String(20), comment="二级行业代码")
+    l2_industry_name = Column(String(50), comment="行业名称（申万二级）")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     __table_args__ = (
@@ -212,6 +217,23 @@ class PaperTransaction(Base):
     )
 
 
+class IndustryFactorConfig(Base):
+    """行业因子权重配置表"""
+    __tablename__ = "industry_factor_config"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    industry_name = Column(String(50), nullable=False, comment="行业名称，__DEFAULT__=默认")
+    factor_name = Column(String(30), nullable=False, comment="因子名称")
+    weight = Column(Float, nullable=False, default=1.0, comment="因子权重（带符号，反向因子为负）")
+    description = Column(String(200), comment="配置说明")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("industry_name", "factor_name", name="uq_industry_factor"),
+        Index("idx_ind_factor_industry", "industry_name"),
+    )
+
+
 class PaperNav(Base):
     """模拟盘每日净值"""
     __tablename__ = "paper_nav"
@@ -278,7 +300,26 @@ class DatabaseManager:
         创建所有表。如果表已存在则跳过。
         对已有表自动补齐新增列（如 adj_factor）。
         """
-        Base.metadata.create_all(self.engine)
+        # 确保舆情模型注册到 Base.metadata
+        global _sentiment_models_loaded
+        if not _sentiment_models_loaded:
+            try:
+                import sentiment.models  # noqa: F401
+                _sentiment_models_loaded = True
+            except ImportError:
+                pass
+
+        try:
+            Base.metadata.create_all(self.engine)
+        except Exception as e:
+            # 部分表（如 sentiment 模块）可能因索引长度等问题创建失败，
+            # 跳过并逐表重试核心表
+            logger.warning(f"全量建表异常({e})，逐表重试核心表")
+            for table in Base.metadata.sorted_tables:
+                try:
+                    table.create(self.engine, checkfirst=True)
+                except Exception:
+                    logger.debug(f"跳过表 {table.name} 创建失败")
         self._ensure_adj_factor_column()
         self._ensure_new_columns()
         logger.info("数据库表初始化完成")
@@ -308,6 +349,8 @@ class DatabaseManager:
             ("financial_data", "bps", "FLOAT"),
             ("stock_basic", "total_share", "FLOAT"),
             ("stock_basic", "float_share", "FLOAT"),
+            ("industry_class", "l2_industry_code", "VARCHAR(20)"),
+            ("industry_class", "l2_industry_name", "VARCHAR(50)"),
         ]
         try:
             with self.engine.connect() as conn:
@@ -772,7 +815,174 @@ class DatabaseManager:
         Returns:
             DataFrame，包含 ts_code 和 industry_name 列。
         """
-        return self.query("SELECT ts_code, industry_name FROM industry_class")
+        return self.query("SELECT ts_code, industry_name, l2_industry_name FROM industry_class")
+
+    # ----------------------------------------------------------
+    # 行业因子权重配置
+    # ----------------------------------------------------------
+
+    def upsert_industry_factor_config(self, records: list[dict]):
+        """
+        批量写入/更新行业因子权重配置。
+
+        按 (industry_name, factor_name) 做 upsert。
+
+        Args:
+            records: 每条记录包含 industry_name, factor_name, weight, description(可选)。
+        """
+        if not records:
+            return
+
+        with self.get_session() as session:
+            for record in records:
+                existing = session.query(IndustryFactorConfig).filter_by(
+                    industry_name=record["industry_name"],
+                    factor_name=record["factor_name"],
+                ).first()
+                if existing:
+                    existing.weight = record["weight"]
+                    if "description" in record:
+                        existing.description = record["description"]
+                else:
+                    session.add(IndustryFactorConfig(**record))
+            session.commit()
+        logger.info(f"industry_factor_config: 写入/更新 {len(records)} 条记录")
+
+    def get_industry_factor_weights(self) -> pd.DataFrame:
+        """
+        获取全部行业因子权重配置。
+
+        Returns:
+            DataFrame，包含 industry_name, factor_name, weight 列。
+        """
+        return self.query(
+            "SELECT industry_name, factor_name, weight FROM industry_factor_config"
+        )
+
+
+    # ----------------------------------------------------------
+    # 舆情数据
+    # ----------------------------------------------------------
+
+    def upsert_policy_articles(self, articles: list[dict]) -> int:
+        """
+        批量写入/更新政策文章（URL 去重）。
+
+        Args:
+            articles: 文章字典列表，每条包含 source, tier, title, url,
+                      publish_date, category, summary, content_hash。
+
+        Returns:
+            新增文章数。
+        """
+        if not articles:
+            return 0
+
+        from sentiment.models import PolicyArticle
+
+        new_count = 0
+        with self.get_session() as session:
+            for record in articles:
+                existing = session.query(PolicyArticle).filter_by(
+                    url=record["url"]
+                ).first()
+                if existing:
+                    for key, value in record.items():
+                        if key != "url" and hasattr(existing, key):
+                            setattr(existing, key, value)
+                else:
+                    session.add(PolicyArticle(**record))
+                    new_count += 1
+            session.commit()
+        logger.info(f"policy_article: 写入/更新 {len(articles)} 条，新增 {new_count} 条")
+        return new_count
+
+    def bulk_upsert_policy_articles(self, articles: list[dict]) -> int:
+        """
+        批量 upsert 政策文章（MySQL ON DUPLICATE KEY UPDATE）。
+
+        Args:
+            articles: 文章字典列表。
+
+        Returns:
+            新增文章数（近似值）。
+        """
+        if not articles:
+            return 0
+
+        is_mysql = not str(self.engine.url).startswith("sqlite")
+
+        if is_mysql:
+            cols = [
+                "source", "tier", "title", "url", "publish_date",
+                "category", "summary", "content_hash", "scraped_at", "updated_at",
+            ]
+            existing_cols = [c for c in cols if c in articles[0]]
+            # 确保有 scraped_at 和 updated_at
+            now = datetime.now()
+            for a in articles:
+                a.setdefault("scraped_at", now)
+                a["updated_at"] = now
+
+            update_cols = [c for c in existing_cols if c != "url"]
+            placeholders = ", ".join([f":{c}" for c in existing_cols])
+            col_names = ", ".join([f"`{c}`" for c in existing_cols])
+            update_clause = ", ".join([f"`{c}` = VALUES(`{c}`)" for c in update_cols])
+
+            sql = text(
+                f"INSERT INTO policy_article ({col_names}) VALUES ({placeholders}) "
+                f"ON DUPLICATE KEY UPDATE {update_clause}"
+            )
+
+            batch_size = 500
+            with self.engine.begin() as conn:
+                for i in range(0, len(articles), batch_size):
+                    batch = articles[i:i + batch_size]
+                    conn.execute(sql, batch)
+
+            logger.info(f"policy_article: 批量upsert {len(articles)} 条")
+            return len(articles)  # 近似值
+        else:
+            return self.upsert_policy_articles(articles)
+
+    def get_latest_scrape_date(self, source: str) -> Optional[str]:
+        """
+        查询某来源最新文章的发布日期。
+
+        Args:
+            source: 来源标识，如 'gov_cn'。
+
+        Returns:
+            最新日期字符串（YYYY-MM-DD），无数据返回 None。
+        """
+        sql = "SELECT MAX(publish_date) as max_date FROM policy_article WHERE source = :source"
+        result = self.query(sql, params={"source": source})
+        max_date = result["max_date"].iloc[0]
+        if pd.isna(max_date):
+            return None
+        return str(max_date)
+
+    def upsert_scrape_log(self, record: dict):
+        """
+        写入/更新抓取日志。
+
+        Args:
+            record: 包含 id(可选), source, started_at, finished_at,
+                    articles_found, articles_new, status, error_message。
+        """
+        from sentiment.models import ScrapeLog
+
+        with self.get_session() as session:
+            if "id" in record and record["id"]:
+                existing = session.query(ScrapeLog).filter_by(id=record["id"]).first()
+                if existing:
+                    for key, value in record.items():
+                        if key != "id" and hasattr(existing, key):
+                            setattr(existing, key, value)
+                    session.commit()
+                    return
+            session.add(ScrapeLog(**{k: v for k, v in record.items() if k != "id" or v}))
+            session.commit()
 
 
 # ============================================================

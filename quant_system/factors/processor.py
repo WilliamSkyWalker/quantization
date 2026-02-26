@@ -71,36 +71,60 @@ def neutralize(
     factor_df: pd.DataFrame,
     industry_col: str = "industry_name",
     mktcap_col: str = "ln_mktcap",
+    mode: str = "full",
+    nonlinear_size: bool = False,
 ) -> pd.Series:
     """
     行业市值中性化。
 
-    对因子值做截面回归：
-        factor_value = β0 + Σ βi * Industry_Dummy_i + β_mv * ln(market_cap) + ε
-    取残差 ε 作为中性化后的因子值。
+    对因子值做截面回归取残差 ε 作为中性化后的因子值。
+
+    mode:
+        "full"      — 行业哑变量 + ln(mktcap) 回归（原有行为）
+        "size_only" — 仅对 ln(mktcap) 回归，保留行业 Alpha
+        "none"      — 跳过中性化，直接返回原始因子值
+
+    nonlinear_size:
+        True 时在 X 矩阵追加 ln_mktcap² 列，捕捉市值与因子的非线性关系。
 
     Args:
-        factor_df: DataFrame，必须包含以下列：
-            - factor_value: 原始因子值
-            - industry_col: 行业名称列
-            - mktcap_col: ln(市值) 列
+        factor_df: DataFrame，必须包含 factor_value 列；
+                   mode="full" 时还需 industry_col 和 mktcap_col；
+                   mode="size_only" 时仅需 mktcap_col。
         industry_col: 行业列名。
         mktcap_col: ln(市值) 列名。
+        mode: 中性化模式，"full" / "size_only" / "none"。
+        nonlinear_size: 是否添加 ln_mktcap² 非线性项。
 
     Returns:
         中性化后的因子值 Series（残差），index 与输入对齐。
     """
-    df = factor_df.dropna(subset=["factor_value", industry_col, mktcap_col]).copy()
+    if mode == "none":
+        return factor_df["factor_value"]
+
+    required_cols = ["factor_value", mktcap_col]
+    if mode == "full":
+        required_cols.append(industry_col)
+
+    df = factor_df.dropna(subset=required_cols).copy()
 
     if len(df) < 10:
         logger.warning(f"中性化样本不足({len(df)}只)，跳过中性化")
         return factor_df["factor_value"]
 
-    # 构建行业哑变量
-    industry_dummies = pd.get_dummies(df[industry_col], prefix="ind", drop_first=True)
+    # 构建回归矩阵 X
+    if mode == "full":
+        # 行业哑变量 + ln(市值)
+        industry_dummies = pd.get_dummies(df[industry_col], prefix="ind", drop_first=True)
+        X = pd.concat([industry_dummies, df[[mktcap_col]]], axis=1).astype(float)
+    else:
+        # size_only: 仅 ln(市值)
+        X = df[[mktcap_col]].astype(float).copy()
 
-    # 构建回归矩阵 X = [行业哑变量, ln(市值)]
-    X = pd.concat([industry_dummies, df[[mktcap_col]]], axis=1).astype(float)
+    # 可选：非线性市值项
+    if nonlinear_size:
+        X["ln_mktcap_sq"] = X[mktcap_col] ** 2
+
     # 添加截距项
     X.insert(0, "const", 1.0)
     y = df["factor_value"].values
@@ -118,8 +142,11 @@ def neutralize(
     result = factor_df["factor_value"].copy()
     result.loc[df.index] = residuals
 
-    n_industries = industry_dummies.shape[1] + 1  # 含 drop 掉的基准行业
-    logger.debug(f"中性化完成: {len(df)} 只股票, {n_industries} 个行业")
+    if mode == "full":
+        n_industries = industry_dummies.shape[1] + 1
+        logger.debug(f"中性化完成(full): {len(df)} 只股票, {n_industries} 个行业")
+    else:
+        logger.debug(f"中性化完成(size_only): {len(df)} 只股票, nonlinear={nonlinear_size}")
 
     return result
 
@@ -161,6 +188,8 @@ def process_factor(
     do_neutralize: bool = True,
     do_zscore: bool = True,
     mad_n: float = 5.0,
+    neutralize_mode: str = "full",
+    nonlinear_size: bool = False,
 ) -> pd.DataFrame:
     """
     因子处理完整流水线：去极值 → 中性化 → 标准化。
@@ -168,13 +197,15 @@ def process_factor(
     Args:
         factor_df: DataFrame，必须包含 ts_code 和 factor_value 列。
         industry_df: 行业分类 DataFrame，包含 ts_code 和 industry_name 列。
-                     中性化时必需，为 None 则跳过中性化。
+                     中性化 mode="full" 时必需。
         mktcap_df: 市值 DataFrame，包含 ts_code 和 total_mv 列。
-                   中性化时必需，为 None 则跳过中性化。
+                   中性化时必需（mode="full" 或 "size_only"）。
         do_winsorize: 是否去极值。
         do_neutralize: 是否中性化。
         do_zscore: 是否标准化。
         mad_n: MAD 去极值倍数。
+        neutralize_mode: 中性化模式 "full" / "size_only" / "none"。
+        nonlinear_size: 是否添加 ln_mktcap² 非线性项。
 
     Returns:
         处理后的 DataFrame[ts_code, factor_value]。
@@ -190,20 +221,28 @@ def process_factor(
         )
 
     # 2. 中性化
-    if do_neutralize and industry_df is not None and mktcap_df is not None:
-        # 合并行业和市值信息
-        df = df.merge(
-            industry_df[["ts_code", "industry_name"]], on="ts_code", how="left"
-        )
+    effective_mode = neutralize_mode if do_neutralize else "none"
+    if effective_mode != "none" and mktcap_df is not None:
+        # size_only 和 full 都需要市值
         df = df.merge(
             mktcap_df[["ts_code", "total_mv"]], on="ts_code", how="left"
         )
-
-        # ln(市值)
         df["total_mv"] = pd.to_numeric(df["total_mv"], errors="coerce")
         df["ln_mktcap"] = np.log(df["total_mv"].fillna(1).clip(lower=1).astype(float))
 
-        df["factor_value"] = neutralize(df)
+        # full 模式还需要行业信息
+        if effective_mode == "full" and industry_df is not None:
+            df = df.merge(
+                industry_df[["ts_code", "industry_name"]], on="ts_code", how="left"
+            )
+        elif effective_mode == "full" and industry_df is None:
+            # full 模式但无行业数据，降级为 size_only
+            effective_mode = "size_only"
+            logger.debug("full 模式缺少行业数据，降级为 size_only")
+
+        df["factor_value"] = neutralize(
+            df, mode=effective_mode, nonlinear_size=nonlinear_size
+        )
 
         # 清理临时列
         df = df[["ts_code", "factor_value"]]
@@ -214,6 +253,8 @@ def process_factor(
         df.loc[valid_mask, "factor_value"] = zscore(
             df.loc[valid_mask, "factor_value"]
         )
+        # 4. Clip Z-score 到 ±3，防止中性化后残差极端值主导得分
+        df["factor_value"] = df["factor_value"].clip(lower=-3.0, upper=3.0)
 
     final_count = df["factor_value"].notna().sum()
     logger.debug(f"因子处理完成: {initial_count} -> {final_count} 个有效值")

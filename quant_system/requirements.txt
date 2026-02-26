@@ -25,6 +25,11 @@ lightgbm>=4.0.0
 # 优化（Phase 4+）
 cvxpy>=1.4.0
 
+# 网页抓取（舆情模块）
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
 # 进度条
 tqdm>=4.65.0
 

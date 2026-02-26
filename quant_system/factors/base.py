@@ -263,6 +263,68 @@ class FactorBase(ABC):
 
         return pd.DataFrame(results) if results else pd.DataFrame(columns=["ts_code", "ttm_net_profit"])
 
+    def get_ttm_revenue(
+        self,
+        date: str,
+        universe_codes: Optional[list[str]] = None,
+    ) -> pd.DataFrame:
+        """
+        计算截止到指定日期的 TTM 营收（滚动四季度）。
+
+        计算逻辑（revenue 是季度累计值）：
+            - 年报期（12月）: TTM = 当期营收
+            - 其他期: TTM = 当期累计 + 上年年报 - 上年同期累计
+        严格遵守 ann_date <= date 防止未来函数。
+
+        Args:
+            date: 截止日期，格式 YYYY-MM-DD。
+            universe_codes: 股票代码列表（可选）。
+
+        Returns:
+            DataFrame，包含 ts_code 和 ttm_revenue 列。
+        """
+        sql = (
+            "SELECT ts_code, ann_date, end_date, revenue FROM financial_data "
+            f"WHERE ann_date <= '{date}' AND revenue IS NOT NULL"
+        )
+        if universe_codes:
+            codes_str = "','".join(universe_codes)
+            sql += f" AND ts_code IN ('{codes_str}')"
+        sql += " ORDER BY ts_code, end_date DESC"
+
+        df = self.db.query(sql)
+        if df.empty:
+            return pd.DataFrame(columns=["ts_code", "ttm_revenue"])
+
+        df["end_date"] = pd.to_datetime(df["end_date"])
+        results = []
+
+        for ts_code, grp in df.groupby("ts_code"):
+            grp = grp.sort_values("end_date", ascending=False)
+            latest = grp.iloc[0]
+            end_dt = latest["end_date"]
+            month = end_dt.month
+
+            if month == 12:
+                results.append({"ts_code": ts_code, "ttm_revenue": latest["revenue"]})
+            else:
+                prev_year = end_dt.year - 1
+                prev_annual_end = pd.Timestamp(year=prev_year, month=12, day=31)
+                prev_same_end = pd.Timestamp(year=prev_year, month=month, day=end_dt.day)
+
+                prev_annual = grp[grp["end_date"] == prev_annual_end]
+                prev_same = grp[grp["end_date"] == prev_same_end]
+
+                if not prev_annual.empty and not prev_same.empty:
+                    ttm = (latest["revenue"]
+                           + prev_annual.iloc[0]["revenue"]
+                           - prev_same.iloc[0]["revenue"])
+                    results.append({"ts_code": ts_code, "ttm_revenue": ttm})
+                else:
+                    results.append({"ts_code": ts_code, "ttm_revenue": float("nan")})
+
+        return pd.DataFrame(results) if results else pd.DataFrame(columns=["ts_code", "ttm_revenue"])
+
     def get_close_on_date(
         self,
         date: str,
