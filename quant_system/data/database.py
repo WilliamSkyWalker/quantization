@@ -152,6 +152,56 @@ class IndustryClass(Base):
 
 
 # ============================================================
+# 商品期货价格表
+# ============================================================
+
+class CommodityPrice(Base):
+    """商品期货主力合约日线行情"""
+    __tablename__ = "commodity_price"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    commodity_code = Column(String(10), nullable=False, comment="品种代码，如 AU, CU")
+    trade_date = Column(Date, nullable=False, comment="交易日期")
+    ts_code = Column(String(20), comment="实际合约代码，如 AU2412.SHF")
+    open = Column(Float, comment="开盘价")
+    high = Column(Float, comment="最高价")
+    low = Column(Float, comment="最低价")
+    close = Column(Float, comment="收盘价")
+    settle = Column(Float, comment="结算价")
+    volume = Column(Float, comment="成交量（手）")
+    amount = Column(Float, comment="成交额（万元）")
+    oi = Column(Float, comment="持仓量（手）")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("commodity_code", "trade_date", name="uq_commodity_code_date"),
+        Index("idx_commodity_trade_date", "trade_date"),
+        Index("idx_commodity_code", "commodity_code"),
+    )
+
+
+# ============================================================
+# 宏观经济指标表
+# ============================================================
+
+class MacroIndicator(Base):
+    """宏观经济指标通用 KV 表（SHIBOR、CPI、PMI 等）"""
+    __tablename__ = "macro_indicator"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    indicator_code = Column(String(30), nullable=False, comment="指标代码，如 SHIBOR_3M, CPI_YOY")
+    report_date = Column(Date, nullable=False, comment="报告日期（月度数据存月末）")
+    value = Column(Float, comment="指标值")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("indicator_code", "report_date", name="uq_macro_code_date"),
+        Index("idx_macro_indicator_code", "indicator_code"),
+        Index("idx_macro_report_date", "report_date"),
+    )
+
+
+# ============================================================
 # 模拟盘表定义
 # ============================================================
 
@@ -816,6 +866,233 @@ class DatabaseManager:
             DataFrame，包含 ts_code 和 industry_name 列。
         """
         return self.query("SELECT ts_code, industry_name, l2_industry_name FROM industry_class")
+
+    # ----------------------------------------------------------
+    # 商品期货价格
+    # ----------------------------------------------------------
+
+    def upsert_commodity_price(self, df: pd.DataFrame):
+        """
+        批量写入/更新商品期货价格。
+
+        Args:
+            df: 包含 commodity_code, trade_date, ts_code, open, high, low,
+                close, settle, volume, amount, oi 列的 DataFrame。
+        """
+        if df.empty:
+            logger.warning("upsert_commodity_price: 输入DataFrame为空，跳过")
+            return
+
+        if "trade_date" in df.columns:
+            df = df.copy()
+            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+
+        is_mysql = not str(self.engine.url).startswith("sqlite")
+
+        if is_mysql:
+            cols = [
+                "commodity_code", "trade_date", "ts_code",
+                "open", "high", "low", "close", "settle",
+                "volume", "amount", "oi", "updated_at",
+            ]
+            df = df.copy()
+            df["updated_at"] = datetime.now()
+            existing_cols = [c for c in cols if c in df.columns]
+            update_cols = [c for c in existing_cols if c not in ("commodity_code", "trade_date")]
+
+            placeholders = ", ".join([f":{c}" for c in existing_cols])
+            col_names = ", ".join([f"`{c}`" for c in existing_cols])
+            update_clause = ", ".join([f"`{c}` = VALUES(`{c}`)" for c in update_cols])
+
+            sql = text(
+                f"INSERT INTO commodity_price ({col_names}) VALUES ({placeholders}) "
+                f"ON DUPLICATE KEY UPDATE {update_clause}"
+            )
+
+            records = df[existing_cols].to_dict("records")
+            batch_size = 1000
+            with self.engine.begin() as conn:
+                for i in range(0, len(records), batch_size):
+                    batch = records[i:i + batch_size]
+                    conn.execute(sql, batch)
+            logger.info(f"commodity_price: 批量upsert {len(records)} 条记录")
+        else:
+            # SQLite: 逐条 upsert
+            records = df.to_dict("records")
+            with self.get_session() as session:
+                for record in records:
+                    existing = session.query(CommodityPrice).filter_by(
+                        commodity_code=record["commodity_code"],
+                        trade_date=record["trade_date"],
+                    ).first()
+                    if existing:
+                        for key, value in record.items():
+                            if key not in ("commodity_code", "trade_date") and hasattr(existing, key):
+                                setattr(existing, key, value)
+                    else:
+                        session.add(CommodityPrice(**{
+                            k: v for k, v in record.items() if hasattr(CommodityPrice, k)
+                        }))
+                session.commit()
+            logger.info(f"commodity_price: 写入/更新 {len(records)} 条记录")
+
+    def get_commodity_price_history(
+        self,
+        commodity_codes: list[str],
+        end_date: str,
+        lookback_days: int,
+    ) -> pd.DataFrame:
+        """
+        查询商品价格历史。
+
+        Args:
+            commodity_codes: 品种代码列表，如 ["AU", "CU"]。
+            end_date: 截止日期，格式 YYYY-MM-DD。
+            lookback_days: 向前回看的自然日天数。
+
+        Returns:
+            DataFrame，包含 commodity_code, trade_date, close, settle, oi 列。
+        """
+        start_date = (
+            pd.to_datetime(end_date) - pd.Timedelta(days=lookback_days)
+        ).strftime("%Y-%m-%d")
+
+        codes_str = "','".join(commodity_codes)
+        sql = (
+            f"SELECT commodity_code, trade_date, close, settle, oi "
+            f"FROM commodity_price "
+            f"WHERE commodity_code IN ('{codes_str}') "
+            f"AND trade_date >= '{start_date}' "
+            f"AND trade_date <= '{end_date}' "
+            f"ORDER BY commodity_code, trade_date"
+        )
+        return self.query(sql)
+
+    def get_latest_commodity_date(self) -> Optional[str]:
+        """获取商品价格表最新日期。"""
+        try:
+            result = self.query("SELECT MAX(trade_date) as max_date FROM commodity_price")
+            max_date = result["max_date"].iloc[0]
+            if pd.isna(max_date):
+                return None
+            return str(max_date)
+        except Exception:
+            return None
+
+    # ----------------------------------------------------------
+    # 宏观经济指标
+    # ----------------------------------------------------------
+
+    def upsert_macro_indicator(self, df: pd.DataFrame):
+        """
+        批量写入/更新宏观经济指标。
+
+        Args:
+            df: 包含 indicator_code, report_date, value 列的 DataFrame。
+        """
+        if df.empty:
+            logger.warning("upsert_macro_indicator: 输入DataFrame为空，跳过")
+            return
+
+        if "report_date" in df.columns:
+            df = df.copy()
+            df["report_date"] = pd.to_datetime(df["report_date"]).dt.date
+
+        is_mysql = not str(self.engine.url).startswith("sqlite")
+
+        if is_mysql:
+            cols = ["indicator_code", "report_date", "value", "updated_at"]
+            df = df.copy()
+            df["updated_at"] = datetime.now()
+            existing_cols = [c for c in cols if c in df.columns]
+            update_cols = [c for c in existing_cols if c not in ("indicator_code", "report_date")]
+
+            placeholders = ", ".join([f":{c}" for c in existing_cols])
+            col_names = ", ".join([f"`{c}`" for c in existing_cols])
+            update_clause = ", ".join([f"`{c}` = VALUES(`{c}`)" for c in update_cols])
+
+            sql = text(
+                f"INSERT INTO macro_indicator ({col_names}) VALUES ({placeholders}) "
+                f"ON DUPLICATE KEY UPDATE {update_clause}"
+            )
+
+            records = df[existing_cols].to_dict("records")
+            batch_size = 1000
+            with self.engine.begin() as conn:
+                for i in range(0, len(records), batch_size):
+                    batch = records[i:i + batch_size]
+                    conn.execute(sql, batch)
+            logger.info(f"macro_indicator: 批量upsert {len(records)} 条记录")
+        else:
+            # SQLite: 逐条 upsert
+            records = df.to_dict("records")
+            with self.get_session() as session:
+                for record in records:
+                    existing = session.query(MacroIndicator).filter_by(
+                        indicator_code=record["indicator_code"],
+                        report_date=record["report_date"],
+                    ).first()
+                    if existing:
+                        if "value" in record:
+                            existing.value = record["value"]
+                    else:
+                        session.add(MacroIndicator(**{
+                            k: v for k, v in record.items() if hasattr(MacroIndicator, k)
+                        }))
+                session.commit()
+            logger.info(f"macro_indicator: 写入/更新 {len(records)} 条记录")
+
+    def get_macro_indicator_history(
+        self,
+        indicator_code: str,
+        end_date: str,
+        lookback_months: int = 36,
+    ) -> pd.DataFrame:
+        """
+        查询宏观指标历史序列。
+
+        Args:
+            indicator_code: 指标代码，如 "SHIBOR_3M"。
+            end_date: 截止日期，格式 YYYY-MM-DD。
+            lookback_months: 向前回看的月数。
+
+        Returns:
+            DataFrame，包含 report_date, value 列，按日期升序。
+        """
+        start_date = (
+            pd.to_datetime(end_date) - pd.DateOffset(months=lookback_months)
+        ).strftime("%Y-%m-%d")
+
+        sql = (
+            "SELECT report_date, value FROM macro_indicator "
+            f"WHERE indicator_code = '{indicator_code}' "
+            f"AND report_date >= '{start_date}' "
+            f"AND report_date <= '{end_date}' "
+            "ORDER BY report_date"
+        )
+        return self.query(sql)
+
+    def get_latest_macro_date(self, indicator_code: Optional[str] = None) -> Optional[str]:
+        """
+        获取宏观指标表最新日期。
+
+        Args:
+            indicator_code: 指定指标代码（可选，不指定则取全局最新）。
+
+        Returns:
+            最新日期字符串（YYYY-MM-DD），无数据返回 None。
+        """
+        try:
+            sql = "SELECT MAX(report_date) as max_date FROM macro_indicator"
+            if indicator_code:
+                sql += f" WHERE indicator_code = '{indicator_code}'"
+            result = self.query(sql)
+            max_date = result["max_date"].iloc[0]
+            if pd.isna(max_date):
+                return None
+            return str(max_date)
+        except Exception:
+            return None
 
     # ----------------------------------------------------------
     # 行业因子权重配置

@@ -26,7 +26,7 @@
 - 回测中涨跌停：当日涨停不可买入，当日跌停不可卖出
 - 代码可直接运行，不留 TODO 占位，有完整异常处理
 
-算法文档：请先阅读 ALGORITHM.md 了解完整算法设计（19 因子、5 大类评分、Z-score clip、中性化模式等）。
+算法文档：请先阅读 ALGORITHM.md 了解完整算法设计（20 因子、5 大类评分、Z-score clip、中性化模式等）。
 请先阅读项目现有代码再动手修改，不要凭空猜测已有实现。
 ```
 
@@ -37,7 +37,7 @@
 | 阶段 | 模块 | 状态 |
 |------|------|------|
 | Phase 1 数据层 | 配置 / ORM / 下载 / 清洗 / 更新 / income 补全 | ✅ 完成 |
-| Phase 2 因子层 | 19 个因子（5 大类）+ 处理流水线 + IC/ICIR 评估 | ✅ 完成 |
+| Phase 2 因子层 | 20 个因子（5 大类）+ 处理流水线 + IC/ICIR 评估 | ✅ 完成 |
 | Phase 3 策略层 | 分类复合评分选股 + 回测引擎（一字板排队） | ✅ 完成 |
 | Phase 4 风控层 | 个股/行业上限 + 回撤降仓 / 波动率目标管理 | ✅ 完成 |
 | Phase 5 执行层 | 本地模拟盘 PaperTrader + BaseTrader 抽象 | ✅ 完成 |
@@ -46,7 +46,11 @@
 | Phase 7 因子增强 | 防守型 + 质量增强 + 效率因子（7 个新因子） | ✅ 完成 |
 | Phase 8 算法升级 | 4 新因子 + 分类评分 + Z-score clip + income 补全 | ✅ 完成 |
 | Phase 8 舆情层 | 政策新闻采集流水线（11 源，9/11 可用） | ✅ 完成 |
+| Phase 8 舆情层 | 美国政策 Twitter/X 采集（Trump/Vance/Rubio） | ✅ 完成 |
 | Phase 8 舆情层 | LLM 政策解读 + 舆情因子化 | 📋 待实现 |
+| Phase 9 参数调优 | 大类/因子权重精调 + 风控参数放宽 + 环境变量可配 | ✅ 完成 |
+| Phase 10 商品轮动 | 商品期货数据下载 + CMDTY_MOM 因子 + 行业联动 | ✅ 完成 |
+| Phase 11 宏观因子 | 宏观经济数据接入 + 4 个宏观因子（MACRO_CYCLE/LIQD/INFL/EXTR） | ✅ 完成 |
 | 远期规划 | 行业轮动数据深度接入 | 📋 备忘 |
 
 ---
@@ -56,7 +60,7 @@
 详细算法见 `ALGORITHM.md`，核心改动：
 
 1. **4 个新因子**：NET_PROFIT_YOY、REVENUE_YOY（成长）、RESIDUAL_MOM（残差动量）、VOL_PRICE_DIV（量价背离）
-2. **分类复合评分**：19 因子分 5 大类（价值/质量/成长/动量/技术），类内动态分母 + 类间固定分母（4.5）
+2. **分类复合评分**：24 因子分 6 大类（价值/质量/成长/动量/技术/宏观），类内动态分母 + 类间固定分母（5.6）
 3. **核心财务准入过滤**：缺失全部 EP/BP/ROE_TTM/GROSS_MARGIN 的股票剔除
 4. **Z-score clip ±3**：防止中性化后残差极端值主导得分
 5. **中性化模式可配**：full（行业+市值）/ size_only（仅市值）/ none
@@ -85,10 +89,15 @@ python3 main.py show_industry_config               # 查看行业因子权重配
 python3 main.py select 2025-12-31                  # 单日选股信号（全行业显示）
 python3 main.py backtest 2025-01-01 2025-12-31     # 指定区间回测（基准=沪深300）
 
+# 宏观经济数据
+python3 main.py download_macro                     # 全量下载宏观经济指标（14 个序列）
+
 # 舆情抓取
-python3 main.py download_sentiment                 # 全量抓取 11 个政府网站
-python3 main.py download_sentiment --source=csrc   # 单源抓取
-python3 main.py download_sentiment --tier=3        # 按层级抓取
+python3 main.py download_sentiment                 # 全量抓取 14 个来源（11 政府 + 3 Twitter）
+python3 main.py download_sentiment --source=csrc   # 单源抓取（中国政府）
+python3 main.py download_sentiment --source=twitter_trump  # 单源抓取（Twitter）
+python3 main.py download_sentiment --tier=3        # 按层级抓取（金融监管）
+python3 main.py download_sentiment --tier=5        # 按层级抓取（美国政策）
 python3 main.py update_sentiment                   # 增量更新
 python3 main.py sentiment_status                   # 各来源文章数和最新日期
 
@@ -109,10 +118,12 @@ python3 main.py paper_reset --confirm              # 重置模拟账户
 quant_system/
 ├── config/settings.py               # 全局配置 + .env 加载
 ├── data/
-│   ├── database.py                  # ORM表定义(8张表) + DatabaseManager + 自动列迁移
+│   ├── database.py                  # ORM表定义(9张表) + DatabaseManager + 自动列迁移
 │   ├── downloader.py                # Tushare 数据下载
 │   ├── cleaner.py                   # 数据清洗 + 股票池构建
 │   ├── updater.py                   # 财务数据 + 行业分类 + income API 补全
+│   ├── commodity_downloader.py      # 商品期货数据下载
+│   ├── macro_downloader.py          # 宏观经济数据下载（8 个 Tushare API）
 │   └── seed_config.py               # 行业因子配置种子数据
 ├── factors/
 │   ├── base.py                      # 因子基类 ABC + TTM/收盘价/总股本/TTM营收 工具方法
@@ -121,6 +132,8 @@ quant_system/
 │   ├── quality.py                   # ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND
 │   ├── technical.py                 # TURN_20D, VOL_20D, PRICE_DEV_60D, SIZE, IND_MOM, VOL_PRICE_DIV
 │   ├── growth.py                    # NET_PROFIT_YOY, REVENUE_YOY
+│   ├── commodity.py                 # CMDTY_MOM（商品轮动）
+│   ├── macro.py                     # MACRO_CYCLE, MACRO_LIQD, MACRO_INFL, MACRO_EXTR（宏观因子）
 │   ├── processor.py                 # 去极值 → 中性化(full/size_only/none) → Z-score → clip ±3
 │   └── evaluation.py                # IC/ICIR/分层回测
 ├── strategy/
@@ -139,12 +152,28 @@ quant_system/
 │   ├── models.py                    # ORM: policy_article + scrape_log
 │   ├── base_scraper.py              # HttpRateLimiter + BaseScraper ABC
 │   ├── downloader.py                # SentimentDownloader 编排器
-│   └── scrapers/                    # 11 个政府网站爬虫
+│   └── scrapers/                    # 11 个政府网站爬虫 + 3 个 Twitter 美国政策爬虫
 ├── tests/                           # 129个测试用例
 ├── main.py                          # CLI 入口
 ├── ALGORITHM.md                     # 完整算法设计文档
 └── .env                             # 本地配置（不入库）
 ```
+
+---
+
+## Phase 9 参数调优（已完成）摘要
+
+基于回测结果对因子权重和风控参数进行了系统性调优：
+
+1. **大类权重差异化**：成长权重 1.0→1.2，动量权重 1.0→1.3（更重视成长性和趋势信号）
+2. **因子权重精调**：
+   - VOL_20D 0.5→0.3、PRICE_DEV_60D 0.3→0.15（降低技术面惩罚力度）
+   - IND_MOM 0.5→0.8（提高行业动量信号权重）
+   - NET_PROFIT_YOY 0.8→1.0、REVENUE_YOY 0.6→0.8（提高成长因子权重）
+3. **风控参数放宽**：
+   - MAX_DRAWDOWN_THRESHOLD 0.15→0.25（回撤触发阈值放宽）
+   - DRAWDOWN_REDUCE_POSITION 0.50→0.70（降仓比例温和化）
+4. **风控参数可配**：MAX_SINGLE_WEIGHT / MAX_INDUSTRY_WEIGHT 改为环境变量可配
 
 ---
 
@@ -171,15 +200,58 @@ quant_system/
 
 ### Phase 8-A：修复 JS 渲染网站爬虫
 
+**已探查到两站后端 API，无需 headless browser。**
+
+#### MIIT（工信部）API
+
+- **端点**: `https://www.miit.gov.cn/api-gateway/jpaas-publish-server/front/page/build/unit`
+- **方法**: GET，返回 `{"code":"200","data":{"html":"..."}}`，data.html 为服务端渲染 HTML
+- **核心参数**:
+  - `parseType=buildstatic`
+  - `webId=8d828e408d90447786ddbe128d495e9e`（固定）
+  - `tplSetId=209741b2109044b5b7695700b2bec37e`（装备一司模板，其他栏目需从页面提取）
+  - `pageType=column`
+  - `tagId=当前栏目_list`
+  - `pageId=28ac65269a12494f81b5a832bce5f51c`（装备一司/文件发布，每个栏目不同）
+- **分页**: 返回 HTML 底部 `<div class="pagination" count="484" pageNo="1" rows="24">`
+- **HTML 结构**: `ul > li.cf > a.fl[href][title] + span.fr（日期）`
+- **注意**: 不同栏目的 `tplSetId` / `pageId` 不同，需从对应栏目 HTML 页面的 `<script>` 标签 `queryData` 属性中提取
+
+#### NFRA（金融监管总局）API
+
+- **端点**: `https://www.nfra.gov.cn/cbircweb/DocInfo/SelectDocByItemIdAndChild`
+- **方法**: GET，返回标准 JSON `{"rptCode":200,"data":{"total":N,"rows":[...]}}`
+- **参数**: `itemId={分类ID}&pageSize={每页条数}&pageIndex={页码}`
+- **关键 itemId**:
+  - `915` — 监管动态（~4803 篇，最活跃）
+  - `916` — 政策解读
+  - `925` — 公告通知
+  - `926` — 政策法规
+- **返回字段**: `docId, docTitle, docSubtitle, publishDate, docFileUrl, pdfFileUrl`
+- **文章详情**: `GET /cbircweb/DocInfo/SelectByDocId?docId={docId}` 含 `docClob`（全文 HTML）
+- **备用 CDN**: `https://www.nfra.gov.cn/cn/static/data/DocInfo/SelectDocByItemIdAndChild/data_itemId=915,pageIndex=1,pageSize=18.json`
+- **无需特殊 Headers**，标准 User-Agent 即可
+
 ```
-继续 A 股量化投资系统 Phase 8-A — 修复 miit/nfra 爬虫（JS 渲染网站）。
+继续 A 股量化投资系统 Phase 8-A — 用后端 API 修复 miit/nfra 爬虫。
 
 请先读取：
 - quant_system/sentiment/base_scraper.py
 - quant_system/sentiment/scrapers/miit.py
 - quant_system/sentiment/scrapers/nfra.py
 
-方案选择：找到后端 API（推荐）或使用 Playwright headless browser。
+两站后端 API 已探查完毕（见上方详情），改造方案：
+
+1. miit.py — 改为调用 /api-gateway/jpaas-publish-server/front/page/build/unit，
+   从返回 JSON 的 data.html 解析 li>a[title]+span 提取标题/链接/日期。
+   可在 BaseScraper 中新增 fetch_json() 或直接在 MiitScraper 中 override fetch_page。
+2. nfra.py — 改为调用 /cbircweb/DocInfo/SelectDocByItemIdAndChild JSON API，
+   直接从 rows 数组提取 docTitle/publishDate/docId，
+   文章 URL 拼接 https://www.nfra.gov.cn/cn/view/pages/ItemDetail.html?docId={docId}。
+   重写 scrape() 方法遍历多个 itemId + 分页。
+3. 两个爬虫的 list_urls 属性不再需要（改用 API 参数），
+   但保持 BaseScraper 接口兼容（source/tier/scrape 方法签名不变）。
+4. 运行 python3 main.py download_sentiment --source=miit 和 --source=nfra 验证。
 ```
 
 ### Phase 8-B：LLM 政策解读 + 行业关联
@@ -267,6 +339,13 @@ A股量化系统遇到问题，请帮我排查。
 - [x] 中性化模式可配（full/size_only/none）+ 非线性市值项
 - [x] 一字板排队卖出机制（pending_sells）
 - [x] 波动率目标管理（可选替代回撤缩仓）
+- [x] Phase 9 参数调优：大类权重差异化（成长 1.2 / 动量 1.3）+ 因子权重精调
+- [x] 风控参数放宽：回撤阈值 0.25 + 降仓比例 0.70（减少频繁降仓）
+- [x] MAX_SINGLE_WEIGHT / MAX_INDUSTRY_WEIGHT 改为环境变量可配
+- [x] Twitter/X 美国政策推文采集（Trump/Vance/Rubio），Tier 5，twikit 免费方案 + 独立限速器
+- [x] Phase 11 宏观因子：8 个 Tushare 宏观 API → 14 个指标序列 → 4 个因子（MACRO_CYCLE/LIQD/INFL/EXTR）
+- [x] 宏观因子防未来数据泄露（MACRO_PUBLICATION_LAG 配置各指标发布延迟）
+- [x] PMI 积分不足时优雅退化（PMI → PPI only 版本）
 
 ## 已知待优化项
 
@@ -276,5 +355,5 @@ A股量化系统遇到问题，请帮我排查。
 - [ ] 行业分类下载仍为串行（板块数 ~90，速度尚可）
 - [ ] 券商实盘对接：QMT（华泰/国金）或 Ptrade（恒生）
 - [ ] 模拟盘净值图表可视化（paper_nav --plot）
-- [ ] miit/nfra 爬虫需 headless browser（JS 渲染网站）
-- [ ] LLM 政策解读 + 舆情因子化（Phase 8-B/C）
+- [ ] miit/nfra 爬虫改用后端 API（已探查到端点，待编码实现）
+- [ ] LLM 政策解读 + 舆情因子化（Phase 8-B/C，含 Twitter 推文分析）

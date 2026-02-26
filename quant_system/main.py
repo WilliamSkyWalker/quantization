@@ -42,10 +42,16 @@ A股量化投资系统 - 主入口
     python3 main.py seed_industry_config     # 初始化行业因子权重种子数据
     python3 main.py show_industry_config     # 查看当前行业因子权重配置
 
+    # ====== 商品期货数据 ======
+    python3 main.py download_commodity             # 全量下载期货主力合约数据
+
+    # ====== 宏观经济数据 ======
+    python3 main.py download_macro                 # 全量下载宏观经济指标
+
     # ====== 舆情抓取 ======
-    python3 main.py download_sentiment              # 全量抓取 11 个政府网站
+    python3 main.py download_sentiment              # 全量抓取所有来源（政府网站 + Twitter）
     python3 main.py download_sentiment --source=csrc # 单源抓取
-    python3 main.py download_sentiment --tier=3      # 按层级抓取
+    python3 main.py download_sentiment --tier=3      # 按层级抓取（5=美国政策）
     python3 main.py update_sentiment                 # 增量更新（同 download，URL 去重）
     python3 main.py sentiment_status                 # 各来源文章数和最新日期
 
@@ -189,6 +195,25 @@ def main():
         count = updater.backfill_income()
         print(f"完成，成功回填 {count} 只股票")
 
+    elif command == "download_commodity":
+        from data.commodity_downloader import CommodityDownloader
+        db.init_tables()
+        dl = CommodityDownloader(db)
+        print("=== 下载商品期货主力合约数据 ===")
+        count = dl.download_commodity_prices()
+        print(f"完成，成功 {count} 个品种")
+
+    elif command == "download_macro":
+        from data.macro_downloader import MacroDownloader
+        db.init_tables()
+        dl = MacroDownloader(db)
+        print("=== 下载宏观经济数据 ===")
+        results = dl.download_all()
+        total = sum(results.values())
+        for name, count in results.items():
+            print(f"  {name:8s}: {count:>6,} 条")
+        print(f"  合计: {total:>6,} 条")
+
     elif command == "download_extra":
         from data.updater import FinancialUpdater
         db.init_tables()
@@ -235,15 +260,15 @@ def main():
 
         print("=== 全量增量更新 ===")
 
-        print("步骤 1/6: 刷新股票列表（更新ST状态）...")
+        print("步骤 1/8: 刷新股票列表（更新ST状态）...")
         df = downloader.download_stock_list()
         print(f"  股票列表刷新完成，{len(df)} 只")
 
-        print("步骤 2/6: 增量更新日线行情...")
+        print("步骤 2/8: 增量更新日线行情...")
         daily_count = downloader.update_daily_prices()
         print(f"  日线更新完成，{daily_count} 个交易日")
 
-        print("步骤 3/6: 增量更新沪深300指数...")
+        print("步骤 3/8: 增量更新沪深300指数...")
         idx_count = downloader.update_index_daily("000300.SH")
         print(f"  沪深300指数完成，{idx_count} 条")
 
@@ -254,15 +279,34 @@ def main():
                 ind_count = downloader.update_index_daily(ind_code)
                 print(f"  {ind_name}({ind_code}) 完成，{ind_count} 条")
 
-        print("步骤 4/6: 增量更新财务数据...")
+        print("步骤 4/8: 增量更新商品期货数据...")
+        try:
+            from data.commodity_downloader import CommodityDownloader
+            cmdty_dl = CommodityDownloader(db)
+            cmdty_count = cmdty_dl.update_commodity_prices()
+            print(f"  商品期货完成，{cmdty_count} 个品种")
+        except Exception as e:
+            print(f"  商品期货更新跳过: {e}")
+
+        print("步骤 5/8: 增量更新宏观经济数据...")
+        try:
+            from data.macro_downloader import MacroDownloader
+            macro_dl = MacroDownloader(db)
+            macro_results = macro_dl.update()
+            macro_total = sum(macro_results.values())
+            print(f"  宏观数据完成，{macro_total} 条")
+        except Exception as e:
+            print(f"  宏观数据更新跳过: {e}")
+
+        print("步骤 6/8: 增量更新财务数据...")
         fin_count = updater.update_financial_data()
         print(f"  财务数据完成，{fin_count} 只")
 
-        print("步骤 5/6: 刷新估值快照...")
+        print("步骤 7/8: 刷新估值快照...")
         val_count = updater.download_valuation_snapshot()
         print(f"  估值快照完成，{val_count} 条")
 
-        print("步骤 6/6: 刷新行业分类...")
+        print("步骤 8/8: 刷新行业分类...")
         ind_count = updater.download_industry_classification()
         print(f"  行业分类完成，{ind_count} 只")
 
@@ -438,6 +482,17 @@ def main():
             total_industries = len(ind_max)
             total_stocks = len(top5)
             print(f"\n共 {total_industries} 个行业，{total_stocks} 只股票（每行业 Top 5）\n")
+
+            # === 总榜 Top 5 ===
+            overall_top5 = scored.sort_values("score", ascending=False).head(5)
+            print(f"{'═' * 50}")
+            print(f"  总榜 Top 5")
+            print(f"{'═' * 50}")
+            for i, (_, r) in enumerate(overall_top5.iterrows(), 1):
+                name = r.get("name", "")
+                ind = r.get("industry_name", "未知")
+                print(f"  {i}. {r['ts_code']}  {name:<6s}  得分={r['score']:.3f}  [{ind}]")
+            print()
 
             rank = 0
             for ind_name in ind_max.index:
@@ -724,17 +779,17 @@ def main():
             result = dl.download_source(source)
             print(f"  {source}: 发现 {result['found']} 篇，新增 {result['new']} 篇 [{result['status']}]")
         elif tier:
-            tier_names = {1: "最高层", 2: "产业层", 3: "金融监管", 4: "专项行业"}
+            tier_names = {1: "最高层", 2: "产业层", 3: "金融监管", 4: "专项行业", 5: "美国政策"}
             print(f"=== 抓取舆情: 层级 {tier} ({tier_names.get(tier, '未知')}) ===")
             results = dl.download_tier(tier)
             for src, r in results.items():
-                print(f"  {src:10s}: 发现 {r['found']:3d} 篇，新增 {r['new']:3d} 篇 [{r['status']}]")
+                print(f"  {src:15s}: 发现 {r['found']:3d} 篇，新增 {r['new']:3d} 篇 [{r['status']}]")
         else:
-            print("=== 全量抓取舆情: 11 个政府网站 ===")
+            print(f"=== 全量抓取舆情: {len(SCRAPER_REGISTRY)} 个来源 ===")
             results = dl.download_all()
             total_found = total_new = 0
             for src, r in results.items():
-                print(f"  {src:10s}: 发现 {r['found']:3d} 篇，新增 {r['new']:3d} 篇 [{r['status']}]")
+                print(f"  {src:15s}: 发现 {r['found']:3d} 篇，新增 {r['new']:3d} 篇 [{r['status']}]")
                 total_found += r["found"]
                 total_new += r["new"]
             print(f"\n  合计: 发现 {total_found} 篇，新增 {total_new} 篇")
@@ -756,14 +811,15 @@ def main():
                     "ndrc": 2, "miit": 2, "mofcom": 2,
                     "csrc": 3, "pbc": 3, "nfra": 3,
                     "nea": 4, "mohurd": 4,
+                    "twitter_trump": 5, "twitter_vance": 5, "twitter_rubio": 5,
                 }
-                tier_names = {1: "最高层", 2: "产业层", 3: "金融监管", 4: "专项行业"}
+                tier_names = {1: "最高层", 2: "产业层", 3: "金融监管", 4: "专项行业", 5: "美国政策"}
                 total = 0
                 for _, row in df.iterrows():
                     t = tier_map.get(row["source"], 0)
                     tn = tier_names.get(t, "?")
                     print(
-                        f"  {row['source']:10s} [T{t}-{tn}]: "
+                        f"  {row['source']:15s} [T{t}-{tn}]: "
                         f"{row['cnt']:5d} 篇  ({row['earliest']} ~ {row['latest']})"
                     )
                     total += row["cnt"]
@@ -787,6 +843,8 @@ def main():
             ("paper_position", "模拟盘持仓"),
             ("paper_transaction", "模拟盘交易"),
             ("paper_nav", "模拟盘净值"),
+            ("commodity_price", "商品期货价格"),
+            ("macro_indicator", "宏观经济指标"),
             ("industry_factor_config", "行业因子配置"),
             ("policy_article", "政策文章"),
             ("scrape_log", "抓取日志"),

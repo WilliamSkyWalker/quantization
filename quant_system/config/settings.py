@@ -77,10 +77,10 @@ REBALANCE_FREQ = "M"
 MIN_HOLDINGS = 0                  # 最少持仓数，0 = 允许空仓
 MAX_HOLDINGS = int(os.environ.get("MAX_HOLDINGS", "10"))
 MIN_SELECT_SCORE = float(os.environ.get("MIN_SELECT_SCORE", "0"))  # 选股最低分，低于此分不入选
-MAX_SINGLE_WEIGHT = 0.05
-MAX_INDUSTRY_WEIGHT = 0.30
-MAX_DRAWDOWN_THRESHOLD = 0.15
-DRAWDOWN_REDUCE_POSITION = 0.50
+MAX_SINGLE_WEIGHT = float(os.environ.get("MAX_SINGLE_WEIGHT", "0.05"))
+MAX_INDUSTRY_WEIGHT = float(os.environ.get("MAX_INDUSTRY_WEIGHT", "0.30"))
+MAX_DRAWDOWN_THRESHOLD = 0.25
+DRAWDOWN_REDUCE_POSITION = 0.70
 MIN_DAILY_TURNOVER = 50_000_000
 
 # 换手惩罚系数（0.0 = 关闭）
@@ -136,6 +136,100 @@ SENTIMENT_USER_AGENT = os.environ.get(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 )
+
+# ============================================================
+# Twitter/X 配置（twikit 免费方案，使用普通账号登录）
+# ============================================================
+
+TWITTER_USERNAME = os.environ.get("TWITTER_USERNAME", "")
+TWITTER_EMAIL = os.environ.get("TWITTER_EMAIL", "")
+TWITTER_PASSWORD = os.environ.get("TWITTER_PASSWORD", "")
+TWITTER_COOKIES_FILE = str(PROJECT_ROOT / os.environ.get("TWITTER_COOKIES_FILE", "twitter_cookies.json"))
+TWITTER_RATE_LIMIT = int(os.environ.get("TWITTER_RATE_LIMIT", "90"))   # req/min
+TWITTER_MAX_TWEETS = int(os.environ.get("TWITTER_MAX_TWEETS", "40"))   # 每页最大推文数（twikit 上限 40）
+
+# ============================================================
+# 商品期货配置（商品价格轮动因子）
+# ============================================================
+
+COMMODITY_SYMBOLS = [
+    "AU", "AG", "CU", "AL", "ZN", "PB", "NI", "SN",  # 有色金属
+    "RB", "I", "J", "JM",                              # 黑色系
+    "SC",                                               # 能源
+    "SA", "MA",                                         # 化工
+]
+
+COMMODITY_MOM_LOOKBACK = int(os.environ.get("COMMODITY_MOM_LOOKBACK", "20"))  # 动量回看窗口（交易日）
+
+# 商品→行业两层映射（l2 精确匹配申万二级，l1 回退到申万一级）
+COMMODITY_INDUSTRY_MAP = {
+    "AU": {"l1": "有色金属", "l2": "贵金属"},
+    "AG": {"l1": "有色金属", "l2": "贵金属"},
+    "CU": {"l1": "有色金属", "l2": "工业金属"},
+    "AL": {"l1": "有色金属", "l2": "铝"},
+    "ZN": {"l1": "有色金属", "l2": "工业金属"},
+    "PB": {"l1": "有色金属", "l2": "工业金属"},
+    "NI": {"l1": "有色金属", "l2": "工业金属"},
+    "SN": {"l1": "有色金属", "l2": "工业金属"},
+    "RB": {"l1": "钢铁", "l2": "普钢"},
+    "I":  {"l1": "钢铁", "l2": "特钢"},
+    "J":  {"l1": "钢铁", "l2": "普钢"},
+    "JM": {"l1": "钢铁", "l2": "普钢"},
+    "SC": {"l1": "石油石化", "l2": "油气开采"},
+    "SA": {"l1": "基础化工", "l2": "纯碱"},
+    "MA": {"l1": "基础化工", "l2": "其他化学制品"},
+}
+
+# 商品品种→交易所后缀映射
+COMMODITY_EXCHANGE_MAP = {
+    "AU": "SHF", "AG": "SHF", "CU": "SHF", "AL": "SHF",
+    "ZN": "SHF", "PB": "SHF", "NI": "SHF", "SN": "SHF",
+    "RB": "SHF",
+    "I": "DCE", "J": "DCE", "JM": "DCE",
+    "SC": "INE",
+    "SA": "ZCE", "MA": "ZCE",
+}
+
+# ============================================================
+# 宏观经济数据配置（宏观因子）
+# ============================================================
+
+MACRO_ZSCORE_WINDOW = int(os.environ.get("MACRO_ZSCORE_WINDOW", "24"))  # trailing Z-score 月数窗口
+
+# 各指标发布延迟（自然日），防止未来数据泄露
+MACRO_PUBLICATION_LAG = {
+    "SHIBOR_3M": 0, "SHIBOR_ON": 0,
+    "LPR_1Y": 0,
+    "CPI_YOY": 16, "PPI_YOY": 16, "PPI_MP_YOY": 16,
+    "PMI_MFG": 1, "PMI_NEW_ORDER": 1,
+    "M2_YOY": 16, "M1_YOY": 16, "M1_M2_SPREAD": 16,
+    "GDP_YOY": 20,
+    "UST_10Y": 0, "UST_2Y10Y": 0,
+}
+
+# --- 行业敏感度映射（正=受益，负=防御，未映射→NaN）---
+
+MACRO_CYCLE_SENSITIVITY = {
+    "有色金属": 1.0, "钢铁": 1.0, "基础化工": 0.8, "机械设备": 0.8,
+    "汽车": 0.7, "建筑材料": 0.7, "煤炭": 0.6, "电力设备": 0.6,
+    "食品饮料": -0.3, "医药生物": -0.3, "公用事业": -0.4,
+}
+
+MACRO_LIQD_SENSITIVITY = {
+    "房地产": 1.0, "非银金融": 0.9, "建筑装饰": 0.7,
+    "计算机": 0.6, "电子": 0.6, "银行": 0.5, "传媒": 0.5,
+    "煤炭": -0.2, "石油石化": -0.2,
+}
+
+MACRO_INFL_SENSITIVITY = {
+    "食品饮料": 0.8, "家用电器": 0.7, "商贸零售": 0.6, "社会服务": 0.5,
+    "钢铁": -0.6, "基础化工": -0.5, "有色金属": -0.5, "煤炭": -0.4,
+}
+
+MACRO_EXTR_SENSITIVITY = {
+    "计算机": 0.6, "电子": 0.6, "电力设备": 0.5, "传媒": 0.4,
+    "银行": -0.2, "公用事业": -0.3,
+}
 
 # ============================================================
 # 日志配置

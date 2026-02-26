@@ -16,6 +16,9 @@ from sentiment.scrapers.pbc import PbcScraper
 from sentiment.scrapers.nfra import NfraScraper
 from sentiment.scrapers.nea import NeaScraper
 from sentiment.scrapers.mohurd import MohurdScraper
+from sentiment.scrapers.twitter_trump import TwitterTrumpScraper
+from sentiment.scrapers.twitter_vance import TwitterVanceScraper
+from sentiment.scrapers.twitter_rubio import TwitterRubioScraper
 
 SCRAPER_REGISTRY = {
     "gov_cn": GovCnScraper,
@@ -29,6 +32,9 @@ SCRAPER_REGISTRY = {
     "nfra": NfraScraper,
     "nea": NeaScraper,
     "mohurd": MohurdScraper,
+    "twitter_trump": TwitterTrumpScraper,
+    "twitter_vance": TwitterVanceScraper,
+    "twitter_rubio": TwitterRubioScraper,
 }
 
 TIER_MAP = {
@@ -36,4 +42,5 @@ TIER_MAP = {
     2: ["ndrc", "miit", "mofcom"],             # 产业层
     3: ["csrc", "pbc", "nfra"],                # 金融监管
     4: ["nea", "mohurd"],                      # 专项行业
+    5: ["twitter_trump", "twitter_vance", "twitter_rubio"],  # 美国政策
 }

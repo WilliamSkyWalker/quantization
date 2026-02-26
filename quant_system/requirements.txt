@@ -30,6 +30,9 @@ requests>=2.31.0
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
 
+# Twitter/X 抓取（twikit 免费方案）
+twikit>=2.0.0
+
 # 进度条
 tqdm>=4.65.0
 

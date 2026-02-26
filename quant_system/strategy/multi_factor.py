@@ -43,6 +43,13 @@ from factors.technical import (
     IndustryMomentumFactor,
     VolPriceDivFactor,
 )
+from factors.commodity import CommodityMomentumFactor
+from factors.macro import (
+    MacroCycleFactor,
+    MacroLiquidityFactor,
+    MacroInflationFactor,
+    MacroExternalFactor,
+)
 from factors.processor import process_factor
 
 logger = logging.getLogger(__name__)
@@ -67,17 +74,19 @@ class MultiFactorStrategy:
         "value":    ["EP", "BP"],
         "quality":  ["ROE_TTM", "GROSS_MARGIN", "PROFIT_STB", "MARGIN_TREND"],
         "growth":   ["NET_PROFIT_YOY", "REVENUE_YOY"],
-        "momentum": ["MOM_1M", "MOM_3M", "MOM_12M", "REV_5D", "IND_MOM", "RESIDUAL_MOM"],
+        "momentum": ["MOM_1M", "MOM_3M", "MOM_12M", "REV_5D", "IND_MOM", "RESIDUAL_MOM", "CMDTY_MOM"],
         "technical":["TURN_20D", "VOL_20D", "PRICE_DEV_60D", "SIZE", "VOL_PRICE_DIV"],
+        "macro":    ["MACRO_CYCLE", "MACRO_LIQD", "MACRO_INFL", "MACRO_EXTR"],
     }
 
-    # 大类权重（动量与价值/质量/成长同权 = 1.0，技术半权 = 0.5）
+    # 大类权重（动量增强 1.3、成长增强 1.2，技术半权 0.5）
     CATEGORY_WEIGHTS = {
         "value": 1.0,
         "quality": 1.0,
-        "growth": 1.0,
-        "momentum": 1.0,
+        "growth": 1.2,
+        "momentum": 1.3,
         "technical": 0.5,
+        "macro": 0.6,
     }
 
     # 核心财务因子 — 全部缺失则剔除出池
@@ -142,24 +151,38 @@ class MultiFactorStrategy:
             ResidualMomentumFactor(db),  # RESIDUAL_MOM
             # 量价背离
             VolPriceDivFactor(db),       # VOL_PRICE_DIV
+            # --- 商品轮动因子 ---
+            CommodityMomentumFactor(db), # CMDTY_MOM
+            # --- 宏观因子 ---
+            MacroCycleFactor(db),        # MACRO_CYCLE
+            MacroLiquidityFactor(db),    # MACRO_LIQD
+            MacroInflationFactor(db),    # MACRO_INFL
+            MacroExternalFactor(db),     # MACRO_EXTR
         ]
 
         # 因子权重（默认等权，新因子使用差异化权重）
         if factor_weights is None:
             self.factor_weights = {f.name: 1.0 for f in self.factors}
             # Phase 7 新因子差异化权重
-            self.factor_weights["VOL_20D"] = 0.5
-            self.factor_weights["PRICE_DEV_60D"] = 0.3
+            self.factor_weights["VOL_20D"] = 0.3          # 降低波动率惩罚（0.5→0.3）
+            self.factor_weights["PRICE_DEV_60D"] = 0.15   # 降低偏离度惩罚（0.3→0.15）
             self.factor_weights["REV_5D"] = 0.4
             self.factor_weights["PROFIT_STB"] = 0.5
             self.factor_weights["MARGIN_TREND"] = 0.4
             self.factor_weights["SIZE"] = 0.3
-            self.factor_weights["IND_MOM"] = 0.5
+            self.factor_weights["IND_MOM"] = 0.8          # 提高行业动量（0.5→0.8）
             # Phase 8 新因子差异化权重
-            self.factor_weights["NET_PROFIT_YOY"] = 0.8
-            self.factor_weights["REVENUE_YOY"] = 0.6
+            self.factor_weights["NET_PROFIT_YOY"] = 1.0   # 提高净利润增速（0.8→1.0）
+            self.factor_weights["REVENUE_YOY"] = 0.8      # 提高营收增速（0.6→0.8）
             self.factor_weights["RESIDUAL_MOM"] = 0.7
             self.factor_weights["VOL_PRICE_DIV"] = 0.4
+            # 商品轮动因子（低于 IND_MOM=0.8，因信号更间接）
+            self.factor_weights["CMDTY_MOM"] = 0.6
+            # 宏观因子（类内权重）
+            self.factor_weights["MACRO_CYCLE"] = 0.8
+            self.factor_weights["MACRO_LIQD"] = 0.7
+            self.factor_weights["MACRO_INFL"] = 0.5
+            self.factor_weights["MACRO_EXTR"] = 0.4
         else:
             self.factor_weights = factor_weights
 

@@ -11,6 +11,7 @@
 7. [风控模块](#7-风控模块)
 8. [回测引擎](#8-回测引擎)
 9. [可配置参数汇总](#9-可配置参数汇总)
+10. [舆情采集管道](#10-舆情采集管道)
 
 ---
 
@@ -21,7 +22,7 @@
 ```
 每月末交易日(T日)
   → 构建可交易股票池（含核心财务准入过滤）
-  → 计算 19 个因子
+  → 计算 24 个因子
   → 因子处理（去极值 → 行业市值中性化 → Z-Score → Clip ±3）
   → 大类合成评分（类内加权平均 → 类间固定分母合成）
   → 选取得分最高的 N 只，Score 比例分配权重
@@ -52,7 +53,7 @@
 
 ## 3. 因子体系
 
-共 19 个因子，分 5 大类。
+共 24 个因子，分 6 大类。
 
 ### 3.1 价值因子（value）
 
@@ -96,9 +97,11 @@
 | **REV_5D** | 5 日短期反转 | -1 × 累计 5 日收益率 | 5 个交易日 | 越高越好（超跌反弹） |
 | **IND_MOM** | 行业动量 | 行业内所有股票 20 日累计收益均值 | 20 交易日 | 越高越好 |
 | **RESIDUAL_MOM** | 残差动量 | 个股 20 日累计收益 - 行业平均累计收益 | 20 交易日 | 越高越好 |
+| **CMDTY_MOM** | 商品轮动 | 对应商品期货 N 日收益率（OI 加权） | 20 交易日 | 越高越好 |
 
 - MOM_12M 跳过最近 1 个月，避免短期反转污染
 - RESIDUAL_MOM 剥离了行业 beta，捕捉个股 alpha
+- CMDTY_MOM 通过两层映射（L2 优先 → L1 回退）将商品价格动量传导到对应行业股票。无映射行业（如银行、计算机）返回 NaN，由动态分母机制正确处理。同行业多商品按 OI（持仓量）加权平均。数据来源：Tushare `fut_mapping` + `fut_daily`。
 
 ### 3.5 技术因子（technical）
 
@@ -111,6 +114,23 @@
 | **VOL_PRICE_DIV** | 量价背离 | corr(pct_chg, volume_chg, 20D) | 20 交易日 | **反向** |
 
 反向因子 = 值越低越好，权重为负数。
+
+### 3.6 宏观因子（macro）
+
+利用宏观经济指标的 trailing Z-score（24 月窗口），通过行业敏感度系数映射到个股。
+
+| 因子 | 名称 | 信号公式 | 方向 |
+|------|------|---------|------|
+| **MACRO_CYCLE** | 经济周期 | 0.5×z(PMI-50) + 0.3×z(PPI_YOY) + 0.2×z(PMI_NEW_ORDER-50) | 越高越好 |
+| **MACRO_LIQD** | 流动性 | 0.3×z(M1_M2_SPREAD) + 0.3×z(M2_YOY) + 0.2×(-z(Δ3M SHIBOR)) + 0.2×(-z(Δ3M LPR)) | 越高越好 |
+| **MACRO_INFL** | 通胀结构 | 0.5×z(CPI-PPI) + 0.3×z(CPI) + 0.2×(-z(PPI)) | 越高越好 |
+| **MACRO_EXTR** | 外部风险 | 0.6×(-z(UST_10Y)) + 0.4×z(UST_2Y10Y) | 越高越好 |
+
+- **数据源**: 8 个 Tushare 宏观 API（shibor, shibor_lpr, cn_cpi, cn_ppi, cn_pmi, cn_m, cn_gdp, us_tycr）
+- **防未来数据泄露**: 各指标按 `MACRO_PUBLICATION_LAG` 延迟取值（CPI/PPI/M2=16天, PMI=1天, GDP=20天, SHIBOR/LPR/UST=0天）
+- **PMI 退化**: cn_pmi 需 2000 积分，不可用时退化为 PPI only 版本: 0.6×z(PPI_YOY) + 0.4×z(PPI_MP_YOY)
+- **行业映射**: 每个因子有独立的行业敏感度字典（正=受益行业，负=防御行业），未映射行业 → NaN
+- **数据库**: macro_indicator 表（通用 KV 结构，indicator_code + report_date 唯一键）
 
 ---
 
@@ -171,7 +191,7 @@ z = clip(z, -3.0, +3.0)
 
 ### 5.1 大类合成评分（固定分母）
 
-19 个因子分为 5 个大类，评分分两层：
+24 个因子分为 6 个大类，评分分两层：
 
 **第一层：类内加权平均（动态分母）**
 
@@ -187,19 +207,20 @@ cat_score = Σ(factor_zscore × factor_weight) / Σ|factor_weight|  （仅非 Na
 score = Σ(cat_score × cat_weight) / Σ|所有 cat_weight|
 ```
 
-固定分母 = 1.0 + 1.0 + 1.0 + 1.0 + 0.5 = **4.5**
+固定分母 = 1.0 + 1.0 + 1.2 + 1.3 + 0.5 + 0.6 = **5.6**
 
 ### 5.2 大类权重
 
 | 大类 | 包含因子 | 大类权重 | 占比 |
 |------|---------|---------|------|
-| **value** | EP, BP | 1.0 | 22.2% |
-| **quality** | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND | 1.0 | 22.2% |
-| **growth** | NET_PROFIT_YOY, REVENUE_YOY | 1.0 | 22.2% |
-| **momentum** | MOM_1M, MOM_3M, MOM_12M, REV_5D, IND_MOM, RESIDUAL_MOM | 1.0 | 22.2% |
-| **technical** | TURN_20D, VOL_20D, PRICE_DEV_60D, SIZE, VOL_PRICE_DIV | 0.5 | 11.1% |
+| **value** | EP, BP | 1.0 | 20.0% |
+| **quality** | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND | 1.0 | 20.0% |
+| **growth** | NET_PROFIT_YOY, REVENUE_YOY | 1.2 | 24.0% |
+| **momentum** | MOM_1M, MOM_3M, MOM_12M, REV_5D, IND_MOM, RESIDUAL_MOM, CMDTY_MOM | 1.3 | 23.2% |
+| **technical** | TURN_20D, VOL_20D, PRICE_DEV_60D, SIZE, VOL_PRICE_DIV | 0.5 | 8.9% |
+| **macro** | MACRO_CYCLE, MACRO_LIQD, MACRO_INFL, MACRO_EXTR | 0.6 | 10.7% |
 
-设计目的：动量 6 个因子的总贡献被限制在 1 个大类权重内，与价值（2 因子）、质量（4 因子）等权。
+设计目的：成长和动量增强权重（1.2 / 1.3），更重视成长性和趋势信号；技术因子半权（0.5）降低噪声干扰；宏观因子权重 0.6（市场级信号，补充个股因子盲区）。
 
 ### 5.3 因子级权重（类内）
 
@@ -209,17 +230,22 @@ score = Σ(cat_score × cat_weight) / Σ|所有 cat_weight|
 | MOM_1M, MOM_3M, MOM_12M | 1.0 | 动量基准 |
 | ROE_TTM, GROSS_MARGIN | 1.0 | 质量基准 |
 | TURN_20D | **-1.0** | 反向，回避高换手 |
-| VOL_20D | **-0.5** | 反向，防守 |
-| PRICE_DEV_60D | **-0.3** | 反向，安全边际 |
+| VOL_20D | **-0.3** | 反向，防守（降低惩罚力度） |
+| PRICE_DEV_60D | **-0.15** | 反向，安全边际（降低惩罚力度） |
 | REV_5D | 0.4 | 短期反转信号 |
 | PROFIT_STB | **-0.5** | 反向，偏好稳定 |
 | MARGIN_TREND | 0.4 | 毛利趋势改善 |
 | SIZE | 0.3 | 偏中大盘 |
-| IND_MOM | 0.5 | 行业轮动 |
-| NET_PROFIT_YOY | 0.8 | 成长性 |
-| REVENUE_YOY | 0.6 | 营收增长 |
+| IND_MOM | 0.8 | 行业轮动（提高权重） |
+| NET_PROFIT_YOY | 1.0 | 成长性（提高权重） |
+| REVENUE_YOY | 0.8 | 营收增长（提高权重） |
 | RESIDUAL_MOM | 0.7 | 个股 alpha 动量 |
 | VOL_PRICE_DIV | **-0.4** | 反向，量价背离信号 |
+| CMDTY_MOM | 0.6 | 商品轮动（信号间接） |
+| MACRO_CYCLE | 0.8 | 经济周期（宏观核心信号） |
+| MACRO_LIQD | 0.7 | 流动性 |
+| MACRO_INFL | 0.5 | 通胀结构 |
+| MACRO_EXTR | 0.4 | 外部风险（辅助信号） |
 
 权重回退链：`DB行业配置 → __DEFAULT__ 配置 → 代码硬编码权重`
 
@@ -293,7 +319,7 @@ score += λ × is_in_portfolio
 |------|------|------|
 | 个股上限 | `MAX_SINGLE_WEIGHT = 5%` | 超限部分按比例分配给其他持仓，迭代至收敛（最多 10 轮） |
 | 行业上限 | `MAX_INDUSTRY_WEIGHT = 30%` | 超限行业内所有股票等比例缩减 |
-| 回撤缩仓 | `MAX_DRAWDOWN_THRESHOLD = 15%` | 当前回撤超 15% 时全仓位缩至 50%（`USE_VOL_TARGETING=0` 时） |
+| 回撤缩仓 | `MAX_DRAWDOWN_THRESHOLD = 25%` | 当前回撤超 25% 时全仓位缩至 70%（`USE_VOL_TARGETING=0` 时） |
 | 波动率目标 | `USE_VOL_TARGETING=1` | `scale = target_vol / realized_vol`，clipped [0.3, 1.0] |
 | 流动性 | `MIN_DAILY_TURNOVER = 5000 万` | 近 20 日日均成交额不足则剔除 |
 
@@ -380,10 +406,10 @@ scale = clip(scale, VOL_SCALE_MIN, VOL_SCALE_MAX)
 
 | 参数 | 默认值 | 环境变量 |
 |------|--------|---------|
-| MAX_SINGLE_WEIGHT | 0.05 | — |
-| MAX_INDUSTRY_WEIGHT | 0.30 | — |
-| MAX_DRAWDOWN_THRESHOLD | 0.15 | — |
-| DRAWDOWN_REDUCE_POSITION | 0.50 | — |
+| MAX_SINGLE_WEIGHT | 0.05 | MAX_SINGLE_WEIGHT |
+| MAX_INDUSTRY_WEIGHT | 0.30 | MAX_INDUSTRY_WEIGHT |
+| MAX_DRAWDOWN_THRESHOLD | 0.25 | — |
+| DRAWDOWN_REDUCE_POSITION | 0.70 | — |
 | MIN_DAILY_TURNOVER | 5000 万 | — |
 | USE_VOL_TARGETING | 0（关闭） | USE_VOL_TARGETING |
 | TARGET_VOL | 0.20 | TARGET_VOL |
@@ -413,3 +439,70 @@ scale = clip(scale, VOL_SCALE_MIN, VOL_SCALE_MAX)
 |------|--------|---------|
 | ALLOWED_INDUSTRIES | []（全市场） | ALLOWED_INDUSTRIES |
 | INDUSTRY_INDEX_MAP | {} | INDUSTRY_INDEX_MAP |
+
+### 宏观因子
+
+| 参数 | 默认值 | 环境变量 |
+|------|--------|---------|
+| MACRO_ZSCORE_WINDOW | 24（月） | MACRO_ZSCORE_WINDOW |
+| MACRO_PUBLICATION_LAG | {CPI:16, PPI:16, PMI:1, GDP:20, SHIBOR:0, LPR:0, UST:0} | — |
+| MACRO_CYCLE_SENSITIVITY | {有色金属:1.0, 钢铁:1.0, 食品饮料:-0.3, ...} | — |
+| MACRO_LIQD_SENSITIVITY | {房地产:1.0, 非银金融:0.9, 煤炭:-0.2, ...} | — |
+| MACRO_INFL_SENSITIVITY | {食品饮料:0.8, 钢铁:-0.6, ...} | — |
+| MACRO_EXTR_SENSITIVITY | {计算机:0.6, 电子:0.6, 银行:-0.2, ...} | — |
+
+### 舆情抓取
+
+| 参数 | 默认值 | 环境变量 |
+|------|--------|---------|
+| SENTIMENT_RATE_LIMIT | 20 req/min/domain | SENTIMENT_RATE_LIMIT |
+| SENTIMENT_MAX_PAGES | 5 | SENTIMENT_MAX_PAGES |
+| TWITTER_BEARER_TOKEN | （空） | TWITTER_BEARER_TOKEN |
+| TWITTER_RATE_LIMIT | 90 req/min | TWITTER_RATE_LIMIT |
+| TWITTER_MAX_TWEETS | 100 | TWITTER_MAX_TWEETS |
+
+---
+
+## 10. 舆情采集管道
+
+### 10.1 中国政策层（Tier 1-4）
+
+11 个政府网站爬虫，按政策影响力分 4 层级：
+
+| 层级 | 来源 | 说明 |
+|------|------|------|
+| Tier 1 最高层 | gov_cn, xinhua, people | 国务院/新华社/人民日报 |
+| Tier 2 产业层 | ndrc, miit, mofcom | 发改委/工信部/商务部 |
+| Tier 3 金融监管 | csrc, pbc, nfra | 证监会/央行/金融监管总局 |
+| Tier 4 专项行业 | nea, mohurd | 能源局/住建部 |
+
+### 10.2 美国政策层（Tier 5）
+
+通过 twikit 库（Twitter 内部 API，免费）采集美国关键政策人物推文，用于跟踪关税/贸易/外交政策动向：
+
+| 来源 | 账号 | 类别 | Twitter User ID |
+|------|------|------|----------------|
+| twitter_trump | @realDonaldTrump | US Policy - President | 25073877 |
+| twitter_vance | @JDVance | US Policy - Vice President | 1326229737551912960 |
+| twitter_rubio | @marcorubio | US Policy - Secretary of State | 43201586 |
+
+**架构设计：**
+- `TwitterBaseScraper(BaseScraper)` 中间基类，重写 `__init__`/`scrape`/`parse_list_page`
+- 使用 twikit `Client.get_user_tweets()` + `result.next()` 分页，纯 async，`scrape()` 中用 `asyncio.run()` 桥接
+- 独立 `HttpRateLimiter`（90 req/min），3 个 Twitter 爬虫共享
+- 转推过滤：`text.startswith("RT @")` 跳过
+- Cookies 持久化到 `TWITTER_COOKIES_FILE`，避免重复登录
+- 凭证为空或 twikit 未安装时 `scrape()` 返回空列表并打印警告，不影响其他来源
+
+**推文→PolicyArticle 映射：**
+
+| PolicyArticle 列 | 推文数据 |
+|-------------------|----------|
+| source | `twitter_trump` / `twitter_vance` / `twitter_rubio` |
+| tier | 5 |
+| title | 推文文本（≤500 字符，推文上限 280） |
+| url | `https://x.com/{username}/status/{tweet_id}`（唯一键） |
+| publish_date | twikit `created_at` 日期部分（`%a %b %d %H:%M:%S %z %Y` 格式） |
+| category | `US Policy - President` 等 |
+| summary | 推文全文 + 互动指标 `[RT:N, like:N]` |
+| content_hash | SHA256(title\|date) |
