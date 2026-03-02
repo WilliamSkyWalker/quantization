@@ -83,6 +83,21 @@ class CommodityDownloader:
         logger.info(f"商品期货下载完成: {success}/{len(symbols)} 个品种")
         return success
 
+    def backfill_commodity_prices(self) -> dict:
+        """
+        补录商品期货数据（全量重下）。
+
+        仅 15 个品种，直接全量重下 DATA_START_DATE ~ 今天。
+        幂等安全，耗时短（每品种 ~2 次 API 调用）。
+
+        Returns:
+            {'symbols': int, 'success': int}
+        """
+        end_date = datetime.now().strftime("%Y%m%d")
+        logger.info(f"商品期货补录: 全量重下 {DATA_START_DATE} ~ {end_date}")
+        success = self.download_commodity_prices(DATA_START_DATE, end_date)
+        return {'symbols': len(COMMODITY_SYMBOLS), 'success': success}
+
     def update_commodity_prices(self) -> int:
         """
         增量更新商品期货数据，从 DB 最新日期开始。

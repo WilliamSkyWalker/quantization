@@ -58,6 +58,16 @@ def data_status(request):
         'research_report': "SELECT MAX(updated_at) FROM research_report",
     }
 
+    # SQL to get the latest business data date for each table
+    data_date_sql = {
+        'daily_price': "SELECT MAX(trade_date) FROM daily_price",
+        'financial_data': "SELECT MAX(end_date) FROM financial_data",
+        'commodity_price': "SELECT MAX(trade_date) FROM commodity_price",
+        'macro_indicator': "SELECT MAX(report_date) FROM macro_indicator",
+        'policy_article': "SELECT MAX(publish_date) FROM policy_article",
+        'research_report': "SELECT MAX(report_date) FROM research_report",
+    }
+
     # Get latest trade date separately for dashboard use
     latest_trade_date = None
     try:
@@ -78,6 +88,11 @@ def data_status(request):
                 val = row.iloc[0, 0] if not row.empty else None
                 if val is not None and not (isinstance(val, float) and pd.isna(val)):
                     extra['latest_date'] = str(val)[:19]  # YYYY-MM-DD HH:MM:SS
+            if table_name in data_date_sql:
+                row = db.query(data_date_sql[table_name])
+                val = row.iloc[0, 0] if not row.empty else None
+                if val is not None and not (isinstance(val, float) and pd.isna(val)):
+                    extra['data_date'] = str(val)[:10]  # YYYY-MM-DD
             result.append({
                 'table': table_name,
                 'label': label,
@@ -126,6 +141,12 @@ def data_download(request):
         'update_macro': ('增量更新宏观', _run_update_macro),
         'update_reports': ('刷新券商研报', _run_update_reports),
         'update_sentiment': ('增量更新舆情', _run_update_sentiment),
+        'backfill_daily': ('补录日线行情', _run_backfill_daily),
+        'backfill_financial': ('补录财务季度', _run_backfill_financial),
+        'backfill_index': ('补录指数数据', _run_backfill_index),
+        'backfill_commodity': ('补录商品期货', _run_backfill_commodity),
+        'backfill_macro': ('补录宏观数据', _run_backfill_macro),
+        'backfill_reports': ('补录券商研报', _run_backfill_reports),
     }
 
     if action not in action_map:
@@ -485,6 +506,60 @@ def _run_backfill_income(task_id):
     updater = FinancialUpdater(db)
     task_manager.update_progress(task_id, 20, '回填利润表数据...')
     count = updater.backfill_income()
+    return {'count': count}
+
+
+def _run_backfill_daily(task_id):
+    from backend.services.data.downloader import TushareDownloader
+    db = _get_db()
+    dl = TushareDownloader(db)
+    task_manager.update_progress(task_id, 10, '检测缺失交易日...')
+    result = dl.backfill_daily_prices()
+    return result
+
+
+def _run_backfill_financial(task_id):
+    from backend.services.data.updater import FinancialUpdater
+    db = _get_db()
+    updater = FinancialUpdater(db)
+    task_manager.update_progress(task_id, 10, '检测缺失财务季度...')
+    result = updater.backfill_financial_quarters()
+    return result
+
+
+def _run_backfill_index(task_id):
+    from backend.services.data.downloader import TushareDownloader
+    db = _get_db()
+    dl = TushareDownloader(db)
+    task_manager.update_progress(task_id, 10, '检测缺失指数数据...')
+    result = dl.backfill_index_daily()
+    return result
+
+
+def _run_backfill_commodity(task_id):
+    from backend.services.data.commodity_downloader import CommodityDownloader
+    db = _get_db()
+    dl = CommodityDownloader(db)
+    task_manager.update_progress(task_id, 10, '补录商品期货数据...')
+    result = dl.backfill_commodity_prices()
+    return result
+
+
+def _run_backfill_macro(task_id):
+    from backend.services.data.macro_downloader import MacroDownloader
+    db = _get_db()
+    dl = MacroDownloader(db)
+    task_manager.update_progress(task_id, 10, '补录宏观数据...')
+    result = dl.backfill()
+    return result
+
+
+def _run_backfill_reports(task_id):
+    from backend.services.data.akshare_downloader import AKShareDownloader
+    db = _get_db()
+    dl = AKShareDownloader(db)
+    task_manager.update_progress(task_id, 10, '强制全量下载券商研报...')
+    count = dl.download_research_reports(force=True)
     return {'count': count}
 
 

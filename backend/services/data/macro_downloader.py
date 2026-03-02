@@ -91,6 +91,21 @@ class MacroDownloader:
         logger.info(f"宏观数据下载完成: {total} 条记录")
         return results
 
+    def backfill(self) -> dict:
+        """
+        补录宏观数据（全量重下）。
+
+        仅 8 组指标，直接全量重下 DATA_START_DATE ~ 今天。
+        等价于从头全量，8 次 API 调用，幂等安全。
+
+        Returns:
+            {'total': int, 'detail': dict}
+        """
+        end_date = datetime.now().strftime("%Y%m%d")
+        logger.info(f"宏观数据补录: 全量重下 {DATA_START_DATE} ~ {end_date}")
+        results = self.download_all(DATA_START_DATE, end_date)
+        return {'total': sum(results.values()), 'detail': results}
+
     def update(self) -> dict[str, int]:
         """
         增量更新宏观数据，从 DB 最新日期开始。

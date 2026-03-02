@@ -157,6 +157,33 @@ def _tushare_call(pro, method: str, limiter: TushareRateLimiter, **kwargs) -> pd
     return pd.DataFrame()
 
 
+def _group_consecutive_dates(dates: list[str]) -> list[tuple[str, str]]:
+    """
+    将有序的 YYYYMMDD 日期列表分组为连续交易日区间。
+
+    连续的定义：相邻日期差 <= 5 天（跨周末/节假日仍视为连续）。
+
+    Args:
+        dates: 已排序的 YYYYMMDD 字符串列表。
+
+    Returns:
+        [(start, end), ...] 元组列表。
+    """
+    if not dates:
+        return []
+    groups = []
+    start = dates[0]
+    prev = pd.to_datetime(dates[0])
+    for d in dates[1:]:
+        cur = pd.to_datetime(d)
+        if (cur - prev).days > 5:
+            groups.append((start, prev.strftime('%Y%m%d')))
+            start = d
+        prev = cur
+    groups.append((start, prev.strftime('%Y%m%d')))
+    return groups
+
+
 # ============================================================
 # 数据下载器
 # ============================================================
@@ -375,8 +402,114 @@ class TushareDownloader:
         return df_out
 
     # ----------------------------------------------------------
-    # 增量更新
+    # 日线行情补录
     # ----------------------------------------------------------
+
+    def backfill_daily_prices(self) -> dict:
+        """
+        检测并补录缺失的日线行情交易日。
+
+        用交易日历获取 DATA_START_DATE 至今全部交易日，
+        与 DB 中 daily_price 已有的 distinct trade_date（仅股票）做差集，
+        对缺失交易日逐日调用 _fetch_daily_by_date() 补录。
+
+        Returns:
+            {'missing_dates': int, 'filled': int}
+        """
+        end_date = datetime.now().strftime("%Y%m%d")
+        all_trade_dates = set(self._get_trade_dates(DATA_START_DATE, end_date))
+        if not all_trade_dates:
+            logger.warning("交易日历为空")
+            return {'missing_dates': 0, 'filled': 0}
+
+        # 查 DB 中已有的交易日（排除指数，只看股票代码格式）
+        df_existing = self.db.query(
+            "SELECT DISTINCT trade_date FROM daily_price "
+            "WHERE ts_code LIKE '00%' OR ts_code LIKE '30%' "
+            "OR ts_code LIKE '60%' OR ts_code LIKE '68%'"
+        )
+        existing_dates = set()
+        if not df_existing.empty:
+            existing_dates = set(
+                pd.to_datetime(df_existing['trade_date']).dt.strftime('%Y%m%d').tolist()
+            )
+
+        missing = sorted(all_trade_dates - existing_dates)
+        if not missing:
+            logger.info("日线行情无缺失交易日")
+            return {'missing_dates': 0, 'filled': 0}
+
+        logger.info(f"检测到 {len(missing)} 个缺失交易日，开始补录")
+        filled = 0
+        for trade_date in tqdm(missing, desc="补录日线行情"):
+            try:
+                df = self._fetch_daily_by_date(trade_date)
+                if df is not None and not df.empty:
+                    self.db.bulk_upsert_daily_price(df)
+                    filled += 1
+            except Exception as e:
+                logger.warning(f"补录交易日 {trade_date} 失败: {e}")
+
+        logger.info(f"日线行情补录完成: 缺失 {len(missing)} 日, 成功补录 {filled} 日")
+        return {'missing_dates': len(missing), 'filled': filled}
+
+    # ----------------------------------------------------------
+    # 指数数据补录
+    # ----------------------------------------------------------
+
+    def backfill_index_daily(self) -> dict:
+        """
+        检测并补录缺失的指数日线数据。
+
+        检查 000300.SH + INDUSTRY_INDEX_MAP 所有指数，
+        对每个指数比较交易日历 vs DB 已有日期，
+        将缺失日期分组为连续区间后调用 download_index_daily() 补录。
+
+        Returns:
+            {'indices_checked': int, 'total_filled': int}
+        """
+        from backend.services.config import INDUSTRY_INDEX_MAP
+
+        end_date = datetime.now().strftime("%Y%m%d")
+        all_trade_dates = set(self._get_trade_dates(DATA_START_DATE, end_date))
+        if not all_trade_dates:
+            logger.warning("交易日历为空")
+            return {'indices_checked': 0, 'total_filled': 0}
+
+        # 收集所有指数代码
+        index_codes = ['000300.SH']
+        if INDUSTRY_INDEX_MAP:
+            index_codes.extend(INDUSTRY_INDEX_MAP.values())
+        index_codes = list(dict.fromkeys(index_codes))  # 去重保序
+
+        total_filled = 0
+        for code in index_codes:
+            # 查 DB 中该指数已有日期
+            df_existing = self.db.query(
+                "SELECT DISTINCT trade_date FROM daily_price WHERE ts_code = :code",
+                params={'code': code},
+            )
+            existing_dates = set()
+            if not df_existing.empty:
+                existing_dates = set(
+                    pd.to_datetime(df_existing['trade_date']).dt.strftime('%Y%m%d').tolist()
+                )
+
+            missing = sorted(all_trade_dates - existing_dates)
+            if not missing:
+                continue
+
+            logger.info(f"指数 {code}: 缺失 {len(missing)} 个交易日")
+            # 分组为连续区间
+            for seg_start, seg_end in _group_consecutive_dates(missing):
+                try:
+                    self.download_index_daily(code, start_date=seg_start, end_date=seg_end)
+                    total_filled += 1
+                except Exception as e:
+                    logger.warning(f"指数 {code} 补录 {seg_start}~{seg_end} 失败: {e}")
+
+        logger.info(f"指数补录完成: 检查 {len(index_codes)} 个指数, 补录 {total_filled} 个区间")
+        return {'indices_checked': len(index_codes), 'total_filled': total_filled}
 
     # ----------------------------------------------------------
     # 指数日线下载

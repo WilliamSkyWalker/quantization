@@ -50,12 +50,16 @@ const dataTypes: DataTypeRow[] = [
     key: 'daily', label: '日线行情', browseTable: 'daily_price',
     downloadAction: 'download_daily', downloadLabel: '下载',
     updateAction: 'update_daily', updateLabel: '更新',
+    backfillActions: [{ action: 'backfill_daily', label: '补录缺失', handler: () => runAction('backfill_daily', '补录日线行情') }],
   },
   {
     key: 'financial', label: '财务数据', browseTable: 'financial_data',
     downloadAction: 'download_financial', downloadLabel: '下载',
     updateAction: 'update_financial', updateLabel: '更新',
-    backfillActions: [{ action: 'backfill_income', label: '回填利润', handler: () => runBackfill() }],
+    backfillActions: [
+      { action: 'backfill_income', label: '回填利润', handler: () => runBackfill() },
+      { action: 'backfill_financial', label: '补录季度', handler: () => runAction('backfill_financial', '补录财务季度') },
+    ],
   },
   {
     key: 'valuation', label: '估值快照', browseTable: 'daily_price',
@@ -71,21 +75,25 @@ const dataTypes: DataTypeRow[] = [
     key: 'index', label: '指数数据',
     downloadAction: 'download_index', downloadLabel: '下载',
     updateAction: 'update_index', updateLabel: '更新',
+    backfillActions: [{ action: 'backfill_index', label: '补录缺失', handler: () => runAction('backfill_index', '补录指数数据') }],
   },
   {
     key: 'commodity', label: '商品期货', browseTable: 'commodity_price',
     downloadAction: 'download_commodity', downloadLabel: '下载',
     updateAction: 'update_commodity', updateLabel: '更新',
+    backfillActions: [{ action: 'backfill_commodity', label: '补录缺失', handler: () => runAction('backfill_commodity', '补录商品期货') }],
   },
   {
     key: 'macro', label: '宏观数据', browseTable: 'macro_indicator',
     downloadAction: 'download_macro', downloadLabel: '下载',
     updateAction: 'update_macro', updateLabel: '更新',
+    backfillActions: [{ action: 'backfill_macro', label: '补录全量', handler: () => runAction('backfill_macro', '补录宏观数据') }],
   },
   {
     key: 'reports', label: '券商研报', browseTable: 'research_report',
     downloadAction: 'download_reports', downloadLabel: '下载',
     updateAction: 'update_reports', updateLabel: '刷新',
+    backfillActions: [{ action: 'backfill_reports', label: '强制全量', handler: () => runAction('backfill_reports', '补录券商研报') }],
   },
   {
     key: 'sentiment', label: '舆情数据',
@@ -128,6 +136,28 @@ const statusColumns: DataTableColumns = [
     },
   },
 ]
+
+// Map dataType key → table name for row count lookup
+const _COUNT_TABLE_MAP: Record<string, string> = {
+  list: 'stock_basic',
+  daily: 'daily_price',
+  financial: 'financial_data',
+  valuation: 'financial_data',
+  industry: 'industry_class',
+  index: 'daily_price',
+  commodity: 'commodity_price',
+  macro: 'macro_indicator',
+  reports: 'research_report',
+  sentiment: 'policy_article',
+}
+
+const tableInfoMap = computed(() => {
+  const m: Record<string, { count: number; dataDate?: string; latestDate?: string }> = {}
+  for (const t of tables.value) {
+    m[t.table] = { count: t.count ?? 0, dataDate: t.data_date, latestDate: t.latest_date }
+  }
+  return m
+})
 
 // Mapping for browsable tables
 const _BROWSE_MAP: Record<string, string> = {}
@@ -183,6 +213,36 @@ const opColumns: DataTableColumns = [
     ]),
   },
   { title: '数据类型', key: 'label', width: 100 },
+  {
+    title: '数据总量', key: 'count', width: 90, align: 'right',
+    render: (row: any) => {
+      const tableName = _COUNT_TABLE_MAP[row.key]
+      if (!tableName) return '-'
+      const info = tableInfoMap.value[tableName]
+      if (!info) return '-'
+      return h('span', {
+        style: info.count > 0 ? 'font-weight: 600; color: #18a058' : 'color: #c0c4cc',
+      }, info.count.toLocaleString())
+    },
+  },
+  {
+    title: '数据日期', key: 'dataDate', width: 100,
+    render: (row: any) => {
+      const tableName = _COUNT_TABLE_MAP[row.key]
+      if (!tableName) return '-'
+      const info = tableInfoMap.value[tableName]
+      return h('span', { style: 'font-size: 12px; color: #606266' }, info?.dataDate || '-')
+    },
+  },
+  {
+    title: '更新时间', key: 'latestDate', width: 150,
+    render: (row: any) => {
+      const tableName = _COUNT_TABLE_MAP[row.key]
+      if (!tableName) return '-'
+      const info = tableInfoMap.value[tableName]
+      return h('span', { style: 'font-size: 12px; color: #909399' }, info?.latestDate || '-')
+    },
+  },
   {
     title: '全量下载', key: 'download', width: 110, align: 'center',
     render: (row: any) => {
@@ -414,13 +474,21 @@ const sourceColumns: DataTableColumns = [
   { title: '最早', key: 'earliest', width: 110, render: (row: any) => row.earliest || '-' },
   { title: '最新', key: 'latest', width: 110, render: (row: any) => row.latest || '-' },
   {
-    title: '操作', key: 'actions', width: 200,
+    title: '操作', key: 'actions', width: 340,
     render: (row: any) => h(NSpace, { size: 'small' }, {
       default: () => [
         h(NButton, {
           size: 'tiny', type: 'primary', disabled: scraping.value,
           onClick: () => scrapeSource(row.source),
         }, { default: () => '抓取' }),
+        h(NButton, {
+          size: 'tiny', type: 'warning', disabled: scraping.value,
+          onClick: () => scrapeSourceIncremental(row.source),
+        }, { default: () => '增量' }),
+        h(NButton, {
+          size: 'tiny', disabled: scraping.value,
+          onClick: () => scrapeSourceBackfill(row.source),
+        }, { default: () => '补录' }),
         h(NButton, {
           size: 'tiny', disabled: row.count === 0,
           onClick: () => filterBySource(row.source),
@@ -503,6 +571,44 @@ async function scrapeSource(source: string) {
       const { data } = await startSentimentDownload(source)
       taskStore.trackTask(data.task_id, `抓取 ${source}`)
       message.success(`${source} 抓取任务已启动`)
+    }
+  } catch (e: any) {
+    message.error(e.response?.data?.error || '操作失败')
+  } finally {
+    scraping.value = false
+  }
+}
+
+async function scrapeSourceIncremental(source: string) {
+  scraping.value = true
+  try {
+    if (source === 'research_report') {
+      const { data } = await startDownload('update_reports')
+      taskStore.trackTask(data.task_id, '增量刷新券商研报')
+      message.success('券商研报增量刷新任务已启动')
+    } else {
+      const { data } = await startSentimentDownload(source, undefined, true)
+      taskStore.trackTask(data.task_id, `增量更新 ${source}`)
+      message.success(`${source} 增量更新任务已启动`)
+    }
+  } catch (e: any) {
+    message.error(e.response?.data?.error || '操作失败')
+  } finally {
+    scraping.value = false
+  }
+}
+
+async function scrapeSourceBackfill(source: string) {
+  scraping.value = true
+  try {
+    if (source === 'research_report') {
+      const { data } = await startDownload('backfill_reports')
+      taskStore.trackTask(data.task_id, '补录券商研报')
+      message.success('券商研报补录任务已启动')
+    } else {
+      const { data } = await startSentimentDownload(source, undefined, false, true)
+      taskStore.trackTask(data.task_id, `补录 ${source}`)
+      message.success(`${source} 补录任务已启动`)
     }
   } catch (e: any) {
     message.error(e.response?.data?.error || '操作失败')

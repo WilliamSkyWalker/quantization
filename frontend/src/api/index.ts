@@ -63,8 +63,8 @@ export const getSentimentArticles = (params: {
   page?: number
   page_size?: number
 } = {}) => api.get('/sentiment/articles', { params: { page: 1, ...params } })
-export const startSentimentDownload = (source?: string, tier?: number) =>
-  api.post('/sentiment/download', { source, tier })
+export const startSentimentDownload = (source?: string, tier?: number, incremental?: boolean, backfill?: boolean) =>
+  api.post('/sentiment/download', { source, tier, incremental, backfill })
 export const startSentimentAnalyze = () => api.post('/sentiment/analyze')
 export const startSentimentBackfillAnalyze = () => api.post('/sentiment/backfill-analyze')
 export const startSentimentBackfillContent = (source?: string) =>

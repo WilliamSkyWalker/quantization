@@ -439,6 +439,81 @@ class FinancialUpdater:
         return success_count
 
     # ----------------------------------------------------------
+    # 补录财务季度
+    # ----------------------------------------------------------
+
+    def backfill_financial_quarters(self) -> dict:
+        """
+        检测并补录缺失的财务季度数据。
+
+        生成 DATA_START_DATE ~ 当前年的所有季度报告期，
+        对未退市股票比较应有季度 vs DB 实际 (ts_code, end_date)，
+        缺失率 >25% 的股票纳入补录列表，调用 _download_stock_batch() 重下全历史。
+
+        Returns:
+            {'stocks_checked': int, 'stocks_backfilled': int, 'records': int}
+        """
+        start_year = int(DATA_START_DATE[:4])
+        end_year = datetime.now().year
+
+        # 生成所有应有季度报告期（YYYYMMDD）
+        all_quarters = []
+        for y in range(start_year, end_year + 1):
+            for q_end in ["0331", "0630", "0930", "1231"]:
+                qdate = f"{y}{q_end}"
+                if qdate <= datetime.now().strftime("%Y%m%d"):
+                    all_quarters.append(qdate)
+        total_quarters = len(all_quarters)
+
+        if total_quarters == 0:
+            return {'stocks_checked': 0, 'stocks_backfilled': 0, 'records': 0}
+
+        # 获取未退市股票
+        df_stocks = self.db.get_stock_list(exclude_st=False)
+        if df_stocks.empty:
+            logger.error("数据库中无股票列表")
+            return {'stocks_checked': 0, 'stocks_backfilled': 0, 'records': 0}
+
+        # 只看未退市
+        active_stocks = df_stocks[df_stocks['delist_date'].isna()]['ts_code'].tolist()
+        if not active_stocks:
+            active_stocks = df_stocks['ts_code'].tolist()
+
+        # 查 DB 中每只股票实际有多少个季度
+        df_counts = self.db.query(
+            "SELECT ts_code, COUNT(DISTINCT end_date) as cnt FROM financial_data GROUP BY ts_code"
+        )
+        count_map = {}
+        if not df_counts.empty:
+            count_map = dict(zip(df_counts['ts_code'], df_counts['cnt']))
+
+        # 缺失率 > 25% 的需要补录
+        threshold = total_quarters * 0.75
+        backfill_list = []
+        for code in active_stocks:
+            actual = count_map.get(code, 0)
+            if actual < threshold:
+                backfill_list.append(code)
+
+        stocks_checked = len(active_stocks)
+        if not backfill_list:
+            logger.info(f"检查 {stocks_checked} 只股票，财务季度均完整（阈值 {threshold:.0f}/{total_quarters}）")
+            return {'stocks_checked': stocks_checked, 'stocks_backfilled': 0, 'records': 0}
+
+        logger.info(
+            f"检查 {stocks_checked} 只股票，{len(backfill_list)} 只缺失率>25%，开始补录"
+        )
+
+        hist_start = f"{start_year}0101"
+        hist_end = f"{end_year}1231"
+        cnt, records = self._download_stock_batch(
+            backfill_list, hist_start, hist_end, "补录财务季度",
+        )
+
+        logger.info(f"财务季度补录完成: {cnt}/{len(backfill_list)} 只, {records} 条记录")
+        return {'stocks_checked': stocks_checked, 'stocks_backfilled': cnt, 'records': records}
+
+    # ----------------------------------------------------------
     # 回填历史 revenue / net_profit
     # ----------------------------------------------------------
 
