@@ -1,0 +1,362 @@
+"""
+全局配置文件
+
+优先从项目根目录的 .env 文件加载配置，未设置的项使用默认值。
+修改配置请编辑 .env 文件，不要直接改此文件。
+"""
+
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# ============================================================
+# 加载 .env
+# ============================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
+
+# 日志目录
+LOG_DIR = PROJECT_ROOT / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+# ============================================================
+# MySQL 数据库配置
+# ============================================================
+
+MYSQL_HOST = os.environ.get("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "3306"))
+MYSQL_USER = os.environ.get("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", "123456")
+MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE", "quant")
+
+DB_URL = (
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}"
+    f"@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}"
+    f"?charset=utf8mb4"
+)
+
+# ============================================================
+# API 配置
+# ============================================================
+
+TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", "")
+TUSHARE_RATE_LIMIT = int(os.environ.get("TUSHARE_RATE_LIMIT", "180"))       # 每分钟请求数
+TUSHARE_RETRY_WAIT = int(os.environ.get("TUSHARE_RETRY_WAIT", "15"))        # 触发限流后等待秒数
+TUSHARE_MAX_RETRIES = int(os.environ.get("TUSHARE_MAX_RETRIES", "3"))       # 最大重试次数
+
+# ============================================================
+# 数据参数
+# ============================================================
+
+DATA_START_DATE = os.environ.get("DATA_START_DATE", "20150101")
+IPO_FILTER_DAYS = 180
+
+# ============================================================
+# 市场参数
+# ============================================================
+
+ST_KEYWORDS = ["ST", "*ST", "S*ST", "SST"]
+EXCLUDE_STAR_MARKET = os.environ.get("EXCLUDE_STAR_MARKET", "1") == "1"  # 排除科创板（688）
+
+# ============================================================
+# 交易成本假设
+# ============================================================
+
+BUY_COMMISSION = 0.00075   # 买入佣金 万7.5
+SELL_COMMISSION = 0.00075  # 卖出佣金 万7.5
+STAMP_TAX = 0.001          # 印花税 0.1%（仅卖出）
+SLIPPAGE = 0.001           # 滑点 0.1%
+
+# ============================================================
+# 策略参数
+# ============================================================
+
+REBALANCE_FREQ = "M"
+MIN_HOLDINGS = 0                  # 最少持仓数，0 = 允许空仓
+MAX_HOLDINGS = int(os.environ.get("MAX_HOLDINGS", "10"))
+MIN_SELECT_SCORE = float(os.environ.get("MIN_SELECT_SCORE", "0"))  # 选股最低分，低于此分不入选
+MAX_SINGLE_WEIGHT = float(os.environ.get("MAX_SINGLE_WEIGHT", "0.05"))
+MAX_INDUSTRY_WEIGHT = float(os.environ.get("MAX_INDUSTRY_WEIGHT", "0.30"))
+MAX_DRAWDOWN_THRESHOLD = 0.25
+DRAWDOWN_REDUCE_POSITION = 0.70
+MIN_DAILY_TURNOVER = 50_000_000
+
+# 换手惩罚系数（0.0 = 关闭）
+TURNOVER_PENALTY_LAMBDA = float(os.environ.get("TURNOVER_PENALTY_LAMBDA", "0.0"))
+
+# 中性化模式: "full" / "size_only" / "none"
+NEUTRALIZE_MODE = os.environ.get("NEUTRALIZE_MODE", "full")
+# 非线性市值项: 0 = 关闭, 1 = 开启
+NONLINEAR_SIZE = os.environ.get("NONLINEAR_SIZE", "0") == "1"
+
+# 波动率目标管理（替代回撤缩仓）
+USE_VOL_TARGETING = os.environ.get("USE_VOL_TARGETING", "0") == "1"
+TARGET_VOL = float(os.environ.get("TARGET_VOL", "0.20"))
+VOL_LOOKBACK_DAYS = int(os.environ.get("VOL_LOOKBACK_DAYS", "20"))
+VOL_SCALE_MIN = float(os.environ.get("VOL_SCALE_MIN", "0.3"))
+VOL_SCALE_MAX = float(os.environ.get("VOL_SCALE_MAX", "1.0"))
+
+# 行业白名单（仅允许买入的行业，空列表=不限制）
+# .env 中用逗号分隔，例如: ALLOWED_INDUSTRIES=计算机,半导体,有色金属,基础化工
+_raw_industries = os.environ.get("ALLOWED_INDUSTRIES", "")
+ALLOWED_INDUSTRIES: list[str] = [s.strip() for s in _raw_industries.split(",") if s.strip()]
+
+# 行业指数映射（行业名→申万行业指数代码，用于回测图中显示行业指数走势对比）
+# .env 中格式: INDUSTRY_INDEX_MAP=有色金属:801050.SI,半导体:801081.SI,计算机:801750.SI,基础化工:801030.SI
+_raw_index_map = os.environ.get("INDUSTRY_INDEX_MAP", "")
+INDUSTRY_INDEX_MAP: dict[str, str] = {}
+for _pair in _raw_index_map.split(","):
+    _pair = _pair.strip()
+    if ":" in _pair:
+        _k, _v = _pair.split(":", 1)
+        if _k.strip() and _v.strip():
+            INDUSTRY_INDEX_MAP[_k.strip()] = _v.strip()
+
+# ============================================================
+# 模拟盘配置
+# ============================================================
+
+PAPER_INITIAL_CAPITAL = float(os.environ.get("PAPER_INITIAL_CAPITAL", "1000000"))
+PAPER_ACCOUNT_NAME = os.environ.get("PAPER_ACCOUNT_NAME", "default")
+TRADER_TYPE = os.environ.get("TRADER_TYPE", "paper")  # paper / qmt / ptrade
+
+# ============================================================
+# 券商研报配置
+RESEARCH_LOOKBACK_DAYS = int(os.environ.get("RESEARCH_LOOKBACK_DAYS", "90"))
+
+# 舆情抓取配置
+# ============================================================
+
+SENTIMENT_RATE_LIMIT = int(os.environ.get("SENTIMENT_RATE_LIMIT", "20"))          # 每分钟每域名请求数
+SENTIMENT_REQUEST_TIMEOUT = int(os.environ.get("SENTIMENT_REQUEST_TIMEOUT", "30"))  # 请求超时（秒）
+SENTIMENT_MAX_RETRIES = int(os.environ.get("SENTIMENT_MAX_RETRIES", "3"))
+SENTIMENT_RETRY_WAIT = int(os.environ.get("SENTIMENT_RETRY_WAIT", "5"))            # 重试等待（秒）
+SENTIMENT_MAX_PAGES = int(os.environ.get("SENTIMENT_MAX_PAGES", "5"))              # 每来源最大翻页数
+SENTIMENT_BACKFILL_DAYS = int(os.environ.get("SENTIMENT_BACKFILL_DAYS", "1095"))  # 全量补录回看天数（CCTV/巨潮），默认 3 年
+SENTIMENT_USER_AGENT = os.environ.get(
+    "SENTIMENT_USER_AGENT",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+)
+
+# ============================================================
+# Twitter/X 配置（twikit 免费方案，使用普通账号登录）
+# ============================================================
+
+TWITTER_USERNAME = os.environ.get("TWITTER_USERNAME", "")
+TWITTER_EMAIL = os.environ.get("TWITTER_EMAIL", "")
+TWITTER_PASSWORD = os.environ.get("TWITTER_PASSWORD", "")
+TWITTER_COOKIES_FILE = str(PROJECT_ROOT / os.environ.get("TWITTER_COOKIES_FILE", "twitter_cookies.json"))
+TWITTER_RATE_LIMIT = int(os.environ.get("TWITTER_RATE_LIMIT", "90"))   # req/min
+TWITTER_MAX_TWEETS = int(os.environ.get("TWITTER_MAX_TWEETS", "40"))   # 每页最大推文数（twikit 上限 40）
+
+# ============================================================
+# 商品期货配置（商品价格轮动因子）
+# ============================================================
+
+COMMODITY_SYMBOLS = [
+    "AU", "AG", "CU", "AL", "ZN", "PB", "NI", "SN",  # 有色金属
+    "RB", "I", "J", "JM",                              # 黑色系
+    "SC",                                               # 能源
+    "SA", "MA",                                         # 化工
+]
+
+COMMODITY_MOM_LOOKBACK = int(os.environ.get("COMMODITY_MOM_LOOKBACK", "20"))  # 动量回看窗口（交易日）
+
+# 商品→行业两层映射（l2 精确匹配申万二级，l1 回退到申万一级）
+COMMODITY_INDUSTRY_MAP = {
+    "AU": {"l1": "有色金属", "l2": "贵金属"},
+    "AG": {"l1": "有色金属", "l2": "贵金属"},
+    "CU": {"l1": "有色金属", "l2": "工业金属"},
+    "AL": {"l1": "有色金属", "l2": "铝"},
+    "ZN": {"l1": "有色金属", "l2": "工业金属"},
+    "PB": {"l1": "有色金属", "l2": "工业金属"},
+    "NI": {"l1": "有色金属", "l2": "工业金属"},
+    "SN": {"l1": "有色金属", "l2": "工业金属"},
+    "RB": {"l1": "钢铁", "l2": "普钢"},
+    "I":  {"l1": "钢铁", "l2": "特钢"},
+    "J":  {"l1": "钢铁", "l2": "普钢"},
+    "JM": {"l1": "钢铁", "l2": "普钢"},
+    "SC": {"l1": "石油石化", "l2": "油气开采"},
+    "SA": {"l1": "基础化工", "l2": "纯碱"},
+    "MA": {"l1": "基础化工", "l2": "其他化学制品"},
+}
+
+# 商品品种→交易所后缀映射
+COMMODITY_EXCHANGE_MAP = {
+    "AU": "SHF", "AG": "SHF", "CU": "SHF", "AL": "SHF",
+    "ZN": "SHF", "PB": "SHF", "NI": "SHF", "SN": "SHF",
+    "RB": "SHF",
+    "I": "DCE", "J": "DCE", "JM": "DCE",
+    "SC": "INE",
+    "SA": "ZCE", "MA": "ZCE",
+}
+
+# ============================================================
+# 宏观经济数据配置（宏观因子）
+# ============================================================
+
+MACRO_ZSCORE_WINDOW = int(os.environ.get("MACRO_ZSCORE_WINDOW", "24"))  # trailing Z-score 月数窗口
+
+# 各指标发布延迟（自然日），防止未来数据泄露
+MACRO_PUBLICATION_LAG = {
+    "SHIBOR_3M": 0, "SHIBOR_ON": 0,
+    "LPR_1Y": 0,
+    "CPI_YOY": 16, "PPI_YOY": 16, "PPI_MP_YOY": 16,
+    "PMI_MFG": 1, "PMI_NEW_ORDER": 1,
+    "M2_YOY": 16, "M1_YOY": 16, "M1_M2_SPREAD": 16,
+    "GDP_YOY": 20,
+    "UST_10Y": 0, "UST_2Y10Y": 0,
+}
+
+# --- 行业敏感度映射（正=受益，负=防御，未映射→NaN）---
+
+MACRO_CYCLE_SENSITIVITY = {
+    # 强顺周期（工业/资源/建设）
+    "有色金属": 1.0, "钢铁": 1.0,
+    "基础化工": 0.8, "机械设备": 0.8,
+    "汽车": 0.7, "建筑材料": 0.7,
+    "煤炭": 0.6, "电力设备": 0.6, "房地产": 0.6,
+    "建筑装饰": 0.5, "石油石化": 0.5,
+    # 适度顺周期（科技/消费/金融）
+    "家用电器": 0.4, "电子": 0.4,
+    "非银金融": 0.3, "交通运输": 0.3, "环保": 0.3,
+    "银行": 0.2, "通信": 0.2, "计算机": 0.2, "国防军工": 0.2, "轻工制造": 0.2,
+    # 中性
+    "综合": 0.0, "美容护理": 0.0,
+    # 弱防御
+    "纺织服饰": -0.1, "农林牧渔": -0.1, "社会服务": -0.1,
+    "商贸零售": -0.1, "传媒": -0.1,
+    # 防御
+    "食品饮料": -0.3, "医药生物": -0.3, "公用事业": -0.4,
+}
+
+MACRO_LIQD_SENSITIVITY = {
+    # 强受益（高杠杆/资本密集/折现率最敏感）
+    "房地产": 1.0, "非银金融": 0.9, "建筑装饰": 0.7,
+    # 成长科技（长久期估值对利率高度敏感）
+    "计算机": 0.6, "电子": 0.6,
+    "通信": 0.5, "电力设备": 0.5, "银行": 0.5, "传媒": 0.5,
+    # 消费/制造（信贷驱动）
+    "医药生物": 0.4, "家用电器": 0.4, "汽车": 0.4,
+    "建筑材料": 0.3, "机械设备": 0.3, "国防军工": 0.3, "环保": 0.3,
+    # 一般消费/服务
+    "轻工制造": 0.2, "交通运输": 0.2, "社会服务": 0.2,
+    "商贸零售": 0.2, "美容护理": 0.2,
+    # 弱正相关
+    "食品饮料": 0.1, "农林牧渔": 0.1, "纺织服饰": 0.1, "综合": 0.1,
+    # 中性
+    "有色金属": 0.0, "钢铁": 0.0, "公用事业": 0.0, "基础化工": 0.0,
+    # 负相关（大宗商品/能源在紧缩期反受益）
+    "煤炭": -0.2, "石油石化": -0.2,
+}
+
+MACRO_INFL_SENSITIVITY = {
+    # CPI 受益（下游消费/食品农业，终端价格随 CPI 上涨）
+    "食品饮料": 0.8, "家用电器": 0.7, "农林牧渔": 0.6,
+    "商贸零售": 0.6, "社会服务": 0.5,
+    "医药生物": 0.4, "纺织服饰": 0.4,
+    "美容护理": 0.3, "轻工制造": 0.2, "传媒": 0.2,
+    # 中性（CPI-PPI 剪刀差对其影响不显著）
+    "非银金融": 0.1, "计算机": 0.1,
+    "银行": 0.0, "电子": 0.0, "通信": 0.0, "国防军工": 0.0,
+    "公用事业": 0.0, "汽车": 0.0, "综合": 0.0,
+    # 弱负相关（成本端受 PPI 上涨挤压）
+    "交通运输": -0.1, "环保": -0.1, "电力设备": -0.1,
+    "机械设备": -0.2, "建筑装饰": -0.2, "房地产": -0.2,
+    "建筑材料": -0.3, "石油石化": -0.4, "煤炭": -0.4,
+    # 强负相关（上游原材料生产商利润被 CPI 上涨而非 PPI 上涨侵蚀）
+    "有色金属": -0.5, "基础化工": -0.5, "钢铁": -0.6,
+}
+
+MACRO_EXTR_SENSITIVITY = {
+    # 强受益（高成长/长久期，美债利率下降降低折现率）
+    "计算机": 0.6, "电子": 0.6, "电力设备": 0.5,
+    "传媒": 0.4, "通信": 0.4, "医药生物": 0.4,
+    # 适度受益
+    "国防军工": 0.3, "有色金属": 0.2, "机械设备": 0.2, "环保": 0.2,
+    # 弱正相关
+    "非银金融": 0.1, "基础化工": 0.1, "汽车": 0.1,
+    "家用电器": 0.1, "社会服务": 0.1,
+    # 中性
+    "农林牧渔": 0.0, "纺织服饰": 0.0, "石油石化": 0.0,
+    "钢铁": 0.0, "综合": 0.0, "美容护理": 0.0,
+    "商贸零售": 0.0, "轻工制造": 0.0,
+    # 弱负相关（防御/高股息，利率下行反而相对吸引力下降）
+    "食品饮料": -0.1, "交通运输": -0.1, "煤炭": -0.1, "建筑材料": -0.1,
+    # 负相关（高杠杆/防御板块，美债利率上升时资金回流美元资产）
+    "银行": -0.2, "建筑装饰": -0.2, "公用事业": -0.3, "房地产": -0.3,
+}
+
+# ============================================================
+# 舆情因子配置
+# ============================================================
+
+SENTIMENT_LOOKBACK_DAYS = int(os.environ.get("SENTIMENT_LOOKBACK_DAYS", "7"))
+SENTIMENT_DECAY = float(os.environ.get("SENTIMENT_DECAY", "0.3"))          # 时间衰减系数（约 3 天半衰期）
+SENTIMENT_LLM_THRESHOLD = float(os.environ.get("SENTIMENT_LLM_THRESHOLD", "0.5"))  # keyword intensity 阈值
+SENTIMENT_CONTENT_MAX_CHARS = int(os.environ.get("SENTIMENT_CONTENT_MAX_CHARS", "10000"))  # LLM 传入正文最大字符数
+
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "anthropic")  # anthropic | openai
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+LLM_API_BASE = os.environ.get("LLM_API_BASE", "https://api.openai.com/v1")  # 仅 openai provider 使用
+LLM_MODEL = os.environ.get("LLM_MODEL", "claude-haiku-4-5-20251001")  # anthropic 默认 Haiku；openai 可改 gpt-4o-mini
+
+# --- 行业关键词映射（申万一级行业 → 关键词）---
+INDUSTRY_KEYWORDS = {
+    "房地产": ["房地产", "住房", "楼市", "房价", "限购", "公积金", "棚改", "保障房"],
+    "银行": ["银行", "存款", "贷款", "利率", "LPR", "准备金", "降息", "加息"],
+    "非银金融": ["保险", "证券", "基金", "股市", "IPO", "注册制", "资本市场"],
+    "计算机": ["人工智能", "芯片", "半导体", "数字经济", "信创", "数据安全", "算力", "大模型"],
+    "电力设备": ["新能源", "光伏", "风电", "储能", "电池", "充电桩", "碳中和"],
+    "汽车": ["新能源汽车", "电动车", "智能驾驶", "汽车下乡", "自动驾驶"],
+    "医药生物": ["医药", "医保", "集采", "创新药", "中药", "医疗器械"],
+    "钢铁": ["钢铁", "钢材", "去产能", "限产", "粗钢"],
+    "有色金属": ["稀土", "锂", "铜", "有色金属", "矿产"],
+    "食品饮料": ["食品安全", "白酒", "乳制品", "消费升级", "餐饮"],
+    "电子": ["集成电路", "显示面板", "消费电子", "半导体设备", "封测"],
+    "通信": ["5G", "通信", "网络安全", "物联网", "卫星"],
+    "传媒": ["文化", "游戏", "影视", "出版", "版权"],
+    "公用事业": ["电力供应", "水务", "燃气", "供热", "核电"],
+    "煤炭": ["煤炭", "煤矿", "煤价", "火电", "动力煤"],
+    "石油石化": ["石油", "天然气", "油价", "炼化", "成品油"],
+    "建筑材料": ["水泥", "玻璃", "建材", "地产基建"],
+    "建筑装饰": ["基建", "基础设施", "城镇化", "PPP", "专项债"],
+    "机械设备": ["机械", "工程机械", "机器人", "智能制造", "数控"],
+    "国防军工": ["军工", "国防", "航空航天", "军费"],
+    "交通运输": ["航运", "物流", "铁路", "航空", "快递"],
+    "商贸零售": ["零售", "电商", "免税", "消费券"],
+    "社会服务": ["旅游", "酒店", "教育", "养老"],
+    "农林牧渔": ["农业", "畜牧", "渔业", "种业", "粮食安全"],
+    "家用电器": ["家电", "空调", "冰箱", "以旧换新"],
+    "纺织服饰": ["纺织", "服装", "棉花"],
+    "轻工制造": ["造纸", "包装", "家居"],
+    "环保": ["环保", "垃圾处理", "污水处理", "碳交易", "碳排放"],
+    "基础化工": ["化工", "化学品", "农药", "化肥", "涂料", "橡胶", "塑料"],
+    "美容护理": ["美妆", "护肤品", "化妆品", "个人护理", "美容"],
+}
+
+# --- 情感关键词 ---
+POSITIVE_KEYWORDS = [
+    "支持", "鼓励", "扩大", "促进", "减税", "降费", "补贴", "利好",
+    "增长", "放宽", "优化", "推动", "加快", "加大", "提升", "深化",
+    "创新", "发展", "突破", "改革",
+]
+NEGATIVE_KEYWORDS = [
+    "限制", "收紧", "处罚", "风险", "下滑", "严查", "整治", "叫停",
+    "约谈", "下降", "回落", "萎缩", "压降", "清退", "取缔", "禁止",
+    "违规", "罚款", "监管", "严控",
+]
+
+# --- 来源层级权重 ---
+TIER_WEIGHTS = {1: 1.0, 2: 0.8, 3: 0.7, 4: 0.5, 5: 0.4}
+
+# ============================================================
+# 日志配置
+# ============================================================
+
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+LOG_FORMAT = "%(asctime)s | %(name)-20s | %(levelname)-7s | %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
