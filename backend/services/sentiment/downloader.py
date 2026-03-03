@@ -5,9 +5,13 @@
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 
 from backend.services.config import LOG_LEVEL, SENTIMENT_MAX_PAGES, SENTIMENT_BACKFILL_DAYS
+
+# 单个爬虫最大执行时间（秒）
+_PER_SOURCE_TIMEOUT = 120
 from backend.services.data.database import DatabaseManager
 from backend.services.sentiment.scrapers import SCRAPER_REGISTRY, TIER_MAP
 from backend.services.sentiment.base_scraper import HttpRateLimiter
@@ -69,7 +73,17 @@ class SentimentDownloader:
         """
         results = {}
         for source_id in SCRAPER_REGISTRY:
-            results[source_id] = self.download_source(source_id, max_pages, incremental=incremental)
+            # 用线程超时保护，防止单个爬虫卡住阻塞整个流程
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(self.download_source, source_id, max_pages, incremental)
+                try:
+                    results[source_id] = future.result(timeout=_PER_SOURCE_TIMEOUT)
+                except FuturesTimeoutError:
+                    logger.warning(f"[{source_id}] 超时 ({_PER_SOURCE_TIMEOUT}s)，跳过")
+                    results[source_id] = {"found": 0, "new": 0, "status": "timeout"}
+                except Exception as e:
+                    logger.warning(f"[{source_id}] 异常: {e}")
+                    results[source_id] = {"found": 0, "new": 0, "status": "failed"}
         return results
 
     def download_source(self, source: str, max_pages: int = SENTIMENT_MAX_PAGES, incremental: bool = False) -> dict:
