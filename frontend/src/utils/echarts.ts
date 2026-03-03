@@ -1,5 +1,5 @@
 import { use } from 'echarts/core'
-import { LineChart, BarChart, PieChart, HeatmapChart } from 'echarts/charts'
+import { LineChart, BarChart, PieChart, HeatmapChart, CandlestickChart } from 'echarts/charts'
 import {
   GridComponent,
   TooltipComponent,
@@ -14,6 +14,7 @@ use([
   BarChart,
   PieChart,
   HeatmapChart,
+  CandlestickChart,
   GridComponent,
   TooltipComponent,
   LegendComponent,

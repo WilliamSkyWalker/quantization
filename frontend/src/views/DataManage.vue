@@ -9,7 +9,7 @@ import type { DataTableColumns } from 'naive-ui'
 import {
   getDataStatus, startDownload, startUpdate, startBackfillIncome, initDatabase,
   startSentimentDownloadAndAnalyze, startSentimentBackfillAnalyze, startSentimentBackfillContent,
-  getSentimentStatus, getSentimentArticles, getSentimentAnalysisStats,
+  startSentimentBackfillLLM, getSentimentStatus, getSentimentArticles, getSentimentAnalysisStats,
   startSentimentDownload, browseData,
 } from '../api'
 import { formatDate } from '../utils/format'
@@ -41,6 +41,8 @@ interface DataTypeRow {
 }
 
 const dataTypes: DataTypeRow[] = [
+  // --- A股数据 ---
+  { key: 'a_divider', label: '── A股数据 ──' },
   {
     key: 'list', label: '股票列表', browseTable: 'stock_basic',
     downloadAction: 'download_list', downloadLabel: '下载',
@@ -102,6 +104,7 @@ const dataTypes: DataTypeRow[] = [
     backfillActions: [
       { action: 'backfill_analyze', label: '补分析', handler: () => runBackfillAnalyze() },
       { action: 'backfill_content', label: '补全文', handler: () => runBackfillContent() },
+      { action: 'backfill_llm', label: '补LLM', handler: () => runBackfillLLM() },
     ],
   },
   // --- 美股数据 ---
@@ -280,7 +283,7 @@ const opColumns: DataTableColumns = [
   {
     title: '数据类型', key: 'label', width: 100,
     render: (row: any) => {
-      if (row.key === 'us_divider') {
+      if (row.key.endsWith('_divider')) {
         return h('span', { style: 'font-weight: 700; color: #409eff; font-size: 12px' }, row.label)
       }
       return row.label
@@ -289,7 +292,7 @@ const opColumns: DataTableColumns = [
   {
     title: '数据总量', key: 'count', width: 90, align: 'right',
     render: (row: any) => {
-      if (row.key === 'us_divider') return null
+      if (row.key.endsWith('_divider')) return null
       const tableName = _COUNT_TABLE_MAP[row.key]
       if (!tableName) return '-'
       const info = tableInfoMap.value[tableName]
@@ -302,7 +305,7 @@ const opColumns: DataTableColumns = [
   {
     title: '数据日期', key: 'dataDate', width: 100,
     render: (row: any) => {
-      if (row.key === 'us_divider') return null
+      if (row.key.endsWith('_divider')) return null
       const tableName = _COUNT_TABLE_MAP[row.key]
       if (!tableName) return '-'
       const info = tableInfoMap.value[tableName]
@@ -312,7 +315,7 @@ const opColumns: DataTableColumns = [
   {
     title: '更新时间', key: 'latestDate', width: 150,
     render: (row: any) => {
-      if (row.key === 'us_divider') return null
+      if (row.key.endsWith('_divider')) return null
       const tableName = _COUNT_TABLE_MAP[row.key]
       if (!tableName) return '-'
       const info = tableInfoMap.value[tableName]
@@ -519,6 +522,19 @@ async function runBackfillContent() {
     const { data } = await startSentimentBackfillContent()
     taskStore.trackTask(data.task_id, '补录全文')
     message.success('补录全文任务已启动')
+  } catch (e: any) {
+    message.error(e.response?.data?.error || '操作失败')
+  } finally {
+    running.value = false
+  }
+}
+
+async function runBackfillLLM() {
+  running.value = true
+  try {
+    const { data } = await startSentimentBackfillLLM()
+    taskStore.trackTask(data.task_id, '补录LLM打分')
+    message.success('补录LLM打分任务已启动')
   } catch (e: any) {
     message.error(e.response?.data?.error || '操作失败')
   } finally {

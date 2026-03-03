@@ -37,7 +37,7 @@ class NfraScraper(BaseScraper):
         """不使用 HTML 列表页。"""
         return []
 
-    def scrape_pages(self, max_pages: int = SENTIMENT_MAX_PAGES):
+    def scrape_pages(self, max_pages: int = SENTIMENT_MAX_PAGES, **kwargs):
         """
         通过 JSON API 逐页抓取生成器。
 

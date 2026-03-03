@@ -435,3 +435,37 @@ def _run_backfill_content(task_id, source=None):
             break
 
     return {"total": total_count, "success": total_success, "failed": total_failed}
+
+
+@api_view(['POST'])
+def sentiment_backfill_llm(request):
+    """Backfill: run LLM analysis on all eligible articles (keyword intensity >= threshold)."""
+    task_id = task_manager.submit('补录LLM打分', _run_backfill_llm)
+    return Response({'task_id': task_id})
+
+
+def _run_backfill_llm(task_id):
+    from backend.services.sentiment.analyzer import SentimentAnalyzer
+    db = _get_db()
+    analyzer = SentimentAnalyzer(db)
+    logger.info('补录LLM打分: 开始（先补关键词分析，再补LLM）')
+    total_kw = 0
+    total_llm = 0
+    batch = 0
+
+    while True:
+        batch += 1
+        logger.info(f'补录LLM打分: 第 {batch} 批, 关键词已完成 {total_kw} 篇, LLM已完成 {total_llm} 篇')
+        task_manager.update_progress(
+            task_id, min(90, batch * 5),
+            f'第 {batch} 批 (关键词 {total_kw}, LLM {total_llm})...',
+        )
+        result = analyzer.analyze_pending(max_articles=500)
+        logger.info(f'补录LLM打分: 第 {batch} 批结果 = {result}')
+        total_kw += result["keyword_analyzed"]
+        total_llm += result["llm_analyzed"]
+        if result["keyword_analyzed"] == 0 and result["llm_analyzed"] == 0:
+            break
+
+    logger.info(f'补录LLM打分: 完成, 关键词 {total_kw} 篇, LLM {total_llm} 篇')
+    return {"keyword_analyzed": total_kw, "llm_analyzed": total_llm}

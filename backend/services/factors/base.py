@@ -44,12 +44,40 @@ class FactorBase(ABC):
     name: str = "base"
     description: str = ""
 
+    # ----------------------------------------------------------
+    # 查询缓存（类级别，所有因子实例共享）
+    # ----------------------------------------------------------
+    # _static_cache: 跨日期持久化（industry_map, total_share 等不随日期变化的数据）
+    # _date_cache: 每个调仓日期清空（close, financial, price_history 等日期相关数据）
+    _static_cache: dict = {}
+    _date_cache: dict = {}
+
+    @classmethod
+    def clear_date_cache(cls):
+        """清空日期相关缓存（每个调仓日期调用）。"""
+        cls._date_cache.clear()
+
+    @classmethod
+    def clear_all_cache(cls):
+        """清空所有缓存（generate_signals 结束时调用）。"""
+        cls._static_cache.clear()
+        cls._date_cache.clear()
+
     def __init__(self, db: DatabaseManager):
         """
         Args:
             db: DatabaseManager 实例。
         """
         self.db = db
+
+    def get_industry_map_cached(self) -> pd.DataFrame:
+        """获取行业映射（使用静态缓存，跨日期复用）。"""
+        cached = self._static_cache.get("industry_map")
+        if cached is not None:
+            return cached.copy()
+        result = self.db.get_industry_map()
+        self._static_cache["industry_map"] = result
+        return result.copy()
 
     @abstractmethod
     def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
@@ -115,7 +143,18 @@ class FactorBase(ABC):
         Returns:
             DataFrame，包含 ts_code 和请求的列。
         """
-        cols_str = ", ".join(["ts_code", "ann_date", "end_date"] + columns)
+        # 缓存键仅用 date（始终获取宽列集以复用）
+        cache_key = ("financial", date)
+        cached = self._date_cache.get(cache_key)
+        if cached is not None:
+            df = cached
+            if universe_codes:
+                df = df[df["ts_code"].isin(universe_codes)]
+            return df[["ts_code", "ann_date", "end_date"] + [c for c in columns if c in df.columns]].copy()
+
+        # 获取宽列数据（合并多个因子常用列，减少重复查询）
+        all_columns = list(set(columns) | {"roe_ttm", "gross_margin", "bps", "net_profit", "revenue"})
+        cols_str = ", ".join(["ts_code", "ann_date", "end_date"] + all_columns)
         params: dict = {"date": date}
 
         inner_sql = (
@@ -134,12 +173,16 @@ class FactorBase(ABC):
         df = self.db.query(sql, params=params)
 
         if df.empty:
+            self._date_cache[cache_key] = df
             return df
 
         # 移除辅助列
         df = df.drop(columns=["rn"], errors="ignore")
+        self._date_cache[cache_key] = df
 
-        return df
+        if universe_codes:
+            df = df[df["ts_code"].isin(universe_codes)]
+        return df[["ts_code", "ann_date", "end_date"] + [c for c in columns if c in df.columns]].copy()
 
     def get_price_history(
         self,
@@ -160,14 +203,29 @@ class FactorBase(ABC):
         Returns:
             日线行情 DataFrame。
         """
+        # 缓存：按 (end_date, lookback_days) 缓存宽表，请求列从缓存过滤
+        cache_key = ("price_hist", end_date, lookback_days)
+        cached = self._date_cache.get(cache_key)
+        if cached is not None:
+            df = cached
+            if universe_codes:
+                df = df[df["ts_code"].isin(universe_codes)]
+            if columns:
+                keep = ["ts_code", "trade_date"] + [c for c in columns if c in df.columns]
+                df = df[keep]
+            return df.copy()
+
         start_date = (
             pd.to_datetime(end_date) - pd.Timedelta(days=lookback_days)
         ).strftime("%Y-%m-%d")
 
+        # 始终获取常用列宽表以便复用（不含 open 保留字，因子不需要）
+        base_cols = {"ts_code", "trade_date", "pct_chg", "turnover_rate",
+                     "volume", "amount", "close", "adj_factor"}
         if columns:
-            cols_str = ", ".join(["ts_code", "trade_date"] + columns)
-        else:
-            cols_str = "*"
+            base_cols.update(columns)
+        wide_cols = sorted(base_cols)
+        cols_str = ", ".join(wide_cols)
 
         params: dict = {"start_date": start_date, "end_date": end_date}
 
@@ -184,7 +242,13 @@ class FactorBase(ABC):
 
         sql += " ORDER BY ts_code, trade_date"
 
-        return self.db.query(sql, params=params)
+        result = self.db.query(sql, params=params)
+        self._date_cache[cache_key] = result
+
+        if columns:
+            keep = ["ts_code", "trade_date"] + [c for c in columns if c in result.columns]
+            result = result[keep]
+        return result.copy()
 
     def get_month_end_price(
         self,
@@ -193,7 +257,10 @@ class FactorBase(ABC):
         universe_codes: Optional[list[str]] = None,
     ) -> pd.DataFrame:
         """
-        获取 N 个月前月末的收盘价。
+        获取 N 个月前月末的前复权收盘价。
+
+        使用 adj_factor 计算前复权价格：adj_close = close * adj_factor。
+        adj_factor 为 NULL 时 fillna(1.0) 保持向后兼容。
 
         Args:
             date: 基准日期。
@@ -201,8 +268,15 @@ class FactorBase(ABC):
             universe_codes: 股票代码列表（可选）。
 
         Returns:
-            DataFrame，包含 ts_code 和 close 列。
+            DataFrame，包含 ts_code 和 close 列（前复权价格）。
         """
+        cache_key = ("month_end", date, months_ago)
+        cached = self._date_cache.get(cache_key)
+        if cached is not None:
+            if universe_codes:
+                return cached[cached["ts_code"].isin(universe_codes)].copy()
+            return cached.copy()
+
         target_date = pd.to_datetime(date) - pd.DateOffset(months=months_ago)
         # 取目标月份的最后一个交易日
         month_start = target_date.replace(day=1).strftime("%Y-%m-%d")
@@ -213,7 +287,7 @@ class FactorBase(ABC):
         params: dict = {"month_start": month_start, "month_end": month_end}
 
         inner_sql = (
-            "SELECT ts_code, trade_date, close, "
+            "SELECT ts_code, trade_date, close, adj_factor, "
             "ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) as rn "
             "FROM daily_price "
             "WHERE trade_date >= :month_start "
@@ -229,9 +303,16 @@ class FactorBase(ABC):
 
         df = self.db.query(sql, params=params)
         if df.empty:
+            self._date_cache[cache_key] = df
             return df
 
-        return df[["ts_code", "close"]]
+        # 计算前复权价格
+        df["adj_factor"] = pd.to_numeric(df["adj_factor"], errors="coerce").fillna(1.0)
+        df["close"] = pd.to_numeric(df["close"], errors="coerce") * df["adj_factor"]
+
+        result = df[["ts_code", "close"]]
+        self._date_cache[cache_key] = result
+        return result.copy()
 
     def get_ttm_net_profit(
         self,
@@ -253,6 +334,13 @@ class FactorBase(ABC):
         Returns:
             DataFrame，包含 ts_code 和 ttm_net_profit 列。
         """
+        cache_key = ("ttm_np", date)
+        cached = self._date_cache.get(cache_key)
+        if cached is not None:
+            if universe_codes:
+                return cached[cached["ts_code"].isin(universe_codes)].copy()
+            return cached.copy()
+
         params: dict = {"date": date}
         sql = (
             "SELECT ts_code, ann_date, end_date, net_profit FROM financial_data "
@@ -266,7 +354,9 @@ class FactorBase(ABC):
 
         df = self.db.query(sql, params=params)
         if df.empty:
-            return pd.DataFrame(columns=["ts_code", "ttm_net_profit"])
+            result = pd.DataFrame(columns=["ts_code", "ttm_net_profit"])
+            self._date_cache[cache_key] = result
+            return result
 
         df["end_date"] = pd.to_datetime(df["end_date"])
         results = []
@@ -298,7 +388,9 @@ class FactorBase(ABC):
                 else:
                     results.append({"ts_code": ts_code, "ttm_net_profit": float("nan")})
 
-        return pd.DataFrame(results) if results else pd.DataFrame(columns=["ts_code", "ttm_net_profit"])
+        result = pd.DataFrame(results) if results else pd.DataFrame(columns=["ts_code", "ttm_net_profit"])
+        self._date_cache[cache_key] = result
+        return result.copy()
 
     def get_ttm_revenue(
         self,
@@ -320,6 +412,13 @@ class FactorBase(ABC):
         Returns:
             DataFrame，包含 ts_code 和 ttm_revenue 列。
         """
+        cache_key = ("ttm_rev", date)
+        cached = self._date_cache.get(cache_key)
+        if cached is not None:
+            if universe_codes:
+                return cached[cached["ts_code"].isin(universe_codes)].copy()
+            return cached.copy()
+
         params: dict = {"date": date}
         sql = (
             "SELECT ts_code, ann_date, end_date, revenue FROM financial_data "
@@ -333,7 +432,9 @@ class FactorBase(ABC):
 
         df = self.db.query(sql, params=params)
         if df.empty:
-            return pd.DataFrame(columns=["ts_code", "ttm_revenue"])
+            result = pd.DataFrame(columns=["ts_code", "ttm_revenue"])
+            self._date_cache[cache_key] = result
+            return result
 
         df["end_date"] = pd.to_datetime(df["end_date"])
         results = []
@@ -362,7 +463,9 @@ class FactorBase(ABC):
                 else:
                     results.append({"ts_code": ts_code, "ttm_revenue": float("nan")})
 
-        return pd.DataFrame(results) if results else pd.DataFrame(columns=["ts_code", "ttm_revenue"])
+        result = pd.DataFrame(results) if results else pd.DataFrame(columns=["ts_code", "ttm_revenue"])
+        self._date_cache[cache_key] = result
+        return result.copy()
 
     def get_close_on_date(
         self,
@@ -379,6 +482,13 @@ class FactorBase(ABC):
         Returns:
             DataFrame，包含 ts_code 和 close 列。
         """
+        cache_key = ("close_on_date", date)
+        cached = self._date_cache.get(cache_key)
+        if cached is not None:
+            if universe_codes:
+                return cached[cached["ts_code"].isin(universe_codes)].copy()
+            return cached.copy()
+
         # 向前查找最多 10 个自然日
         lookback = (pd.to_datetime(date) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
 
@@ -399,9 +509,13 @@ class FactorBase(ABC):
 
         df = self.db.query(sql, params=params)
         if df.empty:
-            return pd.DataFrame(columns=["ts_code", "close"])
+            result = pd.DataFrame(columns=["ts_code", "close"])
+            self._date_cache[cache_key] = result
+            return result
 
-        return df[["ts_code", "close"]]
+        result = df[["ts_code", "close"]]
+        self._date_cache[cache_key] = result
+        return result.copy()
 
     def get_total_share(
         self,
@@ -416,14 +530,21 @@ class FactorBase(ABC):
         Returns:
             DataFrame，包含 ts_code 和 total_share 列。
         """
-        params: dict = {}
-        sql = "SELECT ts_code, total_share FROM stock_basic WHERE total_share IS NOT NULL"
-        if universe_codes:
-            in_clause, in_params = self._build_in_clause(universe_codes)
-            sql += f" AND ts_code IN {in_clause}"
-            params.update(in_params)
+        cache_key = "total_share"
+        cached = self._static_cache.get(cache_key)
+        if cached is not None:
+            if universe_codes:
+                return cached[cached["ts_code"].isin(universe_codes)].copy()
+            return cached.copy()
 
-        return self.db.query(sql, params=params)
+        # 获取全量数据
+        sql = "SELECT ts_code, total_share FROM stock_basic WHERE total_share IS NOT NULL"
+        result = self.db.query(sql, params={})
+        self._static_cache[cache_key] = result
+
+        if universe_codes:
+            return result[result["ts_code"].isin(universe_codes)].copy()
+        return result.copy()
 
     def __repr__(self) -> str:
         return f"<Factor: {self.name}>"

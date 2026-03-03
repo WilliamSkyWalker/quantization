@@ -26,12 +26,13 @@ class SentimentPolicyFactor(FactorBase):
     """
     政策情感因子 (POLICY_SENT)
 
-    因子值 = 该行业的加权情感分 × 强度。
+    因子值 = 情感分 × 强度。
+    优先使用 LLM 识别的个股级信号，无个股信号时回退到行业映射。
     正值利好，负值利空。
     """
 
     name = "POLICY_SENT"
-    description = "政策舆情情感因子，行业级政策利好/利空信号"
+    description = "政策舆情情感因子，个股/行业级政策利好/利空信号"
 
     def __init__(self, db):
         super().__init__(db)
@@ -41,52 +42,49 @@ class SentimentPolicyFactor(FactorBase):
         codes = universe["ts_code"].tolist()
         result = pd.DataFrame({"ts_code": codes, "factor_value": np.nan})
 
-        # 1. 获取行业映射
-        industry_df = self.db.get_industry_map()
-        if industry_df.empty:
-            logger.warning("POLICY_SENT: 无行业分类数据")
-            return result
+        # 1. 个股级信号（LLM affected_stocks）
+        stock_score = self._analyzer.get_daily_stock_score(date)
+        stock_direct = {}
+        if not stock_score.empty:
+            for _, row in stock_score.iterrows():
+                stock_direct[row["ts_code"]] = row["sentiment"] * row["intensity"]
+            logger.debug(f"POLICY_SENT: {len(stock_direct)} 只个股有直接信号")
 
-        # 2. 获取行业级情感得分
+        # 2. 行业级信号（回退）
+        industry_df = self.get_industry_map_cached()
         daily_score = self._analyzer.get_daily_score(date)
-        if daily_score.empty:
-            logger.debug("POLICY_SENT: 无舆情分析数据")
-            return result
-
-        # 构建行业→得分映射
         score_map = {}
-        for _, row in daily_score.iterrows():
-            score_map[row["industry_name"]] = {
-                "sentiment": row["sentiment"],
-                "intensity": row["intensity"],
-            }
+        if not daily_score.empty:
+            for _, row in daily_score.iterrows():
+                score_map[row["industry_name"]] = {
+                    "sentiment": row["sentiment"],
+                    "intensity": row["intensity"],
+                }
 
-        # 3. 映射到个股
-        stock_industry = industry_df[
-            industry_df["ts_code"].isin(codes)
-        ][["ts_code", "industry_name"]].copy()
+        stock_industry = pd.DataFrame()
+        if not industry_df.empty:
+            stock_industry = industry_df[
+                industry_df["ts_code"].isin(codes)
+            ][["ts_code", "industry_name"]].copy()
 
-        if stock_industry.empty:
-            return result
-
-        def _map(row):
-            ind = row.get("industry_name")
-            if pd.notna(ind) and ind in score_map:
-                s = score_map[ind]
-                return s["sentiment"] * s["intensity"]
+        # 3. 合并：个股信号优先，无则用行业映射
+        def _map(ts_code):
+            if ts_code in stock_direct:
+                return stock_direct[ts_code]
+            if not stock_industry.empty:
+                ind_rows = stock_industry[stock_industry["ts_code"] == ts_code]
+                if not ind_rows.empty:
+                    ind = ind_rows.iloc[0]["industry_name"]
+                    if pd.notna(ind) and ind in score_map:
+                        s = score_map[ind]
+                        return s["sentiment"] * s["intensity"]
             return np.nan
 
-        stock_industry["factor_value"] = stock_industry.apply(_map, axis=1)
-
-        result = result[["ts_code"]].merge(
-            stock_industry[["ts_code", "factor_value"]],
-            on="ts_code",
-            how="left",
-        )
+        result["factor_value"] = result["ts_code"].apply(_map)
         result["factor_value"] = result["factor_value"].astype(float)
 
         valid = result["factor_value"].notna().sum()
-        logger.debug(f"POLICY_SENT: {valid}/{len(result)} 只有效值")
+        logger.debug(f"POLICY_SENT: {valid}/{len(result)} 只有效值 (直接={len(stock_direct)})")
         return result[["ts_code", "factor_value"]]
 
 
@@ -94,12 +92,12 @@ class SentimentIntensityFactor(FactorBase):
     """
     政策关注度因子 (POLICY_INTENSITY)
 
-    因子值 = 行业强度得分（不考虑正负方向，只看关注度）。
-    高关注度行业可能有更大波动，无论利好利空。
+    因子值 = 强度得分（不考虑正负方向，只看关注度）。
+    优先使用 LLM 识别的个股级信号，无个股信号时回退到行业映射。
     """
 
     name = "POLICY_INTENSITY"
-    description = "政策关注度因子，行业政策关注热度信号"
+    description = "政策关注度因子，个股/行业政策关注热度信号"
 
     def __init__(self, db):
         super().__init__(db)
@@ -109,46 +107,43 @@ class SentimentIntensityFactor(FactorBase):
         codes = universe["ts_code"].tolist()
         result = pd.DataFrame({"ts_code": codes, "factor_value": np.nan})
 
-        # 1. 获取行业映射
-        industry_df = self.db.get_industry_map()
-        if industry_df.empty:
-            logger.warning("POLICY_INTENSITY: 无行业分类数据")
-            return result
+        # 1. 个股级信号（LLM affected_stocks）
+        stock_score = self._analyzer.get_daily_stock_score(date)
+        stock_direct = {}
+        if not stock_score.empty:
+            for _, row in stock_score.iterrows():
+                stock_direct[row["ts_code"]] = row["intensity"]
+            logger.debug(f"POLICY_INTENSITY: {len(stock_direct)} 只个股有直接信号")
 
-        # 2. 获取行业级情感得分
+        # 2. 行业级信号（回退）
+        industry_df = self.get_industry_map_cached()
         daily_score = self._analyzer.get_daily_score(date)
-        if daily_score.empty:
-            logger.debug("POLICY_INTENSITY: 无舆情分析数据")
-            return result
-
-        # 构建行业→强度映射
         intensity_map = {}
-        for _, row in daily_score.iterrows():
-            intensity_map[row["industry_name"]] = row["intensity"]
+        if not daily_score.empty:
+            for _, row in daily_score.iterrows():
+                intensity_map[row["industry_name"]] = row["intensity"]
 
-        # 3. 映射到个股
-        stock_industry = industry_df[
-            industry_df["ts_code"].isin(codes)
-        ][["ts_code", "industry_name"]].copy()
+        stock_industry = pd.DataFrame()
+        if not industry_df.empty:
+            stock_industry = industry_df[
+                industry_df["ts_code"].isin(codes)
+            ][["ts_code", "industry_name"]].copy()
 
-        if stock_industry.empty:
-            return result
-
-        def _map(row):
-            ind = row.get("industry_name")
-            if pd.notna(ind) and ind in intensity_map:
-                return intensity_map[ind]
+        # 3. 合并：个股信号优先，无则用行业映射
+        def _map(ts_code):
+            if ts_code in stock_direct:
+                return stock_direct[ts_code]
+            if not stock_industry.empty:
+                ind_rows = stock_industry[stock_industry["ts_code"] == ts_code]
+                if not ind_rows.empty:
+                    ind = ind_rows.iloc[0]["industry_name"]
+                    if pd.notna(ind) and ind in intensity_map:
+                        return intensity_map[ind]
             return np.nan
 
-        stock_industry["factor_value"] = stock_industry.apply(_map, axis=1)
-
-        result = result[["ts_code"]].merge(
-            stock_industry[["ts_code", "factor_value"]],
-            on="ts_code",
-            how="left",
-        )
+        result["factor_value"] = result["ts_code"].apply(_map)
         result["factor_value"] = result["factor_value"].astype(float)
 
         valid = result["factor_value"].notna().sum()
-        logger.debug(f"POLICY_INTENSITY: {valid}/{len(result)} 只有效值")
+        logger.debug(f"POLICY_INTENSITY: {valid}/{len(result)} 只有效值 (直接={len(stock_direct)})")
         return result[["ts_code", "factor_value"]]

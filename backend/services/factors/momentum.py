@@ -121,7 +121,7 @@ class ResidualMomentumFactor(FactorBase):
 
         # 获取行业映射
         try:
-            df_industry = self.db.get_industry_map()
+            df_industry = self.get_industry_map_cached()
         except Exception:
             return pd.DataFrame(columns=["ts_code", "factor_value"])
 

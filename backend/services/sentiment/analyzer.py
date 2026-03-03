@@ -8,6 +8,7 @@
     4. 计算行业级别每日情感得分（合并 keyword + llm，时间衰减加权）
 """
 
+import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
 
 # LLM 并发数（受 API 限速约束，不宜太高）
-LLM_CONCURRENCY = 10
+LLM_CONCURRENCY = 200
 
 
 class SentimentAnalyzer:
@@ -48,23 +49,24 @@ class SentimentAnalyzer:
         self.keyword = KeywordAnalyzer()
         self.llm = LLMAnalyzer()
 
-    def analyze_pending(self, max_articles: int = 500) -> dict:
+    def analyze_pending(self, max_articles: int = 500, llm_only: bool = False) -> dict:
         """
         分析所有未分析的文章。
 
         流程：
-            1. 查询未做 keyword 分析的文章 → 批量关键词分析
+            1. 查询未做 keyword 分析的文章 → 批量关键词分析（llm_only=True 时跳过）
             2. 对 keyword intensity >= 阈值且未做 llm 分析的文章 → 调用 LLM
 
         Args:
             max_articles: 单次最大处理文章数。
+            llm_only: 仅执行 LLM 分析，跳过关键词分析阶段。
 
         Returns:
             {"keyword_analyzed": int, "llm_analyzed": int}
         """
         # 1. Keyword 分析
-        unanalyzed = self.db.get_unanalyzed_articles("keyword", limit=max_articles)
         keyword_count = 0
+        unanalyzed = [] if llm_only else self.db.get_unanalyzed_articles("keyword", limit=max_articles)
 
         if unanalyzed:
             logger.info(f"待关键词分析: {len(unanalyzed)} 篇")
@@ -77,6 +79,7 @@ class SentimentAnalyzer:
                     "industries": ",".join(result["industries"]),
                     "sentiment": result["sentiment"],
                     "intensity": result["intensity"],
+                    "impact_type": result.get("impact_type", "general_policy"),
                     "keywords_hit": ",".join(result["keywords_hit"]),
                     "analyzed_at": datetime.now(),
                 })
@@ -89,19 +92,29 @@ class SentimentAnalyzer:
         llm_count = 0
         if self.llm.is_available():
             llm_candidates = self.db.get_unanalyzed_articles("llm", limit=max_articles)
+            logger.info(f"未做 LLM 分析的文章: {len(llm_candidates)} 篇")
             if llm_candidates:
                 # 筛选 keyword intensity >= 阈值的文章
                 high_intensity_ids = self._get_high_intensity_ids(
                     [a["id"] for a in llm_candidates]
                 )
+                before = len(llm_candidates)
                 llm_candidates = [
                     a for a in llm_candidates if a["id"] in high_intensity_ids
                 ]
+                logger.info(
+                    f"intensity >= {SENTIMENT_LLM_THRESHOLD} 筛选: "
+                    f"{before} → {len(llm_candidates)} 篇"
+                )
 
                 if llm_candidates:
                     logger.info(f"待 LLM 分析: {len(llm_candidates)} 篇 (并发={LLM_CONCURRENCY})")
                     llm_count = self._run_llm_concurrent(llm_candidates)
                     logger.info(f"LLM 分析完成: {llm_count} 篇")
+                else:
+                    logger.info("无满足 intensity 阈值的文章，跳过 LLM 分析")
+        else:
+            logger.warning("LLM 分析器不可用，跳过 LLM 阶段")
 
         return {"keyword_analyzed": keyword_count, "llm_analyzed": llm_count}
 
@@ -110,14 +123,19 @@ class SentimentAnalyzer:
         result = self.llm.analyze(article)
         if result is None:
             return None
+        # 序列化受影响股票为 JSON
+        stocks = result.get("stocks", [])
+        affected_stocks_json = json.dumps(stocks, ensure_ascii=False) if stocks else ""
         record = {
             "article_id": article["id"],
             "analysis_type": "llm",
             "industries": ",".join(result["industries"]),
             "sentiment": result["sentiment"],
             "intensity": result["intensity"],
+            "impact_type": result.get("impact_type", "general_policy"),
             "keywords_hit": "",
             "summary_text": result.get("summary_text", ""),
+            "affected_stocks": affected_stocks_json,
             "analyzed_at": datetime.now(),
         }
         self.db.upsert_policy_analysis([record])
@@ -249,6 +267,84 @@ class SentimentAnalyzer:
             return pd.Series({"sentiment": round(sent, 4), "intensity": round(inten, 4)})
 
         result = expanded.groupby("industry_name").apply(_weighted_agg, include_groups=False).reset_index()
+        return result
+
+    def get_daily_stock_score(
+        self,
+        date: str,
+        lookback_days: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        计算某日个股级别情感得分（来自 LLM 识别的受影响股票）。
+
+        仅使用 LLM 分析结果中的 affected_stocks 字段，按时间衰减加权。
+
+        Args:
+            date: 计算日期，格式 YYYY-MM-DD。
+            lookback_days: 回看天数，默认 SENTIMENT_LOOKBACK_DAYS。
+
+        Returns:
+            DataFrame[ts_code, sentiment, intensity]
+            按个股聚合的加权情感得分。
+        """
+        if lookback_days is None:
+            lookback_days = SENTIMENT_LOOKBACK_DAYS
+
+        df = self.db.get_policy_analysis(date, lookback_days, analysis_type="llm")
+        if df.empty:
+            return pd.DataFrame(columns=["ts_code", "sentiment", "intensity"])
+
+        # 计算时间衰减权重
+        ref_date = pd.to_datetime(date)
+        df["publish_date"] = pd.to_datetime(df["publish_date"])
+        df["days_ago"] = (ref_date - df["publish_date"]).dt.days.clip(lower=0)
+        df["time_weight"] = np.exp(-SENTIMENT_DECAY * df["days_ago"])
+
+        # 展开股票级别数据
+        rows = []
+        for _, row in df.iterrows():
+            affected_str = row.get("affected_stocks", "")
+            if not affected_str or pd.isna(affected_str):
+                continue
+            try:
+                stocks = json.loads(affected_str)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(stocks, list):
+                continue
+            for stock in stocks:
+                if not isinstance(stock, dict):
+                    continue
+                code = str(stock.get("code", "")).strip()
+                if not code:
+                    continue
+                impact = stock.get("impact", 0.5)
+                if not isinstance(impact, (int, float)):
+                    impact = 0.5
+                impact = max(0.0, min(1.0, float(impact)))
+                rows.append({
+                    "ts_code": code,
+                    "sentiment": (row["sentiment"] or 0.0),
+                    "intensity": (row["intensity"] or 0.0) * impact,
+                    "time_weight": row["time_weight"],
+                })
+
+        if not rows:
+            return pd.DataFrame(columns=["ts_code", "sentiment", "intensity"])
+
+        expanded = pd.DataFrame(rows)
+
+        # 按个股聚合：加权平均
+        def _weighted_agg(grp):
+            w = grp["time_weight"] * grp["intensity"]
+            total_w = w.sum()
+            if total_w == 0:
+                return pd.Series({"sentiment": 0.0, "intensity": 0.0})
+            sent = (grp["sentiment"] * w).sum() / total_w
+            inten = (grp["intensity"] * grp["time_weight"]).sum() / grp["time_weight"].sum()
+            return pd.Series({"sentiment": round(sent, 4), "intensity": round(inten, 4)})
+
+        result = expanded.groupby("ts_code").apply(_weighted_agg, include_groups=False).reset_index()
         return result
 
     def get_analysis_stats(self) -> dict:

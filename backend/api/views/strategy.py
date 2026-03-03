@@ -88,15 +88,6 @@ def select_stocks(request):
     return Response({'task_id': task_id, 'date': date, 'fallback': fallback, 'requested_date': requested_date or date})
 
 
-@api_view(['GET'])
-def select_result(request, task_id):
-    """Get stock selection result by task_id."""
-    status = task_manager.get_status(task_id)
-    if not status:
-        return Response({'error': '任务不存在'}, status=404)
-    return Response(status)
-
-
 def _run_select(task_id, date):
     """Execute stock selection in background thread."""
     from backend.services.strategy.multi_factor import MultiFactorStrategy
@@ -347,15 +338,6 @@ def backtest_run(request):
     return Response({'task_id': task_id})
 
 
-@api_view(['GET'])
-def backtest_result(request, task_id):
-    """Get backtest result by task_id."""
-    status = task_manager.get_status(task_id)
-    if not status:
-        return Response({'error': '任务不存在'}, status=404)
-    return Response(status)
-
-
 def _run_backtest(task_id, start_date, end_date):
     """Execute backtest in background thread."""
     from backend.services.strategy.multi_factor import MultiFactorStrategy
@@ -364,8 +346,13 @@ def _run_backtest(task_id, start_date, end_date):
 
     db = _get_db()
 
+    def ensure_not_cancelled():
+        if task_manager.is_cancelled(task_id):
+            raise RuntimeError('回测已取消')
+
     task_manager.update_progress(task_id, 10, '生成选股信号...')
     strategy = MultiFactorStrategy(db)
+    ensure_not_cancelled()
     signals = strategy.generate_signals(start_date, end_date)
 
     if not signals:
@@ -375,11 +362,13 @@ def _run_backtest(task_id, start_date, end_date):
     rm = RiskManager(db)
     adjusted = {}
     for dt, df_sig in signals.items():
+        ensure_not_cancelled()
         adjusted[dt] = rm.adjust_weights(df_sig, dt)
 
     # Stock name mapping
     all_codes = set()
     for df_sig in adjusted.values():
+        ensure_not_cancelled()
         all_codes.update(df_sig['ts_code'].tolist())
     codes_str = "','".join(all_codes)
     name_map = {}
@@ -391,13 +380,50 @@ def _run_backtest(task_id, start_date, end_date):
 
     task_manager.update_progress(task_id, 60, '执行回测...')
     engine = BacktestEngine(db)
-    result = engine.run(adjusted, start_date, end_date)
+    cancel_check = lambda: task_manager.is_cancelled(task_id)
+    ensure_not_cancelled()
+    result = engine.run(adjusted, start_date, end_date, cancel_check=cancel_check)
 
     if not result:
         raise ValueError('回测失败')
 
-    task_manager.update_progress(task_id, 85, '计算绩效指标...')
+    task_manager.update_progress(task_id, 80, '计算绩效指标...')
+    ensure_not_cancelled()
     summary = engine.summary(result)
+
+    # Industry attribution + latest holdings (from report.py logic)
+    task_manager.update_progress(task_id, 88, '行业归因分析...')
+    from backend.services.monitor.performance import PerformanceAnalyzer
+    latest_signal_date = sorted(adjusted.keys())[-1]
+    latest_holdings = adjusted[latest_signal_date]
+    analyzer = PerformanceAnalyzer(db)
+    ensure_not_cancelled()
+    attribution = analyzer.industry_attribution(latest_holdings, start_date, end_date)
+
+    attr_data = []
+    if attribution is not None and not attribution.empty:
+        for _, row in attribution.iterrows():
+            ensure_not_cancelled()
+            record = {}
+            for col in attribution.columns:
+                val = row[col]
+                if pd.isna(val):
+                    record[col] = None
+                elif isinstance(val, float):
+                    record[col] = round(val, 4)
+                else:
+                    record[col] = val
+            attr_data.append(record)
+
+    holdings_data = []
+    for _, row in latest_holdings.iterrows():
+        ensure_not_cancelled()
+        holdings_data.append({
+            'ts_code': row.get('ts_code', ''),
+            'name': name_map.get(row.get('ts_code', ''), ''),
+            'weight': round(float(row.get('weight', 0)), 4),
+            'score': round(float(row.get('score', 0)), 3) if pd.notna(row.get('score')) else None,
+        })
 
     # Build JSON-serializable result
     nav = result.get('nav')
@@ -479,6 +505,8 @@ def _run_backtest(task_id, start_date, end_date):
         'monthly': monthly_data,
         'drawdown': drawdown_data,
         'signals': signal_data,
+        'attribution': attr_data,
+        'holdings': holdings_data,
     }
 
 

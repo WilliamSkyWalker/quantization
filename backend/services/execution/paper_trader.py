@@ -293,16 +293,20 @@ class PaperTrader(BaseTrader):
                     buy_orders.append((code, delta, target_w, info))
 
             results = {"success": 0, "failed": 0, "skipped": 0}
+            failed_sells = {}  # {ts_code: volume} 跌停/一字板无法卖出的订单
             trade_dt = self._parse_date(trade_date)
 
             # 先卖后买（用开盘价作为成交基准价）
             for code, volume, info in sell_orders:
-                if info.get("is_limit_down"):
+                one_char_up, one_char_down = self._is_one_char_limit(info)
+
+                if one_char_down or info.get("is_limit_down"):
                     self._log_blocked_trade(
                         session, trade_dt, code, "SELL", volume,
                         info.get("open") or info["close"],
                         "limit_down_blocked"
                     )
+                    failed_sells[code] = volume
                     results["failed"] += 1
                     continue
 
@@ -316,7 +320,9 @@ class PaperTrader(BaseTrader):
             buy_orders.sort(key=lambda x: x[2], reverse=True)
 
             for code, volume, weight, info in buy_orders:
-                if info.get("is_limit_up"):
+                one_char_up, _ = self._is_one_char_limit(info)
+
+                if info.get("is_limit_up") or one_char_up:
                     self._log_blocked_trade(
                         session, trade_dt, code, "BUY", volume,
                         info.get("open") or info["close"],
@@ -335,6 +341,7 @@ class PaperTrader(BaseTrader):
                     results["failed"] += 1
 
             session.commit()
+            results["failed_sells"] = failed_sells
 
             logger.info(
                 f"调仓完成 [{trade_date}]: "
@@ -526,6 +533,7 @@ class PaperTrader(BaseTrader):
         signal_idx = 0
         prev_adj_factors = {}
         pending_signal = None  # T日产生信号，T+1日执行
+        pending_sells = {}     # {ts_code: volume} 跌停排队卖单
 
         logger.info(
             f"开始回放: {start_date} ~ {end_date}, "
@@ -541,9 +549,53 @@ class PaperTrader(BaseTrader):
                 date_str, prev_adj_factors
             )
 
+            # === 优先处理排队卖单 ===
+            if pending_sells:
+                session = self.db.get_session()
+                try:
+                    account = session.query(PaperAccount).filter_by(
+                        account_name=self.account_name
+                    ).first()
+                    positions = session.query(PaperPosition).filter_by(
+                        account_name=self.account_name
+                    ).all()
+                    pos_map = {p.ts_code: p for p in positions}
+
+                    codes = list(pending_sells.keys())
+                    price_info = self._get_price_info(date_str, codes)
+                    resolved = []
+
+                    for code, vol in pending_sells.items():
+                        info = price_info.get(code)
+                        if not info:
+                            continue  # 停牌，继续排队
+
+                        one_char_up, one_char_down = self._is_one_char_limit(info)
+                        if one_char_down or info.get("is_limit_down"):
+                            continue  # 仍然跌停，继续排队
+
+                        # 可以卖出
+                        trade_dt = self._parse_date(date_str)
+                        self._execute_sell(
+                            session, account, pos_map, trade_dt,
+                            code, vol, info.get("open") or info["close"]
+                        )
+                        resolved.append(code)
+                        logger.debug(f"{code} 排队卖单成功执行")
+
+                    for code in resolved:
+                        del pending_sells[code]
+
+                    session.commit()
+                finally:
+                    session.close()
+
             # T+1 执行：如果昨天产生了待执行信号，今天开盘执行
             if pending_signal is not None:
-                self._execute_rebalance(date_str, pending_signal)
+                result = self._execute_rebalance(date_str, pending_signal)
+                # 收集新的失败卖单加入排队
+                new_failed = result.get("failed_sells", {})
+                pending_sells.update(new_failed)
                 pending_signal = None
 
             # 检查今天是否产生新信号（收盘后生效，明天执行）
@@ -835,14 +887,15 @@ class PaperTrader(BaseTrader):
         获取指定日期的行情信息。
 
         Returns:
-            {ts_code: {close, is_limit_up, is_limit_down, adj_factor}}。
+            {ts_code: {open, close, high, low, is_limit_up, is_limit_down, adj_factor}}。
         """
         if not codes:
             return {}
 
         codes_str = "','".join(codes)
         df = self.db.query(
-            f"SELECT ts_code, `open`, `close`, is_limit_up, is_limit_down, adj_factor "
+            f"SELECT ts_code, `open`, `close`, `high`, `low`, "
+            f"is_limit_up, is_limit_down, adj_factor "
             f"FROM daily_price "
             f"WHERE trade_date = '{trade_date}' "
             f"AND ts_code IN ('{codes_str}')"
@@ -850,9 +903,12 @@ class PaperTrader(BaseTrader):
 
         result = {}
         for _, row in df.iterrows():
+            close_px = row["close"]
             result[row["ts_code"]] = {
-                "open": row.get("open", row["close"]),
-                "close": row["close"],
+                "open": row.get("open", close_px),
+                "close": close_px,
+                "high": row.get("high", close_px),
+                "low": row.get("low", close_px),
                 "is_limit_up": row.get("is_limit_up", 0) == 1,
                 "is_limit_down": row.get("is_limit_down", 0) == 1,
                 "adj_factor": row.get("adj_factor"),
@@ -903,6 +959,19 @@ class PaperTrader(BaseTrader):
             "stamp_tax": round(stamp_tax, 2),
             "total_cost": round(total_cost, 2),
         }
+
+    @staticmethod
+    def _is_one_char_limit(info: dict) -> tuple[bool, bool]:
+        """
+        判断是否为一字板（开盘=最高=最低=收盘）。
+
+        Returns:
+            (is_one_char_limit_up, is_one_char_limit_down)
+        """
+        o, h, l, c = info['open'], info['high'], info['low'], info['close']
+        if o == h == l == c:
+            return (info['is_limit_up'], info['is_limit_down'])
+        return (False, False)
 
     @staticmethod
     def _round_to_lot(volume: float) -> int:

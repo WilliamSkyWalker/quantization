@@ -37,7 +37,7 @@ class CCTVScraper(BaseScraper):
         """CCTV 不使用 HTML 列表页，此方法不会被调用。"""
         return []
 
-    def scrape_pages(self, max_pages: int = SENTIMENT_MAX_PAGES):
+    def scrape_pages(self, max_pages: int = SENTIMENT_MAX_PAGES, **kwargs):
         """
         逐日抓取生成器：每天的新闻联播作为一批 yield。
 

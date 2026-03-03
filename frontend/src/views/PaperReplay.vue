@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { useMessage, NIcon } from 'naive-ui'
 import { PlayOutline } from '@vicons/ionicons5'
-import { startPaperReplay, getTaskStatus } from '../api'
+import { startPaperReplay } from '../api'
 import { useTaskPolling } from '../composables/useTaskPolling'
 import { formatDate } from '../utils/format'
 import NavChart from '../components/NavChart.vue'
@@ -12,7 +12,6 @@ const dateRange = ref<[string, string]>(['2020-01-01', '2024-12-31'])
 const resetAccount = ref(true)
 const capital = ref(1000000)
 const { loading, taskId, result, start, stopPolling, taskStore } = useTaskPolling({
-  fetchResult: getTaskStatus,
   taskLabel: '回放',
 })
 

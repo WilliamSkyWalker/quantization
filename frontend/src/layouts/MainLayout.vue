@@ -8,13 +8,13 @@ import TaskProgress from '../components/TaskProgress.vue'
 import {
   SpeedometerOutline,
   DownloadOutline,
-  FunnelOutline,
+  SearchOutline,
   TrendingUpOutline,
   AnalyticsOutline,
   WalletOutline,
-  DocumentTextOutline,
   SettingsOutline,
   MenuOutline,
+  PulseOutline,
 } from '@vicons/ionicons5'
 
 const route = useRoute()
@@ -28,11 +28,11 @@ function renderIcon(icon: any) {
 const menuOptions: MenuOption[] = [
   { label: '仪表盘', key: '/', icon: renderIcon(SpeedometerOutline) },
   { label: '数据管理', key: '/data', icon: renderIcon(DownloadOutline) },
-  { label: '股票池', key: '/universe', icon: renderIcon(FunnelOutline) },
-  { label: '选股结果', key: '/select', icon: renderIcon(TrendingUpOutline) },
+  { label: '个股详情', key: '/universe', icon: renderIcon(SearchOutline) },
+  { label: '今日选股', key: '/select', icon: renderIcon(TrendingUpOutline) },
   { label: '回测', key: '/backtest', icon: renderIcon(AnalyticsOutline) },
   { label: '模拟交易', key: '/paper', icon: renderIcon(WalletOutline) },
-  { label: '报告', key: '/report', icon: renderIcon(DocumentTextOutline) },
+  { label: 'Polymarket', key: '/polymarket', icon: renderIcon(PulseOutline) },
   { label: '系统设置', key: '/settings', icon: renderIcon(SettingsOutline) },
 ]
 

@@ -30,13 +30,18 @@ from backend.services.config import (
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
 
-SYSTEM_PROMPT = """你是一个专业的A股市场政策分析师。请分析以下政策文章，判断其对申万一级行业的影响。
+SYSTEM_PROMPT = """你是一个专业的A股市场政策分析师。请分析以下政策文章，判断其对申万一级行业和具体A股上市公司的影响。
 
 请返回严格的 JSON 格式：
 {
     "industries": ["行业1", "行业2"],
+    "stocks": [
+        {"code": "600519.SH", "name": "贵州茅台", "impact": 0.8},
+        {"code": "000858.SZ", "name": "五粮液", "impact": 0.5}
+    ],
     "sentiment": 0.5,
     "intensity": 0.8,
+    "impact_type": "industry_regulation",
     "summary": "一句话摘要"
 }
 
@@ -47,8 +52,20 @@ SYSTEM_PROMPT = """你是一个专业的A股市场政策分析师。请分析以
   家用电器、食品饮料、医药生物、农林牧渔、纺织服饰、轻工制造、商贸零售、社会服务、
   交通运输、美容护理、综合
   若无明确相关行业，返回空列表 []
+- stocks: 受影响的具体A股上市公司列表。每项包含：
+  - code: 股票代码，上交所用 .SH 后缀，深交所用 .SZ 后缀（如 600519.SH、000858.SZ）
+  - name: 公司简称
+  - impact: 对该股票的影响程度，0.0（几乎无影响）到 1.0（重大直接影响）
+  仅列出文章中明确提及或直接相关的公司，不要泛泛列举。若无具体公司，返回空列表 []
 - sentiment: 情感倾向，-1.0（强利空）到 +1.0（强利好）
 - intensity: 影响强度，0.0（无影响）到 1.0（重大影响）
+- impact_type: 政策影响类型，必须从以下 6 种中选取一个：
+  - trade_tariff: 贸易关税政策（进出口关税、贸易壁垒、贸易协定）
+  - tech_sanction: 技术制裁/出口管制（芯片禁令、实体清单、技术封锁）
+  - monetary_policy: 货币政策（利率、准备金率、公开市场操作、汇率）
+  - fiscal_stimulus: 财政刺激（减税降费、专项债、补贴、政府投资）
+  - industry_regulation: 行业监管（行业准入、合规要求、反垄断、环保标准）
+  - general_policy: 一般政策（不属于以上5类的其他政策）
 - summary: 50字以内的政策影响摘要
 
 只返回 JSON，不要其他内容。"""
@@ -145,16 +162,16 @@ class LLMAnalyzer:
         if not self._available:
             return None
 
-        content_raw = (article.get("content", "") or "")
+        content_raw = str(article.get("content") or "")
         content_truncated = content_raw[:SENTIMENT_CONTENT_MAX_CHARS]
 
         user_content = USER_TEMPLATE.format(
-            title=article.get("title", ""),
-            source=article.get("source", ""),
+            title=str(article.get("title") or ""),
+            source=str(article.get("source") or ""),
             tier=article.get("tier", ""),
-            category=article.get("category", ""),
-            publish_date=article.get("publish_date", ""),
-            summary=(article.get("summary", "") or "")[:500],
+            category=str(article.get("category") or ""),
+            publish_date=str(article.get("publish_date") or ""),
+            summary=str(article.get("summary") or "")[:500],
             content=content_truncated,
         )
 
@@ -245,9 +262,41 @@ class LLMAnalyzer:
 
         summary_text = str(data.get("summary", ""))[:2000]
 
+        # 解析受影响的股票
+        stocks = data.get("stocks", [])
+        if not isinstance(stocks, list):
+            stocks = []
+        parsed_stocks = []
+        for item in stocks:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("code", "")).strip()
+            name = str(item.get("name", "")).strip()
+            impact = item.get("impact", 0.5)
+            if not isinstance(impact, (int, float)):
+                impact = 0.5
+            impact = max(0.0, min(1.0, float(impact)))
+            if code or name:
+                parsed_stocks.append({
+                    "code": code,
+                    "name": name,
+                    "impact": round(impact, 4),
+                })
+
+        # 解析 impact_type
+        valid_impact_types = {
+            "trade_tariff", "tech_sanction", "monetary_policy",
+            "fiscal_stimulus", "industry_regulation", "general_policy",
+        }
+        impact_type = str(data.get("impact_type", "general_policy")).strip()
+        if impact_type not in valid_impact_types:
+            impact_type = "general_policy"
+
         return {
             "industries": industries,
+            "stocks": parsed_stocks,
             "sentiment": round(sentiment, 4),
             "intensity": round(intensity, 4),
+            "impact_type": impact_type,
             "summary_text": summary_text,
         }

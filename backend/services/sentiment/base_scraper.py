@@ -11,6 +11,7 @@ import logging
 import time
 import threading
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional
 from urllib.parse import urljoin, urlparse
@@ -110,6 +111,10 @@ class BaseScraper(ABC):
     def __init__(self, limiter: Optional[HttpRateLimiter] = None):
         self.limiter = limiter or _global_limiter
         self.session = requests.Session()
+        # 扩大连接池以支持并发抓取
+        adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
         self.session.headers.update({
             "User-Agent": SENTIMENT_USER_AGENT,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -247,14 +252,19 @@ class BaseScraper(ABC):
     # 主抓取流程
     # ----------------------------------------------------------
 
-    def scrape_pages(self, max_pages: int = SENTIMENT_MAX_PAGES):
+    def scrape_pages(self, max_pages: int = SENTIMENT_MAX_PAGES, existing_urls: set[str] | None = None):
         """
         逐页抓取生成器：每个列表页返回一批文章（含正文）。
+
+        Args:
+            max_pages: 最大翻页数。
+            existing_urls: 数据库中已有的 URL 集合，已有文章跳过详情页抓取。
 
         Yields:
             list[dict] — 当前列表页解析出的文章列表。
         """
         seen_urls: set[str] = set()
+        _existing = existing_urls or set()
 
         for list_url_template in self.list_urls[:max_pages]:
             html = self.fetch_page(list_url_template)
@@ -268,6 +278,7 @@ class BaseScraper(ABC):
                 continue
 
             page_articles = []
+            new_articles = []  # 需要抓详情页的新文章
             for article in articles:
                 url = article.get("url", "")
                 if not url or url in seen_urls:
@@ -284,11 +295,20 @@ class BaseScraper(ABC):
                 pub_date = article.get("publish_date", "")
                 article["content_hash"] = self._compute_content_hash(title, pub_date)
 
-                # 详情页正文
-                if self.fetch_content:
-                    self._fetch_article_content(article)
-
                 page_articles.append(article)
+                if url not in _existing:
+                    new_articles.append(article)
+
+            # 只对新文章并发抓取详情页正文
+            if self.fetch_content and new_articles:
+                logger.info(f"[{self.source}] 列表 {len(page_articles)} 篇，新增 {len(new_articles)} 篇需抓详情页")
+                with ThreadPoolExecutor(max_workers=50) as pool:
+                    futures = {pool.submit(self._fetch_article_content, a): a for a in new_articles}
+                    for f in as_completed(futures):
+                        try:
+                            f.result()
+                        except Exception as e:
+                            logger.debug(f"[{self.source}] 详情页并发抓取异常: {e}")
 
             if page_articles:
                 yield page_articles

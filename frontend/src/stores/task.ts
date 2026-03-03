@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { reactive, computed } from 'vue'
-import { getTaskStatus, getTaskList, cancelTask } from '../api'
+import { getTaskList, cancelTask } from '../api'
 
 export interface TaskInfo {
   task_id: string
@@ -49,6 +49,7 @@ export const useTaskStore = defineStore('task', () => {
 
     ws.onopen = () => {
       retryDelay = 3000
+      loadAllTasks()
     }
 
     ws.onmessage = (event) => {
@@ -92,12 +93,6 @@ export const useTaskStore = defineStore('task', () => {
     }
   }
 
-  async function pollTask(taskId: string): Promise<TaskInfo> {
-    const { data } = await getTaskStatus(taskId)
-    tasks[taskId] = data
-    return data
-  }
-
   async function killTask(taskId: string) {
     await cancelTask(taskId)
     // Optimistic update
@@ -133,7 +128,6 @@ export const useTaskStore = defineStore('task', () => {
     connectWebSocket,
     trackTask,
     loadAllTasks,
-    pollTask,
     killTask,
     getTask,
     removeTask,

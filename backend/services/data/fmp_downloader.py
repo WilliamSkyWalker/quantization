@@ -1,32 +1,27 @@
 """
-FMP (Financial Modeling Prep) 美股数据下载器
+美股数据下载器（yfinance 版）
 
-负责从 FMP API 获取以下数据并存入 MySQL：
-    1. S&P 500 + NASDAQ 100 成分股列表
+使用 yfinance 获取以下数据并存入 MySQL：
+    1. NASDAQ 100 成分股列表
     2. 日线行情（含复权价）
     3. 季度财务数据
     4. GICS 行业分类
     5. 指数日线（S&P 500, NASDAQ, Dow Jones）
     6. 商品期货日线
     7. 分析师评级
-    8. SEC 公告
+    8. SEC 公告（yfinance 不支持，返回 0）
     9. 公司行动（分红/拆股）
 """
 
-import collections
 import logging
+import re
 import time
-import threading
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import datetime, timedelta, UTC
 
 import pandas as pd
-import requests
 from tqdm import tqdm
 
 from backend.services.config import (
-    FMP_API_KEY,
-    FMP_RATE_LIMIT,
     US_DATA_START_DATE,
     US_INDEX_SYMBOLS,
     US_COMMODITY_SYMBOLS,
@@ -38,73 +33,35 @@ logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
 
 
-# ============================================================
-# 限速器
-# ============================================================
-
-class FMPRateLimiter:
-    """滑动窗口限速器（线程安全），默认 300 req/min。"""
-
-    def __init__(self, max_per_min: int = FMP_RATE_LIMIT):
-        self.max_per_min = max_per_min
-        self._timestamps: collections.deque = collections.deque()
-        self._lock = threading.Lock()
-
-    def acquire(self):
-        with self._lock:
-            now = time.monotonic()
-            while self._timestamps and now - self._timestamps[0] >= 60.0:
-                self._timestamps.popleft()
-
-            if len(self._timestamps) >= self.max_per_min:
-                wait = 60.0 - (now - self._timestamps[0]) + 0.1
-                if wait > 0:
-                    logger.debug(f"FMP 限速等待 {wait:.1f}s")
-                    time.sleep(wait)
-                now = time.monotonic()
-                while self._timestamps and now - self._timestamps[0] >= 60.0:
-                    self._timestamps.popleft()
-
-            self._timestamps.append(time.monotonic())
+def _check_yf():
+    """检查 yfinance 是否安装，返回模块引用。"""
+    try:
+        import yfinance as yf
+        return yf
+    except ImportError:
+        raise ImportError(
+            "yfinance 未安装，请运行: pip install yfinance"
+        )
 
 
 # ============================================================
-# FMP 下载器
+# 美股数据下载器
 # ============================================================
 
 class FMPDownloader:
-    """FMP (Financial Modeling Prep) 美股数据下载器"""
-
-    BASE_URL = "https://financialmodelingprep.com"
+    """美股数据下载器（yfinance 实现，保留类名兼容 API view 引用）"""
 
     def __init__(self, db: DatabaseManager):
         self.db = db
-        self.api_key = FMP_API_KEY
-        self.limiter = FMPRateLimiter()
         self._start_date = datetime.strptime(US_DATA_START_DATE, "%Y%m%d").strftime("%Y-%m-%d")
+        self._yf = _check_yf()
 
-    def _get(self, path: str, params: dict = None) -> list | dict | None:
-        """发起 FMP API GET 请求。"""
-        if not self.api_key:
-            logger.error("FMP_API_KEY 未配置")
-            return None
-
-        self.limiter.acquire()
-        url = f"{self.BASE_URL}{path}"
-        p = {"apikey": self.api_key}
-        if params:
-            p.update(params)
-
+    def _safe_ticker(self, symbol: str):
+        """创建 yfinance Ticker，捕获异常返回 None。"""
         try:
-            resp = requests.get(url, params=p, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-            if isinstance(data, dict) and "Error Message" in data:
-                logger.warning(f"FMP API 错误: {data['Error Message']}")
-                return None
-            return data
-        except requests.RequestException as e:
-            logger.warning(f"FMP 请求失败 {path}: {e}")
+            return self._yf.Ticker(symbol)
+        except Exception as e:
+            logger.warning(f"yfinance Ticker 创建失败 {symbol}: {e}")
             return None
 
     # ----------------------------------------------------------
@@ -112,71 +69,146 @@ class FMPDownloader:
     # ----------------------------------------------------------
 
     def download_stock_list(self) -> int:
-        """下载 S&P 500 + NASDAQ 100 成分股列表，合并去重后 upsert。"""
+        """下载 NASDAQ 100 成分股列表并 upsert。"""
+        import requests
+        from io import StringIO
+
         all_tickers = {}
 
-        # S&P 500
-        sp500 = self._get("/api/v3/sp500_constituent")
-        if sp500:
-            for item in sp500:
-                ticker = item.get("symbol", "")
-                if ticker:
-                    all_tickers[ticker] = {
-                        "ticker": ticker,
-                        "name": item.get("name", ""),
-                        "exchange": item.get("exchange", ""),
-                        "sector": item.get("sector", ""),
-                        "industry": item.get("subSector", "") or item.get("industry", ""),
-                        "is_active": 1,
-                    }
+        # 从 Wikipedia 获取 NASDAQ 100 成分股
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+            }
+            session = requests.Session()
+            session.headers.update(headers)
+            response = session.get(
+                "https://en.wikipedia.org/wiki/Nasdaq-100",
+                timeout=15,
+            )
+            response.raise_for_status()
+            tables = pd.read_html(StringIO(response.text), match="Ticker")
+            if tables:
+                wiki_df = tables[0]
 
-        # NASDAQ 100
-        nasdaq = self._get("/api/v3/nasdaq_constituent")
-        if nasdaq:
-            for item in nasdaq:
-                ticker = item.get("symbol", "")
-                if ticker and ticker not in all_tickers:
-                    all_tickers[ticker] = {
-                        "ticker": ticker,
-                        "name": item.get("name", ""),
-                        "exchange": item.get("exchange", ""),
-                        "sector": item.get("sector", ""),
-                        "industry": item.get("subSector", "") or item.get("industry", ""),
-                        "is_active": 1,
-                    }
+                # 识别列名（Wikipedia 表格列名可能变化）
+                ticker_col = None
+                name_col = None
+                sector_col = None
+                industry_col = None
+                for col in wiki_df.columns:
+                    col_lower = str(col).lower()
+                    if "ticker" in col_lower or "symbol" in col_lower:
+                        ticker_col = col
+                    elif "company" in col_lower or "name" in col_lower:
+                        name_col = col
+                    elif "sector" in col_lower and "sub" not in col_lower:
+                        sector_col = col
+                    elif "sub" in col_lower or "industry" in col_lower:
+                        industry_col = col
 
+                if ticker_col:
+                    for _, row in wiki_df.iterrows():
+                        ticker = str(row.get(ticker_col, "")).strip()
+                        if not ticker:
+                            continue
+                        all_tickers[ticker] = {
+                            "ticker": ticker,
+                            "name": str(row.get(name_col, "")) if name_col else "",
+                            "exchange": "NASDAQ",
+                            "sector": str(row.get(sector_col, "")) if sector_col else "",
+                            "industry": str(row.get(industry_col, "")) if industry_col else "",
+                            "is_active": 1,
+                            "country": "US",
+                        }
+                else:
+                    logger.warning("Wikipedia 表格未找到 Ticker 列")
+            else:
+                logger.warning("无法从 Wikipedia 获取 NASDAQ 100 成分股表格")
+        except Exception as e:
+            logger.error(f"Wikipedia NASDAQ 100 页面解析失败: {e}")
+
+        # Wikipedia 失败时使用兜底列表
         if not all_tickers:
-            logger.warning("未获取到成分股数据")
+            all_tickers = self._build_fallback_stock_list()
+        if not all_tickers:
+            logger.warning("未获取到成分股数据（Wikipedia + 兜底列表均为空）")
             return 0
 
-        # 补充 profile 信息（IPO 日期、市值）—— 批量接口
-        tickers_list = list(all_tickers.keys())
-        batch_size = 50
-        for i in range(0, len(tickers_list), batch_size):
-            batch = tickers_list[i:i + batch_size]
-            symbols_str = ",".join(batch)
-            profiles = self._get(f"/api/v3/profile/{symbols_str}")
-            if profiles:
-                for p in profiles:
-                    t = p.get("symbol", "")
-                    if t in all_tickers:
-                        all_tickers[t]["market_cap"] = p.get("mktCap")
-                        all_tickers[t]["country"] = p.get("country", "US")
-                        ipo = p.get("ipoDate")
-                        if ipo:
-                            try:
-                                all_tickers[t]["ipo_date"] = pd.to_datetime(ipo).date()
-                            except Exception:
-                                pass
+        # 用 yfinance 补充 market_cap 和 ipo_date（逐个查询）
+        for ticker in tqdm(list(all_tickers.keys()), desc="补充股票信息"):
+            t = self._safe_ticker(ticker)
+            if t is None:
+                continue
+            try:
+                info = t.info
+                if info:
+                    mc = info.get("marketCap")
+                    if mc:
+                        all_tickers[ticker]["market_cap"] = mc
+                    # firstTradeDateEpochUtc → ipo_date
+                    epoch = info.get("firstTradeDateEpochUtc")
+                    if epoch:
+                        try:
+                            all_tickers[ticker]["ipo_date"] = datetime.fromtimestamp(epoch, UTC).date()
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.debug(f"yfinance info 获取失败 {ticker}: {e}")
+
+            time.sleep(0.1)  # 避免过快请求
 
         df = pd.DataFrame(list(all_tickers.values()))
         self.db.upsert_us_stock_basic(df)
-        logger.info(f"美股列表下载完成: {len(df)} 只")
+        self.db.deactivate_us_stocks_not_in(set(all_tickers.keys()))
+
+        logger.info(f"美股列表下载完成: {len(df)} 只 (NASDAQ 100)")
         return len(df)
 
     # ----------------------------------------------------------
     # 日线行情
     # ----------------------------------------------------------
+
+    def _download_prices_for(self, tickers: list[str], start: str, end: str, desc: str) -> int:
+        """通用日线下载辅助方法。"""
+        total = 0
+        for ticker in tqdm(tickers, desc=desc):
+            t = self._safe_ticker(ticker)
+            if t is None:
+                continue
+            try:
+                hist = t.history(start=start, end=end, auto_adjust=False)
+                if hist.empty:
+                    continue
+
+                records = []
+                for date_idx, row in hist.iterrows():
+                    records.append({
+                        "ticker": ticker,
+                        "trade_date": _safe_date_str(date_idx),
+                        "open": row.get("Open"),
+                        "high": row.get("High"),
+                        "low": row.get("Low"),
+                        "close": row.get("Close"),
+                        "adj_close": row.get("Adj Close"),
+                        "volume": row.get("Volume"),
+                        "change_pct": None,  # yfinance 不直接提供，DB 层可后续计算
+                    })
+
+                if records:
+                    df = pd.DataFrame(records)
+                    self.db.bulk_upsert_us_daily_price(df)
+                    total += len(records)
+
+            except Exception as e:
+                logger.warning(f"日线下载失败 {ticker}: {e}")
+
+        return total
 
     def download_daily_prices(self, tickers: list[str] = None) -> int:
         """全量下载日线数据。"""
@@ -186,34 +218,8 @@ class FMPDownloader:
             logger.warning("无美股代码，请先下载股票列表")
             return 0
 
-        total = 0
-        for ticker in tqdm(tickers, desc="美股日线下载"):
-            data = self._get(
-                f"/api/v3/historical-price-full/{ticker}",
-                {"from": self._start_date},
-            )
-            if not data or "historical" not in data:
-                continue
-
-            records = []
-            for row in data["historical"]:
-                records.append({
-                    "ticker": ticker,
-                    "trade_date": row.get("date"),
-                    "open": row.get("open"),
-                    "high": row.get("high"),
-                    "low": row.get("low"),
-                    "close": row.get("close"),
-                    "adj_close": row.get("adjClose"),
-                    "volume": row.get("volume"),
-                    "change_pct": row.get("changePercent"),
-                })
-
-            if records:
-                df = pd.DataFrame(records)
-                self.db.bulk_upsert_us_daily_price(df)
-                total += len(records)
-
+        today = datetime.now().strftime("%Y-%m-%d")
+        total = self._download_prices_for(tickers, self._start_date, today, "美股日线下载")
         logger.info(f"美股日线下载完成: {total} 条")
         return total
 
@@ -234,34 +240,7 @@ class FMPDownloader:
             logger.info("美股日线已是最新")
             return 0
 
-        total = 0
-        for ticker in tqdm(tickers, desc="美股日线增量更新"):
-            data = self._get(
-                f"/api/v3/historical-price-full/{ticker}",
-                {"from": from_date, "to": today},
-            )
-            if not data or "historical" not in data:
-                continue
-
-            records = []
-            for row in data["historical"]:
-                records.append({
-                    "ticker": ticker,
-                    "trade_date": row.get("date"),
-                    "open": row.get("open"),
-                    "high": row.get("high"),
-                    "low": row.get("low"),
-                    "close": row.get("close"),
-                    "adj_close": row.get("adjClose"),
-                    "volume": row.get("volume"),
-                    "change_pct": row.get("changePercent"),
-                })
-
-            if records:
-                df = pd.DataFrame(records)
-                self.db.bulk_upsert_us_daily_price(df)
-                total += len(records)
-
+        total = self._download_prices_for(tickers, from_date, today, "美股日线增量更新")
         logger.info(f"美股日线增量更新完成: {total} 条")
         return total
 
@@ -270,7 +249,7 @@ class FMPDownloader:
     # ----------------------------------------------------------
 
     def download_financial_data(self, tickers: list[str] = None) -> int:
-        """下载季度财报（income-statement + key-metrics 合并）。"""
+        """下载季度财报（income_stmt + balance_sheet + cashflow）。"""
         if tickers is None:
             tickers = self.db.get_us_tickers()
         if not tickers:
@@ -278,56 +257,135 @@ class FMPDownloader:
 
         total = 0
         for ticker in tqdm(tickers, desc="美股财务下载"):
-            # 利润表
-            income = self._get(
-                f"/api/v3/income-statement/{ticker}",
-                {"period": "quarter", "limit": 40},
-            )
-            # 关键指标
-            metrics = self._get(
-                f"/api/v3/key-metrics/{ticker}",
-                {"period": "quarter", "limit": 40},
-            )
-
-            if not income:
+            t = self._safe_ticker(ticker)
+            if t is None:
                 continue
 
-            # 将 metrics 转为 dict[period] 便于合并
-            metrics_map = {}
-            if metrics:
-                for m in metrics:
-                    p = m.get("period", "")
-                    if p:
-                        metrics_map[p] = m
+            try:
+                income = t.quarterly_income_stmt
+                balance = t.quarterly_balance_sheet
+                cashflow = t.quarterly_cashflow
+            except Exception as e:
+                logger.warning(f"财务数据获取失败 {ticker}: {e}")
+                continue
+
+            if income is None or income.empty:
+                continue
+
+            # 从 sec_filings 构建 报告期末日 → SEC提交日 映射
+            # income_stmt 用标准季末日（如 12-31），实际财年季末可能偏移几天（如 12-27）
+            # 因此用 ±10 天近似匹配
+            filing_date_map = {}
+            try:
+                sec_filings = t.sec_filings
+                if sec_filings:
+                    _sec_entries = []  # [(报告期末日, SEC提交日)]
+                    for sf in sec_filings:
+                        if sf.get("type") not in ("10-Q", "10-K"):
+                            continue
+                        sf_date = sf.get("date")  # SEC 提交日
+                        if sf_date is None:
+                            continue
+                        # edgarUrl / exhibits URL 中含报告期末日, 如 aapl-20251227.htm
+                        edgar = sf.get("edgarUrl", "")
+                        for url in [edgar] + list((sf.get("exhibits") or {}).values()):
+                            m = re.search(r"-(\d{8})\.", url)
+                            if m:
+                                try:
+                                    report_end = datetime.strptime(m.group(1), "%Y%m%d").date()
+                                    _sec_entries.append((report_end, sf_date))
+                                except ValueError:
+                                    pass
+                                break
+                    # 对 income_stmt 每个季末日做近似匹配
+                    for col_date in income.columns:
+                        target = col_date.date()
+                        best = None
+                        best_delta = timedelta(days=11)
+                        for report_end, sf_date in _sec_entries:
+                            delta = abs(target - report_end)
+                            if delta < best_delta:
+                                best_delta = delta
+                                best = sf_date
+                        if best is not None:
+                            filing_date_map[target] = best
+            except Exception as e:
+                logger.debug(f"sec_filings 获取失败 {ticker}: {e}")
+
+            # 将 balance/cashflow 转为按日期索引的 dict
+            balance_map = {}
+            if balance is not None and not balance.empty:
+                for col in balance.columns:
+                    balance_map[col] = balance[col]
+
+            cashflow_map = {}
+            if cashflow is not None and not cashflow.empty:
+                for col in cashflow.columns:
+                    cashflow_map[col] = cashflow[col]
 
             records = []
-            for row in income:
-                period = row.get("period", "")
-                date_str = row.get("date", "")
-                if not period or not date_str:
-                    continue
+            for col_date in income.columns:
+                date_str = col_date.strftime("%Y-%m-%d")
+                inc = income[col_date]
 
-                metric = metrics_map.get(period, {})
-                revenue = row.get("revenue")
-                gross_profit = row.get("grossProfit")
+                # 从 balance sheet 取同期数据
+                bal = balance_map.get(col_date, pd.Series(dtype=float))
+                cf = cashflow_map.get(col_date, pd.Series(dtype=float))
+
+                revenue = _safe_get(inc, "Total Revenue")
+                gross_profit = _safe_get(inc, "Gross Profit")
+                operating_income = _safe_get(inc, "Operating Income")
+                net_income = _safe_get(inc, "Net Income")
+
+                # EPS: 优先 Basic EPS，回退 Diluted EPS
+                eps = _safe_get(inc, "Basic EPS") or _safe_get(inc, "Diluted EPS")
+
+                # 利润率计算
+                gross_margin = None
+                if revenue and gross_profit:
+                    try:
+                        gross_margin = float(gross_profit) / float(revenue) * 100
+                    except (ZeroDivisionError, TypeError):
+                        pass
+
+                operating_margin = None
+                if revenue and operating_income:
+                    try:
+                        operating_margin = float(operating_income) / float(revenue) * 100
+                    except (ZeroDivisionError, TypeError):
+                        pass
+
+                # 确定 period（Q1-Q4）
+                month = col_date.month
+                if month <= 3:
+                    period = f"Q1 {col_date.year}"
+                elif month <= 6:
+                    period = f"Q2 {col_date.year}"
+                elif month <= 9:
+                    period = f"Q3 {col_date.year}"
+                else:
+                    period = f"Q4 {col_date.year}"
+
+                # filing_date: 优先 SEC 提交日，兜底用报告期末日
+                filing_date = filing_date_map.get(col_date.date(), date_str)
 
                 record = {
                     "ticker": ticker,
                     "period": period,
                     "date": date_str,
-                    "filing_date": row.get("fillingDate") or row.get("filingDate"),
+                    "filing_date": filing_date,
                     "revenue": revenue,
-                    "net_income": row.get("netIncome"),
-                    "eps": row.get("eps"),
-                    "gross_margin": (gross_profit / revenue * 100) if revenue and gross_profit else None,
-                    "operating_margin": (row.get("operatingIncome", 0) / revenue * 100) if revenue and row.get("operatingIncome") else None,
-                    "roe": metric.get("roe"),
-                    "total_assets": metric.get("totalAssets") or row.get("totalAssets"),
-                    "total_equity": metric.get("totalEquity") or row.get("totalEquity"),
-                    "total_debt": metric.get("totalDebt"),
-                    "free_cash_flow": metric.get("freeCashFlow"),
-                    "pe_ratio": metric.get("peRatio"),
-                    "pb_ratio": metric.get("pbRatio"),
+                    "net_income": net_income,
+                    "eps": eps,
+                    "gross_margin": gross_margin,
+                    "operating_margin": operating_margin,
+                    "roe": None,  # yfinance 季报不直接提供
+                    "total_assets": _safe_get(bal, "Total Assets"),
+                    "total_equity": _safe_get(bal, "Stockholders Equity"),
+                    "total_debt": _safe_get(bal, "Total Debt"),
+                    "free_cash_flow": _safe_get(cf, "Free Cash Flow"),
+                    "pe_ratio": None,  # yfinance 季报不直接提供
+                    "pb_ratio": None,  # yfinance 季报不直接提供
                 }
                 records.append(record)
 
@@ -335,6 +393,8 @@ class FMPDownloader:
                 df = pd.DataFrame(records)
                 self.db.upsert_us_financial_data(df)
                 total += len(records)
+
+            time.sleep(0.1)
 
         logger.info(f"美股财务下载完成: {total} 条")
         return total
@@ -348,26 +408,30 @@ class FMPDownloader:
     # ----------------------------------------------------------
 
     def download_industry_class(self) -> int:
-        """下载 GICS 行业分类（从 stock profile 提取）。"""
+        """下载 GICS 行业分类（从 yfinance info 提取）。"""
         tickers = self.db.get_us_tickers()
         if not tickers:
             return 0
 
         records = []
-        batch_size = 50
-        for i in tqdm(range(0, len(tickers), batch_size), desc="美股行业分类"):
-            batch = tickers[i:i + batch_size]
-            symbols_str = ",".join(batch)
-            profiles = self._get(f"/api/v3/profile/{symbols_str}")
-            if not profiles:
+        for ticker in tqdm(tickers, desc="美股行业分类"):
+            t = self._safe_ticker(ticker)
+            if t is None:
                 continue
-            for p in profiles:
+            try:
+                info = t.info
+                if not info:
+                    continue
                 records.append({
-                    "ticker": p.get("symbol", ""),
-                    "sector": p.get("sector", ""),
-                    "industry": p.get("industry", ""),
-                    "sub_industry": "",  # FMP profile 无 sub-industry
+                    "ticker": ticker,
+                    "sector": info.get("sector", ""),
+                    "industry": info.get("industry", ""),
+                    "sub_industry": "",
                 })
+            except Exception as e:
+                logger.debug(f"行业信息获取失败 {ticker}: {e}")
+
+            time.sleep(0.1)
 
         if records:
             df = pd.DataFrame(records)
@@ -385,31 +449,36 @@ class FMPDownloader:
         if symbols is None:
             symbols = US_INDEX_SYMBOLS
 
+        today = datetime.now().strftime("%Y-%m-%d")
         total = 0
         for symbol in symbols:
-            data = self._get(
-                f"/api/v3/historical-price-full/{symbol}",
-                {"from": self._start_date},
-            )
-            if not data or "historical" not in data:
+            t = self._safe_ticker(symbol)
+            if t is None:
                 continue
+            try:
+                hist = t.history(start=self._start_date, end=today, auto_adjust=False)
+                if hist.empty:
+                    continue
 
-            records = []
-            for row in data["historical"]:
-                records.append({
-                    "index_code": symbol,
-                    "trade_date": row.get("date"),
-                    "open": row.get("open"),
-                    "high": row.get("high"),
-                    "low": row.get("low"),
-                    "close": row.get("close"),
-                    "volume": row.get("volume"),
-                })
+                records = []
+                for date_idx, row in hist.iterrows():
+                    records.append({
+                        "index_code": symbol,
+                        "trade_date": _safe_date_str(date_idx),
+                        "open": row.get("Open"),
+                        "high": row.get("High"),
+                        "low": row.get("Low"),
+                        "close": row.get("Close"),
+                        "volume": row.get("Volume"),
+                    })
 
-            if records:
-                df = pd.DataFrame(records)
-                self.db.bulk_upsert_us_index_daily(df)
-                total += len(records)
+                if records:
+                    df = pd.DataFrame(records)
+                    self.db.bulk_upsert_us_index_daily(df)
+                    total += len(records)
+
+            except Exception as e:
+                logger.warning(f"指数下载失败 {symbol}: {e}")
 
         logger.info(f"美股指数下载完成: {total} 条")
         return total
@@ -435,29 +504,33 @@ class FMPDownloader:
 
         total = 0
         for symbol in US_INDEX_SYMBOLS:
-            data = self._get(
-                f"/api/v3/historical-price-full/{symbol}",
-                {"from": from_date, "to": today},
-            )
-            if not data or "historical" not in data:
+            t = self._safe_ticker(symbol)
+            if t is None:
                 continue
+            try:
+                hist = t.history(start=from_date, end=today, auto_adjust=False)
+                if hist.empty:
+                    continue
 
-            records = []
-            for row in data["historical"]:
-                records.append({
-                    "index_code": symbol,
-                    "trade_date": row.get("date"),
-                    "open": row.get("open"),
-                    "high": row.get("high"),
-                    "low": row.get("low"),
-                    "close": row.get("close"),
-                    "volume": row.get("volume"),
-                })
+                records = []
+                for date_idx, row in hist.iterrows():
+                    records.append({
+                        "index_code": symbol,
+                        "trade_date": _safe_date_str(date_idx),
+                        "open": row.get("Open"),
+                        "high": row.get("High"),
+                        "low": row.get("Low"),
+                        "close": row.get("Close"),
+                        "volume": row.get("Volume"),
+                    })
 
-            if records:
-                df = pd.DataFrame(records)
-                self.db.bulk_upsert_us_index_daily(df)
-                total += len(records)
+                if records:
+                    df = pd.DataFrame(records)
+                    self.db.bulk_upsert_us_index_daily(df)
+                    total += len(records)
+
+            except Exception as e:
+                logger.warning(f"指数增量更新失败 {symbol}: {e}")
 
         logger.info(f"美股指数增量更新完成: {total} 条")
         return total
@@ -468,31 +541,36 @@ class FMPDownloader:
 
     def download_commodity_prices(self) -> int:
         """下载商品期货日线。"""
+        today = datetime.now().strftime("%Y-%m-%d")
         total = 0
         for symbol in US_COMMODITY_SYMBOLS:
-            data = self._get(
-                f"/api/v3/historical-price-full/{symbol}",
-                {"from": self._start_date},
-            )
-            if not data or "historical" not in data:
+            t = self._safe_ticker(symbol)
+            if t is None:
                 continue
+            try:
+                hist = t.history(start=self._start_date, end=today, auto_adjust=False)
+                if hist.empty:
+                    continue
 
-            records = []
-            for row in data["historical"]:
-                records.append({
-                    "symbol": symbol,
-                    "trade_date": row.get("date"),
-                    "open": row.get("open"),
-                    "high": row.get("high"),
-                    "low": row.get("low"),
-                    "close": row.get("close"),
-                    "volume": row.get("volume"),
-                })
+                records = []
+                for date_idx, row in hist.iterrows():
+                    records.append({
+                        "symbol": symbol,
+                        "trade_date": _safe_date_str(date_idx),
+                        "open": row.get("Open"),
+                        "high": row.get("High"),
+                        "low": row.get("Low"),
+                        "close": row.get("Close"),
+                        "volume": row.get("Volume"),
+                    })
 
-            if records:
-                df = pd.DataFrame(records)
-                self.db.bulk_upsert_us_commodity_price(df)
-                total += len(records)
+                if records:
+                    df = pd.DataFrame(records)
+                    self.db.bulk_upsert_us_commodity_price(df)
+                    total += len(records)
+
+            except Exception as e:
+                logger.warning(f"商品期货下载失败 {symbol}: {e}")
 
         logger.info(f"美股商品期货下载完成: {total} 条")
         return total
@@ -518,29 +596,33 @@ class FMPDownloader:
 
         total = 0
         for symbol in US_COMMODITY_SYMBOLS:
-            data = self._get(
-                f"/api/v3/historical-price-full/{symbol}",
-                {"from": from_date, "to": today},
-            )
-            if not data or "historical" not in data:
+            t = self._safe_ticker(symbol)
+            if t is None:
                 continue
+            try:
+                hist = t.history(start=from_date, end=today, auto_adjust=False)
+                if hist.empty:
+                    continue
 
-            records = []
-            for row in data["historical"]:
-                records.append({
-                    "symbol": symbol,
-                    "trade_date": row.get("date"),
-                    "open": row.get("open"),
-                    "high": row.get("high"),
-                    "low": row.get("low"),
-                    "close": row.get("close"),
-                    "volume": row.get("volume"),
-                })
+                records = []
+                for date_idx, row in hist.iterrows():
+                    records.append({
+                        "symbol": symbol,
+                        "trade_date": _safe_date_str(date_idx),
+                        "open": row.get("Open"),
+                        "high": row.get("High"),
+                        "low": row.get("Low"),
+                        "close": row.get("Close"),
+                        "volume": row.get("Volume"),
+                    })
 
-            if records:
-                df = pd.DataFrame(records)
-                self.db.bulk_upsert_us_commodity_price(df)
-                total += len(records)
+                if records:
+                    df = pd.DataFrame(records)
+                    self.db.bulk_upsert_us_commodity_price(df)
+                    total += len(records)
+
+            except Exception as e:
+                logger.warning(f"商品期货增量更新失败 {symbol}: {e}")
 
         logger.info(f"美股商品期货增量更新完成: {total} 条")
         return total
@@ -550,7 +632,7 @@ class FMPDownloader:
     # ----------------------------------------------------------
 
     def download_analyst_recommendations(self, tickers: list[str] = None) -> int:
-        """下载分析师评级和目标价。"""
+        """下载分析师评级（yfinance upgrades_downgrades）。"""
         if tickers is None:
             tickers = self.db.get_us_tickers()
         if not tickers:
@@ -558,46 +640,43 @@ class FMPDownloader:
 
         total = 0
         for ticker in tqdm(tickers, desc="美股分析师评级"):
-            data = self._get(f"/api/v3/analyst-stock-recommendations/{ticker}")
-            if not data:
+            t = self._safe_ticker(ticker)
+            if t is None:
                 continue
 
-            records = []
-            for row in data:
-                date_str = row.get("date", "")
-                if not date_str:
+            try:
+                ud = t.upgrades_downgrades
+                if ud is None or ud.empty:
                     continue
-                records.append({
-                    "ticker": ticker,
-                    "date": date_str,
-                    "analyst_company": row.get("analystCompany", ""),
-                    "analyst_name": row.get("analystName", ""),
-                    "rating": row.get("newGrade") or row.get("rating", ""),
-                    "price_target": row.get("priceTarget"),
-                })
 
-            # 补充 price-target 数据
-            pt_data = self._get(f"/api/v3/price-target/{ticker}")
-            if pt_data:
-                for row in pt_data:
-                    date_str = row.get("publishedDate", "")[:10]
-                    if not date_str:
-                        continue
+                records = []
+                for date_idx, row in ud.iterrows():
+                    try:
+                        date_str = date_idx.strftime("%Y-%m-%d")
+                    except Exception:
+                        date_str = str(date_idx)[:10]
+
                     records.append({
                         "ticker": ticker,
                         "date": date_str,
-                        "analyst_company": row.get("analystCompany", ""),
-                        "analyst_name": row.get("analystName", ""),
-                        "rating": "",
-                        "price_target": row.get("priceTarget"),
+                        "analyst_company": row.get("Firm", ""),
+                        "analyst_name": "",  # yfinance 不提供
+                        "rating": row.get("ToGrade", ""),
+                        "price_target": None,  # yfinance 不提供
                     })
 
-            if records:
-                df = pd.DataFrame(records)
-                # 去重（同 ticker+date+analyst_company 取最后一条）
-                df = df.drop_duplicates(subset=["ticker", "date", "analyst_company"], keep="last")
-                self.db.upsert_us_analyst_recommendation(df)
-                total += len(df)
+                if records:
+                    df = pd.DataFrame(records)
+                    df = df.drop_duplicates(
+                        subset=["ticker", "date", "analyst_company"], keep="last"
+                    )
+                    self.db.upsert_us_analyst_recommendation(df)
+                    total += len(df)
+
+            except Exception as e:
+                logger.warning(f"分析师评级获取失败 {ticker}: {e}")
+
+            time.sleep(0.1)
 
         logger.info(f"美股分析师评级下载完成: {total} 条")
         return total
@@ -607,49 +686,16 @@ class FMPDownloader:
         return self.download_analyst_recommendations()
 
     # ----------------------------------------------------------
-    # SEC 公告
+    # SEC 公告（yfinance 不支持）
     # ----------------------------------------------------------
 
     def download_sec_filings(self, tickers: list[str] = None, filing_type: str = None) -> int:
-        """下载 SEC filings。"""
-        if tickers is None:
-            tickers = self.db.get_us_tickers()
-        if not tickers:
-            return 0
-
-        total = 0
-        for ticker in tqdm(tickers, desc="美股 SEC 公告"):
-            params = {"limit": 100}
-            if filing_type:
-                params["type"] = filing_type
-
-            data = self._get(f"/api/v3/sec_filings/{ticker}", params)
-            if not data:
-                continue
-
-            records = []
-            for row in data:
-                filing_date = row.get("fillingDate", "") or row.get("filingDate", "")
-                if not filing_date:
-                    continue
-                records.append({
-                    "ticker": ticker,
-                    "filing_date": filing_date[:10],
-                    "type": row.get("type", ""),
-                    "title": (row.get("title") or "")[:500],
-                    "url": (row.get("finalLink") or row.get("link", ""))[:500],
-                })
-
-            if records:
-                df = pd.DataFrame(records)
-                self.db.upsert_us_sec_filing(df)
-                total += len(records)
-
-        logger.info(f"美股 SEC 公告下载完成: {total} 条")
-        return total
+        """SEC filings — yfinance 不支持，返回 0。"""
+        logger.info("SEC filings 下载跳过（yfinance 不支持此功能，请使用 SEC EDGAR API）")
+        return 0
 
     def update_sec_filings(self) -> int:
-        """增量更新 SEC 公告。"""
+        """增量更新 SEC 公告 — 跳过。"""
         return self.download_sec_filings()
 
     # ----------------------------------------------------------
@@ -665,42 +711,48 @@ class FMPDownloader:
 
         total = 0
         for ticker in tqdm(tickers, desc="美股公司行动"):
+            t = self._safe_ticker(ticker)
+            if t is None:
+                continue
+
             records = []
 
             # 分红
-            div_data = self._get(f"/api/v3/historical-price-full/stock_dividend/{ticker}")
-            if div_data and "historical" in div_data:
-                for row in div_data["historical"]:
-                    date_str = row.get("date", "")
-                    if not date_str:
-                        continue
-                    records.append({
-                        "ticker": ticker,
-                        "date": date_str,
-                        "action_type": "dividend",
-                        "label": row.get("label", ""),
-                        "value": row.get("dividend"),
-                    })
+            try:
+                divs = t.dividends
+                if divs is not None and not divs.empty:
+                    for date_idx, value in divs.items():
+                        records.append({
+                            "ticker": ticker,
+                            "date": _safe_date_str(date_idx),
+                            "action_type": "dividend",
+                            "label": f"${value:.4f} per share",
+                            "value": float(value),
+                        })
+            except Exception as e:
+                logger.debug(f"分红数据获取失败 {ticker}: {e}")
 
             # 拆股
-            split_data = self._get(f"/api/v3/historical-price-full/stock_split/{ticker}")
-            if split_data and "historical" in split_data:
-                for row in split_data["historical"]:
-                    date_str = row.get("date", "")
-                    if not date_str:
-                        continue
-                    records.append({
-                        "ticker": ticker,
-                        "date": date_str,
-                        "action_type": "split",
-                        "label": row.get("label", ""),
-                        "value": row.get("numerator"),
-                    })
+            try:
+                splits = t.splits
+                if splits is not None and not splits.empty:
+                    for date_idx, value in splits.items():
+                        records.append({
+                            "ticker": ticker,
+                            "date": _safe_date_str(date_idx),
+                            "action_type": "split",
+                            "label": f"{value:.0f}:1 split",
+                            "value": float(value),
+                        })
+            except Exception as e:
+                logger.debug(f"拆股数据获取失败 {ticker}: {e}")
 
             if records:
                 df = pd.DataFrame(records)
                 self.db.upsert_us_corporate_action(df)
                 total += len(records)
+
+            time.sleep(0.1)
 
         logger.info(f"美股公司行动下载完成: {total} 条")
         return total
@@ -726,3 +778,30 @@ class FMPDownloader:
         results["sec_filings"] = self.download_sec_filings()
         results["corporate_actions"] = self.download_corporate_actions()
         return results
+
+
+# ============================================================
+# 辅助函数
+# ============================================================
+
+def _safe_get(series: pd.Series, key: str):
+    """从 yfinance 财务 Series 中安全取值，找不到返回 None。"""
+    if series is None or series.empty:
+        return None
+    try:
+        val = series.get(key)
+        if val is not None and pd.notna(val):
+            return float(val)
+    except (TypeError, ValueError):
+        pass
+    return None
+
+def _safe_date_str(date_idx):
+    """Safely convert date_idx to YYYY-MM-DD string."""
+    try:
+        if hasattr(date_idx, 'strftime'):
+            return date_idx.strftime("%Y-%m-%d")
+        return pd.to_datetime(date_idx).strftime("%Y-%m-%d")
+    except Exception:
+        return str(date_idx)[:10]
+

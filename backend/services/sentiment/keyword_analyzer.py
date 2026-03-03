@@ -61,9 +61,9 @@ class KeywordAnalyzer:
                 "keywords_hit": list[str],  # 命中的关键词
             }
         """
-        title = article.get("title", "") or ""
-        summary = article.get("summary", "") or ""
-        content = article.get("content", "") or ""
+        title = str(article.get("title") or "")
+        summary = str(article.get("summary") or "")
+        content = str(article.get("content") or "")
         tier = article.get("tier", 5)
 
         # 1. 行业匹配
@@ -76,11 +76,15 @@ class KeywordAnalyzer:
         all_hits = industry_hits + sentiment_hits
         intensity = self._compute_intensity(tier, len(all_hits))
 
+        # 4. 影响类型分类
+        impact_type = self._classify_impact_type(title, summary, content)
+
         return {
             "industries": industries,
             "sentiment": sentiment,
             "intensity": intensity,
             "keywords_hit": all_hits,
+            "impact_type": impact_type,
         }
 
     def _match_industries(
@@ -176,3 +180,46 @@ class KeywordAnalyzer:
         tier_w = TIER_WEIGHTS.get(tier, 0.4)
         density = min(hit_count / 3.0, 1.0)
         return round(tier_w * density, 4)
+
+    @staticmethod
+    def _classify_impact_type(title: str, summary: str, content: str = "") -> str:
+        """
+        基于规则的政策影响类型分类。
+
+        Returns:
+            impact_type: trade_tariff | tech_sanction | monetary_policy |
+                         fiscal_stimulus | industry_regulation | general_policy
+        """
+        text = title + summary + content
+
+        # 贸易关税
+        tariff_kw = ["关税", "贸易战", "进出口", "贸易壁垒", "贸易协定", "反倾销",
+                     "反补贴", "tariff", "trade war", "贸易摩擦", "加征关税"]
+        if any(kw in text for kw in tariff_kw):
+            return "trade_tariff"
+
+        # 技术制裁
+        sanction_kw = ["制裁", "实体清单", "出口管制", "芯片禁令", "技术封锁",
+                       "sanction", "断供", "技术脱钩", "出口限制"]
+        if any(kw in text for kw in sanction_kw):
+            return "tech_sanction"
+
+        # 货币政策
+        monetary_kw = ["利率", "降息", "加息", "准备金", "公开市场", "MLF",
+                       "逆回购", "LPR", "货币政策", "汇率", "央行", "SHIBOR"]
+        if any(kw in text for kw in monetary_kw):
+            return "monetary_policy"
+
+        # 财政刺激
+        fiscal_kw = ["减税", "降费", "专项债", "财政补贴", "财政刺激", "政府投资",
+                     "消费券", "以旧换新", "退税", "财政政策"]
+        if any(kw in text for kw in fiscal_kw):
+            return "fiscal_stimulus"
+
+        # 行业监管
+        regulation_kw = ["监管", "整治", "规范", "准入", "反垄断", "合规",
+                         "处罚", "约谈", "环保标准", "排放", "牌照"]
+        if any(kw in text for kw in regulation_kw):
+            return "industry_regulation"
+
+        return "general_policy"

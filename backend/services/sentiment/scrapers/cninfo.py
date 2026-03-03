@@ -44,7 +44,7 @@ class CninfoScraper(BaseScraper):
         """Cninfo 不使用 HTML 列表页，此方法不会被调用。"""
         return []
 
-    def scrape_pages(self, max_pages: int = SENTIMENT_MAX_PAGES):
+    def scrape_pages(self, max_pages: int = SENTIMENT_MAX_PAGES, **kwargs):
         """
         逐日窗口抓取生成器：按 7 天为一个时间窗口分批拉取公告。
 

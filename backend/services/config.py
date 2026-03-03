@@ -5,6 +5,7 @@
 修改配置请编辑 .env 文件，不要直接改此文件。
 """
 
+import json as _json
 import os
 from pathlib import Path
 
@@ -77,24 +78,64 @@ REBALANCE_FREQ = "M"
 MIN_HOLDINGS = 0                  # 最少持仓数，0 = 允许空仓
 MAX_HOLDINGS = int(os.environ.get("MAX_HOLDINGS", "10"))
 MIN_SELECT_SCORE = float(os.environ.get("MIN_SELECT_SCORE", "0"))  # 选股最低分，低于此分不入选
-MAX_SINGLE_WEIGHT = float(os.environ.get("MAX_SINGLE_WEIGHT", "0.05"))
+MAX_SINGLE_WEIGHT = float(os.environ.get("MAX_SINGLE_WEIGHT", "0.12"))
 MAX_INDUSTRY_WEIGHT = float(os.environ.get("MAX_INDUSTRY_WEIGHT", "0.30"))
 MAX_DRAWDOWN_THRESHOLD = 0.25
 DRAWDOWN_REDUCE_POSITION = 0.70
+# 线性回撤响应参数
+DD_START_THRESHOLD = float(os.environ.get("DD_START_THRESHOLD", "0.10"))
+DD_MAX_THRESHOLD = float(os.environ.get("DD_MAX_THRESHOLD", "0.25"))
+DD_MIN_POSITION = float(os.environ.get("DD_MIN_POSITION", "0.50"))
 MIN_DAILY_TURNOVER = 50_000_000
 
 # 换手惩罚系数（0.0 = 关闭）
 TURNOVER_PENALTY_LAMBDA = float(os.environ.get("TURNOVER_PENALTY_LAMBDA", "0.0"))
+
+# 最小有效大类数（有效大类数低于此值时股票得分设为 NaN，被剔除）
+MIN_VALID_CATEGORIES = int(os.environ.get("MIN_VALID_CATEGORIES", "4"))
 
 # 中性化模式: "full" / "size_only" / "none"
 NEUTRALIZE_MODE = os.environ.get("NEUTRALIZE_MODE", "full")
 # 非线性市值项: 0 = 关闭, 1 = 开启
 NONLINEAR_SIZE = os.environ.get("NONLINEAR_SIZE", "0") == "1"
 
+# 按大类覆盖中性化模式（JSON 格式，例如 '{"macro":"size_only","sentiment":"none"}'）
+_raw_cat_neutralize = os.environ.get("CATEGORY_NEUTRALIZE_OVERRIDES", "")
+CATEGORY_NEUTRALIZE_OVERRIDES: dict[str, str] = {}
+if _raw_cat_neutralize.strip():
+    try:
+        CATEGORY_NEUTRALIZE_OVERRIDES = _json.loads(_raw_cat_neutralize)
+    except _json.JSONDecodeError:
+        pass
+# 默认: macro/sentiment 使用 size_only，保留行业 alpha
+if "macro" not in CATEGORY_NEUTRALIZE_OVERRIDES:
+    CATEGORY_NEUTRALIZE_OVERRIDES["macro"] = "size_only"
+if "sentiment" not in CATEGORY_NEUTRALIZE_OVERRIDES:
+    CATEGORY_NEUTRALIZE_OVERRIDES["sentiment"] = "size_only"
+
+# 标准化模式: "zscore" | "rank"（rank percentile 对偏态分布更稳健）
+STANDARDIZE_MODE = os.environ.get("STANDARDIZE_MODE", "zscore")
+
+# Softmax 权重温度参数（τ > 0: softmax, τ = 0: 等权）
+WEIGHT_TEMPERATURE = float(os.environ.get("WEIGHT_TEMPERATURE", "2.0"))
+
+# Regime 切换（CSI 300 120 日均线判定牛/熊）
+REGIME_ENABLED = os.environ.get("REGIME_ENABLED", "1") == "1"
+REGIME_MA_WINDOW = int(os.environ.get("REGIME_MA_WINDOW", "120"))
+REGIME_INDEX_CODE = os.environ.get("REGIME_INDEX_CODE", "000300.SH")
+# 熊市大类权重覆盖
+_raw_regime_bear = os.environ.get("REGIME_BEAR_OVERRIDES", "")
+REGIME_BEAR_OVERRIDES: dict[str, float] = {"momentum": 0.6, "quality": 1.5}
+if _raw_regime_bear.strip():
+    try:
+        REGIME_BEAR_OVERRIDES = {k: float(v) for k, v in _json.loads(_raw_regime_bear).items()}
+    except Exception:
+        pass
+
 # 波动率目标管理（替代回撤缩仓）
 USE_VOL_TARGETING = os.environ.get("USE_VOL_TARGETING", "0") == "1"
 TARGET_VOL = float(os.environ.get("TARGET_VOL", "0.20"))
-VOL_LOOKBACK_DAYS = int(os.environ.get("VOL_LOOKBACK_DAYS", "20"))
+VOL_LOOKBACK_DAYS = int(os.environ.get("VOL_LOOKBACK_DAYS", "60"))
 VOL_SCALE_MIN = float(os.environ.get("VOL_SCALE_MIN", "0.3"))
 VOL_SCALE_MAX = float(os.environ.get("VOL_SCALE_MAX", "1.0"))
 
@@ -129,7 +170,7 @@ RESEARCH_LOOKBACK_DAYS = int(os.environ.get("RESEARCH_LOOKBACK_DAYS", "90"))
 # 舆情抓取配置
 # ============================================================
 
-SENTIMENT_RATE_LIMIT = int(os.environ.get("SENTIMENT_RATE_LIMIT", "20"))          # 每分钟每域名请求数
+SENTIMENT_RATE_LIMIT = int(os.environ.get("SENTIMENT_RATE_LIMIT", "600"))         # 每分钟每域名请求数
 SENTIMENT_REQUEST_TIMEOUT = int(os.environ.get("SENTIMENT_REQUEST_TIMEOUT", "30"))  # 请求超时（秒）
 SENTIMENT_MAX_RETRIES = int(os.environ.get("SENTIMENT_MAX_RETRIES", "3"))
 SENTIMENT_RETRY_WAIT = int(os.environ.get("SENTIMENT_RETRY_WAIT", "5"))            # 重试等待（秒）
@@ -351,7 +392,7 @@ NEGATIVE_KEYWORDS = [
 ]
 
 # --- 来源层级权重 ---
-TIER_WEIGHTS = {1: 1.0, 2: 0.8, 3: 0.7, 4: 0.5, 5: 0.4}
+TIER_WEIGHTS = {1: 1.0, 2: 0.8, 3: 0.7, 4: 0.5, 5: 0.0}  # Tier 5 暂时禁用
 
 # ============================================================
 # 美股数据配置（FMP + FRED）
@@ -365,8 +406,23 @@ FMP_RATE_LIMIT = int(os.environ.get("FMP_RATE_LIMIT", "300"))  # 免费版 300 r
 US_INDEX_SYMBOLS = ["^GSPC", "^IXIC", "^DJI"]  # S&P 500, NASDAQ, Dow Jones
 
 US_COMMODITY_SYMBOLS = [
-    "GCUSD", "SIUSD", "CLUSD", "BZUSD", "NGUSD",  # 金银油气
-    "HGUSD", "ZCUSD", "ZSUSD", "ZTUSD",            # 铜玉米大豆小麦
+    "GC=F", "SI=F", "CL=F", "BZ=F", "NG=F",  # 金银油气
+    "HG=F", "ZC=F", "ZS=F", "ZW=F",           # 铜玉米大豆小麦
+]
+
+# NASDAQ 100 兜底列表（Wikipedia 不可用时使用，可在 .env 中用逗号分隔覆盖）
+_raw_fallback = os.environ.get("US_FALLBACK_TICKERS", "")
+US_FALLBACK_TICKERS: list[str] = [s.strip() for s in _raw_fallback.split(",") if s.strip()] if _raw_fallback.strip() else [
+    "AAPL", "ABNB", "ADBE", "ADI", "ADP", "ADSK", "AEP", "AMAT", "AMD", "AMGN",
+    "AMZN", "ANSS", "APP", "ARM", "ASML", "AVGO", "AZN", "BIIB", "BKNG", "BKR",
+    "CCEP", "CDNS", "CDW", "CEG", "CHTR", "CMCSA", "COST", "CPRT", "CRWD", "CSCO",
+    "CSGP", "CTAS", "CTSH", "DASH", "DDOG", "DLTR", "DXCM", "EA", "EXC", "FANG",
+    "FAST", "FTNT", "GEHC", "GFS", "GILD", "GOOG", "GOOGL", "HON", "IDXX", "INTC",
+    "INTU", "ISRG", "KDP", "KHC", "KLAC", "LIN", "LRCX", "LULU", "MAR", "MCHP",
+    "MDB", "MDLZ", "MELI", "META", "MNST", "MRVL", "MSFT", "MU", "NFLX", "NVDA",
+    "NXPI", "ODFL", "ON", "ORLY", "PANW", "PAYX", "PCAR", "PDD", "PEP", "PYPL",
+    "QCOM", "REGN", "ROP", "ROST", "SBUX", "SMCI", "SNPS", "TEAM", "TMUS", "TSLA",
+    "TTD", "TTWO", "TXN", "VRSK", "VRTX", "WBD", "WDAY", "XEL", "ZS",
 ]
 
 # FRED 指标映射（indicator_code → FRED series ID）
@@ -392,6 +448,24 @@ FRED_SERIES_MAP = {
     "US_INIT_CLAIMS": "ICSA",
     "US_PCE": "PCEPI",
 }
+
+# ============================================================
+# Polymarket 预测市场配置（美股事件驱动预警）
+# ============================================================
+
+POLYMARKET_GAMMA_API = os.environ.get("POLYMARKET_GAMMA_API", "https://gamma-api.polymarket.com")
+POLYMARKET_CLOB_WS = os.environ.get("POLYMARKET_CLOB_WS", "wss://ws-subscriptions-clob.polymarket.com/ws/market")
+
+# Spike 检测阈值（绝对价格变动）
+POLYMARKET_SPIKE_5M = float(os.environ.get("POLYMARKET_SPIKE_5M", "0.05"))    # 5分钟 >5%
+POLYMARKET_SPIKE_1H = float(os.environ.get("POLYMARKET_SPIKE_1H", "0.15"))    # 1小时 >15%
+POLYMARKET_SPIKE_24H = float(os.environ.get("POLYMARKET_SPIKE_24H", "0.25"))  # 24小时 >25%
+
+POLYMARKET_MIN_VOLUME = int(os.environ.get("POLYMARKET_MIN_VOLUME", "50000"))       # 最低交易量过滤
+POLYMARKET_MAX_MARKETS = int(os.environ.get("POLYMARKET_MAX_MARKETS", "50"))        # 最大监控市场数
+POLYMARKET_SNAPSHOT_INTERVAL = int(os.environ.get("POLYMARKET_SNAPSHOT_INTERVAL", "60"))      # 快照间隔（秒）
+POLYMARKET_DISCOVERY_INTERVAL = int(os.environ.get("POLYMARKET_DISCOVERY_INTERVAL", "3600"))  # 市场发现间隔（秒）
+POLYMARKET_LLM_COOLDOWN = int(os.environ.get("POLYMARKET_LLM_COOLDOWN", "300"))               # 同一事件 LLM 分析冷却（秒）
 
 # ============================================================
 # 日志配置

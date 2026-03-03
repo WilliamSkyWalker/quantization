@@ -1,21 +1,73 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useMessage, NIcon } from 'naive-ui'
-import { PlayOutline } from '@vicons/ionicons5'
-import { startBacktest, getBacktestResult } from '../api'
+import type { DataTableColumns } from 'naive-ui'
+import { PlayOutline, RocketOutline, FlashOutline, StopOutline } from '@vicons/ionicons5'
+import { startBacktest, getDataStatus } from '../api'
 import { useTaskPolling } from '../composables/useTaskPolling'
 import { formatDate } from '../utils/format'
 import NavChart from '../components/NavChart.vue'
 import DrawdownChart from '../components/DrawdownChart.vue'
 import MonthlyHeatmap from '../components/MonthlyHeatmap.vue'
+import IndustryBar from '../components/IndustryBar.vue'
 import TradeLog from '../components/TradeLog.vue'
 
 const message = useMessage()
 const dateRange = ref<[string, string]>(['2020-01-01', '2024-12-31'])
+const latestTradeDate = ref('')
 const { loading, taskId, result, start, stopPolling, taskStore } = useTaskPolling({
-  fetchResult: getBacktestResult,
   taskLabel: '回测',
 })
+const stopping = ref(false)
+const canStop = computed(() => !!taskId.value && loading.value)
+
+onMounted(async () => {
+  try {
+    const { data } = await getDataStatus()
+    if (data.latest_trade_date) {
+      latestTradeDate.value = data.latest_trade_date
+    }
+  } catch { /* ignore */ }
+})
+
+function setFullBacktest() {
+  if (!latestTradeDate.value) {
+    message.warning('无法获取最新交易日，请先下载数据')
+    return
+  }
+  dateRange.value = ['2018-06-01', latestTradeDate.value]
+}
+
+function setQuickBacktest() {
+  if (!latestTradeDate.value) {
+    message.warning('无法获取最新交易日，请先下载数据')
+    return
+  }
+  const d = new Date(latestTradeDate.value)
+  d.setFullYear(d.getFullYear() - 2)
+  const twoYearsAgo = d.toISOString().slice(0, 10)
+  dateRange.value = [twoYearsAgo, latestTradeDate.value]
+}
+
+function computeIndustryContributions(attr: any[]) {
+  if (!attr?.length) return []
+  return attr
+    .filter((a: any) => a.industry_name && a.contribution != null)
+    .map((a: any) => ({ industry: a.industry_name, contribution: a.contribution }))
+}
+
+const holdingsColumns: DataTableColumns = [
+  { title: '代码', key: 'ts_code', width: 120 },
+  { title: '名称', key: 'name', width: 100 },
+  {
+    title: '权重', key: 'weight', width: 100,
+    render: (row: any) => (row.weight * 100).toFixed(2) + '%',
+  },
+  {
+    title: '得分', key: 'score', width: 100,
+    render: (row: any) => row.score?.toFixed(3) || '-',
+  },
+]
 
 function handleStartDateUpdate(ts: number | null) {
   if (ts) {
@@ -42,6 +94,22 @@ async function runBacktest() {
     start(data.task_id)
   } catch (e: any) {
     message.error('启动回测失败')
+  }
+}
+
+async function stopBacktest() {
+  if (!taskId.value) {
+    message.warning('当前没有运行中的回测')
+    return
+  }
+  stopping.value = true
+  try {
+    await taskStore.killTask(taskId.value)
+    message.success('终止指令已发送')
+  } catch (e) {
+    message.error('终止回测失败')
+  } finally {
+    stopping.value = false
   }
 }
 
@@ -74,6 +142,19 @@ const summaryItems = [
         <n-button type="primary" @click="runBacktest" :loading="loading">
           <template #icon><n-icon><PlayOutline /></n-icon></template>
           运行回测
+        </n-button>
+        <n-button type="error" secondary @click="stopBacktest" :disabled="!canStop" :loading="stopping">
+          <template #icon><n-icon><StopOutline /></n-icon></template>
+          停止回测
+        </n-button>
+        <n-divider vertical />
+        <n-button @click="setFullBacktest" :disabled="!latestTradeDate || loading" secondary>
+          <template #icon><n-icon><RocketOutline /></n-icon></template>
+          完整回测 (2018~至今)
+        </n-button>
+        <n-button @click="setQuickBacktest" :disabled="!latestTradeDate || loading" secondary>
+          <template #icon><n-icon><FlashOutline /></n-icon></template>
+          快速回测 (近2年)
         </n-button>
       </n-space>
     </n-card>
@@ -137,6 +218,16 @@ const summaryItems = [
       <!-- Monthly heatmap -->
       <n-card hoverable style="margin-bottom: 20px" v-if="result.monthly?.length" title="月度收益热力图">
         <MonthlyHeatmap :data="result.monthly" />
+      </n-card>
+
+      <!-- Industry Attribution -->
+      <n-card hoverable style="margin-bottom: 20px" v-if="result.attribution?.length" title="行业归因">
+        <IndustryBar :data="computeIndustryContributions(result.attribution)" />
+      </n-card>
+
+      <!-- Latest Holdings -->
+      <n-card hoverable style="margin-bottom: 20px" v-if="result.holdings?.length" title="最新持仓">
+        <n-data-table :columns="holdingsColumns" :data="result.holdings" striped size="small" />
       </n-card>
 
       <!-- Trades -->

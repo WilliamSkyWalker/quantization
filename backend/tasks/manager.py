@@ -112,7 +112,8 @@ class TaskManager:
         info = self._tasks.get(task_id)
         return info._cancel_event.is_set() if info else False
 
-    def update_progress(self, task_id: str, progress: int, message: str = ''):
+    def \
+            update_progress(self, task_id: str, progress: int, message: str = ''):
         """Update task progress and push via WebSocket. Raises if cancelled."""
         info = self._tasks.get(task_id)
         if not info:

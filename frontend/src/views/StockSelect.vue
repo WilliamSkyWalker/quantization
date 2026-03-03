@@ -154,7 +154,7 @@ const factorGroups: Record<string, string[]> = {
   '动量': ['MOM_1M', 'MOM_3M', 'MOM_12M', 'REV_5D', 'IND_MOM', 'RESIDUAL_MOM', 'CMDTY_MOM'],
   '技术': ['TURN_20D', 'VOL_20D', 'PRICE_DEV_60D', 'SIZE', 'VOL_PRICE_DIV'],
   '宏观': ['MACRO_CYCLE', 'MACRO_LIQD', 'MACRO_INFL', 'MACRO_EXTR'],
-  '舆情': ['POLICY_SENT', 'POLICY_INTENSITY'],
+  '舆情': ['POLICY_SENT', 'POLICY_INTENSITY', 'ANALYST_RATING', 'ANALYST_COVERAGE'],
 }
 
 // Factor meta: Chinese name + calculation description
@@ -185,6 +185,8 @@ const factorMeta: Record<string, { name: string; desc: string }> = {
   MACRO_EXTR:     { name: '外部风险', desc: '基于人民币汇率、出口增速合成的外部风险指标，风险上升利好内需板块（正向）' },
   POLICY_SENT:    { name: '政策情感得分', desc: '对11个政府网站及Twitter政策账号的新闻进行NLP情感分析，正向舆情映射到相关行业个股（正向）' },
   POLICY_INTENSITY: { name: '政策强度', desc: '政策新闻的关键词强度加权得分，LLM对高强度文章做二次增强打分，反映政策力度（正向）' },
+  ANALYST_RATING:   { name: '分析师评级', desc: '券商研报的共识评级得分（买入>增持>中性>减持>卖出），近90日加权平均（正向）' },
+  ANALYST_COVERAGE: { name: '分析师覆盖度', desc: '近90日内覆盖该股票的研究机构数量，覆盖度越高关注度越大（正向）' },
 }
 
 onMounted(async () => {
@@ -197,17 +199,31 @@ onMounted(async () => {
   // Default to latest trade date with data, fall back to today
   date.value = latestTradeDate || todayStr()
 
-  // Auto-load saved result if available for the default date
+  // Auto-load saved result if available, otherwise auto-run
   if (historyDates.value.some(h => h.date === date.value)) {
     await loadSavedResult(date.value)
+  } else {
+    runSelect()
   }
 })
 </script>
 
 <template>
   <div>
+    <h2 style="margin: 0 0 16px 0; font-size: 20px; font-weight: 600">今日选股</h2>
     <n-card hoverable style="margin-bottom: 20px">
       <n-space align="center" wrap>
+        <n-button
+          :type="result ? 'warning' : 'primary'"
+          :loading="loading"
+          :disabled="!date"
+          @click="runSelect"
+        >
+          {{ result ? '重新执行' : '执行今日选股' }}
+        </n-button>
+        <n-tag v-if="resultSource === 'saved'" type="info" size="small">已存结果</n-tag>
+        <n-tag v-else-if="resultSource === 'live'" type="success" size="small">实时计算</n-tag>
+        <n-divider vertical />
         <n-date-picker
           type="date"
           :value="date ? new Date(date).getTime() : null"
@@ -224,16 +240,6 @@ onMounted(async () => {
           clearable
           @update:value="handleHistorySelect"
         />
-        <n-button
-          :type="result ? 'warning' : 'primary'"
-          :loading="loading"
-          :disabled="!date"
-          @click="runSelect"
-        >
-          {{ result ? '重新执行' : '执行选股' }}
-        </n-button>
-        <n-tag v-if="resultSource === 'saved'" type="info" size="small">已存结果</n-tag>
-        <n-tag v-else-if="resultSource === 'live'" type="success" size="small">实时计算</n-tag>
       </n-space>
       <div v-if="result" style="margin-top: 8px; color: #909399; font-size: 13px">
         {{ result.date }} · 共 {{ result.total }} 只股票参与打分

@@ -22,6 +22,9 @@ from backend.services.config import (
     MAX_INDUSTRY_WEIGHT,
     MAX_DRAWDOWN_THRESHOLD,
     DRAWDOWN_REDUCE_POSITION,
+    DD_START_THRESHOLD,
+    DD_MAX_THRESHOLD,
+    DD_MIN_POSITION,
     MIN_DAILY_TURNOVER,
     USE_VOL_TARGETING,
     TARGET_VOL,
@@ -53,6 +56,9 @@ class RiskManager:
         max_industry_weight: float = MAX_INDUSTRY_WEIGHT,
         max_drawdown: float = MAX_DRAWDOWN_THRESHOLD,
         drawdown_position: float = DRAWDOWN_REDUCE_POSITION,
+        dd_start_threshold: float = DD_START_THRESHOLD,
+        dd_max_threshold: float = DD_MAX_THRESHOLD,
+        dd_min_position: float = DD_MIN_POSITION,
         min_turnover: float = MIN_DAILY_TURNOVER,
         use_vol_targeting: bool = USE_VOL_TARGETING,
         target_vol: float = TARGET_VOL,
@@ -65,8 +71,11 @@ class RiskManager:
             db: DatabaseManager 实例。
             max_single_weight: 个股持仓上限。
             max_industry_weight: 单行业暴露上限。
-            max_drawdown: 最大回撤降仓阈值。
-            drawdown_position: 触发降仓后的目标仓位。
+            max_drawdown: 最大回撤降仓阈值（旧参数，保留兼容）。
+            drawdown_position: 触发降仓后的目标仓位（旧参数，保留兼容）。
+            dd_start_threshold: 线性降仓起始回撤阈值。
+            dd_max_threshold: 线性降仓最大回撤阈值。
+            dd_min_position: 最大回撤时的最低仓位。
             min_turnover: 日均成交额下限（元）。
             use_vol_targeting: True 则使用波动率目标管理替代回撤缩仓。
             target_vol: 目标年化波动率（默认 0.20）。
@@ -79,6 +88,9 @@ class RiskManager:
         self.max_industry_weight = max_industry_weight
         self.max_drawdown = max_drawdown
         self.drawdown_position = drawdown_position
+        self.dd_start = dd_start_threshold
+        self.dd_max = dd_max_threshold
+        self.dd_min_position = dd_min_position
         self.min_turnover = min_turnover
         self.use_vol_targeting = use_vol_targeting
         self.target_vol = target_vol
@@ -285,7 +297,11 @@ class RiskManager:
 
     def check_drawdown(self, nav_series: pd.Series) -> float:
         """
-        检查当前回撤是否触发降仓。
+        线性回撤响应：回撤在 [dd_start, dd_max] 区间内线性降仓。
+
+        dd <= dd_start → 1.0（满仓）
+        dd >= dd_max   → dd_min_position
+        中间           → 线性插值
 
         Args:
             nav_series: 策略净值时间序列。
@@ -297,15 +313,24 @@ class RiskManager:
             return 1.0
 
         peak = nav_series.cummax()
-        current_drawdown = (nav_series.iloc[-1] - peak.iloc[-1]) / peak.iloc[-1]
+        dd = abs((nav_series.iloc[-1] - peak.iloc[-1]) / peak.iloc[-1])
 
-        if current_drawdown < -self.max_drawdown:
+        if dd <= self.dd_start:
+            return 1.0
+
+        if dd >= self.dd_max:
             logger.warning(
-                f"当前回撤 {current_drawdown:.2%} 超过阈值 {-self.max_drawdown:.2%}"
+                f"当前回撤 {dd:.2%} 达到最大阈值 {self.dd_max:.2%}，"
+                f"仓位降至 {self.dd_min_position:.0%}"
             )
-            return self.drawdown_position
+            return self.dd_min_position
 
-        return 1.0
+        # 线性插值
+        scale = 1.0 - (dd - self.dd_start) / (self.dd_max - self.dd_start) * (1.0 - self.dd_min_position)
+        logger.info(
+            f"线性回撤响应: 回撤 {dd:.2%}，仓位缩放至 {scale:.0%}"
+        )
+        return scale
 
     # ----------------------------------------------------------
     # 波动率目标管理

@@ -1,7 +1,7 @@
 """API URL configuration."""
 from django.urls import path
 
-from .views import data, strategy, trading, sentiment, config, report
+from .views import data, strategy, trading, sentiment, config, report, polymarket, stock
 
 urlpatterns = [
     # Data management
@@ -23,12 +23,10 @@ urlpatterns = [
     path('select', strategy.select_stocks),
     path('select/history', strategy.select_history),
     path('select/history/<str:date>', strategy.select_history_date),
-    path('select/<str:task_id>', strategy.select_result),
     path('factors', strategy.factor_detail),
 
     # Backtest
     path('backtest/run', strategy.backtest_run),
-    path('backtest/result/<str:task_id>', strategy.backtest_result),
 
     # Paper trading
     path('paper/account', trading.paper_account),
@@ -48,6 +46,7 @@ urlpatterns = [
     path('sentiment/download-and-analyze', sentiment.sentiment_download_and_analyze),
     path('sentiment/backfill-analyze', sentiment.sentiment_backfill_analyze),
     path('sentiment/backfill-content', sentiment.sentiment_backfill_content),
+    path('sentiment/backfill-llm', sentiment.sentiment_backfill_llm),
 
     # Config
     path('config/settings', config.get_settings),
@@ -57,6 +56,28 @@ urlpatterns = [
     path('config/industries', config.get_all_industries),
     path('config/init', config.init_database),
 
+    # Stock detail
+    path('stock/search', stock.search),
+    path('stock/<str:ts_code>/profile', stock.profile),
+    path('stock/<str:ts_code>/kline', stock.kline),
+    path('stock/<str:ts_code>/reports', stock.reports),
+    path('stock/<str:ts_code>/news', stock.news),
+
     # Report
     path('report/generate', report.generate_report),
+
+    # Polymarket - Monitor
+    path('polymarket/monitor/start', polymarket.monitor_start),
+    path('polymarket/monitor/stop', polymarket.monitor_stop),
+    path('polymarket/status', polymarket.monitor_status),
+    path('polymarket/alerts', polymarket.alert_list),
+    path('polymarket/alerts/<int:alert_id>/read', polymarket.alert_mark_read),
+    path('polymarket/mock-alert', polymarket.mock_alert),
+
+    # Polymarket - Backtest
+    path('polymarket/backtest/discover', polymarket.backtest_discover),
+    path('polymarket/backtest/download', polymarket.backtest_download),
+    path('polymarket/backtest/markets', polymarket.backtest_markets),
+    path('polymarket/backtest/price-series/<str:condition_id>', polymarket.backtest_price_series),
+    path('polymarket/backtest/run', polymarket.backtest_run),
 ]

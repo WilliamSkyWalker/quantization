@@ -27,6 +27,12 @@ from backend.services.config import (
     TURNOVER_PENALTY_LAMBDA,
     NEUTRALIZE_MODE,
     NONLINEAR_SIZE,
+    MIN_VALID_CATEGORIES,
+    CATEGORY_NEUTRALIZE_OVERRIDES,
+    STANDARDIZE_MODE,
+    WEIGHT_TEMPERATURE,
+    REGIME_ENABLED,
+    REGIME_BEAR_OVERRIDES,
     LOG_LEVEL,
 )
 from backend.services.data.database import DatabaseManager
@@ -34,7 +40,7 @@ from backend.services.data.cleaner import get_clean_universe
 from backend.services.factors.value import EPFactor, BPFactor
 from backend.services.factors.momentum import MOM1MFactor, MOM3MFactor, MOM12MFactor, ShortReversalFactor, ResidualMomentumFactor
 from backend.services.factors.quality import ROEFactor, GrossMarginFactor, ProfitStabilityFactor, MarginTrendFactor
-from backend.services.factors.growth import NetProfitYOYFactor, RevenueYOYFactor
+from backend.services.factors.growth import NetProfitYOYFactor, RevenueYOYFactor, NetProfitCAGR3YFactor
 from backend.services.factors.technical import (
     Turnover20DFactor,
     VolatilityFactor,
@@ -58,7 +64,9 @@ from backend.services.factors.research import (
     AnalystRatingFactor,
     AnalystCoverageFactor,
 )
+from backend.services.factors.base import FactorBase
 from backend.services.factors.processor import process_factor
+from backend.services.strategy.regime import RegimeDetector
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
@@ -81,7 +89,7 @@ class MultiFactorStrategy:
     FACTOR_CATEGORIES = {
         "value":    ["EP", "BP"],
         "quality":  ["ROE_TTM", "GROSS_MARGIN", "PROFIT_STB", "MARGIN_TREND"],
-        "growth":   ["NET_PROFIT_YOY", "REVENUE_YOY"],
+        "growth":   ["NET_PROFIT_YOY", "REVENUE_YOY", "NET_PROFIT_CAGR_3Y"],
         "momentum": ["MOM_1M", "MOM_3M", "MOM_12M", "REV_5D", "IND_MOM", "RESIDUAL_MOM", "CMDTY_MOM"],
         "technical":["TURN_20D", "VOL_20D", "PRICE_DEV_60D", "SIZE", "VOL_PRICE_DIV"],
         "macro":    ["MACRO_CYCLE", "MACRO_LIQD", "MACRO_INFL", "MACRO_EXTR"],
@@ -101,6 +109,9 @@ class MultiFactorStrategy:
 
     # 核心财务因子 — 全部缺失则剔除出池
     CORE_FINANCIAL_FACTORS = ["EP", "BP", "ROE_TTM", "GROSS_MARGIN"]
+
+    # 因子→大类反向映射（用于按大类覆盖中性化模式）
+    FACTOR_TO_CATEGORY = {f: cat for cat, fs in FACTOR_CATEGORIES.items() for f in fs}
 
     def __init__(
         self,
@@ -157,6 +168,7 @@ class MultiFactorStrategy:
             # 成长因子
             NetProfitYOYFactor(db),      # NET_PROFIT_YOY
             RevenueYOYFactor(db),        # REVENUE_YOY
+            NetProfitCAGR3YFactor(db),   # NET_PROFIT_CAGR_3Y
             # 残差动量
             ResidualMomentumFactor(db),  # RESIDUAL_MOM
             # 量价背离
@@ -190,6 +202,7 @@ class MultiFactorStrategy:
             # Phase 8 新因子差异化权重
             self.factor_weights["NET_PROFIT_YOY"] = 1.0   # 提高净利润增速（0.8→1.0）
             self.factor_weights["REVENUE_YOY"] = 0.8      # 提高营收增速（0.6→0.8）
+            self.factor_weights["NET_PROFIT_CAGR_3Y"] = 0.8  # 3年复合增长率
             self.factor_weights["RESIDUAL_MOM"] = 0.7
             self.factor_weights["VOL_PRICE_DIV"] = 0.4
             # 商品轮动因子（低于 IND_MOM=0.8，因信号更间接）
@@ -209,15 +222,53 @@ class MultiFactorStrategy:
             self.factor_weights = factor_weights
 
         # 反向因子列表（值越低越好的因子）
-        self._reverse_factors = ["TURN_20D", "VOL_20D", "PRICE_DEV_60D", "PROFIT_STB", "VOL_PRICE_DIV"]
+        self._reverse_factors = ["TURN_20D", "VOL_20D", "PRICE_DEV_60D", "PROFIT_STB"]
 
         # 对硬编码权重中的反向因子取反
         for fname in self._reverse_factors:
             if fname in self.factor_weights:
                 self.factor_weights[fname] = -abs(self.factor_weights[fname])
 
+        # Regime 检测器
+        self._regime_detector = RegimeDetector(db) if REGIME_ENABLED else None
+
         # 从 DB 加载行业因子权重配置
         self._industry_weights = self._load_industry_weights()
+
+    # ----------------------------------------------------------
+    # 缓存辅助方法
+    # ----------------------------------------------------------
+
+    def _get_cached_industry_df(self) -> pd.DataFrame | None:
+        """获取行业映射（复用 FactorBase 静态缓存）。"""
+        try:
+            return self.factors[0].get_industry_map_cached()
+        except Exception:
+            return None
+
+    def _get_cached_mktcap_df(self, date: str) -> pd.DataFrame | None:
+        """计算市值数据（每日期缓存）。"""
+        cache_key = ("mktcap", date)
+        cached = FactorBase._date_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            # 复用 FactorBase 的缓存方法获取收盘价和总股本
+            # 使用第一个因子实例来调用（所有因子共享同一 db）
+            factor = self.factors[0]
+            df_close = factor.get_close_on_date(date)
+            df_share = factor.get_total_share()
+            if not df_close.empty and not df_share.empty:
+                mktcap_df = df_close[["ts_code", "close"]].merge(
+                    df_share, on="ts_code", how="inner"
+                )
+                mktcap_df["total_mv"] = mktcap_df["close"] * mktcap_df["total_share"]
+                mktcap_df = mktcap_df[["ts_code", "total_mv"]]
+                FactorBase._date_cache[cache_key] = mktcap_df
+                return mktcap_df
+        except Exception:
+            pass
+        return None
 
     def _load_industry_weights(self) -> dict[str, dict[str, float]]:
         """
@@ -257,25 +308,53 @@ class MultiFactorStrategy:
             return self._industry_weights["__DEFAULT__"]
         return self.factor_weights
 
+    def _get_regime_cat_weights(self, date: str) -> dict[str, float]:
+        """
+        获取 regime 感知的大类权重。
+
+        熊市时合并 REGIME_BEAR_OVERRIDES 到 CATEGORY_WEIGHTS。
+
+        Args:
+            date: 选股日期。
+
+        Returns:
+            大类权重字典。
+        """
+        if self._regime_detector is None:
+            return self.CATEGORY_WEIGHTS
+
+        regime = self._regime_detector.detect(date)
+        if regime == "bear" and REGIME_BEAR_OVERRIDES:
+            weights = dict(self.CATEGORY_WEIGHTS)
+            for cat, w in REGIME_BEAR_OVERRIDES.items():
+                if cat in weights:
+                    weights[cat] = w
+            logger.info(f"Regime bear: 大类权重覆盖 {REGIME_BEAR_OVERRIDES}")
+            return weights
+
+        return self.CATEGORY_WEIGHTS
+
     def _compute_scores(
         self,
         composite: pd.DataFrame,
         factor_cols: list[str],
         industry_df,
+        category_weights: dict[str, float] = None,
     ) -> pd.DataFrame:
         """
-        大类合成评分（固定分母）。
+        大类合成评分（缺失大类权重再分配）— 向量化实现。
 
         评分公式：
             1. 剔除缺失全部核心财务因子的股票（准入过滤）
             2. 每个大类内：加权平均（动态分母，同类因子可互替）
-            3. 大类间：固定分母合成（缺失大类贡献 0，分母不缩小）
+            3. 大类间：分母 = 有值大类的权重之和（缺失大类权重自动再分配给有值大类）
 
         效果：
             - 动量 6 个因子的贡献限制在 1 个大类权重内（与价值 2 因子等权）
-            - 缺失财务因子的票不会因分母缩小而虚高
+            - MIN_VALID_CATEGORIES 限制最大膨胀幅度
         """
         composite = composite.copy()
+        effective_cat_weights = category_weights or self.CATEGORY_WEIGHTS
 
         # 1. 核心财务准入过滤
         core_cols = [c for c in self.CORE_FINANCIAL_FACTORS if c in factor_cols]
@@ -297,39 +376,129 @@ class MultiFactorStrategy:
                 industry_df[["ts_code", "industry_name"]], on="ts_code", how="left"
             )
 
-        # 3. 固定分母 = 全部大类权重绝对值之和
-        fixed_denom = sum(abs(v) for v in self.CATEGORY_WEIGHTS.values())
-
         use_industry = bool(self._industry_weights) and industry_df is not None
 
-        def _cat_composite_score(row):
-            if use_industry:
-                ind = row.get("industry_name")
-                weights = self._get_weights_for_industry(ind)
-            else:
-                weights = self.factor_weights
+        # 3. 向量化评分
+        if use_industry:
+            # 行业差异化权重路径：按行业分组向量化
+            composite["score"] = self._compute_scores_by_industry(
+                composite, factor_cols, effective_cat_weights
+            )
+        else:
+            # 通用路径：纯向量化（无行业差异权重）
+            composite["score"] = self._compute_scores_vectorized(
+                composite, factor_cols, effective_cat_weights
+            )
 
-            total = 0.0
-            for cat, factors in self.FACTOR_CATEGORIES.items():
-                cat_sum = 0.0
-                cat_w = 0.0
-                for fc in factors:
-                    if fc in factor_cols:
-                        val = row[fc]
-                        if pd.notna(val):
-                            w = weights.get(fc, self.factor_weights.get(fc, 1.0))
-                            cat_sum += val * w
-                            cat_w += abs(w)
-                if cat_w > 0:
-                    # 类内加权平均（动态分母 — 同类因子可互替）
-                    cat_score = cat_sum / cat_w
-                    # 乘以大类权重
-                    total += cat_score * self.CATEGORY_WEIGHTS.get(cat, 1.0)
-            # 固定分母：无论几个大类有值，都除以全部大类权重和
-            return total / fixed_denom if fixed_denom > 0 else np.nan
-
-        composite["score"] = composite.apply(_cat_composite_score, axis=1)
         return composite
+
+    def _compute_scores_vectorized(
+        self,
+        composite: pd.DataFrame,
+        factor_cols: list[str],
+        effective_cat_weights: dict[str, float],
+    ) -> np.ndarray:
+        """纯向量化评分（通用权重，不区分行业）。"""
+        n_stocks = len(composite)
+        n_cats = len(self.FACTOR_CATEGORIES)
+        cat_names = list(self.FACTOR_CATEGORIES.keys())
+
+        # 预计算每个大类的得分
+        cat_scores = np.full((n_stocks, n_cats), np.nan)
+        cat_has_value = np.zeros((n_stocks, n_cats), dtype=bool)
+
+        for cat_idx, cat in enumerate(cat_names):
+            factors = self.FACTOR_CATEGORIES[cat]
+            cat_factor_cols = [f for f in factors if f in factor_cols]
+            if not cat_factor_cols:
+                continue
+
+            # 因子权重数组
+            fw = np.array([self.factor_weights.get(f, 1.0) for f in cat_factor_cols])
+            # 因子值矩阵 (n_stocks, n_factors_in_cat)
+            values = composite[cat_factor_cols].values.astype(float)
+
+            valid = ~np.isnan(values)
+            # 加权求和（NaN 视为 0）
+            weighted_sum = np.nansum(values * fw, axis=1)
+            # 权重分母（仅计入有效因子）
+            weight_denom = (valid * np.abs(fw)).sum(axis=1)
+
+            has_value = weight_denom > 0
+            cat_has_value[:, cat_idx] = has_value
+            cat_scores[has_value, cat_idx] = weighted_sum[has_value] / weight_denom[has_value]
+
+        # 大类权重
+        cat_weight_arr = np.array([effective_cat_weights.get(c, 1.0) for c in cat_names])
+
+        # 加权大类得分
+        weighted_cat = np.where(cat_has_value, cat_scores * cat_weight_arr, 0.0)
+        total_score = weighted_cat.sum(axis=1)
+
+        # 有效大类计数
+        n_valid_cats = cat_has_value.sum(axis=1)
+        # 有值大类权重之和
+        weight_denom_total = (cat_has_value * np.abs(cat_weight_arr)).sum(axis=1)
+
+        # 最终得分
+        final_score = np.where(
+            (n_valid_cats >= MIN_VALID_CATEGORIES) & (weight_denom_total > 0),
+            total_score / weight_denom_total,
+            np.nan,
+        )
+
+        return final_score
+
+    def _compute_scores_by_industry(
+        self,
+        composite: pd.DataFrame,
+        factor_cols: list[str],
+        effective_cat_weights: dict[str, float],
+    ) -> pd.Series:
+        """按行业分组向量化评分（行业差异化权重）。"""
+        result = pd.Series(np.nan, index=composite.index)
+        cat_names = list(self.FACTOR_CATEGORIES.keys())
+
+        for ind_name, group in composite.groupby("industry_name", dropna=False):
+            weights = self._get_weights_for_industry(ind_name if pd.notna(ind_name) else "")
+            idx = group.index
+            n = len(group)
+            n_cats = len(cat_names)
+
+            cat_scores = np.full((n, n_cats), np.nan)
+            cat_has_value = np.zeros((n, n_cats), dtype=bool)
+
+            for cat_idx, cat in enumerate(cat_names):
+                factors = self.FACTOR_CATEGORIES[cat]
+                cat_factor_cols = [f for f in factors if f in factor_cols]
+                if not cat_factor_cols:
+                    continue
+
+                fw = np.array([weights.get(f, self.factor_weights.get(f, 1.0)) for f in cat_factor_cols])
+                values = group[cat_factor_cols].values.astype(float)
+                valid = ~np.isnan(values)
+
+                weighted_sum = np.nansum(values * fw, axis=1)
+                weight_denom = (valid * np.abs(fw)).sum(axis=1)
+
+                has_value = weight_denom > 0
+                cat_has_value[:, cat_idx] = has_value
+                cat_scores[has_value, cat_idx] = weighted_sum[has_value] / weight_denom[has_value]
+
+            cat_weight_arr = np.array([effective_cat_weights.get(c, 1.0) for c in cat_names])
+            weighted_cat = np.where(cat_has_value, cat_scores * cat_weight_arr, 0.0)
+            total_score = weighted_cat.sum(axis=1)
+            n_valid_cats = cat_has_value.sum(axis=1)
+            weight_denom_total = (cat_has_value * np.abs(cat_weight_arr)).sum(axis=1)
+
+            scores = np.where(
+                (n_valid_cats >= MIN_VALID_CATEGORIES) & (weight_denom_total > 0),
+                total_score / weight_denom_total,
+                np.nan,
+            )
+            result.iloc[result.index.get_indexer(idx)] = scores
+
+        return result
 
     def select_stocks(self, date: str) -> pd.DataFrame:
         """
@@ -375,51 +544,25 @@ class MultiFactorStrategy:
             return pd.DataFrame()
 
         # 3. 因子处理 + 合成
-        # 获取行业和市值数据（用于中性化）
-        industry_df = None
-        mktcap_df = None
-        try:
-            industry_df = self.db.get_industry_map()
-        except Exception:
-            pass
-        try:
-            # 本地计算市值：close × total_share（万股）→ 总市值（万元）
-            # 取当日收盘价
-            lookback = (pd.to_datetime(date) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
-            df_close = self.db.query(
-                "SELECT ts_code, trade_date, close FROM daily_price "
-                "WHERE trade_date >= :lookback AND trade_date <= :date "
-                "ORDER BY ts_code, trade_date DESC",
-                params={"lookback": lookback, "date": date},
-            )
-            if not df_close.empty:
-                df_close = df_close.drop_duplicates(subset=["ts_code"], keep="first")
-            # 取总股本
-            df_share = self.db.query(
-                "SELECT ts_code, total_share FROM stock_basic WHERE total_share IS NOT NULL"
-            )
-            if not df_close.empty and not df_share.empty:
-                mktcap_df = df_close[["ts_code", "close"]].merge(
-                    df_share, on="ts_code", how="inner"
-                )
-                # total_mv 单位：万元（close × total_share(万股) × 10000(股) / 10000(→万元) = close × total_share）
-                mktcap_df["total_mv"] = mktcap_df["close"] * mktcap_df["total_share"]
-                mktcap_df = mktcap_df[["ts_code", "total_mv"]]
-        except Exception:
-            pass
+        # 获取行业和市值数据（用于中性化）— 使用缓存
+        industry_df = self._get_cached_industry_df()
+        mktcap_df = self._get_cached_mktcap_df(date)
 
         # 处理并合并所有因子
         all_codes = universe["ts_code"].tolist()
         composite = pd.DataFrame({"ts_code": all_codes})
 
         for fname, df_raw in factor_scores.items():
+            cat = self.FACTOR_TO_CATEGORY.get(fname)
+            effective_neutralize = CATEGORY_NEUTRALIZE_OVERRIDES.get(cat, NEUTRALIZE_MODE)
             processed = process_factor(
                 df_raw,
                 industry_df=industry_df,
                 mktcap_df=mktcap_df,
                 do_neutralize=(mktcap_df is not None),
-                neutralize_mode=NEUTRALIZE_MODE,
+                neutralize_mode=effective_neutralize,
                 nonlinear_size=NONLINEAR_SIZE,
+                standardize_mode=STANDARDIZE_MODE,
             )
             # 合并该因子 Z-score（不乘权重，权重在按行业合成时使用）
             processed = processed.rename(columns={"factor_value": fname})
@@ -427,8 +570,9 @@ class MultiFactorStrategy:
 
         factor_cols = [c for c in composite.columns if c != "ts_code"]
 
-        # 4. 核心财务准入过滤 + 大类合成评分（固定分母）
-        composite = self._compute_scores(composite, factor_cols, industry_df)
+        # 4. 核心财务准入过滤 + 大类合成评分（regime 感知权重）
+        effective_cat_weights = self._get_regime_cat_weights(date)
+        composite = self._compute_scores(composite, factor_cols, industry_df, category_weights=effective_cat_weights)
         composite = composite.drop(columns=["industry_name"], errors="ignore")
 
         # 过滤掉因子值全缺失的股票
@@ -449,21 +593,22 @@ class MultiFactorStrategy:
         qualified = composite[composite["score"] >= self.min_select_score]
         selected = qualified.head(self.n_holdings).copy()
 
-        # Score 比例权重（替代分档加权）
+        # Softmax 权重分配（温度参数 τ 控制集中度）
         if len(selected) > 0:
             scores = selected["score"].values
-            shifted = np.maximum(scores, 0)
-            total = shifted.sum()
-            if total > 0:
-                raw_w = shifted / total
-                min_w = 1.0 / (self.n_holdings * 3)
-                raw_w = np.maximum(raw_w, min_w)
-                selected["weight"] = raw_w / raw_w.sum()
+            tau = WEIGHT_TEMPERATURE
+            if tau > 0:
+                shifted = scores - scores.max()    # 数值稳定
+                exp_scores = np.exp(shifted / tau)
+                raw_w = exp_scores / exp_scores.sum()
             else:
-                selected["weight"] = 1.0 / len(selected)
+                raw_w = np.ones(len(scores)) / len(scores)  # τ=0 等权
+            min_w = 1.0 / (self.n_holdings * 3)
+            raw_w = np.maximum(raw_w, min_w)
+            selected["weight"] = raw_w / raw_w.sum()
 
             logger.info(
-                f"选股完成: {len(selected)} 只 (比例加权), "
+                f"选股完成: {len(selected)} 只 (softmax τ={tau}), "
                 f"得分范围 [{selected['score'].min():.3f}, {selected['score'].max():.3f}]"
             )
         else:
@@ -501,53 +646,34 @@ class MultiFactorStrategy:
         if not factor_scores:
             return pd.DataFrame(columns=["ts_code", "score"])
 
-        # 行业/市值数据
-        industry_df = None
-        mktcap_df = None
-        try:
-            industry_df = self.db.get_industry_map()
-        except Exception:
-            pass
-        try:
-            lookback = (pd.to_datetime(date) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
-            df_close = self.db.query(
-                "SELECT ts_code, trade_date, close FROM daily_price "
-                "WHERE trade_date >= :lookback AND trade_date <= :date "
-                "ORDER BY ts_code, trade_date DESC",
-                params={"lookback": lookback, "date": date},
-            )
-            if not df_close.empty:
-                df_close = df_close.drop_duplicates(subset=["ts_code"], keep="first")
-            df_share = self.db.query(
-                "SELECT ts_code, total_share FROM stock_basic WHERE total_share IS NOT NULL"
-            )
-            if not df_close.empty and not df_share.empty:
-                mktcap_df = df_close[["ts_code", "close"]].merge(df_share, on="ts_code", how="inner")
-                mktcap_df["total_mv"] = mktcap_df["close"] * mktcap_df["total_share"]
-                mktcap_df = mktcap_df[["ts_code", "total_mv"]]
-        except Exception:
-            pass
+        # 行业/市值数据（使用缓存）
+        industry_df = self._get_cached_industry_df()
+        mktcap_df = self._get_cached_mktcap_df(date)
 
         # 因子处理 + 合并
         all_codes = universe["ts_code"].tolist()
         composite = pd.DataFrame({"ts_code": all_codes})
 
         for fname, df_raw in factor_scores.items():
+            cat = self.FACTOR_TO_CATEGORY.get(fname)
+            effective_neutralize = CATEGORY_NEUTRALIZE_OVERRIDES.get(cat, NEUTRALIZE_MODE)
             processed = process_factor(
                 df_raw,
                 industry_df=industry_df,
                 mktcap_df=mktcap_df,
                 do_neutralize=(mktcap_df is not None),
-                neutralize_mode=NEUTRALIZE_MODE,
+                neutralize_mode=effective_neutralize,
                 nonlinear_size=NONLINEAR_SIZE,
+                standardize_mode=STANDARDIZE_MODE,
             )
             processed = processed.rename(columns={"factor_value": fname})
             composite = composite.merge(processed, on="ts_code", how="left")
 
         factor_cols = [c for c in composite.columns if c != "ts_code"]
 
-        # 核心财务准入过滤 + 大类合成评分（固定分母）
-        composite = self._compute_scores(composite, factor_cols, industry_df)
+        # 核心财务准入过滤 + 大类合成评分（regime 感知权重）
+        effective_cat_weights = self._get_regime_cat_weights(date)
+        composite = self._compute_scores(composite, factor_cols, industry_df, category_weights=effective_cat_weights)
 
         composite = composite.dropna(subset=["score"])
 
@@ -627,8 +753,13 @@ class MultiFactorStrategy:
 
         logger.info(f"回测区间: {start_date} ~ {end_date}, {len(rebalance_dates)} 个调仓日")
 
+        # 初始化缓存（静态数据跨日期复用，日期数据每期清空）
+        FactorBase.clear_all_cache()
+
         signals = {}
         for dt in rebalance_dates:
+            # 每个调仓日清空日期相关缓存，保留静态缓存
+            FactorBase.clear_date_cache()
             try:
                 result = self.select_stocks(dt)
                 # 允许空仓信号：空 DataFrame 表示清仓持现金
@@ -637,6 +768,9 @@ class MultiFactorStrategy:
                     logger.info(f"{dt} 空仓信号（清仓持现金）")
             except Exception as e:
                 logger.warning(f"{dt} 选股失败: {e}")
+
+        # 清理所有缓存
+        FactorBase.clear_all_cache()
 
         logger.info(f"信号生成完成: {len(signals)} 期信号（含空仓）")
         return signals

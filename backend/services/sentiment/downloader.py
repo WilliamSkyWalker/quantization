@@ -11,7 +11,7 @@ from datetime import datetime
 from backend.services.config import LOG_LEVEL, SENTIMENT_MAX_PAGES, SENTIMENT_BACKFILL_DAYS
 
 # 单个爬虫最大执行时间（秒）
-_PER_SOURCE_TIMEOUT = 120
+_PER_SOURCE_TIMEOUT = 60
 from backend.services.data.database import DatabaseManager
 from backend.services.sentiment.scrapers import SCRAPER_REGISTRY, TIER_MAP
 from backend.services.sentiment.base_scraper import HttpRateLimiter
@@ -110,13 +110,26 @@ class SentimentDownloader:
         started_at = datetime.now()
 
         try:
+            # 查询该来源已有的 URL，跳过已有文章的详情页抓取
+            existing_urls = set()
+            try:
+                df = self.db.query(
+                    "SELECT url FROM policy_article WHERE source = :source",
+                    params={"source": source},
+                )
+                if not df.empty:
+                    existing_urls = set(df["url"].tolist())
+                    logger.info(f"[{source}] 库中已有 {len(existing_urls)} 篇，将跳过详情页")
+            except Exception:
+                pass
+
             found = 0
             new_count = 0
 
             # scrape_pages() 由基类和 CCTV/cninfo 实现，逐页入库。
             # Twitter 等只 override scrape() 的爬虫走 fallback 一次性入库。
             has_pages = False
-            for page_articles in scraper.scrape_pages(max_pages=max_pages):
+            for page_articles in scraper.scrape_pages(max_pages=max_pages, existing_urls=existing_urls):
                 has_pages = True
                 found += len(page_articles)
                 if page_articles:

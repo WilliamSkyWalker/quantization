@@ -53,7 +53,7 @@ class CommodityMomentumFactor(FactorBase):
         result = pd.DataFrame({"ts_code": codes, "factor_value": np.nan})
 
         # 1. 获取行业映射
-        industry_df = self.db.get_industry_map()
+        industry_df = self.get_industry_map_cached()
         if industry_df.empty:
             logger.warning("CMDTY_MOM: 无行业分类数据")
             return result

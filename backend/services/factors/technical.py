@@ -123,7 +123,7 @@ class PriceDeviationFactor(FactorBase):
         df_price = self.get_price_history(
             date, lookback_days=120,
             universe_codes=codes,
-            columns=["close"],
+            columns=["close", "adj_factor"],
         )
 
         if df_price.empty:
@@ -131,6 +131,9 @@ class PriceDeviationFactor(FactorBase):
 
         df_price["trade_date"] = pd.to_datetime(df_price["trade_date"])
         df_price["close"] = pd.to_numeric(df_price["close"], errors="coerce")
+        # 前复权价格
+        df_price["adj_factor"] = pd.to_numeric(df_price["adj_factor"], errors="coerce").fillna(1.0)
+        df_price["adj_close"] = df_price["close"] * df_price["adj_factor"]
         df_price = df_price.sort_values(["ts_code", "trade_date"])
 
         # 每只股票取最近 60 个交易日
@@ -139,25 +142,25 @@ class PriceDeviationFactor(FactorBase):
             .tail(60)
         )
 
-        # MA60
+        # MA60（使用前复权价格）
         df_ma60 = (
-            df_recent.groupby("ts_code")["close"]
+            df_recent.groupby("ts_code")["adj_close"]
             .mean()
             .reset_index()
         )
         df_ma60.columns = ["ts_code", "ma60"]
 
-        # 最新收盘价（每组最后一条）
+        # 最新前复权收盘价（每组最后一条）
         df_latest = (
             df_recent.groupby("ts_code")
-            .tail(1)[["ts_code", "close"]]
+            .tail(1)[["ts_code", "adj_close"]]
             .copy()
         )
 
         df_dev = df_latest.merge(df_ma60, on="ts_code")
         df_dev["factor_value"] = np.where(
             (df_dev["ma60"].notna()) & (df_dev["ma60"] > 0),
-            (df_dev["close"] - df_dev["ma60"]) / df_dev["ma60"],
+            (df_dev["adj_close"] - df_dev["ma60"]) / df_dev["ma60"],
             np.nan,
         )
 
@@ -213,14 +216,19 @@ class SizeFactor(FactorBase):
 
 class VolPriceDivFactor(FactorBase):
     """
-    量价背离因子：20 日涨跌幅与成交量变化率的相关系数。
+    量价背离因子：检测价格趋势与成交量趋势的方向不一致。
 
-    负相关 = 量价背离 = 潜在反转信号。
-    作为反向因子使用（负值更好，权重取负）。
+    计算逻辑：
+        1. 20D 累计收益 → 价格趋势方向
+        2. 20D 成交量 OLS 斜率 → 量能趋势方向
+        3. divergence = |price_trend| × sign_mismatch
+           当价格方向与量能方向不一致时 divergence > 0
+
+    值越大 = 量价背离越严重 = 反转信号越强（正向因子）。
     """
 
     name = "VOL_PRICE_DIV"
-    description = "量价背离，负相关为反转信号（反向因子）"
+    description = "量价背离，趋势背离检测（正向因子）"
 
     def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
         codes = universe["ts_code"].tolist()
@@ -242,24 +250,36 @@ class VolPriceDivFactor(FactorBase):
         # 每只股票取最近 20 个交易日
         df_recent = df_price.groupby("ts_code").tail(20).copy()
 
-        # 成交量变化率
-        df_recent["vol_chg"] = df_recent.groupby("ts_code")["volume"].pct_change()
-
-        # 计算每只股票的 corr(pct_chg, vol_chg)
-        def _corr(g):
-            valid = g.dropna(subset=["pct_chg", "vol_chg"])
-            if len(valid) < 10:
+        def _divergence(g):
+            g = g.dropna(subset=["pct_chg", "volume"])
+            if len(g) < 10:
                 return np.nan
-            return valid["pct_chg"].corr(valid["vol_chg"])
+            # 价格趋势：20D 累计收益
+            price_trend = (1 + g["pct_chg"] / 100).prod() - 1
+            # 量能趋势：OLS 斜率（volume ~ t）
+            t = np.arange(len(g), dtype=float)
+            vol = g["volume"].values.astype(float)
+            t_mean = t.mean()
+            vol_mean = vol.mean()
+            if vol_mean == 0:
+                return np.nan
+            slope = ((t - t_mean) * (vol - vol_mean)).sum() / ((t - t_mean) ** 2).sum()
+            # 标准化斜率（除以均值使不同股票可比）
+            norm_slope = slope / vol_mean
+            # 方向不一致时产生正的背离信号
+            if np.sign(price_trend) != np.sign(norm_slope):
+                return abs(price_trend)
+            else:
+                return 0.0
 
-        df_corr = (
+        df_div = (
             df_recent.groupby("ts_code")
-            .apply(_corr, include_groups=False)
+            .apply(_divergence, include_groups=False)
             .reset_index()
         )
-        df_corr.columns = ["ts_code", "factor_value"]
+        df_div.columns = ["ts_code", "factor_value"]
 
-        return df_corr
+        return df_div
 
 
 class IndustryMomentumFactor(FactorBase):
@@ -281,7 +301,7 @@ class IndustryMomentumFactor(FactorBase):
 
         # 获取行业映射
         try:
-            df_industry = self.db.get_industry_map()
+            df_industry = self.get_industry_map_cached()
         except Exception:
             return pd.DataFrame(columns=["ts_code", "factor_value"])
 

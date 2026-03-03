@@ -152,6 +152,31 @@ def neutralize(
 
 
 # ============================================================
+# Rank 百分位标准化
+# ============================================================
+
+def rank_percentile(series: pd.Series) -> pd.Series:
+    """
+    Rank 百分位标准化。
+
+    将因子值转为排名百分位，映射到 [-3, +3] 区间（与 zscore clip 范围一致）。
+    对偏态分布比 Z-score 更稳健。
+
+    Args:
+        series: 因子值序列。
+
+    Returns:
+        标准化后的序列。
+    """
+    n = series.count()
+    if n <= 1:
+        return series * 0.0
+    ranks = series.rank(method="average")
+    uniform = (ranks - 0.5) / n       # (0, 1) 均匀分布
+    return (uniform - 0.5) * 6.0      # 映射到 [-3, +3]
+
+
+# ============================================================
 # Z-Score 标准化
 # ============================================================
 
@@ -190,6 +215,7 @@ def process_factor(
     mad_n: float = 5.0,
     neutralize_mode: str = "full",
     nonlinear_size: bool = False,
+    standardize_mode: str = "zscore",
 ) -> pd.DataFrame:
     """
     因子处理完整流水线：去极值 → 中性化 → 标准化。
@@ -206,6 +232,7 @@ def process_factor(
         mad_n: MAD 去极值倍数。
         neutralize_mode: 中性化模式 "full" / "size_only" / "none"。
         nonlinear_size: 是否添加 ln_mktcap² 非线性项。
+        standardize_mode: 标准化模式 "zscore" / "rank"。
 
     Returns:
         处理后的 DataFrame[ts_code, factor_value]。
@@ -221,6 +248,7 @@ def process_factor(
         )
 
     # 2. 中性化
+    actually_neutralized = False
     effective_mode = neutralize_mode if do_neutralize else "none"
     if effective_mode != "none" and mktcap_df is not None:
         # size_only 和 full 都需要市值
@@ -243,17 +271,30 @@ def process_factor(
         df["factor_value"] = neutralize(
             df, mode=effective_mode, nonlinear_size=nonlinear_size
         )
+        actually_neutralized = True
 
         # 清理临时列
         df = df[["ts_code", "factor_value"]]
 
+    # 2.5 二次去极值（仅在实际执行了中性化时，抑制残差极端值）
+    if actually_neutralized and do_winsorize:
+        valid_mask = df["factor_value"].notna()
+        df.loc[valid_mask, "factor_value"] = winsorize_mad(
+            df.loc[valid_mask, "factor_value"], n=mad_n
+        )
+
     # 3. 标准化
     if do_zscore:
         valid_mask = df["factor_value"].notna()
-        df.loc[valid_mask, "factor_value"] = zscore(
-            df.loc[valid_mask, "factor_value"]
-        )
-        # 4. Clip Z-score 到 ±3，防止中性化后残差极端值主导得分
+        if standardize_mode == "rank":
+            df.loc[valid_mask, "factor_value"] = rank_percentile(
+                df.loc[valid_mask, "factor_value"]
+            )
+        else:
+            df.loc[valid_mask, "factor_value"] = zscore(
+                df.loc[valid_mask, "factor_value"]
+            )
+        # 4. Clip 到 ±3，防止极端值主导得分
         df["factor_value"] = df["factor_value"].clip(lower=-3.0, upper=3.0)
 
     final_count = df["factor_value"].notna().sum()

@@ -1,7 +1,7 @@
 # A股量化投资系统 - 续接 Prompt
 
 > 每次开启新会话时，将下方对应阶段的 Prompt 发送给 AI 即可无缝继续。
-> 算法细节请参阅 `ALGORITHM.md`。
+> 算法细节请参阅 `A_SHARE_STRATEGY.md`。
 
 ---
 
@@ -26,7 +26,7 @@
 - 回测中涨跌停：当日涨停不可买入，当日跌停不可卖出
 - 代码可直接运行，不留 TODO 占位，有完整异常处理
 
-算法文档：请先阅读 ALGORITHM.md 了解完整算法设计（20 因子、5 大类评分、Z-score clip、中性化模式等）。
+算法文档：请先阅读 A_SHARE_STRATEGY.md 了解完整算法设计（20 因子、5 大类评分、Z-score clip、中性化模式等）。
 请先阅读项目现有代码再动手修改，不要凭空猜测已有实现。
 ```
 
@@ -51,13 +51,14 @@
 | Phase 9 参数调优 | 大类/因子权重精调 + 风控参数放宽 + 环境变量可配 | ✅ 完成 |
 | Phase 10 商品轮动 | 商品期货数据下载 + CMDTY_MOM 因子 + 行业联动 | ✅ 完成 |
 | Phase 11 宏观因子 | 宏观经济数据接入 + 4 个宏观因子（MACRO_CYCLE/LIQD/INFL/EXTR） | ✅ 完成 |
+| Phase 12 算法改进R2 | Regime切换 + Softmax权重 + 线性回撤 + Rank标准化 + CAGR因子 + 按大类中性化 + 权重再分配 | ✅ 完成 |
 | 远期规划 | 行业轮动数据深度接入 | 📋 备忘 |
 
 ---
 
 ## Phase 8 算法升级（已完成）摘要
 
-详细算法见 `ALGORITHM.md`，核心改动：
+详细算法见 `A_SHARE_STRATEGY.md`，核心改动：
 
 1. **4 个新因子**：NET_PROFIT_YOY、REVENUE_YOY（成长）、RESIDUAL_MOM（残差动量）、VOL_PRICE_DIV（量价背离）
 2. **分类复合评分**：24 因子分 6 大类（价值/质量/成长/动量/技术/宏观），类内动态分母 + 类间固定分母（5.6）
@@ -157,7 +158,7 @@ backend/
 └── .env                             # 本地配置（不入库）
 frontend/                            # Vue 3 + Naive UI 仪表盘（数据操作/文章列表/数据表状态 三个顶级 Tab）
 start.sh                             # 一键启动 + crontab（cron 通过 curl 调用 API）
-ALGORITHM.md                         # 完整算法设计文档
+A_SHARE_STRATEGY.md                         # 完整算法设计文档
 ```
 
 ---
@@ -188,7 +189,7 @@ ALGORITHM.md                         # 完整算法设计文档
 本地模拟盘已完成，现需接入真实券商的模拟盘或实盘。
 系统已预留 BaseTrader 抽象基类和 TRADER_TYPE 配置项。
 
-请先读取 ALGORITHM.md 了解算法设计，再读取：
+请先读取 A_SHARE_STRATEGY.md 了解算法设计，再读取：
 - backend/services/execution/base_trader.py（必须实现的接口）
 - backend/services/execution/paper_trader.py（参考实现）
 - backend/api/views/trading.py（API 视图 + _create_trader 工厂逻辑）
@@ -260,7 +261,7 @@ ALGORITHM.md                         # 完整算法设计文档
 ```
 继续 A 股量化投资系统 Phase 8-B — 用 LLM 对政策新闻做结构化解读。
 
-请先读取 ALGORITHM.md 了解算法设计，再读取：
+请先读取 A_SHARE_STRATEGY.md 了解算法设计，再读取：
 - backend/services/sentiment/models.py
 - backend/services/data/database.py
 
@@ -278,7 +279,7 @@ ALGORITHM.md                         # 完整算法设计文档
 
 前置条件：Phase 8-B LLM 分析层完成。
 
-请先读取 ALGORITHM.md 和 factors/base.py 了解因子框架。
+请先读取 A_SHARE_STRATEGY.md 和 factors/base.py 了解因子框架。
 
 需完成：
 1. factors/sentiment.py — POLICY_SENT + POLICY_INTENSITY
@@ -303,7 +304,7 @@ A股量化系统遇到问题，请帮我排查。
 
 项目路径：/Users/daweilun/Documents/quantization/backend
 数据库：本地 MySQL（库名 quant）
-算法文档：ALGORITHM.md
+算法文档：A_SHARE_STRATEGY.md
 核心业务逻辑：backend/services/
 
 问题描述：

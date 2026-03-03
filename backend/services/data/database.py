@@ -37,8 +37,9 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from backend.services.config import DB_URL, LOG_LEVEL
 
-# 延迟导入舆情模型（避免循环依赖，在 init_tables 时触发）
+# 延迟导入舆情/Polymarket模型（避免循环依赖，在 init_tables 时触发）
 _sentiment_models_loaded = False
+_polymarket_models_loaded = False
 
 # ============================================================
 # 日志配置
@@ -641,11 +642,17 @@ class DatabaseManager:
         对已有表自动补齐新增列（如 adj_factor）。
         """
         # 确保舆情模型注册到 Base.metadata
-        global _sentiment_models_loaded
+        global _sentiment_models_loaded, _polymarket_models_loaded
         if not _sentiment_models_loaded:
             try:
                 import backend.services.sentiment.models  # noqa: F401
                 _sentiment_models_loaded = True
+            except ImportError:
+                pass
+        if not _polymarket_models_loaded:
+            try:
+                import backend.services.polymarket.models  # noqa: F401
+                _polymarket_models_loaded = True
             except ImportError:
                 pass
 
@@ -692,6 +699,7 @@ class DatabaseManager:
             ("industry_class", "l2_industry_code", "VARCHAR(20)"),
             ("industry_class", "l2_industry_name", "VARCHAR(50)"),
             ("policy_article", "content", "LONGTEXT"),
+            ("policy_analysis", "impact_type", "VARCHAR(30)"),
         ]
         try:
             with self.engine.connect() as conn:
@@ -1542,6 +1550,10 @@ class DatabaseManager:
         start_date = (
             pd.to_datetime(end_date) - pd.Timedelta(days=lookback_days)
         ).strftime("%Y-%m-%d")
+        # 安全裕度：排除选股日当天发布的研报，防止未来函数
+        safe_end = (
+            pd.to_datetime(end_date) - pd.Timedelta(days=1)
+        ).strftime("%Y-%m-%d")
 
         sql = (
             "SELECT ts_code, "
@@ -1550,7 +1562,7 @@ class DatabaseManager:
             "COUNT(DISTINCT institution) as institution_count "
             "FROM research_report "
             f"WHERE report_date >= '{start_date}' "
-            f"AND report_date <= '{end_date}' "
+            f"AND report_date <= '{safe_end}' "
             "AND rating_score IS NOT NULL "
             "GROUP BY ts_code"
         )
@@ -1762,6 +1774,7 @@ class DatabaseManager:
         sql = (
             "SELECT pa.article_id, pa.analysis_type, pa.industries, "
             "pa.sentiment, pa.intensity, pa.keywords_hit, "
+            "pa.affected_stocks, "
             "a.publish_date, a.tier "
             "FROM policy_analysis pa "
             "JOIN policy_article a ON pa.article_id = a.id "
@@ -1844,6 +1857,19 @@ class DatabaseManager:
         df = self.query(sql)
         return df["ticker"].tolist() if not df.empty else []
 
+    def deactivate_us_stocks_not_in(self, active_tickers: set[str]):
+        """将不在 active_tickers 集合中的美股标记为 inactive。"""
+        with self.get_session() as session:
+            rows = session.query(USStockBasic).filter(
+                USStockBasic.is_active == 1,
+                USStockBasic.ticker.notin_(active_tickers),
+            ).all()
+            if rows:
+                for row in rows:
+                    row.is_active = 0
+                session.commit()
+                logger.info(f"us_stock_basic: 标记 {len(rows)} 只非 NASDAQ 100 股票为 inactive")
+
     def bulk_upsert_us_daily_price(self, df: pd.DataFrame):
         """批量 upsert 美股日线行情（MySQL ON DUPLICATE KEY UPDATE）。"""
         if df.empty:
@@ -1905,11 +1931,11 @@ class DatabaseManager:
             return
         for col in ["date", "filing_date"]:
             if col in df.columns:
-                df[col] = pd.to_datetime(df[col]).dt.date
+                df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
         records = df.to_dict("records")
         for record in records:
             for key, value in record.items():
-                if isinstance(value, float) and pd.isna(value):
+                if value is pd.NaT or (isinstance(value, float) and pd.isna(value)):
                     record[key] = None
         with self.get_session() as session:
             for record in records:
@@ -2150,11 +2176,11 @@ class DatabaseManager:
             return
         if "filing_date" in df.columns:
             df = df.copy()
-            df["filing_date"] = pd.to_datetime(df["filing_date"]).dt.date
+            df["filing_date"] = pd.to_datetime(df["filing_date"], errors="coerce").dt.date
         records = df.to_dict("records")
         for record in records:
             for key, value in record.items():
-                if isinstance(value, float) and pd.isna(value):
+                if value is pd.NaT or (isinstance(value, float) and pd.isna(value)):
                     record[key] = None
         with self.get_session() as session:
             for record in records:

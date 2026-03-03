@@ -58,7 +58,13 @@
       "Bash(pip3 list:*)",
       "WebFetch(domain:wap.miit.gov.cn)",
       "WebFetch(domain:www.cnblogs.com)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "WebFetch(domain:en.wikipedia.org)",
+      "WebFetch(domain:site.financialmodelingprep.com)",
+      "WebFetch(domain:financialmodelingprep.com)",
+      "WebFetch(domain:docs.polymarket.com)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:www.polymarketdata.co)"
     ]
   }
 }

@@ -30,7 +30,6 @@ export const cancelTask = (taskId: string) => api.post(`/tasks/${taskId}/cancel`
 // Stock pool & selection
 export const getUniverse = (date?: string) => api.get('/universe', { params: { date } })
 export const startSelectStocks = (date?: string) => api.post('/select', { date })
-export const getSelectResult = (taskId: string) => api.get(`/select/${taskId}`)
 export const getSelectHistory = () => api.get('/select/history')
 export const getSelectHistoryDate = (date: string) => api.get(`/select/history/${date}`)
 export const getFactorDetail = (date: string, code: string) =>
@@ -39,7 +38,6 @@ export const getFactorDetail = (date: string, code: string) =>
 // Backtest
 export const startBacktest = (startDate: string, endDate: string) =>
   api.post('/backtest/run', { start_date: startDate, end_date: endDate })
-export const getBacktestResult = (taskId: string) => api.get(`/backtest/result/${taskId}`)
 
 // Paper trading
 export const getPaperAccount = () => api.get('/paper/account')
@@ -69,6 +67,7 @@ export const startSentimentAnalyze = () => api.post('/sentiment/analyze')
 export const startSentimentBackfillAnalyze = () => api.post('/sentiment/backfill-analyze')
 export const startSentimentBackfillContent = (source?: string) =>
   api.post('/sentiment/backfill-content', { source })
+export const startSentimentBackfillLLM = () => api.post('/sentiment/backfill-llm')
 export const getSentimentAnalysisStats = () => api.get('/sentiment/analysis-stats')
 export const startSentimentDownloadAndAnalyze = (source?: string) =>
   api.post('/sentiment/download-and-analyze', { source })
@@ -82,8 +81,14 @@ export const updateIndustryFactors = (data: Record<string, any>) =>
   api.put('/config/industry-factors/update', data)
 export const initDatabase = () => api.post('/config/init')
 
-// Report
-export const generateReport = (startDate: string, endDate: string) =>
-  api.post('/report/generate', { start_date: startDate, end_date: endDate })
+// Stock detail
+export const searchStocks = (q: string) => api.get('/stock/search', { params: { q } })
+export const getStockProfile = (tsCode: string) => api.get(`/stock/${tsCode}/profile`)
+export const getStockKline = (tsCode: string, startDate?: string, endDate?: string) =>
+  api.get(`/stock/${tsCode}/kline`, { params: { start_date: startDate, end_date: endDate } })
+export const getStockReports = (tsCode: string, page = 1) =>
+  api.get(`/stock/${tsCode}/reports`, { params: { page } })
+export const getStockNews = (tsCode: string, page = 1) =>
+  api.get(`/stock/${tsCode}/news`, { params: { page } })
 
 export default api

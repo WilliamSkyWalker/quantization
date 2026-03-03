@@ -9,6 +9,7 @@ daphne>=4.1
 tushare>=1.4.0
 akshare>=1.14.0
 fredapi>=0.5.0
+yfinance>=0.2.0
 
 # 数据处理
 pandas>=2.0.0
@@ -43,6 +44,9 @@ twikit>=2.0.0
 anthropic>=0.40.0
 openai>=1.30.0
 
+# Polymarket CLOB WebSocket
+websockets>=12.0
+
 # 进度条
 tqdm>=4.65.0
 
@@ -51,3 +55,6 @@ pytest>=7.4.0
 
 # 日志着色（可选，便于调试）
 colorlog>=6.7.0
+
+# fredapi
+fredapi>=0.5.2

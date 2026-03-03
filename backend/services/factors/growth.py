@@ -49,6 +49,40 @@ class NetProfitYOYFactor(FactorBase):
         return df[["ts_code", "factor_value"]]
 
 
+class NetProfitCAGR3YFactor(FactorBase):
+    """
+    归母净利润 3 年复合增长率（CAGR）。
+
+    公式：(TTM净利润(当期) / TTM净利润(3年前))^(1/3) - 1
+    分母 <= 0 时返回 NaN。IPO < 3 年的股票自动 NaN。
+    """
+
+    name = "NET_PROFIT_CAGR_3Y"
+    description = "归母净利润3年复合增长率"
+
+    def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
+        codes = universe["ts_code"].tolist()
+
+        # 当期 TTM 净利润
+        df_now = self.get_ttm_net_profit(date, codes)
+        # 3 年前 TTM 净利润
+        date_3y_ago = (pd.to_datetime(date) - pd.DateOffset(years=3)).strftime("%Y-%m-%d")
+        df_prev = self.get_ttm_net_profit(date_3y_ago, codes)
+
+        if df_now.empty or df_prev.empty:
+            return pd.DataFrame(columns=["ts_code", "factor_value"])
+
+        df = df_now.merge(df_prev, on="ts_code", suffixes=("_now", "_prev"))
+        df["factor_value"] = np.where(
+            (df["ttm_net_profit_prev"].notna()) & (df["ttm_net_profit_prev"] > 0)
+            & (df["ttm_net_profit_now"].notna()) & (df["ttm_net_profit_now"] > 0),
+            (df["ttm_net_profit_now"] / df["ttm_net_profit_prev"]) ** (1.0 / 3.0) - 1,
+            np.nan,
+        )
+
+        return df[["ts_code", "factor_value"]]
+
+
 class RevenueYOYFactor(FactorBase):
     """
     营收 TTM 同比增速。

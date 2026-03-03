@@ -16,7 +16,7 @@
 """
 
 import logging
-from typing import Optional
+from typing import Optional, Callable
 
 import numpy as np
 import pandas as pd
@@ -94,6 +94,7 @@ class BacktestEngine:
         signals: dict[str, pd.DataFrame],
         start_date: str,
         end_date: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> dict:
         """
         执行回测（持仓制，匹配模拟盘逻辑）。
@@ -112,6 +113,10 @@ class BacktestEngine:
         """
         logger.info(f"开始回测: {start_date} ~ {end_date}")
 
+        def ensure_not_cancelled():
+            if cancel_check and cancel_check():
+                raise RuntimeError('回测已取消')
+
         # 获取全部交易日（延伸几天确保最后一期信号能 T+1 执行）
         extended_end = (pd.to_datetime(end_date) + pd.Timedelta(days=10)).strftime("%Y-%m-%d")
         trade_dates = self._get_trade_dates(start_date, extended_end)
@@ -125,6 +130,7 @@ class BacktestEngine:
         # 预加载所有相关股票的价格数据
         all_codes = set()
         for df_sig in signals.values():
+            ensure_not_cancelled()
             all_codes.update(df_sig["ts_code"].tolist())
         price_cache = self._load_prices(list(all_codes), start_date, extended_end)
 
@@ -134,6 +140,7 @@ class BacktestEngine:
         last_close = {}      # {ts_code: float} 停牌时用最近收盘价
         pending_signal = None
         pending_sells = {}   # {ts_code: int_shares} 一字板排队卖单
+        prev_adj_factors = {}  # {ts_code: float} 前日复权因子，用于检测除权除息
         signal_idx = 0
 
         nav = pd.Series(dtype=float)
@@ -141,8 +148,31 @@ class BacktestEngine:
         turnover_list = []
 
         for i, today in enumerate(trade_dates):
+            ensure_not_cancelled()
+
             today_str = today.strftime("%Y-%m-%d")
             day_turnover_amount = 0.0
+
+            # === 除权除息检测：adj_factor 变化时调整持仓股数 ===
+            if positions and prev_adj_factors:
+                for code in list(positions.keys()):
+                    info = price_cache.get((code, today_str))
+                    if not info:
+                        continue
+                    curr_adj = info.get('adj_factor')
+                    prev_adj = prev_adj_factors.get(code)
+                    if curr_adj is not None and prev_adj is not None and abs(curr_adj - prev_adj) > 1e-6:
+                        adj_ratio = curr_adj / prev_adj
+                        old_vol = positions[code]
+                        new_vol = self._round_to_lot(old_vol * adj_ratio)
+                        if new_vol > 0:
+                            positions[code] = new_vol
+                            logger.debug(
+                                f"{code} 除权除息: adj_ratio={adj_ratio:.4f}, "
+                                f"股数 {old_vol} -> {new_vol}"
+                            )
+                        else:
+                            del positions[code]
 
             # === 优先处理排队卖单（每个交易日开头，不论是否有信号）===
             if pending_sells:
@@ -345,6 +375,12 @@ class BacktestEngine:
 
             nav[today] = (cash + market_value) / self.initial_capital
 
+            # === 更新 prev_adj_factors（用于下一日除权除息检测）===
+            for code in positions:
+                info = price_cache.get((code, today_str))
+                if info and info.get('adj_factor') is not None:
+                    prev_adj_factors[code] = info['adj_factor']
+
         # 获取基准净值
         benchmark_nav = self._get_benchmark_nav(start_date, extended_end)
 
@@ -404,10 +440,10 @@ class BacktestEngine:
         self, codes: list[str], start_date: str, end_date: str
     ) -> dict[tuple, dict]:
         """
-        预加载价格缓存（open, close, 涨跌停状态）。
+        预加载价格缓存（open, close, 涨跌停状态, adj_factor）。
 
         Returns:
-            字典 {(ts_code, date_str): {open, close, is_limit_up, is_limit_down}}。
+            字典 {(ts_code, date_str): {open, close, high, low, is_limit_up, is_limit_down, adj_factor}}。
         """
         if not codes:
             return {}
@@ -418,7 +454,8 @@ class BacktestEngine:
         params.update(in_params)
 
         df = self.db.query(
-            "SELECT ts_code, trade_date, `open`, `close`, `high`, `low`, is_limit_up, is_limit_down "
+            "SELECT ts_code, trade_date, `open`, `close`, `high`, `low`, "
+            "is_limit_up, is_limit_down, adj_factor "
             "FROM daily_price "
             "WHERE trade_date >= :start_date "
             "AND trade_date <= :end_date "
@@ -436,6 +473,12 @@ class BacktestEngine:
 
         cache = {}
         for row in df.itertuples(index=False):
+            adj = getattr(row, 'adj_factor', None)
+            if adj is not None:
+                try:
+                    adj = float(adj)
+                except (TypeError, ValueError):
+                    adj = None
             cache[(row.ts_code, row.trade_date)] = {
                 'open': row.open,
                 'close': row.close,
@@ -443,6 +486,7 @@ class BacktestEngine:
                 'low': row.low,
                 'is_limit_up': getattr(row, 'is_limit_up', 0) == 1,
                 'is_limit_down': getattr(row, 'is_limit_down', 0) == 1,
+                'adj_factor': adj,
             }
 
         return cache

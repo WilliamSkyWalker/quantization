@@ -58,8 +58,10 @@ class PolicyAnalysis(Base):
     industries = Column(String(500), comment="逗号分隔的行业列表")
     sentiment = Column(Float, comment="情感分 -1.0 ~ +1.0")
     intensity = Column(Float, comment="影响力/重要性 0.0 ~ 1.0")
+    impact_type = Column(String(30), comment="政策影响类型: trade_tariff|tech_sanction|monetary_policy|fiscal_stimulus|industry_regulation|general_policy")
     keywords_hit = Column(String(500), comment="命中的关键词")
     summary_text = Column(String(2000), comment="LLM 分析摘要（可选）")
+    affected_stocks = Column(Text, comment="JSON: LLM识别的受影响股票 [{code,name,impact}]")
     analyzed_at = Column(DateTime, default=datetime.now, comment="分析时间")
 
     __table_args__ = (
