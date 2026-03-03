@@ -354,6 +354,46 @@ NEGATIVE_KEYWORDS = [
 TIER_WEIGHTS = {1: 1.0, 2: 0.8, 3: 0.7, 4: 0.5, 5: 0.4}
 
 # ============================================================
+# 美股数据配置（FMP + FRED）
+# ============================================================
+
+FMP_API_KEY = os.environ.get("FMP_API_KEY", "")
+FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
+US_DATA_START_DATE = os.environ.get("US_DATA_START_DATE", "20150101")
+FMP_RATE_LIMIT = int(os.environ.get("FMP_RATE_LIMIT", "300"))  # 免费版 300 req/min
+
+US_INDEX_SYMBOLS = ["^GSPC", "^IXIC", "^DJI"]  # S&P 500, NASDAQ, Dow Jones
+
+US_COMMODITY_SYMBOLS = [
+    "GCUSD", "SIUSD", "CLUSD", "BZUSD", "NGUSD",  # 金银油气
+    "HGUSD", "ZCUSD", "ZSUSD", "ZTUSD",            # 铜玉米大豆小麦
+]
+
+# FRED 指标映射（indicator_code → FRED series ID）
+FRED_SERIES_MAP = {
+    "US_GDP": "GDP",
+    "US_CPI_YOY": "CPIAUCSL",
+    "US_CORE_CPI": "CPILFESL",
+    "US_PPI": "PPIACO",
+    "US_UNEMP": "UNRATE",
+    "US_NONFARM": "PAYEMS",
+    "US_FED_RATE": "FEDFUNDS",
+    "US_M2": "M2SL",
+    "US_PMI_MFG": "MANEMP",
+    "US_RETAIL": "RSAFS",
+    "US_IND_PROD": "INDPRO",
+    "US_HOUSING": "HOUST",
+    "US_10Y": "DGS10",
+    "US_2Y": "DGS2",
+    "US_2Y10Y": "T10Y2Y",
+    "US_TED": "TEDRATE",
+    "US_VIX": "VIXCLS",
+    "US_DXY": "DTWEXBGS",
+    "US_INIT_CLAIMS": "ICSA",
+    "US_PCE": "PCEPI",
+}
+
+# ============================================================
 # 日志配置
 # ============================================================
 

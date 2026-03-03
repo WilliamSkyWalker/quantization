@@ -38,6 +38,17 @@ def data_status(request):
         ('policy_analysis', '舆情分析结果'),
         ('scrape_log', '抓取日志'),
         ('research_report', '券商研报'),
+        # --- 美股 ---
+        ('us_stock_basic', '🇺🇸 股票基本信息'),
+        ('us_daily_price', '🇺🇸 日线行情'),
+        ('us_financial_data', '🇺🇸 财务数据'),
+        ('us_industry_class', '🇺🇸 行业分类'),
+        ('us_index_daily', '🇺🇸 指数日线'),
+        ('us_macro_indicator', '🇺🇸 宏观指标'),
+        ('us_commodity_price', '🇺🇸 商品期货'),
+        ('us_analyst_recommendation', '🇺🇸 分析师评级'),
+        ('us_sec_filing', '🇺🇸 SEC公告'),
+        ('us_corporate_action', '🇺🇸 公司行动'),
     ]
     # SQL to get the last updated_at for each table (when data was last written)
     latest_date_sql = {
@@ -56,6 +67,17 @@ def data_status(request):
         'policy_analysis': "SELECT MAX(analyzed_at) FROM policy_analysis",
         'scrape_log': "SELECT MAX(finished_at) FROM scrape_log",
         'research_report': "SELECT MAX(updated_at) FROM research_report",
+        # 美股
+        'us_stock_basic': "SELECT MAX(updated_at) FROM us_stock_basic",
+        'us_daily_price': "SELECT MAX(updated_at) FROM us_daily_price",
+        'us_financial_data': "SELECT MAX(updated_at) FROM us_financial_data",
+        'us_industry_class': "SELECT MAX(updated_at) FROM us_industry_class",
+        'us_index_daily': "SELECT MAX(updated_at) FROM us_index_daily",
+        'us_macro_indicator': "SELECT MAX(updated_at) FROM us_macro_indicator",
+        'us_commodity_price': "SELECT MAX(updated_at) FROM us_commodity_price",
+        'us_analyst_recommendation': "SELECT MAX(updated_at) FROM us_analyst_recommendation",
+        'us_sec_filing': "SELECT MAX(updated_at) FROM us_sec_filing",
+        'us_corporate_action': "SELECT MAX(updated_at) FROM us_corporate_action",
     }
 
     # SQL to get the latest business data date for each table
@@ -66,6 +88,15 @@ def data_status(request):
         'macro_indicator': "SELECT MAX(report_date) FROM macro_indicator",
         'policy_article': "SELECT MAX(publish_date) FROM policy_article",
         'research_report': "SELECT MAX(report_date) FROM research_report",
+        # 美股
+        'us_daily_price': "SELECT MAX(trade_date) FROM us_daily_price",
+        'us_financial_data': "SELECT MAX(date) FROM us_financial_data",
+        'us_index_daily': "SELECT MAX(trade_date) FROM us_index_daily",
+        'us_macro_indicator': "SELECT MAX(report_date) FROM us_macro_indicator",
+        'us_commodity_price': "SELECT MAX(trade_date) FROM us_commodity_price",
+        'us_analyst_recommendation': "SELECT MAX(date) FROM us_analyst_recommendation",
+        'us_sec_filing': "SELECT MAX(filing_date) FROM us_sec_filing",
+        'us_corporate_action': "SELECT MAX(date) FROM us_corporate_action",
     }
 
     # Get latest trade date separately for dashboard use
@@ -147,6 +178,26 @@ def data_download(request):
         'backfill_commodity': ('补录商品期货', _run_backfill_commodity),
         'backfill_macro': ('补录宏观数据', _run_backfill_macro),
         'backfill_reports': ('补录券商研报', _run_backfill_reports),
+        # --- 美股 ---
+        'download_us_all': ('🇺🇸 全量下载', _run_download_us_all),
+        'download_us_list': ('🇺🇸 下载股票列表', _run_download_us_list),
+        'download_us_daily': ('🇺🇸 下载日线行情', _run_download_us_daily),
+        'download_us_financial': ('🇺🇸 下载财务数据', _run_download_us_financial),
+        'download_us_industry': ('🇺🇸 下载行业分类', _run_download_us_industry),
+        'download_us_index': ('🇺🇸 下载指数数据', _run_download_us_index),
+        'download_us_macro': ('🇺🇸 下载宏观数据', _run_download_us_macro),
+        'download_us_commodity': ('🇺🇸 下载商品期货', _run_download_us_commodity),
+        'download_us_analyst': ('🇺🇸 下载分析师评级', _run_download_us_analyst),
+        'download_us_sec_filing': ('🇺🇸 下载SEC公告', _run_download_us_sec_filing),
+        'download_us_corporate_action': ('🇺🇸 下载公司行动', _run_download_us_corporate_action),
+        'update_us_daily': ('🇺🇸 增量更新日线', _run_update_us_daily),
+        'update_us_financial': ('🇺🇸 增量更新财务', _run_update_us_financial),
+        'update_us_index': ('🇺🇸 增量更新指数', _run_update_us_index),
+        'update_us_macro': ('🇺🇸 增量更新宏观', _run_update_us_macro),
+        'update_us_commodity': ('🇺🇸 增量更新商品', _run_update_us_commodity),
+        'update_us_analyst': ('🇺🇸 增量更新评级', _run_update_us_analyst),
+        'update_us_sec_filing': ('🇺🇸 增量更新SEC', _run_update_us_sec_filing),
+        'update_us_corporate_action': ('🇺🇸 增量更新公司行动', _run_update_us_corporate_action),
     }
 
     if action not in action_map:
@@ -482,7 +533,7 @@ def _run_update_all(task_id):
     try:
         from backend.services.sentiment.downloader import SentimentDownloader
         sent_dl = SentimentDownloader(db)
-        sent_results = sent_dl.download_all()
+        sent_results = sent_dl.download_all(max_pages=2, incremental=True)
         sent_new = sum(r['new'] for r in sent_results.values())
         logger.info(f'舆情抓取完成: {sent_new} 篇新文章')
     except Exception as e:
@@ -642,6 +693,202 @@ def research_reports(request):
 
 
 # ------------------------------------------------------------------
+# 美股 task runners
+# ------------------------------------------------------------------
+
+def _run_download_us_all(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    from backend.services.data.fred_downloader import FREDDownloader
+    db = _get_db()
+    fmp = FMPDownloader(db)
+    fred = FREDDownloader(db)
+
+    task_manager.update_progress(task_id, 5, '🇺🇸 下载股票列表...')
+    fmp.download_stock_list()
+    task_manager.update_progress(task_id, 15, '🇺🇸 下载日线行情...')
+    fmp.download_daily_prices()
+    task_manager.update_progress(task_id, 40, '🇺🇸 下载财务数据...')
+    fmp.download_financial_data()
+    task_manager.update_progress(task_id, 55, '🇺🇸 下载行业分类...')
+    fmp.download_industry_class()
+    task_manager.update_progress(task_id, 60, '🇺🇸 下载指数数据...')
+    fmp.download_index_daily()
+    task_manager.update_progress(task_id, 65, '🇺🇸 下载宏观数据 (FRED)...')
+    fred.download_all()
+    task_manager.update_progress(task_id, 75, '🇺🇸 下载商品期货...')
+    fmp.download_commodity_prices()
+    task_manager.update_progress(task_id, 80, '🇺🇸 下载分析师评级...')
+    fmp.download_analyst_recommendations()
+    task_manager.update_progress(task_id, 90, '🇺🇸 下载SEC公告...')
+    fmp.download_sec_filings()
+    task_manager.update_progress(task_id, 95, '🇺🇸 下载公司行动...')
+    fmp.download_corporate_actions()
+    return {'status': 'ok'}
+
+
+def _run_download_us_list(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    db = _get_db()
+    dl = FMPDownloader(db)
+    task_manager.update_progress(task_id, 30, '🇺🇸 下载股票列表...')
+    count = dl.download_stock_list()
+    return {'count': count}
+
+
+def _run_download_us_daily(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    db = _get_db()
+    dl = FMPDownloader(db)
+    task_manager.update_progress(task_id, 10, '🇺🇸 下载日线行情...')
+    count = dl.download_daily_prices()
+    return {'count': count}
+
+
+def _run_download_us_financial(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    db = _get_db()
+    dl = FMPDownloader(db)
+    task_manager.update_progress(task_id, 10, '🇺🇸 下载财务数据...')
+    count = dl.download_financial_data()
+    return {'count': count}
+
+
+def _run_download_us_industry(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    db = _get_db()
+    dl = FMPDownloader(db)
+    task_manager.update_progress(task_id, 30, '🇺🇸 下载行业分类...')
+    count = dl.download_industry_class()
+    return {'count': count}
+
+
+def _run_download_us_index(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    db = _get_db()
+    dl = FMPDownloader(db)
+    task_manager.update_progress(task_id, 20, '🇺🇸 下载指数数据...')
+    count = dl.download_index_daily()
+    return {'count': count}
+
+
+def _run_download_us_macro(task_id):
+    from backend.services.data.fred_downloader import FREDDownloader
+    db = _get_db()
+    dl = FREDDownloader(db)
+    task_manager.update_progress(task_id, 20, '🇺🇸 下载宏观数据 (FRED)...')
+    results = dl.download_all()
+    return {'total': sum(results.values()), 'detail': results}
+
+
+def _run_download_us_commodity(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    db = _get_db()
+    dl = FMPDownloader(db)
+    task_manager.update_progress(task_id, 20, '🇺🇸 下载商品期货...')
+    count = dl.download_commodity_prices()
+    return {'count': count}
+
+
+def _run_download_us_analyst(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    db = _get_db()
+    dl = FMPDownloader(db)
+    task_manager.update_progress(task_id, 10, '🇺🇸 下载分析师评级...')
+    count = dl.download_analyst_recommendations()
+    return {'count': count}
+
+
+def _run_download_us_sec_filing(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    db = _get_db()
+    dl = FMPDownloader(db)
+    task_manager.update_progress(task_id, 10, '🇺🇸 下载SEC公告...')
+    count = dl.download_sec_filings()
+    return {'count': count}
+
+
+def _run_download_us_corporate_action(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    db = _get_db()
+    dl = FMPDownloader(db)
+    task_manager.update_progress(task_id, 10, '🇺🇸 下载公司行动...')
+    count = dl.download_corporate_actions()
+    return {'count': count}
+
+
+def _run_update_us_daily(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    db = _get_db()
+    dl = FMPDownloader(db)
+    task_manager.update_progress(task_id, 10, '🇺🇸 增量更新日线...')
+    count = dl.update_daily_prices()
+    return {'count': count}
+
+
+def _run_update_us_financial(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    db = _get_db()
+    dl = FMPDownloader(db)
+    task_manager.update_progress(task_id, 10, '🇺🇸 增量更新财务...')
+    count = dl.update_financial_data()
+    return {'count': count}
+
+
+def _run_update_us_index(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    db = _get_db()
+    dl = FMPDownloader(db)
+    task_manager.update_progress(task_id, 20, '🇺🇸 增量更新指数...')
+    count = dl.update_index_daily()
+    return {'count': count}
+
+
+def _run_update_us_macro(task_id):
+    from backend.services.data.fred_downloader import FREDDownloader
+    db = _get_db()
+    dl = FREDDownloader(db)
+    task_manager.update_progress(task_id, 20, '🇺🇸 增量更新宏观...')
+    results = dl.update()
+    return {'total': sum(results.values()) if isinstance(results, dict) else results}
+
+
+def _run_update_us_commodity(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    db = _get_db()
+    dl = FMPDownloader(db)
+    task_manager.update_progress(task_id, 20, '🇺🇸 增量更新商品...')
+    count = dl.update_commodity_prices()
+    return {'count': count}
+
+
+def _run_update_us_analyst(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    db = _get_db()
+    dl = FMPDownloader(db)
+    task_manager.update_progress(task_id, 10, '🇺🇸 增量更新评级...')
+    count = dl.update_analyst_recommendations()
+    return {'count': count}
+
+
+def _run_update_us_sec_filing(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    db = _get_db()
+    dl = FMPDownloader(db)
+    task_manager.update_progress(task_id, 10, '🇺🇸 增量更新SEC...')
+    count = dl.update_sec_filings()
+    return {'count': count}
+
+
+def _run_update_us_corporate_action(task_id):
+    from backend.services.data.fmp_downloader import FMPDownloader
+    db = _get_db()
+    dl = FMPDownloader(db)
+    task_manager.update_progress(task_id, 10, '🇺🇸 增量更新公司行动...')
+    count = dl.update_corporate_actions()
+    return {'count': count}
+
+
+# ------------------------------------------------------------------
 # Generic data browse
 # ------------------------------------------------------------------
 _BROWSE_TABLES = {
@@ -709,6 +956,57 @@ _BROWSE_TABLES = {
         'label': '模拟盘净值',
         'order': 'trade_date DESC',
         'columns': '*',
+    },
+    # --- 美股 ---
+    'us_stock_basic': {
+        'label': '🇺🇸 股票基本信息',
+        'order': 'ticker ASC',
+        'columns': 'ticker, name, exchange, sector, industry, ipo_date, market_cap, country, is_active',
+    },
+    'us_daily_price': {
+        'label': '🇺🇸 日线行情',
+        'order': 'trade_date DESC, ticker ASC',
+        'columns': 'ticker, trade_date, `open`, high, low, `close`, adj_close, volume, change_pct',
+    },
+    'us_financial_data': {
+        'label': '🇺🇸 财务数据',
+        'order': 'date DESC, ticker ASC',
+        'columns': 'ticker, period, date, filing_date, revenue, net_income, eps, gross_margin, operating_margin, roe, pe_ratio, pb_ratio',
+    },
+    'us_industry_class': {
+        'label': '🇺🇸 行业分类',
+        'order': 'ticker ASC',
+        'columns': 'ticker, sector, industry, sub_industry',
+    },
+    'us_index_daily': {
+        'label': '🇺🇸 指数日线',
+        'order': 'trade_date DESC, index_code ASC',
+        'columns': 'index_code, trade_date, `open`, high, low, `close`, volume',
+    },
+    'us_macro_indicator': {
+        'label': '🇺🇸 宏观指标',
+        'order': 'report_date DESC, indicator_code ASC',
+        'columns': 'indicator_code, report_date, value',
+    },
+    'us_commodity_price': {
+        'label': '🇺🇸 商品期货',
+        'order': 'trade_date DESC, symbol ASC',
+        'columns': 'symbol, trade_date, `open`, high, low, `close`, volume',
+    },
+    'us_analyst_recommendation': {
+        'label': '🇺🇸 分析师评级',
+        'order': 'date DESC, ticker ASC',
+        'columns': 'ticker, date, analyst_company, analyst_name, rating, price_target',
+    },
+    'us_sec_filing': {
+        'label': '🇺🇸 SEC公告',
+        'order': 'filing_date DESC, ticker ASC',
+        'columns': 'ticker, filing_date, type, title, url',
+    },
+    'us_corporate_action': {
+        'label': '🇺🇸 公司行动',
+        'order': 'date DESC, ticker ASC',
+        'columns': 'ticker, date, action_type, label, value',
     },
 }
 

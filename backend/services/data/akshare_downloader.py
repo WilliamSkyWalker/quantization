@@ -147,22 +147,22 @@ class AKShareDownloader:
             logger.warning("券商研报数据为空")
             return 0
 
-        logger.info(f"研报 API: 共 {total_page} 页，逐页下载入库...")
+        # 增量更新：从最后一页（最新数据）往前翻，遇到旧数据提前终止
+        # force 模式：从第 1 页正序下载全部
+        if force:
+            page_range = range(1, total_page + 1)
+            logger.info(f"研报 API: 共 {total_page} 页，正序全量下载...")
+        else:
+            page_range = range(total_page, 0, -1)
+            logger.info(f"研报 API: 共 {total_page} 页，从最后一页倒序增量下载...")
 
-        # 处理第一页
         total_new = 0
-        no_change_streak = 0  # 连续无变更（无新增且无更新）页数
-        records = _parse_page_records(data_json.get("data", []))
-        if records:
-            result = self.db.upsert_research_reports(records)
-            total_new += result["new"]
-            no_change_streak = 0 if (result["new"] + result["updated"]) > 0 else 1
-        logger.info(f"第 1/{total_page} 页: {len(records)} 条, 累计新增 {total_new}")
+        no_change_streak = 0
+        pages_done = 0
 
-        # 后续页（连续 3 页无变更则提前终止，force 模式跳过）
-        for page in range(2, total_page + 1):
+        for page in page_range:
             if not force and no_change_streak >= 3:
-                logger.info(f"连续 {no_change_streak} 页无变更，提前终止（已完成 {page - 1}/{total_page} 页）")
+                logger.info(f"连续 {no_change_streak} 页无变更，提前终止（已完成 {pages_done}/{total_page} 页）")
                 break
 
             params.update({
@@ -179,6 +179,7 @@ class AKShareDownloader:
                 break
 
             records = _parse_page_records(page_data)
+            pages_done += 1
             if records:
                 result = self.db.upsert_research_reports(records)
                 total_new += result["new"]
@@ -186,7 +187,7 @@ class AKShareDownloader:
                 no_change_streak = 0 if page_changed > 0 else no_change_streak + 1
             else:
                 no_change_streak += 1
-            logger.info(f"第 {page}/{total_page} 页: {len(records)} 条, 累计新增 {total_new}")
+            logger.info(f"第 {pages_done}/{total_page} 页 (p={page}): {len(records)} 条, 累计新增 {total_new}")
 
         logger.info(f"券商研报下载完成: 共新增 {total_new} 条")
         return total_new

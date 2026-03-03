@@ -104,6 +104,56 @@ const dataTypes: DataTypeRow[] = [
       { action: 'backfill_content', label: '补全文', handler: () => runBackfillContent() },
     ],
   },
+  // --- 美股数据 ---
+  { key: 'us_divider', label: '── 美股数据 ──' },
+  {
+    key: 'us_list', label: '🇺🇸 股票列表', browseTable: 'us_stock_basic',
+    downloadAction: 'download_us_list', downloadLabel: '下载',
+  },
+  {
+    key: 'us_daily', label: '🇺🇸 日线行情', browseTable: 'us_daily_price',
+    downloadAction: 'download_us_daily', downloadLabel: '下载',
+    updateAction: 'update_us_daily', updateLabel: '更新',
+  },
+  {
+    key: 'us_financial', label: '🇺🇸 财务数据', browseTable: 'us_financial_data',
+    downloadAction: 'download_us_financial', downloadLabel: '下载',
+    updateAction: 'update_us_financial', updateLabel: '更新',
+  },
+  {
+    key: 'us_industry', label: '🇺🇸 行业分类', browseTable: 'us_industry_class',
+    downloadAction: 'download_us_industry', downloadLabel: '下载',
+  },
+  {
+    key: 'us_index', label: '🇺🇸 指数数据', browseTable: 'us_index_daily',
+    downloadAction: 'download_us_index', downloadLabel: '下载',
+    updateAction: 'update_us_index', updateLabel: '更新',
+  },
+  {
+    key: 'us_macro', label: '🇺🇸 宏观数据', browseTable: 'us_macro_indicator',
+    downloadAction: 'download_us_macro', downloadLabel: '下载',
+    updateAction: 'update_us_macro', updateLabel: '更新',
+  },
+  {
+    key: 'us_commodity', label: '🇺🇸 商品期货', browseTable: 'us_commodity_price',
+    downloadAction: 'download_us_commodity', downloadLabel: '下载',
+    updateAction: 'update_us_commodity', updateLabel: '更新',
+  },
+  {
+    key: 'us_analyst', label: '🇺🇸 分析师评级', browseTable: 'us_analyst_recommendation',
+    downloadAction: 'download_us_analyst', downloadLabel: '下载',
+    updateAction: 'update_us_analyst', updateLabel: '更新',
+  },
+  {
+    key: 'us_sec', label: '🇺🇸 SEC公告', browseTable: 'us_sec_filing',
+    downloadAction: 'download_us_sec_filing', downloadLabel: '下载',
+    updateAction: 'update_us_sec_filing', updateLabel: '更新',
+  },
+  {
+    key: 'us_corp', label: '🇺🇸 公司行动', browseTable: 'us_corporate_action',
+    downloadAction: 'download_us_corporate_action', downloadLabel: '下载',
+    updateAction: 'update_us_corporate_action', updateLabel: '更新',
+  },
 ]
 
 const statusColumns: DataTableColumns = [
@@ -149,6 +199,17 @@ const _COUNT_TABLE_MAP: Record<string, string> = {
   macro: 'macro_indicator',
   reports: 'research_report',
   sentiment: 'policy_article',
+  // 美股
+  us_list: 'us_stock_basic',
+  us_daily: 'us_daily_price',
+  us_financial: 'us_financial_data',
+  us_industry: 'us_industry_class',
+  us_index: 'us_index_daily',
+  us_macro: 'us_macro_indicator',
+  us_commodity: 'us_commodity_price',
+  us_analyst: 'us_analyst_recommendation',
+  us_sec: 'us_sec_filing',
+  us_corp: 'us_corporate_action',
 }
 
 const tableInfoMap = computed(() => {
@@ -167,6 +228,10 @@ const _ALL_BROWSE = [
   'stock_basic', 'daily_price', 'financial_data', 'industry_class',
   'commodity_price', 'macro_indicator', 'policy_article', 'policy_analysis',
   'research_report', 'paper_account', 'paper_position', 'paper_transaction', 'paper_nav',
+  // 美股
+  'us_stock_basic', 'us_daily_price', 'us_financial_data', 'us_industry_class',
+  'us_index_daily', 'us_macro_indicator', 'us_commodity_price',
+  'us_analyst_recommendation', 'us_sec_filing', 'us_corporate_action',
 ]
 
 const opColumns: DataTableColumns = [
@@ -212,10 +277,19 @@ const opColumns: DataTableColumns = [
       }),
     ]),
   },
-  { title: '数据类型', key: 'label', width: 100 },
+  {
+    title: '数据类型', key: 'label', width: 100,
+    render: (row: any) => {
+      if (row.key === 'us_divider') {
+        return h('span', { style: 'font-weight: 700; color: #409eff; font-size: 12px' }, row.label)
+      }
+      return row.label
+    },
+  },
   {
     title: '数据总量', key: 'count', width: 90, align: 'right',
     render: (row: any) => {
+      if (row.key === 'us_divider') return null
       const tableName = _COUNT_TABLE_MAP[row.key]
       if (!tableName) return '-'
       const info = tableInfoMap.value[tableName]
@@ -228,6 +302,7 @@ const opColumns: DataTableColumns = [
   {
     title: '数据日期', key: 'dataDate', width: 100,
     render: (row: any) => {
+      if (row.key === 'us_divider') return null
       const tableName = _COUNT_TABLE_MAP[row.key]
       if (!tableName) return '-'
       const info = tableInfoMap.value[tableName]
@@ -237,6 +312,7 @@ const opColumns: DataTableColumns = [
   {
     title: '更新时间', key: 'latestDate', width: 150,
     render: (row: any) => {
+      if (row.key === 'us_divider') return null
       const tableName = _COUNT_TABLE_MAP[row.key]
       if (!tableName) return '-'
       const info = tableInfoMap.value[tableName]
@@ -353,6 +429,44 @@ async function runFullDownload() {
     const { data: d6 } = await startDownload('download_reports')
     taskStore.trackTask(d6.task_id, '全量下载(研报)')
     message.success('一键全量下载: 6 个任务已启动')
+  } catch (e: any) {
+    message.error(e.response?.data?.error || '操作失败')
+  } finally {
+    running.value = false
+  }
+}
+
+async function runUSFullDownload() {
+  running.value = true
+  try {
+    const { data } = await startDownload('download_us_all')
+    taskStore.trackTask(data.task_id, '美股全量下载')
+    message.success('美股全量下载任务已启动')
+  } catch (e: any) {
+    message.error(e.response?.data?.error || '操作失败')
+  } finally {
+    running.value = false
+  }
+}
+
+async function runUSUpdate() {
+  running.value = true
+  try {
+    const actions = [
+      { action: 'update_us_daily', name: '美股日线' },
+      { action: 'update_us_financial', name: '美股财务' },
+      { action: 'update_us_index', name: '美股指数' },
+      { action: 'update_us_macro', name: '美股宏观' },
+      { action: 'update_us_commodity', name: '美股商品' },
+      { action: 'update_us_analyst', name: '美股评级' },
+      { action: 'update_us_sec_filing', name: '美股SEC' },
+      { action: 'update_us_corporate_action', name: '美股公司行动' },
+    ]
+    for (const a of actions) {
+      const { data } = await startDownload(a.action)
+      taskStore.trackTask(data.task_id, a.name)
+    }
+    message.success(`美股增量更新: ${actions.length} 个任务已启动`)
   } catch (e: any) {
     message.error(e.response?.data?.error || '操作失败')
   } finally {
@@ -782,11 +896,20 @@ onMounted(() => {
           </n-button>
           <n-button size="small" type="success" @click="runFullDownload" :disabled="running">
             <template #icon><n-icon><DownloadOutline /></n-icon></template>
-            一键全量下载
+            A股全量下载
           </n-button>
           <n-button size="small" type="warning" @click="runUpdate" :disabled="running">
             <template #icon><n-icon><RefreshOutline /></n-icon></template>
-            一键增量更新
+            A股增量更新
+          </n-button>
+          <n-divider vertical />
+          <n-button size="small" type="success" @click="runUSFullDownload" :disabled="running">
+            <template #icon><n-icon><DownloadOutline /></n-icon></template>
+            美股全量下载
+          </n-button>
+          <n-button size="small" type="warning" @click="runUSUpdate" :disabled="running">
+            <template #icon><n-icon><RefreshOutline /></n-icon></template>
+            美股增量更新
           </n-button>
         </n-space>
       </n-card>
