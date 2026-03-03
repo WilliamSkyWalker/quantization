@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useMessage, NIcon } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
-import { PlayOutline, RocketOutline, FlashOutline, StopOutline } from '@vicons/ionicons5'
+import { PlayOutline, RocketOutline, FlashOutline } from '@vicons/ionicons5'
 import { startBacktest, getDataStatus } from '../api'
 import { useTaskPolling } from '../composables/useTaskPolling'
 import { formatDate } from '../utils/format'
@@ -18,8 +18,6 @@ const latestTradeDate = ref('')
 const { loading, taskId, result, start, stopPolling, taskStore } = useTaskPolling({
   taskLabel: '回测',
 })
-const stopping = ref(false)
-const canStop = computed(() => !!taskId.value && loading.value)
 
 onMounted(async () => {
   try {
@@ -97,22 +95,6 @@ async function runBacktest() {
   }
 }
 
-async function stopBacktest() {
-  if (!taskId.value) {
-    message.warning('当前没有运行中的回测')
-    return
-  }
-  stopping.value = true
-  try {
-    await taskStore.killTask(taskId.value)
-    message.success('终止指令已发送')
-  } catch (e) {
-    message.error('终止回测失败')
-  } finally {
-    stopping.value = false
-  }
-}
-
 const summaryItems = [
   { key: '总收益率', color: '#409eff' },
   { key: '年化收益率', color: '#67c23a' },
@@ -142,10 +124,6 @@ const summaryItems = [
         <n-button type="primary" @click="runBacktest" :loading="loading">
           <template #icon><n-icon><PlayOutline /></n-icon></template>
           运行回测
-        </n-button>
-        <n-button type="error" secondary @click="stopBacktest" :disabled="!canStop" :loading="stopping">
-          <template #icon><n-icon><StopOutline /></n-icon></template>
-          停止回测
         </n-button>
         <n-divider vertical />
         <n-button @click="setFullBacktest" :disabled="!latestTradeDate || loading" secondary>

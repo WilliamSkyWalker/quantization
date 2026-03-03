@@ -724,7 +724,8 @@ class MultiFactorStrategy:
         return dates
 
     def generate_signals(
-        self, start_date: str, end_date: str
+        self, start_date: str, end_date: str,
+        cancel_check: Optional[callable] = None,
     ) -> dict[str, pd.DataFrame]:
         """
         生成回测区间内所有调仓日的选股信号。
@@ -735,6 +736,7 @@ class MultiFactorStrategy:
         Args:
             start_date: 回测起始日期。
             end_date: 回测结束日期。
+            cancel_check: 可选的取消检查回调，返回 True 时终止。
 
         Returns:
             字典 {调仓日期: 选股结果 DataFrame}。
@@ -758,6 +760,8 @@ class MultiFactorStrategy:
 
         signals = {}
         for dt in rebalance_dates:
+            if cancel_check and cancel_check():
+                raise RuntimeError('回测已取消')
             # 每个调仓日清空日期相关缓存，保留静态缓存
             FactorBase.clear_date_cache()
             try:

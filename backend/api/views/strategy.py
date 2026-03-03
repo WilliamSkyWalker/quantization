@@ -353,7 +353,8 @@ def _run_backtest(task_id, start_date, end_date):
     task_manager.update_progress(task_id, 10, '生成选股信号...')
     strategy = MultiFactorStrategy(db)
     ensure_not_cancelled()
-    signals = strategy.generate_signals(start_date, end_date)
+    cancel_check = lambda: task_manager.is_cancelled(task_id)
+    signals = strategy.generate_signals(start_date, end_date, cancel_check=cancel_check)
 
     if not signals:
         raise ValueError('无有效信号')
