@@ -103,7 +103,12 @@ class TaskManager:
                 info.finished_at = time.time()
                 self._push(task_id)
 
-        future = self._executor.submit(_wrapper)
+        try:
+            future = self._executor.submit(_wrapper)
+        except RuntimeError:
+            # Python 3.14: executor shut down during reload — recreate
+            self._executor = ThreadPoolExecutor(max_workers=2)
+            future = self._executor.submit(_wrapper)
         self._futures[task_id] = future
         return task_id
 
@@ -112,8 +117,7 @@ class TaskManager:
         info = self._tasks.get(task_id)
         return info._cancel_event.is_set() if info else False
 
-    def \
-            update_progress(self, task_id: str, progress: int, message: str = ''):
+    def update_progress(self, task_id: str, progress: int, message: str = ''):
         """Update task progress and push via WebSocket. Raises if cancelled."""
         info = self._tasks.get(task_id)
         if not info:

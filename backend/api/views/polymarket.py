@@ -187,6 +187,34 @@ def mock_alert(request):
     })
 
 
+@api_view(['POST'])
+def delete_mock_alerts(request):
+    """删除所有 Mock 告警及关联的 Mock 事件。"""
+    from backend.services.polymarket.models import PolymarketAlert, PolymarketEvent
+
+    _db.init_tables()
+    session = _db.get_session()
+    try:
+        alert_count = session.query(PolymarketAlert).filter(
+            PolymarketAlert.condition_id.like("MOCK_%")
+        ).delete(synchronize_session=False)
+
+        event_count = session.query(PolymarketEvent).filter(
+            PolymarketEvent.condition_id.like("MOCK_%")
+        ).delete(synchronize_session=False)
+
+        session.commit()
+        return Response({
+            "deleted_alerts": alert_count,
+            "deleted_events": event_count,
+        })
+    except Exception as e:
+        session.rollback()
+        return Response({"error": str(e)}, status=500)
+    finally:
+        session.close()
+
+
 # ============================================================
 # 回测相关端点
 # ============================================================
@@ -283,6 +311,13 @@ def backtest_price_series(request, condition_id):
 
 
 @api_view(['POST'])
+def backtest_backfill_categories(request):
+    """从 Gamma API 回填所有 category 为空的事件分类。"""
+    result = _history_downloader.backfill_categories()
+    return Response(result)
+
+
+@api_view(['POST'])
 def backtest_run(request):
     """
     运行 Polymarket 事件驱动回测。
@@ -293,7 +328,8 @@ def backtest_run(request):
         "use_llm": true,                     // 可选，是否调用 LLM 分析
         "spike_5m": 0.05,                   // 可选，自定义阈值
         "spike_1h": 0.15,
-        "spike_24h": 0.25
+        "spike_24h": 0.25,
+        "exclude_categories": ["sports", "pop-culture"]  // 可选，排除分类
     }
     """
     data = request.data
@@ -302,6 +338,7 @@ def backtest_run(request):
     spike_5m = data.get("spike_5m")
     spike_1h = data.get("spike_1h")
     spike_24h = data.get("spike_24h")
+    exclude_categories = data.get("exclude_categories")  # list[str] | None
 
     if spike_5m is not None:
         spike_5m = float(spike_5m)
@@ -309,6 +346,8 @@ def backtest_run(request):
         spike_1h = float(spike_1h)
     if spike_24h is not None:
         spike_24h = float(spike_24h)
+    if exclude_categories is not None:
+        exclude_categories = set(exclude_categories)
 
     def _run(task_id):
         return _backtester.run(
@@ -318,10 +357,266 @@ def backtest_run(request):
             spike_5m=spike_5m,
             spike_1h=spike_1h,
             spike_24h=spike_24h,
+            exclude_categories=exclude_categories,
         )
 
     tid = task_manager.submit("Polymarket 回测", _run)
     return Response({"status": "started", "task_id": tid})
+
+
+# ============================================================
+# 美股 P&L 回测
+# ============================================================
+
+
+# ============================================================
+# 历史影响分析
+# ============================================================
+
+
+@api_view(['GET'])
+def impact_overview(request):
+    """
+    Polymarket 历史影响概览：聚合 alert 数据展示行业/股票影响。
+
+    Query params:
+        days (int): 回看天数，默认 365
+        min_confidence (float): 最低 LLM 置信度过滤，默认 0.0
+    """
+    import json
+    from datetime import datetime, timedelta
+    from collections import Counter
+
+    days = int(request.query_params.get("days", 365))
+    min_confidence = float(request.query_params.get("min_confidence", 0.0))
+
+    _db.init_tables()
+    from backend.services.polymarket.models import PolymarketAlert
+
+    session = _db.get_session()
+    try:
+        cutoff = datetime.now() - timedelta(days=days)
+
+        # 基础查询：所有有 LLM 分析的 alert
+        query = session.query(PolymarketAlert).filter(
+            PolymarketAlert.created_at >= cutoff,
+            PolymarketAlert.llm_summary.isnot(None),
+        )
+        if min_confidence > 0:
+            query = query.filter(PolymarketAlert.llm_confidence >= min_confidence)
+
+        alerts = query.order_by(PolymarketAlert.created_at.desc()).all()
+        total_alerts = len(alerts)
+
+        if not alerts:
+            return Response({
+                "summary": {
+                    "total_alerts": 0, "alerts_with_llm": 0,
+                    "date_range": None, "avg_sentiment": None, "avg_confidence": None,
+                    "bridged_articles": 0, "bridged_analysis": 0,
+                },
+                "industry_impact": [], "stock_impact": [], "daily_timeline": [],
+                "category_distribution": {}, "alert_type_distribution": {},
+                "recent_alerts": [],
+            })
+
+        # 统计
+        sentiments = [a.llm_sentiment for a in alerts if a.llm_sentiment is not None]
+        confidences = [a.llm_confidence for a in alerts if a.llm_confidence is not None]
+        avg_sentiment = round(sum(sentiments) / len(sentiments), 4) if sentiments else None
+        avg_confidence = round(sum(confidences) / len(confidences), 4) if confidences else None
+
+        dates = [a.created_at for a in alerts if a.created_at]
+        date_range = {
+            "earliest": min(dates).strftime("%Y-%m-%d") if dates else None,
+            "latest": max(dates).strftime("%Y-%m-%d") if dates else None,
+        }
+
+        # 行业影响聚合
+        industry_counter: Counter = Counter()
+        industry_sentiment: dict[str, list[float]] = {}
+        industry_confidence: dict[str, list[float]] = {}
+
+        # 股票影响聚合
+        stock_counter: Counter = Counter()
+        stock_sentiment: dict[str, list[float]] = {}
+        stock_directions: dict[str, Counter] = {}
+        stock_names: dict[str, str] = {}
+
+        # 每日时间线
+        daily_counter: Counter = Counter()
+        daily_sentiment: dict[str, list[float]] = {}
+
+        # 分类/类型分布
+        category_counter: Counter = Counter()
+        alert_type_counter: Counter = Counter()
+
+        for alert in alerts:
+            # 行业
+            sw_raw = alert.affected_sw_industries
+            if sw_raw:
+                try:
+                    industries = json.loads(sw_raw) if isinstance(sw_raw, str) else sw_raw
+                except (json.JSONDecodeError, TypeError):
+                    industries = []
+                if isinstance(industries, list):
+                    for ind in industries:
+                        name = ind if isinstance(ind, str) else str(ind)
+                        if not name:
+                            continue
+                        industry_counter[name] += 1
+                        if alert.llm_sentiment is not None:
+                            industry_sentiment.setdefault(name, []).append(alert.llm_sentiment)
+                        if alert.llm_confidence is not None:
+                            industry_confidence.setdefault(name, []).append(alert.llm_confidence)
+
+            # A股
+            a_raw = alert.affected_a_shares
+            if a_raw:
+                try:
+                    stocks = json.loads(a_raw) if isinstance(a_raw, str) else a_raw
+                except (json.JSONDecodeError, TypeError):
+                    stocks = []
+                if isinstance(stocks, list):
+                    for s in stocks:
+                        if not isinstance(s, dict):
+                            continue
+                        code = s.get("code", "")
+                        name = s.get("name", code)
+                        direction = s.get("direction", "unknown")
+                        if not code:
+                            continue
+                        stock_counter[code] += 1
+                        stock_names[code] = name
+                        if alert.llm_sentiment is not None:
+                            stock_sentiment.setdefault(code, []).append(alert.llm_sentiment)
+                        stock_directions.setdefault(code, Counter())[direction] += 1
+
+            # 每日
+            if alert.created_at:
+                day_key = alert.created_at.strftime("%Y-%m-%d")
+                daily_counter[day_key] += 1
+                if alert.llm_sentiment is not None:
+                    daily_sentiment.setdefault(day_key, []).append(alert.llm_sentiment)
+
+            # 分类/类型
+            # 从 question 推断分类（alert 本身无 category 字段，用 event 关联）
+            alert_type_counter[alert.alert_type or "unknown"] += 1
+
+        # 关联 event category
+        condition_ids = list({a.condition_id for a in alerts})
+        events = session.query(PolymarketEvent).filter(
+            PolymarketEvent.condition_id.in_(condition_ids)
+        ).all()
+        event_category_map = {e.condition_id: e.category or "unknown" for e in events}
+        for alert in alerts:
+            cat = event_category_map.get(alert.condition_id, "unknown")
+            category_counter[cat] += 1
+
+        # 构建行业影响列表
+        industry_impact = []
+        for name, count in industry_counter.most_common(30):
+            sents = industry_sentiment.get(name, [])
+            confs = industry_confidence.get(name, [])
+            industry_impact.append({
+                "industry": name,
+                "count": count,
+                "avg_sentiment": round(sum(sents) / len(sents), 4) if sents else None,
+                "avg_confidence": round(sum(confs) / len(confs), 4) if confs else None,
+            })
+
+        # 构建股票影响列表
+        stock_impact = []
+        for code, count in stock_counter.most_common(50):
+            sents = stock_sentiment.get(code, [])
+            dirs = stock_directions.get(code, Counter())
+            stock_impact.append({
+                "code": code,
+                "name": stock_names.get(code, code),
+                "count": count,
+                "avg_sentiment": round(sum(sents) / len(sents), 4) if sents else None,
+                "bullish": dirs.get("bullish", 0),
+                "bearish": dirs.get("bearish", 0),
+            })
+
+        # 每日时间线（按日期排序）
+        daily_timeline = []
+        for day_key in sorted(daily_counter.keys()):
+            sents = daily_sentiment.get(day_key, [])
+            daily_timeline.append({
+                "date": day_key,
+                "count": daily_counter[day_key],
+                "avg_sentiment": round(sum(sents) / len(sents), 4) if sents else None,
+            })
+
+        # 桥接状态：查询 policy_article 中 source=polymarket 的数量
+        bridged_articles = 0
+        bridged_analysis = 0
+        try:
+            df = _db.query("SELECT COUNT(*) as cnt FROM policy_article WHERE source = 'polymarket'")
+            bridged_articles = int(df["cnt"].iloc[0]) if not df.empty else 0
+            df2 = _db.query(
+                "SELECT COUNT(*) as cnt FROM policy_analysis pa "
+                "JOIN policy_article a ON pa.article_id = a.id "
+                "WHERE a.source = 'polymarket'"
+            )
+            bridged_analysis = int(df2["cnt"].iloc[0]) if not df2.empty else 0
+        except Exception:
+            pass
+
+        # 最近的 alert（取最新 20 条，序列化为前端可用格式）
+        recent_alerts = []
+        for a in alerts[:20]:
+            # 解析 JSON 字段
+            def _parse_json(val):
+                if not val:
+                    return []
+                if isinstance(val, list):
+                    return val
+                try:
+                    parsed = json.loads(val)
+                    return parsed if isinstance(parsed, list) else []
+                except (json.JSONDecodeError, TypeError):
+                    return []
+
+            recent_alerts.append({
+                "id": a.id,
+                "condition_id": a.condition_id,
+                "alert_type": a.alert_type,
+                "question": a.question,
+                "price_before": a.price_before,
+                "price_after": a.price_after,
+                "price_change": a.price_change,
+                "llm_summary": a.llm_summary,
+                "llm_sentiment": a.llm_sentiment,
+                "llm_confidence": a.llm_confidence,
+                "affected_sw_industries": _parse_json(a.affected_sw_industries),
+                "affected_a_shares": _parse_json(a.affected_a_shares),
+                "affected_tickers": _parse_json(a.affected_tickers),
+                "affected_sectors": _parse_json(a.affected_sectors),
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+                "category": event_category_map.get(a.condition_id, "unknown"),
+            })
+
+        return Response({
+            "summary": {
+                "total_alerts": total_alerts,
+                "alerts_with_llm": len(sentiments),
+                "date_range": date_range,
+                "avg_sentiment": avg_sentiment,
+                "avg_confidence": avg_confidence,
+                "bridged_articles": bridged_articles,
+                "bridged_analysis": bridged_analysis,
+            },
+            "industry_impact": industry_impact,
+            "stock_impact": stock_impact,
+            "daily_timeline": daily_timeline,
+            "category_distribution": dict(category_counter.most_common()),
+            "alert_type_distribution": dict(alert_type_counter.most_common()),
+            "recent_alerts": recent_alerts,
+        })
+    finally:
+        session.close()
 
 
 # ============================================================

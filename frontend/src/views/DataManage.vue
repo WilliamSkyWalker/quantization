@@ -633,10 +633,10 @@ const drawerVisible = ref(false)
 const selectedArticle = ref<any>(null)
 
 const tierNames: Record<number, string> = {
-  1: '最高层', 2: '产业层', 3: '金融监管', 4: '专项行业', 5: '美国政策', 6: '财经媒体', 7: '券商研报',
+  1: '最高层', 2: '产业层', 3: '金融监管', 4: '专项行业', 5: '美国政策', 6: '财经媒体', 7: '券商研报', 8: '预测市场',
 }
 const tierColors: Record<number, string> = {
-  1: '#f56c6c', 2: '#e6a23c', 3: '#409eff', 4: '#67c23a', 5: '#909399', 6: '#f59e0b', 7: '#8b5cf6',
+  1: '#f56c6c', 2: '#e6a23c', 3: '#409eff', 4: '#67c23a', 5: '#909399', 6: '#f59e0b', 7: '#8b5cf6', 8: '#3b82f6',
 }
 
 const sourceColumns: DataTableColumns = [

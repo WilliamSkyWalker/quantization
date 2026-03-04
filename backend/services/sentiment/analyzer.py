@@ -20,6 +20,7 @@ from backend.services.config import (
     SENTIMENT_LOOKBACK_DAYS,
     SENTIMENT_DECAY,
     SENTIMENT_LLM_THRESHOLD,
+    SKIP_ANALYSIS_SOURCES,
     LOG_LEVEL,
 )
 from backend.services.data.database import DatabaseManager
@@ -68,6 +69,13 @@ class SentimentAnalyzer:
         keyword_count = 0
         unanalyzed = [] if llm_only else self.db.get_unanalyzed_articles("keyword", limit=max_articles)
 
+        # 排除已自带分析结果的来源（如 polymarket）
+        if unanalyzed and SKIP_ANALYSIS_SOURCES:
+            before = len(unanalyzed)
+            unanalyzed = [a for a in unanalyzed if a.get("source") not in SKIP_ANALYSIS_SOURCES]
+            if len(unanalyzed) < before:
+                logger.info(f"跳过 {before - len(unanalyzed)} 篇已自带分析的文章")
+
         if unanalyzed:
             logger.info(f"待关键词分析: {len(unanalyzed)} 篇")
             records = []
@@ -92,6 +100,9 @@ class SentimentAnalyzer:
         llm_count = 0
         if self.llm.is_available():
             llm_candidates = self.db.get_unanalyzed_articles("llm", limit=max_articles)
+            # 排除已自带分析结果的来源
+            if llm_candidates and SKIP_ANALYSIS_SOURCES:
+                llm_candidates = [a for a in llm_candidates if a.get("source") not in SKIP_ANALYSIS_SOURCES]
             logger.info(f"未做 LLM 分析的文章: {len(llm_candidates)} 篇")
             if llm_candidates:
                 # 筛选 keyword intensity >= 阈值的文章

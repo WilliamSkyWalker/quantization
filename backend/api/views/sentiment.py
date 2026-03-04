@@ -29,10 +29,11 @@ def sentiment_status(request):
         'twitter_trump': 5, 'twitter_vance': 5, 'twitter_rubio': 5,
         'eastmoney': 6, 'cls': 6, 'sina': 6,
         'research_report': 7,
+        'polymarket': 8,
     }
     tier_names = {
         1: '最高层', 2: '产业层', 3: '金融监管', 4: '专项行业', 5: '美国政策',
-        6: '财经媒体', 7: '券商研报',
+        6: '财经媒体', 7: '券商研报', 8: '预测市场',
     }
     source_labels = {
         'gov_cn': '中国政府网', 'xinhua': '新华社', 'people': '人民日报',
@@ -42,6 +43,7 @@ def sentiment_status(request):
         'mohurd': '住建部', 'twitter_trump': 'Trump', 'twitter_vance': 'Vance',
         'twitter_rubio': 'Rubio', 'eastmoney': '东方财富', 'cls': '财联社',
         'sina': '新浪财经', 'research_report': '券商研报',
+        'polymarket': 'Polymarket',
     }
 
     # Query policy_article counts

@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import {
   startMonitor, stopMonitor, getMonitorStatus, getAlerts, markAlertRead, triggerMockAlert,
-  runBacktest,
+  runBacktest, getImpactOverview, deleteMockAlerts,
 } from '../api/polymarket'
-import { getTaskStatus } from '../api'
 import { useTaskStore } from '../stores/task'
 
 const message = useMessage()
@@ -92,6 +91,22 @@ async function submitMock() {
     message.error('触发失败: ' + (e.response?.data?.error || e.message))
   } finally {
     mockLoading.value = false
+  }
+}
+
+const deleteMockLoading = ref(false)
+async function doDeleteMock() {
+  deleteMockLoading.value = true
+  try {
+    const { data } = await deleteMockAlerts()
+    message.success(`已删除 ${data.deleted_alerts} 条 Mock 告警、${data.deleted_events} 个 Mock 事件`)
+    loadAlerts()
+    // 如果历史影响 tab 已加载，刷新
+    if (impactData.value) loadImpact()
+  } catch (e: any) {
+    message.error('删除失败: ' + (e.response?.data?.error || e.message))
+  } finally {
+    deleteMockLoading.value = false
   }
 }
 
@@ -306,6 +321,7 @@ const unreadCount = computed(() => alerts.value.filter((a) => !a.is_read).length
 // ============================================================
 const btRunLoading = ref(false)
 const btResult = ref<any>(null)
+const btTaskId = ref<string | null>(null)
 const btSelectedAlert = ref<any>(null)
 const btShowAlertDetail = ref(false)
 
@@ -317,9 +333,31 @@ const btConfig = ref({
   spike_24h: 0.25,
 })
 
+// 回测任务实时状态（从 task store 响应式获取）
+const btTask = computed(() => btTaskId.value ? taskStore.getTask(btTaskId.value) : undefined)
+
+// Watch task store for backtest completion (替代轮询)
+watch(
+  () => btTask.value?.status,
+  (status) => {
+    if (!status || !btTaskId.value) return
+    if (status === 'completed') {
+      btResult.value = btTask.value?.result
+      btRunLoading.value = false
+      message.success('回测完成')
+    } else if (status === 'failed') {
+      btRunLoading.value = false
+      message.error('回测失败: ' + (btTask.value?.error || ''))
+    } else if (status === 'cancelled') {
+      btRunLoading.value = false
+    }
+  },
+)
+
 async function doRunBacktest() {
   btRunLoading.value = true
   btResult.value = null
+  btTaskId.value = null
   try {
     const payload: any = {
       use_llm: btConfig.value.use_llm,
@@ -328,39 +366,20 @@ async function doRunBacktest() {
       spike_24h: btConfig.value.spike_24h,
     }
     const { data } = await runBacktest(payload)
+    btTaskId.value = data.task_id
     taskStore.trackTask(data.task_id, 'Polymarket 回测')
-    message.success('已提交回测任务，请在任务完成后查看结果')
-    // 轮询结果
-    pollBacktestResult(data.task_id)
+    message.success('已提交回测任务')
   } catch (e: any) {
     message.error('回测失败: ' + (e.response?.data?.error || e.message))
-  } finally {
     btRunLoading.value = false
   }
-}
-
-function pollBacktestResult(taskId: string) {
-  const poll = setInterval(async () => {
-    try {
-      const { data } = await getTaskStatus(taskId)
-      if (data.status === 'completed') {
-        clearInterval(poll)
-        btResult.value = data.result
-        message.success('回测完成')
-      } else if (data.status === 'failed') {
-        clearInterval(poll)
-        message.error('回测失败: ' + (data.error || ''))
-      }
-    } catch {
-      clearInterval(poll)
-    }
-  }, 3000)
 }
 
 function openBtAlertDetail(row: any) {
   btSelectedAlert.value = row
   btShowAlertDetail.value = true
 }
+
 
 // Backtest table columns
 const btAlertColumns: DataTableColumns = [
@@ -404,6 +423,96 @@ const btAlertColumns: DataTableColumns = [
 ]
 
 // ============================================================
+// Impact Tab State
+// ============================================================
+const impactLoading = ref(false)
+const impactData = ref<any>(null)
+const impactDays = ref(365)
+const impactMinConf = ref(0)
+const impactSelectedAlert = ref<any>(null)
+const impactShowDetail = ref(false)
+
+async function loadImpact() {
+  impactLoading.value = true
+  try {
+    const { data } = await getImpactOverview({ days: impactDays.value, min_confidence: impactMinConf.value })
+    impactData.value = data
+  } catch (e: any) {
+    message.error('加载影响数据失败: ' + (e.response?.data?.error || e.message))
+  } finally {
+    impactLoading.value = false
+  }
+}
+
+function openImpactAlertDetail(row: any) {
+  impactSelectedAlert.value = row
+  impactShowDetail.value = true
+}
+
+// 情感色值：-1 红，0 灰，+1 绿
+function sentimentColor(val: number | null): string {
+  if (val == null) return '#999'
+  if (val > 0.3) return '#18a058'
+  if (val > 0.1) return '#5cb85c'
+  if (val < -0.3) return '#d03050'
+  if (val < -0.1) return '#e88080'
+  return '#999'
+}
+
+function sentimentBg(val: number | null): string {
+  if (val == null) return 'transparent'
+  if (val > 0.3) return 'rgba(24,160,88,0.08)'
+  if (val > 0.1) return 'rgba(92,184,92,0.06)'
+  if (val < -0.3) return 'rgba(208,48,80,0.08)'
+  if (val < -0.1) return 'rgba(232,128,128,0.06)'
+  return 'transparent'
+}
+
+// Impact alert table columns
+const impactAlertColumns: DataTableColumns = [
+  {
+    title: '类型',
+    key: 'alert_type',
+    width: 100,
+    render: (row: any) => alertTypeLabel(row.alert_type),
+  },
+  {
+    title: '分类',
+    key: 'category',
+    width: 80,
+  },
+  { title: '事件', key: 'question', ellipsis: { tooltip: true }, width: 280 },
+  {
+    title: '赔率变动',
+    key: 'price_change',
+    width: 140,
+    render: (row: any) =>
+      `${formatPrice(row.price_before)} → ${formatPrice(row.price_after)} (${formatChange(row.price_change)})`,
+  },
+  {
+    title: '情感',
+    key: 'llm_sentiment',
+    width: 70,
+    render: (row: any) => (row.llm_sentiment != null ? row.llm_sentiment.toFixed(2) : '-'),
+  },
+  {
+    title: '受影响行业',
+    key: 'affected_sw_industries',
+    width: 160,
+    render: (row: any) => {
+      const inds = row.affected_sw_industries || []
+      return inds.length ? inds.join(', ') : '-'
+    },
+  },
+  {
+    title: '时间',
+    key: 'created_at',
+    width: 140,
+    render: (row: any) => (row.created_at ? new Date(row.created_at).toLocaleString() : '-'),
+  },
+]
+
+// ============================================================
 // Lifecycle
 // ============================================================
 onMounted(async () => {
@@ -419,6 +528,9 @@ onUnmounted(() => {
 
 function handleTabChange(tab: string) {
   activeTab.value = tab
+  if (tab === 'impact' && !impactData.value) {
+    loadImpact()
+  }
 }
 </script>
 
@@ -445,6 +557,14 @@ function handleTabChange(tab: string) {
                 </n-badge>
               </n-space>
               <n-space :size="8">
+                <n-popconfirm @positive-click="doDeleteMock">
+                  <template #trigger>
+                    <n-button quaternary type="error" :loading="deleteMockLoading" size="small">
+                      清除Mock数据
+                    </n-button>
+                  </template>
+                  确认删除所有 Mock 告警和事件？
+                </n-popconfirm>
                 <n-button quaternary type="warning" @click="showMockDialog = true">
                   模拟告警
                 </n-button>
@@ -540,6 +660,12 @@ function handleTabChange(tab: string) {
               数据准备请前往「数据管理」页
             </span>
           </n-space>
+        </n-card>
+
+        <!-- 回测进度 -->
+        <n-card v-if="btTaskId && btTask && btTask.status === 'running'" size="small" title="回测进度">
+          <n-progress type="line" :percentage="btTask.progress" :indicator-placement="'inside'" />
+          <div style="margin-top: 8px; color: #999; font-size: 13px">{{ btTask.message }}</div>
         </n-card>
 
         <!-- 回测结果 -->
@@ -664,6 +790,253 @@ function handleTabChange(tab: string) {
           </n-card>
         </template>
       </n-space>
+    </n-tab-pane>
+
+    <!-- ============================================================ -->
+    <!-- 历史影响 Tab -->
+    <!-- ============================================================ -->
+    <n-tab-pane name="impact" tab="历史影响">
+      <n-spin :show="impactLoading">
+        <n-space vertical :size="16">
+          <!-- 筛选条件 -->
+          <n-card size="small">
+            <n-space align="center" :size="16">
+              <n-form-item label="回看天数" :show-feedback="false" label-placement="left">
+                <n-input-number v-model:value="impactDays" :min="7" :max="1095" :step="30" size="small" style="width: 120px" />
+              </n-form-item>
+              <n-form-item label="最低置信度" :show-feedback="false" label-placement="left">
+                <n-input-number v-model:value="impactMinConf" :min="0" :max="1" :step="0.1" size="small" style="width: 100px" />
+              </n-form-item>
+              <n-button type="primary" size="small" @click="loadImpact" :loading="impactLoading">
+                刷新
+              </n-button>
+            </n-space>
+          </n-card>
+
+          <template v-if="impactData">
+            <!-- 汇总统计 -->
+            <n-card size="small" title="影响概览">
+              <n-grid :cols="6" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
+                <n-gi span="6 m:1">
+                  <n-statistic label="总告警数" :value="impactData.summary?.total_alerts ?? 0" />
+                </n-gi>
+                <n-gi span="6 m:1">
+                  <n-statistic label="LLM 分析数" :value="impactData.summary?.alerts_with_llm ?? 0" />
+                </n-gi>
+                <n-gi span="6 m:1">
+                  <n-statistic label="受影响行业" :value="impactData.industry_impact?.length ?? 0" />
+                </n-gi>
+                <n-gi span="6 m:1">
+                  <n-statistic label="受影响A股" :value="impactData.stock_impact?.length ?? 0" />
+                </n-gi>
+                <n-gi span="6 m:1">
+                  <n-statistic label="已桥接文章" :value="impactData.summary?.bridged_articles ?? 0" />
+                </n-gi>
+                <n-gi span="6 m:1">
+                  <n-statistic label="已桥接分析" :value="impactData.summary?.bridged_analysis ?? 0" />
+                </n-gi>
+              </n-grid>
+
+              <n-space style="margin-top: 12px" :size="8">
+                <template v-if="impactData.summary?.avg_sentiment != null">
+                  <span style="color: #999; font-size: 13px">平均情感:</span>
+                  <n-tag :type="impactData.summary.avg_sentiment >= 0 ? 'success' : 'error'" size="small">
+                    {{ impactData.summary.avg_sentiment.toFixed(3) }}
+                  </n-tag>
+                </template>
+                <template v-if="impactData.summary?.avg_confidence != null">
+                  <span style="color: #999; font-size: 13px">平均置信度:</span>
+                  <n-tag size="small">{{ impactData.summary.avg_confidence.toFixed(3) }}</n-tag>
+                </template>
+                <template v-if="impactData.summary?.date_range">
+                  <span style="color: #999; font-size: 13px">时间范围:</span>
+                  <span style="font-size: 13px">
+                    {{ impactData.summary.date_range.earliest }} ~ {{ impactData.summary.date_range.latest }}
+                  </span>
+                </template>
+              </n-space>
+            </n-card>
+
+            <!-- 分布卡片 -->
+            <n-grid :cols="2" :x-gap="16" responsive="screen" item-responsive>
+              <!-- 事件分类分布 -->
+              <n-gi span="2 m:1" v-if="impactData.category_distribution && Object.keys(impactData.category_distribution).length">
+                <n-card size="small" title="事件分类分布">
+                  <n-space vertical :size="6">
+                    <div
+                      v-for="(count, cat) in impactData.category_distribution"
+                      :key="cat as string"
+                      style="display: flex; align-items: center; gap: 8px; padding: 4px 0"
+                    >
+                      <span style="min-width: 80px; font-size: 13px">{{ cat }}</span>
+                      <n-progress
+                        type="line"
+                        :percentage="Math.round((count as number / impactData.summary.total_alerts) * 100)"
+                        :show-indicator="false"
+                        style="flex: 1"
+                        color="#409eff"
+                      />
+                      <span style="color: #666; font-size: 12px; min-width: 40px; text-align: right">{{ count }}</span>
+                    </div>
+                  </n-space>
+                </n-card>
+              </n-gi>
+
+              <!-- 告警类型分布 -->
+              <n-gi span="2 m:1" v-if="impactData.alert_type_distribution && Object.keys(impactData.alert_type_distribution).length">
+                <n-card size="small" title="告警类型分布">
+                  <n-space vertical :size="6">
+                    <div
+                      v-for="(count, type) in impactData.alert_type_distribution"
+                      :key="type as string"
+                      style="display: flex; align-items: center; gap: 8px; padding: 4px 0"
+                    >
+                      <span style="min-width: 80px; font-size: 13px">{{ alertTypeLabel(type as string) }}</span>
+                      <n-progress
+                        type="line"
+                        :percentage="Math.round((count as number / impactData.summary.total_alerts) * 100)"
+                        :show-indicator="false"
+                        style="flex: 1"
+                        color="#e6a23c"
+                      />
+                      <span style="color: #666; font-size: 12px; min-width: 40px; text-align: right">{{ count }}</span>
+                    </div>
+                  </n-space>
+                </n-card>
+              </n-gi>
+            </n-grid>
+
+            <!-- 行业影响 & 股票影响 -->
+            <n-grid :cols="2" :x-gap="16" responsive="screen" item-responsive>
+              <!-- 行业影响 -->
+              <n-gi span="2 m:1" v-if="impactData.industry_impact?.length">
+                <n-card size="small" title="受影响申万行业">
+                  <div style="max-height: 500px; overflow-y: auto">
+                    <table style="width: 100%; border-collapse: collapse; font-size: 13px">
+                      <thead>
+                        <tr style="border-bottom: 1px solid #e0e0e0; color: #999; font-size: 12px">
+                          <th style="text-align: left; padding: 6px 8px">行业</th>
+                          <th style="text-align: right; padding: 6px 8px">命中次数</th>
+                          <th style="text-align: right; padding: 6px 8px">平均情感</th>
+                          <th style="text-align: right; padding: 6px 8px">平均置信度</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr
+                          v-for="ind in impactData.industry_impact"
+                          :key="ind.industry"
+                          :style="{ backgroundColor: sentimentBg(ind.avg_sentiment), borderBottom: '1px solid #f5f5f5' }"
+                        >
+                          <td style="padding: 6px 8px; font-weight: 500">{{ ind.industry }}</td>
+                          <td style="padding: 6px 8px; text-align: right">{{ ind.count }}</td>
+                          <td style="padding: 6px 8px; text-align: right; font-weight: 600" :style="{ color: sentimentColor(ind.avg_sentiment) }">
+                            {{ ind.avg_sentiment != null ? ind.avg_sentiment.toFixed(3) : '-' }}
+                          </td>
+                          <td style="padding: 6px 8px; text-align: right; color: #666">
+                            {{ ind.avg_confidence != null ? ind.avg_confidence.toFixed(2) : '-' }}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </n-card>
+              </n-gi>
+
+              <!-- 股票影响 -->
+              <n-gi span="2 m:1" v-if="impactData.stock_impact?.length">
+                <n-card size="small" title="受影响A股">
+                  <div style="max-height: 500px; overflow-y: auto">
+                    <table style="width: 100%; border-collapse: collapse; font-size: 13px">
+                      <thead>
+                        <tr style="border-bottom: 1px solid #e0e0e0; color: #999; font-size: 12px">
+                          <th style="text-align: left; padding: 6px 8px">股票</th>
+                          <th style="text-align: left; padding: 6px 4px">代码</th>
+                          <th style="text-align: right; padding: 6px 8px">次数</th>
+                          <th style="text-align: right; padding: 6px 8px">情感</th>
+                          <th style="text-align: center; padding: 6px 8px">利好/利空</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr
+                          v-for="s in impactData.stock_impact"
+                          :key="s.code"
+                          :style="{ backgroundColor: sentimentBg(s.avg_sentiment), borderBottom: '1px solid #f5f5f5' }"
+                        >
+                          <td style="padding: 6px 8px; font-weight: 500">{{ s.name }}</td>
+                          <td style="padding: 6px 4px; color: #999; font-size: 12px">{{ s.code }}</td>
+                          <td style="padding: 6px 8px; text-align: right">{{ s.count }}</td>
+                          <td style="padding: 6px 8px; text-align: right; font-weight: 600" :style="{ color: sentimentColor(s.avg_sentiment) }">
+                            {{ s.avg_sentiment != null ? s.avg_sentiment.toFixed(3) : '-' }}
+                          </td>
+                          <td style="padding: 6px 8px; text-align: center">
+                            <span v-if="s.bullish" style="color: #18a058; font-size: 12px">{{ s.bullish }}↑</span>
+                            <span v-if="s.bullish && s.bearish" style="color: #ccc; margin: 0 2px">/</span>
+                            <span v-if="s.bearish" style="color: #d03050; font-size: 12px">{{ s.bearish }}↓</span>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </n-card>
+              </n-gi>
+            </n-grid>
+
+            <!-- 每日时间线 -->
+            <n-card v-if="impactData.daily_timeline?.length" size="small" title="每日告警时间线">
+              <div style="max-height: 300px; overflow-y: auto">
+                <div style="display: flex; align-items: flex-end; gap: 2px; min-height: 120px; padding: 8px 0">
+                  <div
+                    v-for="d in impactData.daily_timeline"
+                    :key="d.date"
+                    :title="`${d.date}: ${d.count} 条告警, 情感 ${d.avg_sentiment?.toFixed(2) ?? '-'}`"
+                    :style="{
+                      flex: 1,
+                      minWidth: '4px',
+                      maxWidth: '16px',
+                      height: Math.max(4, d.count * 12) + 'px',
+                      backgroundColor: sentimentColor(d.avg_sentiment),
+                      borderRadius: '2px 2px 0 0',
+                      opacity: 0.7,
+                      cursor: 'pointer',
+                    }"
+                  />
+                </div>
+                <div style="display: flex; justify-content: space-between; font-size: 11px; color: #999; padding: 0 2px">
+                  <span>{{ impactData.daily_timeline[0]?.date }}</span>
+                  <span>{{ impactData.daily_timeline[impactData.daily_timeline.length - 1]?.date }}</span>
+                </div>
+              </div>
+            </n-card>
+
+            <!-- 最近告警列表 -->
+            <n-card v-if="impactData.recent_alerts?.length" size="small" title="最近告警" :segmented="{ content: true }">
+              <n-data-table
+                :columns="impactAlertColumns"
+                :data="impactData.recent_alerts"
+                :row-key="(row: any) => row.id"
+                size="small"
+                :max-height="400"
+                :scroll-x="900"
+                :row-props="(row: any) => ({
+                  style: 'cursor: pointer',
+                  onClick: () => openImpactAlertDetail(row),
+                })"
+              />
+            </n-card>
+
+            <!-- 空状态 -->
+            <n-card v-if="impactData.summary?.total_alerts === 0" size="small">
+              <n-empty description="暂无 Polymarket 历史告警数据">
+                <template #extra>
+                  <span style="color: #999; font-size: 13px">
+                    请先运行「历史回测」或启动「实时监控」生成告警
+                  </span>
+                </template>
+              </n-empty>
+            </n-card>
+          </template>
+        </n-space>
+      </n-spin>
     </n-tab-pane>
   </n-tabs>
 
@@ -908,6 +1281,131 @@ function handleTabChange(tab: string) {
             <div v-if="btSelectedAlert.affected_sectors && btSelectedAlert.affected_sectors.length">
               <span style="color: #999; font-size: 12px; margin-right: 8px">GICS 行业:</span>
               <n-tag v-for="s in btSelectedAlert.affected_sectors" :key="s" size="small" style="margin: 2px">
+                {{ s }}
+              </n-tag>
+            </div>
+          </n-space>
+        </n-card>
+      </n-space>
+    </n-drawer-content>
+  </n-drawer>
+
+  <!-- 历史影响告警详情抽屉 -->
+  <n-drawer v-model:show="impactShowDetail" :width="520" placement="right">
+    <n-drawer-content v-if="impactSelectedAlert" title="告警详情">
+      <n-space vertical :size="16">
+        <n-card size="small" title="事件信息">
+          <n-descriptions :column="1" label-placement="left" size="small">
+            <n-descriptions-item label="事件问题">
+              {{ impactSelectedAlert.question }}
+            </n-descriptions-item>
+            <n-descriptions-item label="告警类型">
+              <n-tag size="small" :type="impactSelectedAlert.alert_type === 'spike_5m' ? 'error' : impactSelectedAlert.alert_type === 'spike_1h' ? 'warning' : 'info'">
+                {{ alertTypeLabel(impactSelectedAlert.alert_type) }}
+              </n-tag>
+            </n-descriptions-item>
+            <n-descriptions-item label="分类">
+              {{ impactSelectedAlert.category }}
+            </n-descriptions-item>
+            <n-descriptions-item label="赔率变动">
+              {{ formatPrice(impactSelectedAlert.price_before) }} → {{ formatPrice(impactSelectedAlert.price_after) }}
+              <n-tag
+                size="small"
+                :type="impactSelectedAlert.price_change >= 0 ? 'success' : 'error'"
+                style="margin-left: 8px"
+              >
+                {{ formatChange(impactSelectedAlert.price_change) }}
+              </n-tag>
+            </n-descriptions-item>
+            <n-descriptions-item label="触发时间">
+              {{ impactSelectedAlert.created_at ? new Date(impactSelectedAlert.created_at).toLocaleString() : '-' }}
+            </n-descriptions-item>
+          </n-descriptions>
+        </n-card>
+
+        <n-card v-if="impactSelectedAlert.llm_summary" size="small" title="LLM 分析">
+          <n-space vertical :size="8">
+            <div style="line-height: 1.6">{{ impactSelectedAlert.llm_summary }}</div>
+            <n-space :size="8">
+              <n-tag size="small" :type="(impactSelectedAlert.llm_sentiment ?? 0) >= 0 ? 'success' : 'error'">
+                情感: {{ impactSelectedAlert.llm_sentiment?.toFixed(2) ?? '-' }}
+              </n-tag>
+              <n-tag size="small">
+                置信度: {{ impactSelectedAlert.llm_confidence?.toFixed(2) ?? '-' }}
+              </n-tag>
+            </n-space>
+          </n-space>
+        </n-card>
+
+        <n-card
+          v-if="impactSelectedAlert.affected_tickers && impactSelectedAlert.affected_tickers.length"
+          size="small"
+          title="受影响美股"
+        >
+          <n-space vertical :size="6">
+            <div
+              v-for="(t, i) in impactSelectedAlert.affected_tickers"
+              :key="i"
+              style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #f0f0f0"
+            >
+              <n-tag :type="directionTag(t.direction)" size="small" round style="min-width: 56px; text-align: center">
+                {{ t.ticker }}
+              </n-tag>
+              <n-tag size="small" :type="directionTag(t.direction)" :bordered="false">
+                {{ directionLabel(t.direction) }}
+              </n-tag>
+              <span style="color: #999; font-size: 12px; white-space: nowrap">
+                {{ (t.confidence * 100).toFixed(0) }}%
+              </span>
+              <span v-if="t.reasoning" style="color: #666; font-size: 12px; flex: 1; line-height: 1.4">
+                {{ t.reasoning }}
+              </span>
+            </div>
+          </n-space>
+        </n-card>
+
+        <n-card
+          v-if="impactSelectedAlert.affected_a_shares && impactSelectedAlert.affected_a_shares.length"
+          size="small"
+          title="受影响A股"
+        >
+          <n-space vertical :size="6">
+            <div
+              v-for="(s, i) in impactSelectedAlert.affected_a_shares"
+              :key="i"
+              style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #f0f0f0"
+            >
+              <n-tag :type="directionTag(s.direction)" size="small" round style="min-width: 56px; text-align: center">
+                {{ s.name }}
+              </n-tag>
+              <span style="color: #999; font-size: 12px; white-space: nowrap">
+                {{ s.code }}
+              </span>
+              <n-tag size="small" :type="directionTag(s.direction)" :bordered="false">
+                {{ directionLabel(s.direction) }}
+              </n-tag>
+              <span style="color: #999; font-size: 12px; white-space: nowrap">
+                {{ (s.confidence * 100).toFixed(0) }}%
+              </span>
+            </div>
+          </n-space>
+        </n-card>
+
+        <n-card
+          v-if="(impactSelectedAlert.affected_sectors && impactSelectedAlert.affected_sectors.length) || (impactSelectedAlert.affected_sw_industries && impactSelectedAlert.affected_sw_industries.length)"
+          size="small"
+          title="受影响行业"
+        >
+          <n-space vertical :size="8">
+            <div v-if="impactSelectedAlert.affected_sw_industries && impactSelectedAlert.affected_sw_industries.length">
+              <span style="color: #999; font-size: 12px; margin-right: 8px">申万行业:</span>
+              <n-tag v-for="s in impactSelectedAlert.affected_sw_industries" :key="s" size="small" style="margin: 2px">
+                {{ s }}
+              </n-tag>
+            </div>
+            <div v-if="impactSelectedAlert.affected_sectors && impactSelectedAlert.affected_sectors.length">
+              <span style="color: #999; font-size: 12px; margin-right: 8px">GICS 行业:</span>
+              <n-tag v-for="s in impactSelectedAlert.affected_sectors" :key="s" size="small" style="margin: 2px">
                 {{ s }}
               </n-tag>
             </div>

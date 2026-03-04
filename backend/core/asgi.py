@@ -3,6 +3,30 @@ import os
 import sys
 from pathlib import Path
 
+# ---------- Python 3.14 compat ----------
+# Python 3.14 raises RuntimeError("cannot schedule new futures after
+# interpreter shutdown") when the event loop's default ThreadPoolExecutor
+# is shut down (e.g. during daphne hot-reload). Patch run_in_executor to
+# transparently replace the dead executor so Django/channels keep working.
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+_orig_run_in_executor = asyncio.BaseEventLoop.run_in_executor
+
+
+def _resilient_run_in_executor(self, executor, func, *args):
+    try:
+        return _orig_run_in_executor(self, executor, func, *args)
+    except RuntimeError:
+        new_executor = ThreadPoolExecutor()
+        if executor is None:
+            self._default_executor = new_executor
+        return _orig_run_in_executor(self, new_executor, func, *args)
+
+
+asyncio.BaseEventLoop.run_in_executor = _resilient_run_in_executor
+# -----------------------------------------
+
 # 确保项目根目录在 sys.path 上，使 'backend' 包可导入
 _project_root = str(Path(__file__).resolve().parent.parent.parent)
 if _project_root not in sys.path:

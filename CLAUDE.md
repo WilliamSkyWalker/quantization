@@ -54,7 +54,7 @@ frontend/ → Vue 3 + Naive UI 仪表盘
 start.sh → 一键启动 + crontab 安装（cron 通过 curl 调用 API）
 ```
 
-**舆情管道：** `services/sentiment/scrapers/` 下 11 个中国政府网站爬虫 + CCTV新闻联播（AKShare）+ 巨潮公告 + 3 个 Twitter/X 美国政策爬虫（Trump/Vance/Rubio），共 16 个爬虫，由 `services/sentiment/downloader.py` 调度，`HttpRateLimiter` 实现按域名限速。CCTV 爬虫通过 AKShare `news_cctv()` 获取新闻联播文字稿（Tier 1）。巨潮公告爬虫通过 cninfo POST API 获取上市公司公告标题（Tier 2）。Twitter 爬虫使用 twikit 库（免费，需 `TWITTER_USERNAME`/`TWITTER_EMAIL`/`TWITTER_PASSWORD`），独立限速器（90 req/min），缺少凭证或 twikit 未安装时优雅降级（跳过，不报错）。
+**舆情管道：** `services/sentiment/scrapers/` 下 11 个中国政府网站爬虫 + CCTV新闻联播（AKShare）+ 巨潮公告 + 3 个 Twitter/X 美国政策爬虫（Trump/Vance/Rubio）+ Polymarket 预测市场桥接，共 20 个爬虫，由 `services/sentiment/downloader.py` 调度，`HttpRateLimiter` 实现按域名限速。CCTV 爬虫通过 AKShare `news_cctv()` 获取新闻联播文字稿（Tier 1）。巨潮公告爬虫通过 cninfo POST API 获取上市公司公告标题（Tier 2）。Twitter 爬虫使用 twikit 库（免费，需 `TWITTER_USERNAME`/`TWITTER_EMAIL`/`TWITTER_PASSWORD`），独立限速器（90 req/min），缺少凭证或 twikit 未安装时优雅降级（跳过，不报错）。Polymarket 桥接爬虫从 `polymarket_alert` 表读取已有 LLM 分析的 alert，直接注入 `policy_article` + `policy_analysis`（Tier 8，`SKIP_ANALYSIS_SOURCES` 跳过重复分析）。
 
 **券商研报管道：** `services/data/akshare_downloader.py` 通过 AKShare `stock_research_report_em()` 下载东方财富券商研报数据，存入 `research_report` 表。`services/factors/research.py` 提供 ANALYST_RATING（共识评级）和 ANALYST_COVERAGE（覆盖度）两个因子，直接按 ts_code 匹配（无需行业映射），归入 sentiment 大类。
 

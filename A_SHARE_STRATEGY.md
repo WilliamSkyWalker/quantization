@@ -731,3 +731,27 @@ deviation ≤ -5%  → strength = 0.0（纯熊）
 - 东方财富 URL 来自 API 返回的链接列；财联社/新浪 URL 基于内容 hash 生成
 - 财联社标题列可能为空，取内容前 100 字做标题；新浪无标题列，取内容前 50 字
 - `TIER_WEIGHTS[6] = 0.6`，与舆情大类权重一致
+
+### 11.4 预测市场层（Tier 8）
+
+将 Polymarket 预测市场的 Spike 告警桥接到舆情因子管道，无需重新跑 LLM 分析。
+
+**数据流：**
+```
+polymarket_alert (实时监控 + 回测引擎产出，含 LLM 分析结果)
+  → PolymarketScraper.scrape_pages() 读取 alert
+  → policy_article (source="polymarket", tier=8)
+  → policy_analysis (直接从 alert 的 llm_sentiment/industries/stocks 注入，analysis_type="llm")
+  → get_daily_score() / get_daily_stock_score() 自动拾取
+  → POLICY_SENT / POLICY_INTENSITY 因子
+```
+
+**关键设计：**
+- `PolymarketScraper` 继承 `BaseScraper`，`fetch_content=False`，`list_urls=[]`
+- 从 `polymarket_alert` 表读取有 `llm_summary` 和 `llm_sentiment` 的 alert
+- 转换为 `policy_article` 格式，附带 `_analysis` 元数据
+- `SentimentDownloader` 识别 `_analysis` 元数据，写入 article 后立即注入 `policy_analysis`
+- `SKIP_ANALYSIS_SOURCES = {"polymarket"}`，analyzer 跳过已自带分析的文章
+- 回测引擎 `_replay_market()` 生成的 alert 同步持久化到 `polymarket_alert` 表
+- `TIER_WEIGHTS[8] = 0.8`（金融预测市场信号质量高）
+- `max_pages` 复用为回看天数

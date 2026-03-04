@@ -788,7 +788,6 @@ class MultiFactorStrategy:
                     logger.info(f"{dt} 空仓信号（清仓持现金）")
             except Exception as e:
                 logger.warning(f"{dt} 选股失败: {e}")
-
         # 清理所有缓存
         FactorBase.clear_all_cache()
 

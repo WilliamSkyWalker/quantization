@@ -133,7 +133,18 @@ class SentimentDownloader:
                 has_pages = True
                 found += len(page_articles)
                 if page_articles:
+                    # 提取附带的 _analysis 元数据（polymarket 等已自带分析的源）
+                    analysis_records = []
+                    for a in page_articles:
+                        analysis_meta = a.pop("_analysis", None)
+                        if analysis_meta:
+                            analysis_records.append(analysis_meta)
+
                     new_count += self.db.upsert_policy_articles(page_articles)
+
+                    # 注入 policy_analysis（需要先拿到 article_id）
+                    if analysis_records:
+                        self._inject_analysis(page_articles, analysis_records)
 
             if not has_pages and not scraper.list_urls:
                 # Fallback: 爬虫未实现 scrape_pages()，调用 scrape()
@@ -171,6 +182,51 @@ class SentimentDownloader:
 
             logger.error(f"[{source}] 抓取失败: {e}")
             return {"found": 0, "new": 0, "status": "failed"}
+
+    def _inject_analysis(self, articles: list[dict], analysis_records: list[dict]):
+        """
+        将已自带的分析结果注入 policy_analysis 表。
+
+        通过 URL 反查 article_id，然后写入对应的 analysis 记录。
+        """
+        if not analysis_records:
+            return
+
+        # 按 URL 查 article_id
+        urls = [a["url"] for a in articles if "url" in a]
+        if not urls:
+            return
+
+        url_to_analysis = {}
+        for article, analysis in zip(articles, analysis_records):
+            if analysis:
+                url_to_analysis[article["url"]] = analysis
+
+        if not url_to_analysis:
+            return
+
+        try:
+            from backend.services.sentiment.models import PolicyArticle
+            session = self.db.get_session()
+            try:
+                rows = session.query(PolicyArticle.id, PolicyArticle.url).filter(
+                    PolicyArticle.url.in_(list(url_to_analysis.keys()))
+                ).all()
+
+                records = []
+                for row in rows:
+                    analysis = url_to_analysis.get(row.url)
+                    if analysis:
+                        record = {**analysis, "article_id": row.id}
+                        records.append(record)
+
+                if records:
+                    self.db.upsert_policy_analysis(records)
+                    logger.info(f"注入 {len(records)} 条 policy_analysis 记录")
+            finally:
+                session.close()
+        except Exception as e:
+            logger.warning(f"注入 policy_analysis 失败: {e}")
 
     def backfill_content(
         self,

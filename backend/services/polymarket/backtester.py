@@ -11,6 +11,7 @@ import json
 import logging
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional
 
@@ -23,6 +24,10 @@ from backend.services.config import (
     POLYMARKET_LLM_COOLDOWN,
     LOG_LEVEL,
 )
+
+LLM_CONCURRENCY = 8  # Polymarket 回测 LLM 并发数
+BACKTEST_EXCLUDE_CATEGORIES = {"sports", "pop-culture"}  # 回测默认排除的分类
+
 from backend.services.data.database import DatabaseManager
 from backend.services.polymarket.models import PolymarketEvent, PolymarketPriceSnapshot, PolymarketAlert
 from backend.services.polymarket.event_analyzer import EventAnalyzer
@@ -62,6 +67,7 @@ class PolymarketBacktester:
         spike_5m: Optional[float] = None,
         spike_1h: Optional[float] = None,
         spike_24h: Optional[float] = None,
+        exclude_categories: Optional[set[str]] = None,
     ) -> dict:
         """
         运行回测。
@@ -76,6 +82,7 @@ class PolymarketBacktester:
             回测结果字典
         """
         self._db.init_tables()
+        logger.info("[回测] 初始化回测引擎，加载历史数据...")
         task_manager.update_progress(task_id, 5, "加载历史数据...")
 
         # 自定义阈值
@@ -88,69 +95,140 @@ class PolymarketBacktester:
         session: Session = self._db.get_session()
         try:
             # 获取要回测的市场
+            excl = exclude_categories if exclude_categories is not None else BACKTEST_EXCLUDE_CATEGORIES
             if condition_ids:
                 events = session.query(PolymarketEvent).filter(
                     PolymarketEvent.condition_id.in_(condition_ids)
                 ).all()
             else:
-                events = session.query(PolymarketEvent).filter(
+                q = session.query(PolymarketEvent).filter(
                     PolymarketEvent.is_active == False  # noqa: E712
-                ).order_by(PolymarketEvent.volume.desc()).limit(50).all()
+                )
+                if excl:
+                    q = q.filter(PolymarketEvent.category.notin_(excl))
+                    logger.info(f"[回测] 排除分类: {excl}")
+                events = q.order_by(PolymarketEvent.volume.desc()).all()
 
             if not events:
+                logger.warning("[回测] 未找到可回测的市场")
                 task_manager.update_progress(task_id, 100, "无可回测的市场")
                 return {"total_markets": 0, "alerts": [], "summary": {}}
 
             total_markets = len(events)
-            all_alerts = []
+            all_alerts: list[dict] = []
             market_results = []
+            logger.info(f"[回测] 找到 {total_markets} 个市场，开始回测...")
+            task_manager.update_progress(task_id, 8, f"找到 {total_markets} 个市场，开始回测...")
+
+            # ── 阶段 1: 快速扫描全部市场，收集 spike ──
+            # alerts_with_ts: [(alert_data, snap_timestamp), ...]
+            alerts_with_ts: list[tuple[dict, datetime]] = []
 
             for idx, event in enumerate(events):
-                progress = 10 + int(80 * (idx / total_markets))
+                progress = 10 + int(50 * (idx / total_markets))
                 task_manager.update_progress(
                     task_id, progress,
-                    f"回测 ({idx + 1}/{total_markets}): {event.question[:40]}..."
+                    f"扫描 ({idx + 1}/{total_markets}): {event.question[:40]}..."
                 )
+                logger.info(f"[回测] [{idx + 1}/{total_markets}] {event.question[:60]}")
 
-                # 获取价格序列
                 snapshots = session.query(PolymarketPriceSnapshot).filter(
                     PolymarketPriceSnapshot.condition_id == event.condition_id
                 ).order_by(PolymarketPriceSnapshot.timestamp.asc()).all()
 
                 if len(snapshots) < 2:
+                    logger.warning(f"[回测]   跳过: 数据点不足 ({len(snapshots)})")
+                    market_results.append(self._market_stat(event, snapshots, 0))
                     continue
+                logger.info(f"[回测]   价格序列: {len(snapshots)} 个数据点")
 
-                # 回放价格序列，检测 spike
-                alerts = self._replay_market(
-                    event=event,
-                    snapshots=snapshots,
-                    rules=rules,
-                    use_llm=use_llm,
+                spikes = self._replay_market(event, snapshots, rules)
+
+                if spikes:
+                    logger.info(f"[回测]   检测到 {len(spikes)} 个 spike")
+                for alert_data, snap_ts in spikes:
+                    alerts_with_ts.append((alert_data, snap_ts))
+
+                market_results.append(self._market_stat(event, snapshots, len(spikes)))
+
+            total_spikes = len(alerts_with_ts)
+            logger.info(f"[回测] 阶段 1 完成: {total_spikes} 个 spike")
+            task_manager.update_progress(task_id, 60, f"扫描完成: {total_spikes} 个 spike")
+
+            # ── 阶段 2: 并发 LLM 分析 ──
+            if use_llm and self._analyzer.is_available() and alerts_with_ts:
+                logger.info(f"[回测] 阶段 2: LLM 并发分析 {total_spikes} 个 spike (concurrency={LLM_CONCURRENCY})")
+                task_manager.update_progress(
+                    task_id, 62,
+                    f"LLM 分析 0/{total_spikes}..."
                 )
+                done_count = 0
 
-                market_results.append({
-                    "condition_id": event.condition_id,
-                    "question": event.question,
-                    "category": event.category,
-                    "volume": event.volume,
-                    "data_points": len(snapshots),
-                    "alerts_triggered": len(alerts),
-                    "price_start": snapshots[0].yes_price,
-                    "price_end": snapshots[-1].yes_price,
-                    "price_range": max(s.yes_price for s in snapshots) - min(s.yes_price for s in snapshots),
-                    "time_start": snapshots[0].timestamp.isoformat() if snapshots[0].timestamp else None,
-                    "time_end": snapshots[-1].timestamp.isoformat() if snapshots[-1].timestamp else None,
-                })
+                def _analyze_one(item: tuple[dict, datetime]) -> tuple[dict, datetime]:
+                    alert_data, snap_ts = item
+                    try:
+                        result = self._analyzer.analyze({
+                            "question": alert_data["question"],
+                            "description": "",
+                            "category": alert_data.get("category", ""),
+                            "price_before": alert_data["price_before"],
+                            "price_after": alert_data["price_after"],
+                            "price_change": alert_data["price_change"],
+                            "alert_type": alert_data["alert_type"],
+                            "timeframe_seconds": alert_data["timeframe_seconds"],
+                        })
+                        if result:
+                            alert_data["affected_tickers"] = result.get("affected_tickers", [])
+                            alert_data["affected_a_shares"] = result.get("affected_a_shares", [])
+                            alert_data["affected_sectors"] = result.get("affected_sectors", [])
+                            alert_data["affected_sw_industries"] = result.get("affected_sw_industries", [])
+                            alert_data["llm_summary"] = result.get("summary")
+                            alert_data["llm_sentiment"] = result.get("overall_sentiment")
+                            alert_data["llm_confidence"] = result.get("confidence")
+                            a_shares = [s.get("name", "") for s in result.get("affected_a_shares", [])[:3]]
+                            logger.info(
+                                f"[回测] LLM 完成: {alert_data['alert_type']} | "
+                                f"sentiment={result.get('overall_sentiment', '-')}"
+                                + (f" | A股: {', '.join(a_shares)}" if a_shares else "")
+                            )
+                    except Exception as e:
+                        logger.warning(f"[回测] LLM 分析失败: {e}")
+                    return alert_data, snap_ts
 
-                all_alerts.extend(alerts)
+                with ThreadPoolExecutor(max_workers=LLM_CONCURRENCY) as pool:
+                    futures = {pool.submit(_analyze_one, item): item for item in alerts_with_ts}
+                    analyzed: list[tuple[dict, datetime]] = []
+                    for future in as_completed(futures):
+                        alert_data, snap_ts = future.result()
+                        analyzed.append((alert_data, snap_ts))
+                        done_count += 1
+                        if done_count % max(1, total_spikes // 10) == 0 or done_count == total_spikes:
+                            pct = 62 + int(28 * done_count / total_spikes)
+                            task_manager.update_progress(
+                                task_id, pct,
+                                f"LLM 分析 {done_count}/{total_spikes}..."
+                            )
+                alerts_with_ts = analyzed
+
+            # 持久化 + 收集最终 alert 列表
+            for alert_data, snap_ts in alerts_with_ts:
+                all_alerts.append(alert_data)
+                self._persist_alert(alert_data, snap_ts, source="backtest")
+
+            # 回填 market_results 的 alerts_triggered（LLM 可能没改数量，但保持一致）
+            alerts_per_market: dict[str, int] = {}
+            for a in all_alerts:
+                cid = a["condition_id"]
+                alerts_per_market[cid] = alerts_per_market.get(cid, 0) + 1
+            for m in market_results:
+                m["alerts_triggered"] = alerts_per_market.get(m["condition_id"], 0)
 
             # 生成汇总统计
             summary = self._compute_summary(market_results, all_alerts)
 
-            task_manager.update_progress(
-                task_id, 95,
-                f"回测完成: {total_markets} 个市场, {len(all_alerts)} 个告警"
-            )
+            msg = f"回测完成: {total_markets} 个市场, {len(all_alerts)} 个告警"
+            logger.info(f"[回测] {msg}")
+            task_manager.update_progress(task_id, 95, msg)
 
             return {
                 "total_markets": total_markets,
@@ -161,20 +239,44 @@ class PolymarketBacktester:
         finally:
             session.close()
 
+    @staticmethod
+    def _market_stat(event: PolymarketEvent, snapshots: list, n_alerts: int) -> dict:
+        if not snapshots or len(snapshots) < 2:
+            return {
+                "condition_id": event.condition_id,
+                "question": event.question,
+                "category": event.category,
+                "volume": event.volume,
+                "data_points": len(snapshots),
+                "alerts_triggered": n_alerts,
+                "price_start": None, "price_end": None, "price_range": 0,
+                "time_start": None, "time_end": None,
+            }
+        return {
+            "condition_id": event.condition_id,
+            "question": event.question,
+            "category": event.category,
+            "volume": event.volume,
+            "data_points": len(snapshots),
+            "alerts_triggered": n_alerts,
+            "price_start": snapshots[0].yes_price,
+            "price_end": snapshots[-1].yes_price,
+            "price_range": max(s.yes_price for s in snapshots) - min(s.yes_price for s in snapshots),
+            "time_start": snapshots[0].timestamp.isoformat() if snapshots[0].timestamp else None,
+            "time_end": snapshots[-1].timestamp.isoformat() if snapshots[-1].timestamp else None,
+        }
+
     def _replay_market(
         self,
         event: PolymarketEvent,
         snapshots: list[PolymarketPriceSnapshot],
         rules: list[tuple],
-        use_llm: bool,
-    ) -> list[dict]:
-        """回放单个市场的价格序列，检测 Spike。"""
-        # 滚动窗口：(timestamp_unix, price)
+    ) -> list[tuple[dict, datetime]]:
+        """回放价格序列，仅做 Spike 检测（不调 LLM）。返回 [(alert_data, snap_timestamp), ...]。"""
         price_history: deque[tuple[float, float]] = deque()
-        max_age = 86400  # 24h
+        max_age = 86400
 
-        alerts = []
-        # 冷却缓存
+        results: list[tuple[dict, datetime]] = []
         cooldown: dict[tuple[str, str], float] = {}
 
         for snap in snapshots:
@@ -183,15 +285,12 @@ class PolymarketBacktester:
             if ts == 0 or price is None:
                 continue
 
-            # 添加到滚动窗口
             price_history.append((ts, price))
 
-            # 修剪过期数据
             cutoff = ts - max_age
             while price_history and price_history[0][0] < cutoff:
                 price_history.popleft()
 
-            # 检测每档 Spike
             for alert_type, lookback_seconds, threshold in rules:
                 target_ts = ts - lookback_seconds
                 old_price = self._find_nearest_price(price_history, target_ts, lookback_seconds)
@@ -202,12 +301,15 @@ class PolymarketBacktester:
                 if abs(change) < threshold:
                     continue
 
-                # 冷却检查
                 cache_key = (event.condition_id, alert_type)
                 last_trigger = cooldown.get(cache_key, 0)
                 if ts - last_trigger < POLYMARKET_LLM_COOLDOWN:
                     continue
                 cooldown[cache_key] = ts
+
+                logger.info(
+                    f"[回测]   {alert_type}: {old_price:.2%} → {price:.2%} ({change:+.2%})"
+                )
 
                 alert_data = {
                     "condition_id": event.condition_id,
@@ -228,37 +330,51 @@ class PolymarketBacktester:
                     "llm_confidence": None,
                 }
 
-                # LLM 分析
-                if use_llm and self._analyzer.is_available():
-                    try:
-                        result = self._analyzer.analyze({
-                            "question": event.question,
-                            "description": event.description or "",
-                            "category": event.category or "",
-                            "price_before": old_price,
-                            "price_after": price,
-                            "price_change": change,
-                            "alert_type": alert_type,
-                            "timeframe_seconds": lookback_seconds,
-                        })
-                        if result:
-                            alert_data["affected_tickers"] = result.get("affected_tickers", [])
-                            alert_data["affected_a_shares"] = result.get("affected_a_shares", [])
-                            alert_data["affected_sectors"] = result.get("affected_sectors", [])
-                            alert_data["affected_sw_industries"] = result.get("affected_sw_industries", [])
-                            alert_data["llm_summary"] = result.get("summary")
-                            alert_data["llm_sentiment"] = result.get("overall_sentiment")
-                            alert_data["llm_confidence"] = result.get("confidence")
-                    except Exception as e:
-                        logger.warning(f"LLM 分析失败: {e}")
+                results.append((alert_data, snap.timestamp))
 
-                alerts.append(alert_data)
-                logger.info(
-                    f"[回测] {alert_type} | {event.question[:40]} | "
-                    f"{old_price:.2%} -> {price:.2%} ({change:+.2%})"
-                )
+        return results
 
-        return alerts
+    def _persist_alert(self, alert_data: dict, timestamp, source: str = "backtest"):
+        """将回测 alert 写入 polymarket_alert 表。"""
+        import json as _json
+
+        session = self._db.get_session()
+        try:
+            # 用 condition_id + alert_type + timestamp 去重
+            existing = session.query(PolymarketAlert).filter(
+                PolymarketAlert.condition_id == alert_data["condition_id"],
+                PolymarketAlert.alert_type == alert_data["alert_type"],
+                PolymarketAlert.created_at == timestamp,
+            ).first()
+            if existing:
+                session.close()
+                return
+
+            record = PolymarketAlert(
+                condition_id=alert_data["condition_id"],
+                alert_type=alert_data["alert_type"],
+                price_before=alert_data.get("price_before"),
+                price_after=alert_data.get("price_after"),
+                price_change=alert_data.get("price_change"),
+                timeframe_seconds=alert_data.get("timeframe_seconds"),
+                question=alert_data.get("question"),
+                affected_tickers=_json.dumps(alert_data.get("affected_tickers", []), ensure_ascii=False),
+                affected_a_shares=_json.dumps(alert_data.get("affected_a_shares", []), ensure_ascii=False),
+                affected_sectors=_json.dumps(alert_data.get("affected_sectors", []), ensure_ascii=False),
+                affected_sw_industries=_json.dumps(alert_data.get("affected_sw_industries", []), ensure_ascii=False),
+                llm_summary=alert_data.get("llm_summary"),
+                llm_sentiment=alert_data.get("llm_sentiment"),
+                llm_confidence=alert_data.get("llm_confidence"),
+                is_read=False,
+                created_at=timestamp,
+            )
+            session.add(record)
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.debug(f"持久化回测 alert 失败: {e}")
+        finally:
+            session.close()
 
     @staticmethod
     def _find_nearest_price(

@@ -33,6 +33,7 @@ from backend.services.config import (
 )
 from backend.services.data.database import DatabaseManager
 from backend.services.polymarket.models import PolymarketEvent, PolymarketPriceSnapshot
+from backend.services.polymarket.utils import category_from_tags
 from backend.tasks.manager import task_manager
 
 logger = logging.getLogger(__name__)
@@ -204,12 +205,13 @@ class PolymarketMonitor:
                         yes_price = 0.5
                     no_price = 1.0 - yes_price
 
+                    category = category_from_tags(event.get("tags", []))
                     market_info = {
                         "condition_id": condition_id,
                         "token_id": market.get("clobTokenIds", "").strip("[]").split(",")[0].strip('" '),
                         "question": market.get("question", event.get("title", "")),
                         "description": market.get("description", event.get("description", "")),
-                        "category": event.get("category", ""),
+                        "category": category,
                         "yes_price": yes_price,
                         "no_price": no_price,
                         "volume": volume,
@@ -235,6 +237,8 @@ class PolymarketMonitor:
                         existing.volume = volume
                         existing.liquidity = market_info["liquidity"]
                         existing.is_active = True
+                        if category and not existing.category:
+                            existing.category = category
                     else:
                         end_date = None
                         if market_info["end_date"]:

@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from backend.services.config import POLYMARKET_GAMMA_API, POLYMARKET_MIN_VOLUME, LOG_LEVEL
 from backend.services.data.database import DatabaseManager
 from backend.services.polymarket.models import PolymarketEvent, PolymarketPriceSnapshot
+from backend.services.polymarket.utils import category_from_tags
 from backend.tasks.manager import task_manager
 
 logger = logging.getLogger(__name__)
@@ -96,12 +97,13 @@ class PolymarketHistoryDownloader:
                     except (ValueError, IndexError, TypeError):
                         yes_price = 0.5
 
+                    category = category_from_tags(event.get("tags", []))
                     market_info = {
                         "condition_id": condition_id,
                         "token_id": token_id,
                         "question": market.get("question", event.get("title", "")),
                         "description": market.get("description", event.get("description", "")),
-                        "category": event.get("category", ""),
+                        "category": category,
                         "yes_price": yes_price,
                         "volume": volume,
                         "liquidity": float(market.get("liquidity", 0) or 0),
@@ -119,6 +121,8 @@ class PolymarketHistoryDownloader:
                     if existing:
                         existing.volume = volume
                         existing.is_active = False
+                        if category and not existing.category:
+                            existing.category = category
                     else:
                         end_date = None
                         if market_info["end_date"]:
@@ -158,6 +162,57 @@ class PolymarketHistoryDownloader:
         )
         logger.info(f"已结算市场发现完成: {len(results)} 个")
         return results
+
+    def backfill_categories(self) -> dict:
+        """从 Gamma API 批量回填所有 category 为空的事件的分类。"""
+        self._db.init_tables()
+        session: Session = self._db.get_session()
+        try:
+            # 找出所有 category 为空的 slug
+            events_no_cat = session.query(PolymarketEvent).filter(
+                (PolymarketEvent.category == None) | (PolymarketEvent.category == "")  # noqa: E711
+            ).all()
+            if not events_no_cat:
+                return {"updated": 0, "total": 0}
+
+            # 按 slug 聚合（同一 event 下多个 market 共享 slug）
+            slug_to_cids: dict[str, list] = {}
+            for e in events_no_cat:
+                slug = e.slug or ""
+                slug_to_cids.setdefault(slug, []).append(e)
+
+            # 批量从 Gamma API 查询
+            updated = 0
+            slugs = [s for s in slug_to_cids if s]
+            logger.info(f"[回填分类] {len(events_no_cat)} 个事件待回填, {len(slugs)} 个 slug")
+
+            for slug in slugs:
+                try:
+                    resp = requests.get(
+                        f"{POLYMARKET_GAMMA_API}/events",
+                        params={"slug": slug, "limit": 1},
+                        timeout=15,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    if data:
+                        cat = category_from_tags(data[0].get("tags", []))
+                        if cat:
+                            for ev in slug_to_cids[slug]:
+                                ev.category = cat
+                                updated += 1
+                    time.sleep(0.05)
+                except Exception as exc:
+                    logger.debug(f"[回填分类] slug={slug} 失败: {exc}")
+
+            session.commit()
+            logger.info(f"[回填分类] 完成: {updated}/{len(events_no_cat)} 更新")
+            return {"updated": updated, "total": len(events_no_cat)}
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
     def download_price_history(
         self,

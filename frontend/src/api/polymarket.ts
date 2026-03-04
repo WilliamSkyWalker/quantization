@@ -34,6 +34,9 @@ export const triggerMockAlert = (data: {
   alert_type?: string
 }) => api.post('/polymarket/mock-alert', data)
 
+// Delete mock data
+export const deleteMockAlerts = () => api.post('/polymarket/mock-alert/delete')
+
 // Backtest
 export const backtestDiscover = (data: { limit?: number; min_volume?: number } = {}) =>
   api.post('/polymarket/backtest/discover', data)
@@ -57,6 +60,10 @@ export const runBacktest = (data: {
   spike_1h?: number
   spike_24h?: number
 } = {}) => api.post('/polymarket/backtest/run', data)
+
+// Impact Analysis
+export const getImpactOverview = (params: { days?: number; min_confidence?: number } = {}) =>
+  api.get('/polymarket/impact', { params: { days: 365, min_confidence: 0, ...params } })
 
 // US Stock P&L Backtest
 export const runUsStockPnl = (data: {

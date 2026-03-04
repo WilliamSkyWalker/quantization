@@ -1,0 +1,60 @@
+"""Polymarket 工具函数。"""
+
+# 从 Gamma API tags 数组推导一级分类
+# 优先级：匹配到第一个即返回
+_TAG_TO_CATEGORY = {
+    "politics": "politics",
+    "elections": "politics",
+    "global-elections": "politics",
+    "world-elections": "politics",
+    "us-election": "politics",
+    "us-presidential-election": "politics",
+    "geopolitics": "politics",
+    "sports": "sports",
+    "nba": "sports",
+    "nfl": "sports",
+    "soccer": "sports",
+    "baseball": "sports",
+    "mma": "sports",
+    "basketball": "sports",
+    "hockey": "sports",
+    "tennis": "sports",
+    "formula-1": "sports",
+    "crypto": "crypto",
+    "crypto-prices": "crypto",
+    "bitcoin": "crypto",
+    "ethereum": "crypto",
+    "economy": "economy",
+    "fed-rates": "economy",
+    "business": "economy",
+    "pop-culture": "pop-culture",
+    "entertainment": "pop-culture",
+    "tech": "tech",
+    "ai": "tech",
+    "science": "science",
+    "world": "world",
+    "middle-east": "world",
+}
+
+# 按优先级排序（确保 politics > world, sports > 具体项目）
+_CATEGORY_PRIORITY = [
+    "politics", "economy", "crypto", "tech", "science",
+    "world", "sports", "pop-culture",
+]
+
+
+def category_from_tags(tags: list[dict]) -> str:
+    """从 Gamma API event.tags 推导一级分类。"""
+    if not tags:
+        return ""
+    matched = set()
+    for t in tags:
+        slug = t.get("slug", "")
+        cat = _TAG_TO_CATEGORY.get(slug)
+        if cat:
+            matched.add(cat)
+    # 按优先级返回
+    for cat in _CATEGORY_PRIORITY:
+        if cat in matched:
+            return cat
+    return ""
