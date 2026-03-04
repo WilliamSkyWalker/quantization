@@ -131,6 +131,9 @@ install_cron() {
 # 每周六 02:00 — 补充利润表数据
 0 2 * * 6 curl -sS -X POST http://localhost:$BACKEND_PORT/api/data/backfill-income >> $LOG_DIR/cron_backfill.log 2>&1 $CRON_TAG
 
+# 每小时整点 — 财经媒体快讯抓取（东方财富/财联社/新浪，无历史数据需高频积累）
+0 * * * * curl -sS -X POST http://localhost:$BACKEND_PORT/api/sentiment/download -H 'Content-Type: application/json' -d '{"tier":6}' >> $LOG_DIR/cron_news.log 2>&1 $CRON_TAG
+
 # 每月1日 03:00 — 生成上月报告
 0 3 1 * * curl -sS -X POST http://localhost:$BACKEND_PORT/api/report/generate -H 'Content-Type: application/json' -d "{\"start_date\":\"\$(date -d '1 month ago' '+\%Y-\%m-01')\",\"end_date\":\"\$(date -d 'yesterday' '+\%Y-\%m-\%d')\"}" >> $LOG_DIR/cron_report.log 2>&1 $CRON_TAG
 
@@ -159,6 +162,14 @@ case "${1:-}" in
         start_backend
         start_frontend
         install_cron
+
+        # 自动启动 Polymarket 监控
+        log "=== 启动 Polymarket 监控 ==="
+        curl -sS -X POST "http://localhost:$BACKEND_PORT/api/polymarket/monitor/start" \
+            >> "$LOG_DIR/polymarket_monitor.log" 2>&1 \
+            && log "Polymarket 监控已启动" \
+            || log "WARNING: Polymarket 监控启动失败，请手动启动"
+
         log "=== 全部就绪 ==="
         log "前端: http://0.0.0.0:$FRONTEND_PORT"
         log "后端: http://0.0.0.0:$BACKEND_PORT/api/"

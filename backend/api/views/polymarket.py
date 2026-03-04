@@ -8,6 +8,7 @@ from backend.services.polymarket.monitor import get_monitor
 from backend.services.polymarket.alert_manager import AlertManager
 from backend.services.polymarket.history import PolymarketHistoryDownloader
 from backend.services.polymarket.backtester import PolymarketBacktester
+from backend.services.polymarket.us_stock_backtester import UsStockBacktester
 from backend.services.data.database import DatabaseManager
 from backend.services.polymarket.models import PolymarketEvent
 from backend.tasks.manager import task_manager
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 _alert_manager = AlertManager()
 _history_downloader = PolymarketHistoryDownloader()
 _backtester = PolymarketBacktester()
+_us_backtester = UsStockBacktester()
 _db = DatabaseManager()
 
 
@@ -319,4 +321,70 @@ def backtest_run(request):
         )
 
     tid = task_manager.submit("Polymarket 回测", _run)
+    return Response({"status": "started", "task_id": tid})
+
+
+# ============================================================
+# 美股 P&L 回测
+# ============================================================
+
+
+@api_view(['POST'])
+def us_stock_pnl(request):
+    """
+    从 alerts JSON 运行美股 P&L 回测。
+
+    POST body (JSON):
+    {
+        "alerts": [...],                // 告警列表（Polymarket 回测结果的 alerts）
+        "holding_days": 5,              // 可选，持仓天数，默认 5
+        "min_confidence": 0.0           // 可选，最低置信度，默认 0.0
+    }
+    """
+    data = request.data
+    alerts = data.get("alerts")
+    if not alerts or not isinstance(alerts, list):
+        return Response({"error": "alerts 为必填项且须为列表"}, status=400)
+
+    holding_days = int(data.get("holding_days", 5))
+    min_confidence = float(data.get("min_confidence", 0.0))
+
+    def _run(task_id):
+        return _us_backtester.run_from_alerts(
+            task_id=task_id,
+            alerts=alerts,
+            holding_days=holding_days,
+            min_confidence=min_confidence,
+        )
+
+    tid = task_manager.submit("美股 P&L 回测", _run)
+    return Response({"status": "started", "task_id": tid})
+
+
+@api_view(['POST'])
+def us_stock_pnl_from_db(request):
+    """
+    从 DB 告警表运行美股 P&L 回测。
+
+    POST body (JSON):
+    {
+        "holding_days": 5,              // 可选，持仓天数，默认 5
+        "min_confidence": 0.0,          // 可选，最低置信度，默认 0.0
+        "limit": 200                    // 可选，告警数量上限，默认 200
+    }
+    """
+    data = request.data
+    holding_days = int(data.get("holding_days", 5))
+    min_confidence = float(data.get("min_confidence", 0.0))
+    limit = int(data.get("limit", 200))
+
+    def _run(task_id):
+        return _us_backtester.run_from_db(
+            task_id=task_id,
+            holding_days=holding_days,
+            min_confidence=min_confidence,
+            limit=limit,
+        )
+
+    tid = task_manager.submit("美股 P&L 回测 (DB)", _run)
     return Response({"status": "started", "task_id": tid})

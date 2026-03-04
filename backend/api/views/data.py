@@ -49,6 +49,10 @@ def data_status(request):
         ('us_analyst_recommendation', '🇺🇸 分析师评级'),
         ('us_sec_filing', '🇺🇸 SEC公告'),
         ('us_corporate_action', '🇺🇸 公司行动'),
+        # --- Polymarket ---
+        ('polymarket_event', 'Polymarket 已结算市场'),
+        ('polymarket_price_snapshot', 'Polymarket 价格快照'),
+        ('polymarket_alert', 'Polymarket 告警'),
     ]
     # SQL to get the last updated_at for each table (when data was last written)
     latest_date_sql = {
@@ -1007,6 +1011,22 @@ _BROWSE_TABLES = {
         'label': '🇺🇸 公司行动',
         'order': 'date DESC, ticker ASC',
         'columns': 'ticker, date, action_type, label, value',
+    },
+    # --- Polymarket ---
+    'polymarket_event': {
+        'label': 'Polymarket 已结算市场',
+        'order': 'id DESC',
+        'columns': 'condition_id, question, category, outcome_yes_price, volume, is_active',
+    },
+    'polymarket_price_snapshot': {
+        'label': 'Polymarket 价格快照',
+        'order': 'timestamp DESC',
+        'columns': '*',
+    },
+    'polymarket_alert': {
+        'label': 'Polymarket 告警',
+        'order': 'created_at DESC',
+        'columns': 'condition_id, alert_type, question, price_before, price_after, price_change, llm_sentiment, llm_confidence, created_at',
     },
 }
 

@@ -190,7 +190,7 @@ class SizeFactor(FactorBase):
         # 获取流通股本
         params: dict = {}
         sql = "SELECT ts_code, float_share FROM stock_basic WHERE float_share IS NOT NULL"
-        if codes:
+        if codes and len(codes) <= self._IN_CLAUSE_THRESHOLD:
             in_clause, in_params = self._build_in_clause(codes)
             sql += f" AND ts_code IN {in_clause}"
             params.update(in_params)

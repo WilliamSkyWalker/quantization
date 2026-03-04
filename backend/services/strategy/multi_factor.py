@@ -96,15 +96,15 @@ class MultiFactorStrategy:
         "sentiment": ["POLICY_SENT", "POLICY_INTENSITY", "ANALYST_RATING", "ANALYST_COVERAGE"],
     }
 
-    # 大类权重（动量增强 1.3、成长增强 1.2，技术半权 0.5）
+    # 大类权重（质量增强 1.2、成长/价值基准 1.0、动量降权 0.8、技术提升 0.7）
     CATEGORY_WEIGHTS = {
         "value": 1.0,
-        "quality": 1.0,
-        "growth": 1.2,
-        "momentum": 1.3,
-        "technical": 0.5,
+        "quality": 1.2,
+        "growth": 1.0,
+        "momentum": 0.8,
+        "technical": 0.7,
         "macro": 0.6,
-        "sentiment": 0.4,
+        "sentiment": 0.6,
     }
 
     # 核心财务因子 — 全部缺失则剔除出池
@@ -191,20 +191,25 @@ class MultiFactorStrategy:
         # 因子权重（默认等权，新因子使用差异化权重）
         if factor_weights is None:
             self.factor_weights = {f.name: 1.0 for f in self.factors}
-            # Phase 7 新因子差异化权重
-            self.factor_weights["VOL_20D"] = 0.3          # 降低波动率惩罚（0.5→0.3）
-            self.factor_weights["PRICE_DEV_60D"] = 0.15   # 降低偏离度惩罚（0.3→0.15）
-            self.factor_weights["REV_5D"] = 0.4
+            # 动量因子（降低纯趋势因子权重，提升反转因子）
+            self.factor_weights["MOM_1M"] = 0.6            # 1月动量噪音大（1.0→0.6）
+            self.factor_weights["MOM_3M"] = 0.8            # 3月动量适度降权（1.0→0.8）
+            self.factor_weights["REV_5D"] = 0.7            # 加强短期反转捕捉（0.4→0.7）
+            self.factor_weights["IND_MOM"] = 0.8           # 行业轮动
+            self.factor_weights["RESIDUAL_MOM"] = 0.7
+            # 技术因子（加强防守信号）
+            self.factor_weights["TURN_20D"] = 0.5          # 降低换手惩罚（1.0→0.5）
+            self.factor_weights["VOL_20D"] = 0.6           # 加强低波偏好（0.3→0.6）
+            self.factor_weights["PRICE_DEV_60D"] = 0.4     # 加强超跌保护（0.15→0.4）
+            self.factor_weights["SIZE"] = 0.3
+            self.factor_weights["VOL_PRICE_DIV"] = 0.4
+            # 质量因子
             self.factor_weights["PROFIT_STB"] = 0.5
             self.factor_weights["MARGIN_TREND"] = 0.4
-            self.factor_weights["SIZE"] = 0.3
-            self.factor_weights["IND_MOM"] = 0.8          # 提高行业动量（0.5→0.8）
-            # Phase 8 新因子差异化权重
-            self.factor_weights["NET_PROFIT_YOY"] = 1.0   # 提高净利润增速（0.8→1.0）
-            self.factor_weights["REVENUE_YOY"] = 0.8      # 提高营收增速（0.6→0.8）
-            self.factor_weights["NET_PROFIT_CAGR_3Y"] = 0.8  # 3年复合增长率
-            self.factor_weights["RESIDUAL_MOM"] = 0.7
-            self.factor_weights["VOL_PRICE_DIV"] = 0.4
+            # 成长因子
+            self.factor_weights["NET_PROFIT_YOY"] = 1.0
+            self.factor_weights["REVENUE_YOY"] = 0.8
+            self.factor_weights["NET_PROFIT_CAGR_3Y"] = 0.8
             # 商品轮动因子（低于 IND_MOM=0.8，因信号更间接）
             self.factor_weights["CMDTY_MOM"] = 0.6
             # 宏观因子（类内权重）
@@ -310,9 +315,10 @@ class MultiFactorStrategy:
 
     def _get_regime_cat_weights(self, date: str) -> dict[str, float]:
         """
-        获取 regime 感知的大类权重。
+        获取 regime 感知的大类权重（渐进式插值）。
 
-        熊市时合并 REGIME_BEAR_OVERRIDES 到 CATEGORY_WEIGHTS。
+        使用 detect_strength() 返回 0~1 的牛市强度，
+        在牛市权重和熊市权重之间做线性插值，避免二元跳变。
 
         Args:
             date: 选股日期。
@@ -323,16 +329,25 @@ class MultiFactorStrategy:
         if self._regime_detector is None:
             return self.CATEGORY_WEIGHTS
 
-        regime = self._regime_detector.detect(date)
-        if regime == "bear" and REGIME_BEAR_OVERRIDES:
-            weights = dict(self.CATEGORY_WEIGHTS)
-            for cat, w in REGIME_BEAR_OVERRIDES.items():
-                if cat in weights:
-                    weights[cat] = w
-            logger.info(f"Regime bear: 大类权重覆盖 {REGIME_BEAR_OVERRIDES}")
-            return weights
+        if not REGIME_BEAR_OVERRIDES:
+            return self.CATEGORY_WEIGHTS
 
-        return self.CATEGORY_WEIGHTS
+        strength = self._regime_detector.detect_strength(date)
+
+        # strength=1.0 → 纯牛市权重；strength=0.0 → 纯熊市权重
+        if strength >= 1.0:
+            return self.CATEGORY_WEIGHTS
+
+        weights = {}
+        for cat, bull_w in self.CATEGORY_WEIGHTS.items():
+            bear_w = REGIME_BEAR_OVERRIDES.get(cat, bull_w)
+            weights[cat] = bull_w * strength + bear_w * (1.0 - strength)
+
+        logger.info(
+            f"Regime 渐进权重 (strength={strength:.2f}): "
+            + ", ".join(f"{c}={w:.2f}" for c, w in weights.items())
+        )
+        return weights
 
     def _compute_scores(
         self,
@@ -755,15 +770,16 @@ class MultiFactorStrategy:
 
         logger.info(f"回测区间: {start_date} ~ {end_date}, {len(rebalance_dates)} 个调仓日")
 
-        # 初始化缓存（静态数据跨日期复用，日期数据每期清空）
+        # 初始化缓存（静态数据跨日期复用）
         FactorBase.clear_all_cache()
+
+        # 预加载 financial_data + daily_price 到内存（回测模式核心优化）
+        FactorBase.preload_for_backtest(self.db, start_date, end_date)
 
         signals = {}
         for dt in rebalance_dates:
             if cancel_check and cancel_check():
                 raise RuntimeError('回测已取消')
-            # 每个调仓日清空日期相关缓存，保留静态缓存
-            FactorBase.clear_date_cache()
             try:
                 result = self.select_stocks(dt)
                 # 允许空仓信号：空 DataFrame 表示清仓持现金

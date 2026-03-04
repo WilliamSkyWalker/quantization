@@ -38,7 +38,7 @@ AKShare API → backend/services/data/akshare_downloader.py → research_report 
   → services/data/cleaner.py（股票池过滤：退市、ST、上市天数、停牌、流动性、科创板）
   → services/factors/*.py（29 个因子，7 大类，均继承 FactorBase ABC）
   → services/factors/processor.py（MAD 去极值 → 按大类中性化 → 标准化(Z-Score/Rank) → 截断 ±3）
-  → services/strategy/regime.py（CSI 300 120日MA → 牛/熊大类权重切换）
+  → services/strategy/regime.py（CSI 300 60日MA ±5%渐进式切换 → 牛/熊大类权重插值）
   → services/strategy/multi_factor.py（两层打分 → Regime感知 → Top-N 选股 → Softmax 分配权重）
   → services/risk/risk_manager.py（个股/行业上限 → 线性回撤响应 / 波动率目标）
   → services/strategy/backtest.py 或 services/execution/paper_trader.py
@@ -65,8 +65,8 @@ start.sh → 一键启动 + crontab 安装（cron 通过 curl 调用 API）
 - **无未来数据泄露：** 财务数据始终按 `ann_date <= date`（公告日）过滤，而非报告期。收盘价和市值取信号日当天数据。
 - **两层因子打分：** 类内使用动态分母（缺失因子等比缩减权重）；类间使用动态分母（缺失大类权重按比例再分配给有值大类），`MIN_VALID_CATEGORIES=4` 限制最大膨胀。
 - **Upsert 语义：** 所有数据库写入为幂等操作（唯一键冲突时 insert-or-update）。
-- **可配置中性化：** `NEUTRALIZE_MODE = full | size_only | none` 控制 OLS 行业+市值残差中性化；`CATEGORY_NEUTRALIZE_OVERRIDES` 支持按大类覆盖（默认 macro/sentiment → size_only 保留行业 alpha）。
-- **Regime 切换：** CSI 300 120 日 MA 判定牛/熊，熊市时降低动量权重（1.3→0.6）、提高质量权重（1.0→1.5），可通过 `REGIME_ENABLED=0` 关闭。
+- **可配置中性化：** `NEUTRALIZE_MODE = full | size_only | none` 控制 OLS 行业+市值残差中性化；`CATEGORY_NEUTRALIZE_OVERRIDES` 支持按大类覆盖（默认 momentum/macro/sentiment → size_only 保留行业 alpha）。
+- **Regime 切换：** CSI 300 60 日 MA ±5% 渐进式切换（线性插值，避免 whipsaw），熊市时降低动量（0.8→0.3）/成长（1.0→0.6）、提高质量（1.2→1.5）/价值（1.0→1.3）/技术（0.7→1.0），可通过 `REGIME_ENABLED=0` 关闭。
 - **T+1 执行模型：** 先卖后买。涨停股排除在买入之外；跌停股加入 `pending_sells` 队列下一交易日重试。
 - **可插拔交易后端：** `BaseTrader` ABC + `main.py::_create_trader()` 工厂方法，目前仅实现 `PaperTrader`。
 
@@ -75,12 +75,12 @@ start.sh → 一键启动 + crontab 安装（cron 通过 curl 调用 API）
 | 大类 | 权重 | 因子 |
 |---|---|---|
 | 价值 | 1.0 | EP, BP |
-| 质量 | 1.0 | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND |
-| 成长 | 1.2 | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y |
-| 动量 | 1.3 | MOM_1M, MOM_3M, MOM_12M, REV_5D, IND_MOM, RESIDUAL_MOM, CMDTY_MOM |
-| 技术 | 0.5 | TURN_20D, VOL_20D, PRICE_DEV_60D, SIZE, VOL_PRICE_DIV |
+| 质量 | 1.2 | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND |
+| 成长 | 1.0 | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y |
+| 动量 | 0.8 | MOM_1M, MOM_3M, MOM_12M, REV_5D, IND_MOM, RESIDUAL_MOM, CMDTY_MOM |
+| 技术 | 0.7 | TURN_20D, VOL_20D, PRICE_DEV_60D, SIZE, VOL_PRICE_DIV |
 | 宏观 | 0.6 | MACRO_CYCLE, MACRO_LIQD, MACRO_INFL, MACRO_EXTR |
-| 舆情 | 0.4 | POLICY_SENT, POLICY_INTENSITY, ANALYST_RATING, ANALYST_COVERAGE |
+| 舆情 | 0.6 | POLICY_SENT, POLICY_INTENSITY, ANALYST_RATING, ANALYST_COVERAGE |
 
 ## 配置
 

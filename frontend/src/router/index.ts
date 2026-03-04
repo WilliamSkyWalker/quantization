@@ -17,6 +17,7 @@ const router = createRouter({
         { path: 'paper/replay', name: 'replay', component: () => import('../views/PaperReplay.vue') },
         { path: 'sentiment', name: 'sentiment', redirect: '/data' },
         { path: 'polymarket', name: 'polymarket', component: () => import('../views/Polymarket.vue') },
+        { path: 'us-backtest', name: 'us-backtest', component: () => import('../views/UsStockBacktest.vue') },
         { path: 'report', redirect: '/backtest' },
         { path: 'settings', name: 'settings', component: () => import('../views/Settings.vue') },
       ],

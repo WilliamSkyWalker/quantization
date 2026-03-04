@@ -38,6 +38,8 @@ export const getFactorDetail = (date: string, code: string) =>
 // Backtest
 export const startBacktest = (startDate: string, endDate: string) =>
   api.post('/backtest/run', { start_date: startDate, end_date: endDate })
+export const getBacktestHistory = () => api.get('/backtest/history')
+export const getBacktestResult = (id: number) => api.get(`/backtest/history/${id}`)
 
 // Paper trading
 export const getPaperAccount = () => api.get('/paper/account')

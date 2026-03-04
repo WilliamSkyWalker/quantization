@@ -4,7 +4,7 @@ import { useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import {
   startMonitor, stopMonitor, getMonitorStatus, getAlerts, markAlertRead, triggerMockAlert,
-  backtestDiscover, backtestDownload, getBacktestMarkets, runBacktest,
+  runBacktest,
 } from '../api/polymarket'
 import { getTaskStatus } from '../api'
 import { useTaskStore } from '../stores/task'
@@ -304,13 +304,6 @@ const unreadCount = computed(() => alerts.value.filter((a) => !a.is_read).length
 // ============================================================
 // Backtest Tab State
 // ============================================================
-const btLoading = ref(false)
-const btMarkets = ref<any[]>([])
-const btMarketTotal = ref(0)
-const btMarketPage = ref(1)
-const btSelectedIds = ref<string[]>([])
-const btDiscoverLoading = ref(false)
-const btDownloadLoading = ref(false)
 const btRunLoading = ref(false)
 const btResult = ref<any>(null)
 const btSelectedAlert = ref<any>(null)
@@ -322,61 +315,7 @@ const btConfig = ref({
   spike_5m: 0.05,
   spike_1h: 0.15,
   spike_24h: 0.25,
-  download_limit: 20,
-  fidelity: 60,
 })
-
-// Backtest API calls
-async function loadBtMarkets() {
-  btLoading.value = true
-  try {
-    const { data } = await getBacktestMarkets({ page: btMarketPage.value, page_size: 20 })
-    btMarkets.value = data.items || []
-    btMarketTotal.value = data.total || 0
-  } catch {} finally {
-    btLoading.value = false
-  }
-}
-
-async function handleBtMarketPageChange(page: number) {
-  btMarketPage.value = page
-  await loadBtMarkets()
-}
-
-async function doDiscover() {
-  btDiscoverLoading.value = true
-  try {
-    const { data } = await backtestDiscover({ limit: 50 })
-    taskStore.trackTask(data.task_id, '发现已结算市场')
-    message.success('已提交市场发现任务')
-    setTimeout(() => loadBtMarkets(), 5000)
-  } catch (e: any) {
-    message.error('发现失败: ' + (e.response?.data?.error || e.message))
-  } finally {
-    btDiscoverLoading.value = false
-  }
-}
-
-async function doDownload() {
-  btDownloadLoading.value = true
-  try {
-    const payload: any = {
-      fidelity: btConfig.value.fidelity,
-      limit: btConfig.value.download_limit,
-    }
-    if (btSelectedIds.value.length > 0) {
-      payload.condition_ids = btSelectedIds.value
-    }
-    const { data } = await backtestDownload(payload)
-    taskStore.trackTask(data.task_id, '下载历史数据')
-    message.success('已提交下载任务')
-    setTimeout(() => loadBtMarkets(), 10000)
-  } catch (e: any) {
-    message.error('下载失败: ' + (e.response?.data?.error || e.message))
-  } finally {
-    btDownloadLoading.value = false
-  }
-}
 
 async function doRunBacktest() {
   btRunLoading.value = true
@@ -387,9 +326,6 @@ async function doRunBacktest() {
       spike_5m: btConfig.value.spike_5m,
       spike_1h: btConfig.value.spike_1h,
       spike_24h: btConfig.value.spike_24h,
-    }
-    if (btSelectedIds.value.length > 0) {
-      payload.condition_ids = btSelectedIds.value
     }
     const { data } = await runBacktest(payload)
     taskStore.trackTask(data.task_id, 'Polymarket 回测')
@@ -427,32 +363,6 @@ function openBtAlertDetail(row: any) {
 }
 
 // Backtest table columns
-const btMarketColumns: DataTableColumns = [
-  {
-    type: 'selection',
-    width: 40,
-  },
-  { title: '事件问题', key: 'question', ellipsis: { tooltip: true }, width: 400 },
-  { title: '分类', key: 'category', width: 100 },
-  {
-    title: '交易量',
-    key: 'volume',
-    width: 100,
-    render: (row: any) => formatVolume(row.volume),
-  },
-  {
-    title: '数据点',
-    key: 'snapshot_count',
-    width: 80,
-  },
-  {
-    title: '结束日期',
-    key: 'end_date',
-    width: 120,
-    render: (row: any) => row.end_date ? new Date(row.end_date).toLocaleDateString() : '-',
-  },
-]
-
 const btAlertColumns: DataTableColumns = [
   {
     title: '类型',
@@ -493,10 +403,6 @@ const btAlertColumns: DataTableColumns = [
   },
 ]
 
-function handleBtRowCheck(keys: string[]) {
-  btSelectedIds.value = keys
-}
-
 // ============================================================
 // Lifecycle
 // ============================================================
@@ -513,9 +419,6 @@ onUnmounted(() => {
 
 function handleTabChange(tab: string) {
   activeTab.value = tab
-  if (tab === 'backtest' && btMarkets.value.length === 0) {
-    loadBtMarkets()
-  }
 }
 </script>
 
@@ -605,50 +508,9 @@ function handleTabChange(tab: string) {
     <!-- ============================================================ -->
     <n-tab-pane name="backtest" tab="历史回测">
       <n-space vertical :size="16">
-        <!-- 操作区 -->
-        <n-card size="small" title="数据准备">
-          <n-space :size="12" align="center">
-            <n-button type="primary" :loading="btDiscoverLoading" @click="doDiscover">
-              发现已结算市场
-            </n-button>
-            <n-button :loading="btDownloadLoading" @click="doDownload">
-              下载历史数据
-              <template v-if="btSelectedIds.length"> ({{ btSelectedIds.length }} 个已选)</template>
-            </n-button>
-            <n-divider vertical />
-            <span style="color: #999; font-size: 13px">
-              共 {{ btMarketTotal }} 个已结算市场
-            </span>
-          </n-space>
-        </n-card>
-
-        <!-- 已结算市场列表 -->
-        <n-card size="small" title="已结算市场" :segmented="{ content: true }">
-          <n-spin :show="btLoading">
-            <n-data-table
-              :columns="btMarketColumns"
-              :data="btMarkets"
-              :row-key="(row: any) => row.condition_id"
-              size="small"
-              :max-height="360"
-              :scroll-x="800"
-              :checked-row-keys="btSelectedIds"
-              @update:checked-row-keys="handleBtRowCheck"
-            />
-            <n-space justify="end" style="margin-top: 12px">
-              <n-pagination
-                v-model:page="btMarketPage"
-                :page-count="Math.ceil(btMarketTotal / 20)"
-                @update:page="handleBtMarketPageChange"
-                size="small"
-              />
-            </n-space>
-          </n-spin>
-        </n-card>
-
         <!-- 回测配置 + 启动 -->
         <n-card size="small" title="回测配置">
-          <n-grid :cols="6" :x-gap="12" :y-gap="12">
+          <n-grid :cols="4" :x-gap="12" :y-gap="12">
             <n-gi>
               <n-form-item label="5min 阈值" :show-feedback="false">
                 <n-input-number v-model:value="btConfig.spike_5m" :min="0.01" :max="1" :step="0.01" size="small" />
@@ -665,27 +527,18 @@ function handleTabChange(tab: string) {
               </n-form-item>
             </n-gi>
             <n-gi>
-              <n-form-item label="数据粒度(分钟)" :show-feedback="false">
-                <n-input-number v-model:value="btConfig.fidelity" :min="1" :max="1440" :step="10" size="small" />
-              </n-form-item>
-            </n-gi>
-            <n-gi>
-              <n-form-item label="下载数量" :show-feedback="false">
-                <n-input-number v-model:value="btConfig.download_limit" :min="1" :max="100" :step="5" size="small" />
-              </n-form-item>
-            </n-gi>
-            <n-gi>
               <n-form-item label="LLM 分析" :show-feedback="false">
                 <n-switch v-model:value="btConfig.use_llm" />
               </n-form-item>
             </n-gi>
           </n-grid>
-          <n-space style="margin-top: 12px">
+          <n-space style="margin-top: 12px" :size="12" align="center">
             <n-button type="primary" :loading="btRunLoading" @click="doRunBacktest">
-              启动回测
-              <template v-if="btSelectedIds.length"> ({{ btSelectedIds.length }} 个市场)</template>
-              <template v-else> (全部已结算市场)</template>
+              启动回测 (全部已结算市场)
             </n-button>
+            <span style="color: #999; font-size: 13px">
+              数据准备请前往「数据管理」页
+            </span>
           </n-space>
         </n-card>
 

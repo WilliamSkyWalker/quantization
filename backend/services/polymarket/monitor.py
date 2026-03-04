@@ -97,6 +97,7 @@ class PolymarketMonitor:
 
     def __init__(self):
         self._stop_event = threading.Event()
+        self._stop_event.set()  # 初始为「已停止」状态
         self._markets: dict[str, dict] = {}  # condition_id -> market info
         self._price_histories: dict[str, PriceHistory] = {}  # condition_id -> PriceHistory
         self._ws_thread: Optional[threading.Thread] = None
@@ -196,7 +197,11 @@ class PolymarketMonitor:
                     if not condition_id:
                         continue
 
-                    yes_price = float(market.get("outcomePrices", "[0.5,0.5]").strip("[]").split(",")[0])
+                    try:
+                        prices = json.loads(market.get("outcomePrices", "[0.5,0.5]"))
+                        yes_price = float(prices[0])
+                    except (json.JSONDecodeError, ValueError, IndexError, TypeError):
+                        yes_price = 0.5
                     no_price = 1.0 - yes_price
 
                     market_info = {
@@ -310,12 +315,16 @@ class PolymarketMonitor:
                             token_ids.append(tid)
 
                     if token_ids:
-                        subscribe_msg = {
-                            "type": "market",
-                            "assets_ids": token_ids,
-                        }
-                        await ws.send(json.dumps(subscribe_msg))
-                        logger.info(f"已订阅 {len(token_ids)} 个 token")
+                        # 分批订阅，每批最多 100 个，避免消息体超过 WebSocket 帧限制
+                        batch_size = 100
+                        for i in range(0, len(token_ids), batch_size):
+                            batch = token_ids[i:i + batch_size]
+                            subscribe_msg = {
+                                "type": "market",
+                                "assets_ids": batch,
+                            }
+                            await ws.send(json.dumps(subscribe_msg))
+                        logger.info(f"已订阅 {len(token_ids)} 个 token（{(len(token_ids) - 1) // batch_size + 1} 批）")
 
                     async for message in ws:
                         if self._stop_event.is_set():

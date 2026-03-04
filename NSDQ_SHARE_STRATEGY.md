@@ -11,7 +11,10 @@
 7. [告警管理与去重](#7-告警管理与去重)
 8. [数据模型](#8-数据模型)
 9. [实时推送架构](#9-实时推送架构)
-10. [可配置参数汇总](#10-可配置参数汇总)
+10. [历史回测引擎](#10-历史回测引擎)
+11. [美股 P&L 回测引擎](#11-美股-pl-回测引擎)
+12. [美股数据接入](#12-美股数据接入)
+13. [可配置参数汇总](#13-可配置参数汇总)
 
 ---
 
@@ -233,17 +236,17 @@ LLM 分析 →
 
 ### 6.3 Ticker 交叉验证
 
-LLM 返回的 ticker 会与 NASDAQ 100 列表交叉验证：
+LLM 返回的 ticker 会与 S&P 500 + NASDAQ 100 成分股列表交叉验证：
 
 ```python
-valid_tickers = set(US_FALLBACK_TICKERS)  # 约 99 只 NASDAQ 100 成分股
+valid_tickers = set(US_FALLBACK_TICKERS)  # S&P 500 + NASDAQ 100 成分股
 
 for ticker in llm_output["affected_tickers"]:
     if ticker not in valid_tickers:
-        过滤掉  # LLM 幻觉的非 NASDAQ 100 ticker
+        过滤掉  # LLM 幻觉的非成分股 ticker
 ```
 
-这确保只有实际可交易的 NASDAQ 100 成分股才会出现在告警中。验证列表来自 `config.py::US_FALLBACK_TICKERS`（可通过 `.env` 覆盖）。
+这确保只有实际可交易的成分股才会出现在告警中。验证列表来自 `config.py::US_FALLBACK_TICKERS`（可通过 `.env` 覆盖）。成分股列表通过 `fmp_downloader.py` 从 Wikipedia 抓取 S&P 500 和 NASDAQ 100 页面获取，合并去重后约 530 只。
 
 ### 6.4 Prompt 设计
 
@@ -413,13 +416,145 @@ ws/polymarket/ → PolymarketConsumer
 
 ---
 
-## 10. 可配置参数汇总
+## 10. 历史回测引擎
+
+> 文件: `services/polymarket/backtester.py`, `services/polymarket/history.py`
+
+### 10.1 历史数据下载
+
+`PolymarketHistoryDownloader` 从已结算市场下载历史赔率时间序列：
+
+```
+Gamma API → 发现已结算高交易量市场（active=false, closed=true）
+  → CLOB API /prices-history → 分钟级赔率序列
+  → 存入 polymarket_price_snapshot 表
+```
+
+- **CLOB API**: `https://clob.polymarket.com/prices-history?market={token_id}&interval=1m&fidelity=1`
+- **请求间隔**: 50ms（保守限速，CLOB API 限制 9000 req/10s）
+- **数据结构**: `{timestamp, price}` 序列，存为 `polymarket_price_snapshot` 记录
+
+### 10.2 回测流程
+
+`PolymarketBacktester` 回放已结算市场的历史价格，模拟实时 Spike 检测：
+
+```
+读取 DB 中已结算市场 + 历史价格序列
+  → 按时间顺序逐条回放价格
+  → 使用与实时监控相同的三档 Spike 检测逻辑
+  → 触发 LLM 分析（可选）
+  → 汇总：总告警数、按类型/市场分布、LLM 分析结果
+```
+
+- **Spike 逻辑复用**: 与实时监控使用相同的阈值和检测算法
+- **LLM 冷却**: 同一 (condition_id, alert_type) 遵守 `POLYMARKET_LLM_COOLDOWN`
+- **可选跳过 LLM**: `use_llm=False` 仅做 Spike 检测，节省 API 调用
+- **自定义阈值**: 支持覆盖 `spike_5m/1h/24h` 参数
+
+---
+
+## 11. 美股 P&L 回测引擎
+
+> 文件: `services/polymarket/us_stock_backtester.py`
+
+将 Polymarket 告警（含 LLM 分析的受影响 ticker + 方向）与实际美股价格联动，计算事件驱动策略的真实收益。
+
+### 11.1 两种运行模式
+
+| 模式 | 输入源 | API 端点 |
+|------|-------|---------|
+| **模式 A** | Polymarket 回测结果的 alerts JSON | `POST /api/polymarket/backtest/us-stock-pnl` |
+| **模式 B** | DB `polymarket_alert` 表 | `POST /api/polymarket/backtest/us-stock-pnl-from-db` |
+
+### 11.2 核心流程
+
+```
+告警列表 → 提取交易信号 (ticker, direction, confidence, alert_time)
+  → 过滤: confidence >= min_confidence
+  → 批量下载股价 (yfinance, batch_size=20)
+  → 逐笔计算:
+    1. 入场日期: 告警时间 < 16:00 ET → 当天; ≥ 16:00 ET → 下一交易日
+    2. 出场日期: 入场后第 N 个交易日（默认 5 天）
+    3. 收益率: bullish → (exit-entry)/entry; bearish → (entry-exit)/entry
+    4. 未到期: 使用最新收盘价做 mark-to-market
+  → 汇总统计
+```
+
+### 11.3 入场时间逻辑
+
+基于美国东部时间 (ET)，以 16:00（美股收盘）为界：
+
+| 告警时间 | 入场规则 |
+|---------|---------|
+| 交易日 16:00 ET 前 | 当天收盘价入场 |
+| 交易日 16:00 ET 后 | 下一个交易日收盘价入场 |
+| 非交易日（周末/假日） | 下一个交易日收盘价入场 |
+
+### 11.4 汇总统计
+
+| 指标 | 说明 |
+|------|------|
+| 胜率 (win_rate) | 正收益交易数 / 总交易数 |
+| 平均收益率 | 所有交易收益率均值 |
+| 中位数收益率 | 所有交易收益率中位数 |
+| Sharpe Ratio | (avg_return / std_return) × √252 |
+| Profit Factor | 总盈利 / |总亏损| |
+| 最大单笔盈利/亏损 | 单笔收益率极值 |
+
+**分组统计**:
+- 按方向 (bullish/bearish)
+- 按告警类型 (spike_5m/1h/24h)
+- 按置信度 (high ≥0.7 / medium 0.4-0.7 / low <0.4)
+- 按 ticker（前 20 高频 ticker）
+- Top 10 盈利/亏损交易
+
+### 11.5 配置参数
+
+| 参数 | 默认值 | 说明 |
+|------|-------|------|
+| `holding_days` | 5 | 持仓交易日数 |
+| `min_confidence` | 0.0 | 最低 LLM 置信度过滤 |
+| `limit` | 200 | 模式 B 从 DB 读取的告警数上限 |
+
+---
+
+## 12. 美股数据接入
+
+> 文件: `services/data/fmp_downloader.py`
+
+### 12.1 股票池
+
+**S&P 500 + NASDAQ 100** 合并去重，约 530 只美股：
+
+```
+Wikipedia "List of S&P 500 companies" → ~503 只（NYSE）
+Wikipedia "Nasdaq-100" → 合并新增 ~30 只（NASDAQ）
+去重: S&P 500 已有的 ticker 不重复添加
+兜底: 两页面均失败时使用 US_FALLBACK_TICKERS
+→ Upsert 到 us_stock_basic 表
+→ 不在列表中的旧股票标记为 is_active=0
+```
+
+### 12.2 日线行情
+
+通过 yfinance 批量下载日线数据（OHLCV + 复权价），存入 `us_daily_price` 表。
+
+### 12.3 指数与商品
+
+| 类别 | 代码 |
+|------|------|
+| 指数 | ^GSPC (S&P 500), ^IXIC (NASDAQ), ^DJI (Dow Jones) |
+| 商品 | GC=F (金), SI=F (银), CL=F (WTI油), BZ=F (布油), NG=F (天然气), HG=F (铜), ZC=F (玉米), ZS=F (大豆), ZW=F (小麦) |
+
+---
+
+## 13. 可配置参数汇总
 
 > 文件: `services/config.py`
 
 所有参数均可通过 `.env` 文件覆盖。
 
-### 10.1 Polymarket 专属配置
+### 13.1 Polymarket 专属配置
 
 | 参数 | 默认值 | 说明 |
 |------|-------|------|
@@ -434,7 +569,7 @@ ws/polymarket/ → PolymarketConsumer
 | `POLYMARKET_DISCOVERY_INTERVAL` | 3600 | 市场发现间隔（秒） |
 | `POLYMARKET_LLM_COOLDOWN` | 300 | 同一事件 LLM 分析冷却期（秒） |
 
-### 10.2 复用的全局配置
+### 13.2 复用的全局配置
 
 | 参数 | 用途 |
 |------|------|
@@ -442,9 +577,9 @@ ws/polymarket/ → PolymarketConsumer
 | `LLM_API_KEY` | LLM API 密钥（无则禁用 LLM 分析） |
 | `LLM_API_BASE` | OpenAI-compatible API 基础 URL |
 | `LLM_MODEL` | LLM 模型名称 |
-| `US_FALLBACK_TICKERS` | NASDAQ 100 成分股列表（用于交叉验证） |
+| `US_FALLBACK_TICKERS` | S&P 500 + NASDAQ 100 成分股兜底列表（用于交叉验证） |
 
-### 10.3 API 端点
+### 13.3 API 端点
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -453,11 +588,18 @@ ws/polymarket/ → PolymarketConsumer
 | GET | `/api/polymarket/status` | 监控状态 + 市场列表 |
 | GET | `/api/polymarket/alerts` | 告警列表（分页，?is_read=true/false） |
 | POST | `/api/polymarket/alerts/{id}/read` | 标记告警已读 |
+| POST | `/api/polymarket/backtest/discover` | 发现已结算市场 |
+| GET | `/api/polymarket/backtest/markets` | 已下载的回测市场列表 |
+| GET | `/api/polymarket/backtest/price-series/<condition_id>` | 市场赔率时间序列 |
+| POST | `/api/polymarket/backtest/run` | 运行 Polymarket 回测 |
+| POST | `/api/polymarket/backtest/us-stock-pnl` | 美股 P&L 回测（从 alerts JSON） |
+| POST | `/api/polymarket/backtest/us-stock-pnl-from-db` | 美股 P&L 回测（从 DB 告警） |
 
-### 10.4 依赖
+### 13.4 依赖
 
 | 包 | 版本 | 用途 |
 |----|------|------|
 | `websockets` | >=12.0 | CLOB WebSocket 连接 |
 | `requests` | >=2.31.0 | Gamma API HTTP 调用（已有） |
 | `channels` | >=4.0 | Django WebSocket 推送（已有） |
+| `yfinance` | >=0.2.31 | 美股价格数据下载（US Stock P&L 回测） |

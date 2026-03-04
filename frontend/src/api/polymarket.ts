@@ -57,3 +57,16 @@ export const runBacktest = (data: {
   spike_1h?: number
   spike_24h?: number
 } = {}) => api.post('/polymarket/backtest/run', data)
+
+// US Stock P&L Backtest
+export const runUsStockPnl = (data: {
+  alerts: any[]
+  holding_days?: number
+  min_confidence?: number
+}) => api.post('/polymarket/backtest/us-stock-pnl', data)
+
+export const runUsStockPnlFromDb = (data: {
+  holding_days?: number
+  min_confidence?: number
+  limit?: number
+}) => api.post('/polymarket/backtest/us-stock-pnl-from-db', data)

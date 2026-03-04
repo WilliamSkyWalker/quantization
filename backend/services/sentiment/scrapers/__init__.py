@@ -21,6 +21,9 @@ from backend.services.sentiment.scrapers.twitter_vance import TwitterVanceScrape
 from backend.services.sentiment.scrapers.twitter_rubio import TwitterRubioScraper
 from backend.services.sentiment.scrapers.cctv import CCTVScraper
 from backend.services.sentiment.scrapers.cninfo import CninfoScraper
+from backend.services.sentiment.scrapers.eastmoney import EastMoneyScraper
+from backend.services.sentiment.scrapers.cls import CLSScraper
+from backend.services.sentiment.scrapers.sina import SinaScraper
 
 SCRAPER_REGISTRY = {
     "gov_cn": GovCnScraper,
@@ -39,6 +42,9 @@ SCRAPER_REGISTRY = {
     "twitter_rubio": TwitterRubioScraper,
     "cctv": CCTVScraper,
     "cninfo": CninfoScraper,
+    "eastmoney": EastMoneyScraper,
+    "cls": CLSScraper,
+    "sina": SinaScraper,
 }
 
 TIER_MAP = {
@@ -47,4 +53,5 @@ TIER_MAP = {
     3: ["csrc", "pbc", "nfra"],                # 金融监管
     4: ["nea", "mohurd"],                      # 专项行业
     5: ["twitter_trump", "twitter_vance", "twitter_rubio"],  # 美国政策
+    6: ["eastmoney", "cls", "sina"],           # 财经媒体
 }

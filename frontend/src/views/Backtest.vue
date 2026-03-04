@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, watch, onMounted } from 'vue'
 import { useMessage, NIcon } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { PlayOutline, RocketOutline, FlashOutline } from '@vicons/ionicons5'
-import { startBacktest, getDataStatus } from '../api'
+import { startBacktest, getDataStatus, getBacktestHistory, getBacktestResult } from '../api'
 import { useTaskPolling } from '../composables/useTaskPolling'
 import { formatDate } from '../utils/format'
 import NavChart from '../components/NavChart.vue'
@@ -15,17 +15,58 @@ import TradeLog from '../components/TradeLog.vue'
 const message = useMessage()
 const dateRange = ref<[string, string]>(['2020-01-01', '2024-12-31'])
 const latestTradeDate = ref('')
+const historyList = ref<any[]>([])
+const selectedHistoryId = ref<number | null>(null)
+const resultSource = ref<'live' | 'saved' | null>(null)
+const historyLoading = ref(false)
 const { loading, taskId, result, start, stopPolling, taskStore } = useTaskPolling({
   taskLabel: '回测',
 })
 
-onMounted(async () => {
+// When a live backtest completes, mark source and refresh history
+watch(result, (val, oldVal) => {
+  if (val && !oldVal && resultSource.value === null) {
+    resultSource.value = 'live'
+    loadHistory()
+  }
+})
+
+async function loadHistory() {
   try {
-    const { data } = await getDataStatus()
-    if (data.latest_trade_date) {
-      latestTradeDate.value = data.latest_trade_date
+    const { data } = await getBacktestHistory()
+    historyList.value = data.items || []
+  } catch { /* ignore */ }
+}
+
+async function loadSavedResult(id: number) {
+  selectedHistoryId.value = id
+  historyLoading.value = true
+  try {
+    const { data } = await getBacktestResult(id)
+    result.value = data
+    resultSource.value = 'saved'
+  } catch {
+    message.error('加载历史回测失败')
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+onMounted(async () => {
+  historyLoading.value = true
+  try {
+    const [, statusRes] = await Promise.allSettled([loadHistory(), getDataStatus()])
+    if (statusRes.status === 'fulfilled' && statusRes.value.data.latest_trade_date) {
+      latestTradeDate.value = statusRes.value.data.latest_trade_date
     }
   } catch { /* ignore */ }
+
+  // Auto-load latest saved result
+  if (!result.value && historyList.value.length > 0) {
+    await loadSavedResult(historyList.value[0].id)
+  } else {
+    historyLoading.value = false
+  }
 })
 
 function setFullBacktest() {
@@ -85,6 +126,8 @@ async function runBacktest() {
     return
   }
   stopPolling()
+  resultSource.value = null
+  selectedHistoryId.value = null
   try {
     const { data } = await startBacktest(dateRange.value[0], dateRange.value[1])
     taskStore.trackTask(data.task_id, `回测 ${dateRange.value[0]}~${dateRange.value[1]}`)
@@ -96,8 +139,8 @@ async function runBacktest() {
 }
 
 const summaryItems = [
-  { key: '总收益率', color: '#409eff' },
-  { key: '年化收益率', color: '#67c23a' },
+  { key: '总收益', color: '#409eff' },
+  { key: '年化收益', color: '#67c23a' },
   { key: '最大回撤', color: '#f56c6c' },
   { key: '夏普比率', color: '#e6a23c' },
 ]
@@ -121,20 +164,45 @@ const summaryItems = [
           @update:value="handleEndDateUpdate"
           placeholder="结束日期"
         />
-        <n-button type="primary" @click="runBacktest" :loading="loading">
+        <n-button type="primary" @click="runBacktest" :loading="loading" :disabled="historyLoading">
           <template #icon><n-icon><PlayOutline /></n-icon></template>
           运行回测
         </n-button>
         <n-divider vertical />
-        <n-button @click="setFullBacktest" :disabled="!latestTradeDate || loading" secondary>
+        <n-button @click="setFullBacktest" :disabled="!latestTradeDate || loading || historyLoading" secondary>
           <template #icon><n-icon><RocketOutline /></n-icon></template>
           完整回测 (2018~至今)
         </n-button>
-        <n-button @click="setQuickBacktest" :disabled="!latestTradeDate || loading" secondary>
+        <n-button @click="setQuickBacktest" :disabled="!latestTradeDate || loading || historyLoading" secondary>
           <template #icon><n-icon><FlashOutline /></n-icon></template>
           快速回测 (近2年)
         </n-button>
       </n-space>
+    </n-card>
+
+    <!-- History selector -->
+    <n-card hoverable style="margin-bottom: 20px" v-if="historyList.length">
+      <n-space align="center">
+        <span style="font-size: 14px; color: #606266">历史回测:</span>
+        <n-select
+          :value="selectedHistoryId"
+          @update:value="loadSavedResult"
+          :options="historyList.map((h: any) => ({ label: `#${h.id}  ${h.start_date} ~ ${h.end_date}  (${h.summary_headline})  ${h.created_at || ''}`, value: h.id }))"
+          placeholder="选择历史回测"
+          style="min-width: 420px"
+          clearable
+        />
+        <n-tag v-if="resultSource === 'saved'" type="info" size="small">已存结果</n-tag>
+        <n-tag v-else-if="resultSource === 'live'" type="success" size="small">实时计算</n-tag>
+      </n-space>
+    </n-card>
+
+    <!-- History loading hint -->
+    <n-card hoverable style="margin-bottom: 20px" v-if="historyLoading">
+      <div style="text-align: center; padding: 40px 0">
+        <n-spin size="large" />
+        <div style="margin-top: 12px; color: #909399">加载历史回测数据...</div>
+      </div>
     </n-card>
 
     <!-- Loading hint -->
@@ -215,6 +283,6 @@ const summaryItems = [
       </n-card>
     </template>
 
-    <n-empty v-else-if="!loading" description="选择日期范围并点击运行回测" />
+    <n-empty v-else-if="!loading && !historyLoading" description="选择日期范围并点击运行回测" />
   </div>
 </template>

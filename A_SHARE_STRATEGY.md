@@ -214,10 +214,11 @@ MAD = median(|x - median|)
 
 **按大类覆盖中性化模式**（`CATEGORY_NEUTRALIZE_OVERRIDES`）：
 
-宏观因子本质是行业 beta（通过 industry_sensitivity_map 映射），行业中性化会削弱行业轮动效果。舆情因子同理。因此默认按大类覆盖：
+动量因子中 IND_MOM/CMDTY_MOM 本质是行业级信号，full 中性化的 OLS 行业哑变量回归会将行业效应完全回归掉，导致行业轮动信号归零。宏观/舆情因子同理（行业 beta / 行业级情感映射）。因此默认按大类覆盖：
 
 | 大类 | 默认中性化模式 | 原因 |
 |------|--------------|------|
+| momentum | `size_only` | IND_MOM/CMDTY_MOM 行业信号需保留 |
 | macro | `size_only` | 保留行业 beta 信号 |
 | sentiment | `size_only` | 保留行业级情感映射 |
 | 其他 | 继承全局 `NEUTRALIZE_MODE` | — |
@@ -262,9 +263,9 @@ z = clip(z, -3.0, +3.0)
 
 > 文件: `strategy/multi_factor.py`
 
-### 5.1 大类合成评分（固定分母）
+### 5.1 大类合成评分
 
-28 个因子分为 7 个大类，评分分两层：
+29 个因子分为 7 个大类，评分分两层：
 
 **第一层：类内加权平均（动态分母）**
 
@@ -288,33 +289,35 @@ score = Σ(cat_score × cat_weight) / Σ|有值大类的 cat_weight|
 
 | 大类 | 包含因子 | 大类权重 | 占比 |
 |------|---------|---------|------|
-| **value** | EP, BP | 1.0 | 16.7% |
-| **quality** | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND | 1.0 | 16.7% |
-| **growth** | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y | 1.2 | 20.0% |
-| **momentum** | MOM_1M, MOM_3M, MOM_12M, REV_5D, IND_MOM, RESIDUAL_MOM, CMDTY_MOM | 1.3 | 21.7% |
-| **technical** | TURN_20D, VOL_20D, PRICE_DEV_60D, SIZE, VOL_PRICE_DIV | 0.5 | 8.3% |
-| **macro** | MACRO_CYCLE, MACRO_LIQD, MACRO_INFL, MACRO_EXTR | 0.6 | 10.0% |
-| **sentiment** | POLICY_SENT, POLICY_INTENSITY, ANALYST_RATING, ANALYST_COVERAGE | 0.4 | 6.7% |
+| **value** | EP, BP | 1.0 | 21.3% |
+| **quality** | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND | 1.2 | 25.5% |
+| **growth** | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y | 1.0 | 21.3% |
+| **momentum** | MOM_1M, MOM_3M, MOM_12M, REV_5D, IND_MOM, RESIDUAL_MOM, CMDTY_MOM | 0.8 | 17.0% |
+| **technical** | TURN_20D, VOL_20D, PRICE_DEV_60D, SIZE, VOL_PRICE_DIV | 0.7 | 14.9% |
+| **macro** | MACRO_CYCLE, MACRO_LIQD, MACRO_INFL, MACRO_EXTR | 0.6 | — |
+| **sentiment** | POLICY_SENT, POLICY_INTENSITY, ANALYST_RATING, ANALYST_COVERAGE | 0.6 | — |
 
-设计目的：成长和动量增强权重（1.2 / 1.3），更重视成长性和趋势信号；技术因子半权（0.5）降低噪声干扰；宏观因子权重 0.6（市场级信号，补充个股因子盲区）；舆情因子权重 0.4（初始偏低，待验证后调整）。券商研报因子归入 sentiment 大类，不新增大类，避免改变固定分母（6.0）。
+设计目的（Phase 16 优化）：质量增强（1.2）提升防守能力；动量降权（1.3→0.8）降低震荡市追涨杀跌；成长基准（1.2→1.0）避免熊市高估值陷阱；技术因子提权（0.5→0.7）增强低波/超跌保护信号；宏观因子权重 0.6（市场级信号，补充个股因子盲区）；舆情因子提权（0.4→0.6），政策信号和分析师评级对A股影响显著。
 
 ### 5.3 因子级权重（类内）
 
 | 因子 | 权重 | 说明 |
 |------|------|------|
 | EP, BP | 1.0 | 价值基准 |
-| MOM_1M, MOM_3M, MOM_12M | 1.0 | 动量基准 |
+| MOM_1M | 0.6 | 1月动量（降权，噪音大） |
+| MOM_3M | 0.8 | 3月动量（适度降权） |
+| MOM_12M | 1.0 | 12-1月动量 |
 | ROE_TTM, GROSS_MARGIN | 1.0 | 质量基准 |
-| TURN_20D | **-1.0** | 反向，回避高换手 |
-| VOL_20D | **-0.3** | 反向，防守（降低惩罚力度） |
-| PRICE_DEV_60D | **-0.15** | 反向，安全边际（降低惩罚力度） |
-| REV_5D | 0.4 | 短期反转信号 |
+| TURN_20D | **-0.5** | 反向，回避高换手（降低惩罚） |
+| VOL_20D | **-0.6** | 反向，加强低波偏好 |
+| PRICE_DEV_60D | **-0.4** | 反向，加强超跌保护 |
+| REV_5D | 0.7 | 短期反转信号（提高权重） |
 | PROFIT_STB | **-0.5** | 反向，偏好稳定 |
 | MARGIN_TREND | 0.4 | 毛利趋势改善 |
 | SIZE | 0.3 | 偏中大盘 |
-| IND_MOM | 0.8 | 行业轮动（提高权重） |
-| NET_PROFIT_YOY | 1.0 | 成长性（提高权重） |
-| REVENUE_YOY | 0.8 | 营收增长（提高权重） |
+| IND_MOM | 0.8 | 行业轮动 |
+| NET_PROFIT_YOY | 1.0 | 成长性 |
+| REVENUE_YOY | 0.8 | 营收增长 |
 | NET_PROFIT_CAGR_3Y | 0.8 | 3年复合增长率 |
 | RESIDUAL_MOM | 0.7 | 个股 alpha 动量 |
 | VOL_PRICE_DIV | 0.4 | 量价背离（正向，高值=背离强） |
@@ -442,25 +445,36 @@ scale = clip(scale, VOL_SCALE_MIN, VOL_SCALE_MAX)
 
 基于 CSI 300 指数是否在 120 日均线上方判断市场状态（牛/熊），动态调整大类权重。
 
-### 8.1 检测逻辑
+### 8.1 检测逻辑（渐进式切换）
 
 ```
-close(CSI300) ≥ MA120(CSI300) → bull
-close(CSI300) < MA120(CSI300) → bear
-数据不足 → 回退到 bull
+deviation = (close(CSI300) - MA60(CSI300)) / MA60(CSI300)
+
+deviation ≥ +5%  → strength = 1.0（纯牛）
+deviation ≤ -5%  → strength = 0.0（纯熊）
+中间              → strength = 线性插值 [0, 1]
+
+每个大类权重 = bull_weight × strength + bear_weight × (1 - strength)
 ```
+
+数据不足时回退到 bull（strength=1.0）。渐进式切换避免了 MA 附近的频繁二元跳变（whipsaw）。
 
 ### 8.2 熊市大类权重覆盖
 
 | 大类 | 牛市权重 | 熊市权重 | 说明 |
 |------|---------|---------|------|
-| momentum | 1.3 | 0.6 | 降低动量暴露（熊市动量反转） |
-| quality | 1.0 | 1.5 | 提高质量防御 |
-| 其他 | 不变 | 不变 | — |
+| momentum | 0.8 | 0.3 | 大幅降低动量暴露 |
+| quality | 1.2 | 1.5 | 提高质量防御 |
+| growth | 1.0 | 0.6 | 降低成长（避免高估值陷阱） |
+| value | 1.0 | 1.3 | 提升价值防守 |
+| technical | 0.7 | 1.0 | 提升防守因子信号 |
+| macro | 0.6 | 0.6 | 不变 |
+| sentiment | 0.4 | 0.4 | 不变 |
 
 - 可通过 `REGIME_BEAR_OVERRIDES` 环境变量自定义（JSON 格式）
 - `REGIME_ENABLED=0` 完全关闭 regime 切换
-- 120 日均线为慢速指标，不会频繁切换
+- MA 窗口 60 日（原 120 日），更快响应市场变化
+- ±5% 过渡带实现渐进式权重调整，避免频繁切换
 
 ---
 
@@ -567,20 +581,20 @@ close(CSI300) < MA120(CSI300) → bear
 
 | 参数 | 默认值 | 环境变量 |
 |------|--------|---------|
-| MAX_HOLDINGS | 10 | MAX_HOLDINGS |
+| MAX_HOLDINGS | 15 | MAX_HOLDINGS |
 | MIN_SELECT_SCORE | 0.0 | MIN_SELECT_SCORE |
 | REBALANCE_FREQ | 月频 | — |
-| TURNOVER_PENALTY_LAMBDA | 0.0（关闭） | TURNOVER_PENALTY_LAMBDA |
+| TURNOVER_PENALTY_LAMBDA | 0.15 | TURNOVER_PENALTY_LAMBDA |
 | NEUTRALIZE_MODE | full | NEUTRALIZE_MODE |
 | NONLINEAR_SIZE | 0（关闭） | NONLINEAR_SIZE |
 | MIN_VALID_CATEGORIES | 4 | MIN_VALID_CATEGORIES |
-| CATEGORY_NEUTRALIZE_OVERRIDES | {"macro":"size_only","sentiment":"size_only"} | CATEGORY_NEUTRALIZE_OVERRIDES |
+| CATEGORY_NEUTRALIZE_OVERRIDES | {"momentum":"size_only","macro":"size_only","sentiment":"size_only"} | CATEGORY_NEUTRALIZE_OVERRIDES |
 | STANDARDIZE_MODE | zscore | STANDARDIZE_MODE |
 | WEIGHT_TEMPERATURE | 2.0 | WEIGHT_TEMPERATURE |
 | REGIME_ENABLED | 1（开启） | REGIME_ENABLED |
-| REGIME_MA_WINDOW | 120 | REGIME_MA_WINDOW |
+| REGIME_MA_WINDOW | 60 | REGIME_MA_WINDOW |
 | REGIME_INDEX_CODE | 000300.SH | REGIME_INDEX_CODE |
-| REGIME_BEAR_OVERRIDES | {"momentum":0.6,"quality":1.5} | REGIME_BEAR_OVERRIDES |
+| REGIME_BEAR_OVERRIDES | {"momentum":0.3,"quality":1.5,"growth":0.6,"value":1.3,"technical":1.0} | REGIME_BEAR_OVERRIDES |
 
 ### 风控
 
@@ -592,8 +606,8 @@ close(CSI300) < MA120(CSI300) → bear
 | DD_MAX_THRESHOLD | 0.25 | DD_MAX_THRESHOLD |
 | DD_MIN_POSITION | 0.50 | DD_MIN_POSITION |
 | MIN_DAILY_TURNOVER | 5000 万 | — |
-| USE_VOL_TARGETING | 0（关闭） | USE_VOL_TARGETING |
-| TARGET_VOL | 0.20 | TARGET_VOL |
+| USE_VOL_TARGETING | 1（开启） | USE_VOL_TARGETING |
+| TARGET_VOL | 0.18 | TARGET_VOL |
 | VOL_LOOKBACK_DAYS | 60 | VOL_LOOKBACK_DAYS |
 | VOL_SCALE_MIN / MAX | 0.3 / 1.0 | VOL_SCALE_MIN / VOL_SCALE_MAX |
 
@@ -699,3 +713,21 @@ close(CSI300) < MA120(CSI300) → bear
 | category | `US Policy - President` 等 |
 | summary | 推文全文 + 互动指标 `[RT:N, like:N]` |
 | content_hash | SHA256(title\|date) |
+
+### 11.3 财经媒体层（Tier 6）
+
+通过 AKShare 接口采集 3 家主流财经媒体快讯，用于捕捉 AI 革命、黄金飙升等市场热点：
+
+| 来源 | AKShare 接口 | 说明 |
+|------|-------------|------|
+| eastmoney | `stock_info_global_em()` | 东方财富全球财经快讯 |
+| cls | `stock_info_global_cls(symbol='全部')` | 财联社快讯 |
+| sina | `stock_info_global_sina()` | 新浪财经全球快讯 |
+
+**架构设计：**
+- 遵循 CCTV 爬虫的 AKShare 模式：继承 `BaseScraper`，重写 `scrape_pages()`/`scrape()`
+- `fetch_content=False`，`list_urls=[]`（纯 API 接口，无 HTML 解析）
+- 按天分批 yield，`max_pages` 复用为回看天数
+- 东方财富 URL 来自 API 返回的链接列；财联社/新浪 URL 基于内容 hash 生成
+- 财联社标题列可能为空，取内容前 100 字做标题；新浪无标题列，取内容前 50 字
+- `TIER_WEIGHTS[6] = 0.6`，与舆情大类权重一致

@@ -7,7 +7,7 @@ import pandas as pd
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from backend.services.data.database import DatabaseManager, SelectionResult, FactorSnapshot
+from backend.services.data.database import DatabaseManager, SelectionResult, FactorSnapshot, BacktestResult
 from backend.tasks.manager import task_manager
 
 logger = logging.getLogger(__name__)
@@ -155,7 +155,8 @@ def _run_select(task_id, date):
     # Overall top N
     top_n = top_n_df.to_dict('records')
 
-    # Per-industry top 5
+    # Per-industry top 5 (only keep display columns, factor values already in snapshot)
+    _DISPLAY_COLS = ['ts_code', 'score', 'industry_name', 'name', 'close', 'pct_chg', 'amount', 'weight']
     by_industry = {}
     for ind, grp in scored.groupby('industry_name'):
         grp5 = grp.head(5).copy()
@@ -171,7 +172,8 @@ def _run_select(task_id, date):
                 grp5['weight'] = raw_w_g / raw_w_g.sum()
             else:
                 grp5['weight'] = 1.0 / n_g
-        by_industry[ind] = grp5.to_dict('records')
+        keep = [c for c in _DISPLAY_COLS if c in grp5.columns]
+        by_industry[ind] = grp5[keep].to_dict('records')
 
     # Clean NaN values for JSON
     def clean_nan(obj):
@@ -498,6 +500,26 @@ def _run_backtest(task_id, start_date, end_date):
             })
         signal_data.append({'date': dt, 'stocks': stocks})
 
+    # Persist to DB (skip signals — large and not displayed in saved view)
+    try:
+        with db.get_session() as session:
+            session.add(BacktestResult(
+                start_date=start_date,
+                end_date=end_date,
+                summary=json.dumps(summary_dict, ensure_ascii=False),
+                nav=json.dumps(nav_data, ensure_ascii=False),
+                benchmark=json.dumps(benchmark_data, ensure_ascii=False),
+                trades=json.dumps(trade_data, ensure_ascii=False),
+                monthly=json.dumps(monthly_data, ensure_ascii=False),
+                drawdown=json.dumps(drawdown_data, ensure_ascii=False),
+                attribution=json.dumps(attr_data, ensure_ascii=False),
+                holdings=json.dumps(holdings_data, ensure_ascii=False),
+            ))
+            session.commit()
+        logger.info(f'回测结果已保存: {start_date}~{end_date}')
+    except Exception as e:
+        logger.warning(f'回测结果保存失败: {e}')
+
     return {
         'summary': summary_dict,
         'nav': nav_data,
@@ -509,6 +531,68 @@ def _run_backtest(task_id, start_date, end_date):
         'attribution': attr_data,
         'holdings': holdings_data,
     }
+
+
+@api_view(['GET'])
+def backtest_history(request):
+    """Return list of saved backtest results, newest first."""
+    db = _get_db()
+    rows = db.query(
+        "SELECT id, start_date, end_date, summary, created_at "
+        "FROM backtest_result ORDER BY created_at DESC"
+    )
+    items = []
+    for _, r in rows.iterrows():
+        summary = {}
+        if r['summary']:
+            try:
+                summary = json.loads(r['summary'])
+            except Exception:
+                pass
+        items.append({
+            'id': int(r['id']),
+            'start_date': str(r['start_date'])[:10],
+            'end_date': str(r['end_date'])[:10],
+            'summary_headline': summary.get('总收益', summary.get('总收益率', '-')),
+            'created_at': str(r['created_at'])[:19] if pd.notna(r['created_at']) else None,
+        })
+    return Response({'items': items})
+
+
+@api_view(['GET'])
+def backtest_history_detail(request, pk):
+    """Return full saved backtest result by id."""
+    db = _get_db()
+    rows = db.query(
+        f"SELECT * FROM backtest_result WHERE id = {int(pk)} LIMIT 1"
+    )
+    if rows.empty:
+        return Response({'error': '未找到该回测记录'}, status=404)
+    r = rows.iloc[0]
+
+    def _load(field):
+        val = r.get(field)
+        if val:
+            try:
+                return json.loads(val)
+            except Exception:
+                pass
+        return {} if field == 'summary' else []
+
+    return Response({
+        'id': int(r['id']),
+        'start_date': str(r['start_date'])[:10],
+        'end_date': str(r['end_date'])[:10],
+        'summary': _load('summary'),
+        'nav': _load('nav'),
+        'benchmark': _load('benchmark'),
+        'trades': _load('trades'),
+        'monthly': _load('monthly'),
+        'drawdown': _load('drawdown'),
+        'attribution': _load('attribution'),
+        'holdings': _load('holdings'),
+        'created_at': str(r['created_at'])[:19] if pd.notna(r.get('created_at')) else None,
+    })
 
 
 def _calc_monthly_returns(nav_series):

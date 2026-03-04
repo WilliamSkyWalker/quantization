@@ -12,6 +12,7 @@ import {
   startSentimentBackfillLLM, getSentimentStatus, getSentimentArticles, getSentimentAnalysisStats,
   startSentimentDownload, browseData,
 } from '../api'
+import { backtestDiscover, backtestDownload, getBacktestMarkets } from '../api/polymarket'
 import { formatDate } from '../utils/format'
 import { useTaskStore } from '../stores/task'
 
@@ -157,6 +158,13 @@ const dataTypes: DataTypeRow[] = [
     downloadAction: 'download_us_corporate_action', downloadLabel: '下载',
     updateAction: 'update_us_corporate_action', updateLabel: '更新',
   },
+  // --- Polymarket ---
+  { key: 'pm_divider', label: '── Polymarket ──' },
+  {
+    key: 'pm_markets', label: '已结算市场', browseTable: 'polymarket_event',
+    downloadAction: 'pm_discover', downloadLabel: '发现市场',
+    updateAction: 'pm_download', updateLabel: '下载数据',
+  },
 ]
 
 const statusColumns: DataTableColumns = [
@@ -213,6 +221,8 @@ const _COUNT_TABLE_MAP: Record<string, string> = {
   us_analyst: 'us_analyst_recommendation',
   us_sec: 'us_sec_filing',
   us_corp: 'us_corporate_action',
+  // Polymarket
+  pm_markets: 'polymarket_event',
 }
 
 const tableInfoMap = computed(() => {
@@ -235,6 +245,8 @@ const _ALL_BROWSE = [
   'us_stock_basic', 'us_daily_price', 'us_financial_data', 'us_industry_class',
   'us_index_daily', 'us_macro_indicator', 'us_commodity_price',
   'us_analyst_recommendation', 'us_sec_filing', 'us_corporate_action',
+  // Polymarket
+  'polymarket_event', 'polymarket_price_snapshot', 'polymarket_alert',
 ]
 
 const opColumns: DataTableColumns = [
@@ -332,6 +344,12 @@ const opColumns: DataTableColumns = [
           onClick: () => runSentimentDownloadAndAnalyze(),
         }, { default: () => row.downloadLabel })
       }
+      if (row.key === 'pm_markets') {
+        return h(NButton, {
+          size: 'tiny', type: 'success',
+          onClick: () => runPmDiscover(),
+        }, { default: () => row.downloadLabel })
+      }
       return h(NButton, {
         size: 'tiny', type: 'success',
         onClick: () => runAction(row.downloadAction, row.downloadLabel + row.label),
@@ -342,6 +360,12 @@ const opColumns: DataTableColumns = [
     title: '增量更新', key: 'update', width: 110, align: 'center',
     render: (row: any) => {
       if (!row.updateAction) return null
+      if (row.key === 'pm_markets') {
+        return h(NButton, {
+          size: 'tiny', type: 'warning',
+          onClick: () => runPmDownload(),
+        }, { default: () => row.updateLabel })
+      }
       return h(NButton, {
         size: 'tiny', type: 'warning',
         onClick: () => runAction(row.updateAction, row.updateLabel + row.label),
@@ -542,6 +566,35 @@ async function runBackfillLLM() {
   }
 }
 
+// ============================================================
+// Polymarket data prep
+// ============================================================
+async function runPmDiscover() {
+  running.value = true
+  try {
+    const { data } = await backtestDiscover({ limit: 50 })
+    taskStore.trackTask(data.task_id, '发现已结算市场')
+    message.success('Polymarket 市场发现任务已启动')
+  } catch (e: any) {
+    message.error(e.response?.data?.error || '发现市场失败')
+  } finally {
+    running.value = false
+  }
+}
+
+async function runPmDownload() {
+  running.value = true
+  try {
+    const { data } = await backtestDownload({ limit: 20, fidelity: 60 })
+    taskStore.trackTask(data.task_id, '下载 Polymarket 历史数据')
+    message.success('Polymarket 历史数据下载任务已启动')
+  } catch (e: any) {
+    message.error(e.response?.data?.error || '下载历史数据失败')
+  } finally {
+    running.value = false
+  }
+}
+
 async function runInit() {
   running.value = true
   try {
@@ -580,10 +633,10 @@ const drawerVisible = ref(false)
 const selectedArticle = ref<any>(null)
 
 const tierNames: Record<number, string> = {
-  1: '最高层', 2: '产业层', 3: '金融监管', 4: '专项行业', 5: '美国政策', 6: '券商研报',
+  1: '最高层', 2: '产业层', 3: '金融监管', 4: '专项行业', 5: '美国政策', 6: '财经媒体', 7: '券商研报',
 }
 const tierColors: Record<number, string> = {
-  1: '#f56c6c', 2: '#e6a23c', 3: '#409eff', 4: '#67c23a', 5: '#909399', 6: '#8b5cf6',
+  1: '#f56c6c', 2: '#e6a23c', 3: '#409eff', 4: '#67c23a', 5: '#909399', 6: '#f59e0b', 7: '#8b5cf6',
 }
 
 const sourceColumns: DataTableColumns = [
@@ -818,6 +871,7 @@ function getTierTagType(tier: number): 'error' | 'warning' | 'info' | 'success' 
   if (tier === 3) return 'warning'
   if (tier === 4) return 'success'
   if (tier === 6) return 'info'
+  if (tier === 7) return 'info'
   return 'default'
 }
 

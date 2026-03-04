@@ -84,19 +84,27 @@ class ProfitStabilityFactor(FactorBase):
     def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
         codes = universe["ts_code"].tolist()
 
-        # 查询截止到 date 已公告的所有净利润数据
-        params: dict = {"date": date}
-        sql = (
-            "SELECT ts_code, ann_date, end_date, net_profit FROM financial_data "
-            "WHERE ann_date <= :date AND net_profit IS NOT NULL"
-        )
-        if codes:
-            in_clause, in_params = self._build_in_clause(codes)
-            sql += f" AND ts_code IN {in_clause}"
-            params.update(in_params)
-        sql += " ORDER BY ts_code, end_date DESC"
-
-        df = self.db.query(sql, params=params)
+        # 预加载数据可用时，从内存过滤
+        bulk_fin = self._static_cache.get("_bulk_financial")
+        if bulk_fin is not None and not bulk_fin.empty:
+            date_ts = pd.to_datetime(date)
+            df = bulk_fin[["ts_code", "ann_date", "end_date", "net_profit"]].copy()
+            df = df[(df["ann_date"] <= date_ts) & df["net_profit"].notna()]
+            if codes:
+                df = df[df["ts_code"].isin(codes)]
+            df = df.sort_values(["ts_code", "end_date"], ascending=[True, False])
+        else:
+            params: dict = {"date": date}
+            sql = (
+                "SELECT ts_code, ann_date, end_date, net_profit FROM financial_data "
+                "WHERE ann_date <= :date AND net_profit IS NOT NULL"
+            )
+            if codes and len(codes) <= self._IN_CLAUSE_THRESHOLD:
+                in_clause, in_params = self._build_in_clause(codes)
+                sql += f" AND ts_code IN {in_clause}"
+                params.update(in_params)
+            sql += " ORDER BY ts_code, end_date DESC"
+            df = self.db.query(sql, params=params)
 
         if df.empty:
             return pd.DataFrame(columns=["ts_code", "factor_value"])
@@ -104,43 +112,59 @@ class ProfitStabilityFactor(FactorBase):
         df["end_date"] = pd.to_datetime(df["end_date"])
         df["net_profit"] = pd.to_numeric(df["net_profit"], errors="coerce")
 
-        results = []
-        for ts_code, grp in df.groupby("ts_code"):
-            grp = grp.drop_duplicates(subset=["end_date"]).sort_values(
-                "end_date", ascending=False
-            )
+        # 去重并排序，生成组内排名
+        df = df.drop_duplicates(subset=["ts_code", "end_date"])
+        df = df.sort_values(["ts_code", "end_date"], ascending=[True, False])
+        df["rank"] = df.groupby("ts_code").cumcount()
 
-            # 需要至少 7 个报告期（最近 4 期 + 各自同比上年同期共 4 期，可能有重叠）
-            if len(grp) < 4:
-                continue
+        # 取每只股票最近 4 个报告期
+        top4 = df[df["rank"] < 4].copy()
 
-            # 取最近 4 个报告期，尝试匹配各自的同比上年同期
-            yoy_growths = []
-            for _, row in grp.head(4).iterrows():
-                end_dt = row["end_date"]
-                prev_end = pd.Timestamp(
-                    year=end_dt.year - 1, month=end_dt.month, day=end_dt.day
-                )
-                prev = grp[grp["end_date"] == prev_end]
-                if not prev.empty:
-                    prev_np = prev.iloc[0]["net_profit"]
-                    if prev_np != 0 and pd.notna(prev_np):
-                        yoy = row["net_profit"] / prev_np - 1
-                        yoy_growths.append(yoy)
+        # 向量化构建上年同期 end_date
+        top4["prev_end"] = pd.to_datetime(dict(
+            year=top4["end_date"].dt.year - 1,
+            month=top4["end_date"].dt.month,
+            day=top4["end_date"].dt.day,
+        ))
 
-            # 至少需要 3 组同比增速才能算 CV
-            if len(yoy_growths) >= 3:
-                arr = np.array(yoy_growths)
-                mean_val = np.mean(arr)
-                std_val = np.std(arr, ddof=1)
-                if abs(mean_val) > 1e-8:
-                    cv = std_val / abs(mean_val)
-                    results.append({"ts_code": ts_code, "factor_value": cv})
+        # 构建 lookup：(ts_code, end_date) → net_profit
+        lookup = df[["ts_code", "end_date", "net_profit"]].drop_duplicates(
+            subset=["ts_code", "end_date"]
+        )
 
-        if not results:
-            return pd.DataFrame(columns=["ts_code", "factor_value"])
+        # merge 获取上年同期净利润
+        merged = top4.merge(
+            lookup.rename(columns={"end_date": "prev_end", "net_profit": "prev_np"}),
+            on=["ts_code", "prev_end"],
+            how="left",
+        )
 
-        return pd.DataFrame(results)
+        # 计算同比增速
+        merged["yoy"] = np.where(
+            (merged["prev_np"].notna()) & (merged["prev_np"] != 0),
+            merged["net_profit"] / merged["prev_np"] - 1,
+            np.nan,
+        )
+
+        # 丢弃无效 yoy，按股票汇总统计
+        valid = merged.dropna(subset=["yoy"])
+        stats = valid.groupby("ts_code")["yoy"].agg(["mean", "std", "count"]).reset_index()
+
+        # 至少 3 组同比增速才能算 CV
+        stats = stats[stats["count"] >= 3].copy()
+
+        # CV = std / |mean|
+        stats["factor_value"] = np.where(
+            stats["mean"].abs() > 1e-8,
+            stats["std"] / stats["mean"].abs(),
+            np.nan,
+        )
+
+        result = stats[["ts_code", "factor_value"]].dropna(subset=["factor_value"])
+        if codes:
+            result = result[result["ts_code"].isin(codes)]
+
+        return result.reset_index(drop=True)
 
 
 class MarginTrendFactor(FactorBase):
@@ -158,19 +182,27 @@ class MarginTrendFactor(FactorBase):
     def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
         codes = universe["ts_code"].tolist()
 
-        # 查询截止到 date 已公告的毛利率数据
-        params: dict = {"date": date}
-        sql = (
-            "SELECT ts_code, ann_date, end_date, gross_margin FROM financial_data "
-            "WHERE ann_date <= :date AND gross_margin IS NOT NULL"
-        )
-        if codes:
-            in_clause, in_params = self._build_in_clause(codes)
-            sql += f" AND ts_code IN {in_clause}"
-            params.update(in_params)
-        sql += " ORDER BY ts_code, end_date DESC"
-
-        df = self.db.query(sql, params=params)
+        # 预加载数据可用时，从内存过滤
+        bulk_fin = self._static_cache.get("_bulk_financial")
+        if bulk_fin is not None and not bulk_fin.empty:
+            date_ts = pd.to_datetime(date)
+            df = bulk_fin[["ts_code", "ann_date", "end_date", "gross_margin"]].copy()
+            df = df[(df["ann_date"] <= date_ts) & df["gross_margin"].notna()]
+            if codes:
+                df = df[df["ts_code"].isin(codes)]
+            df = df.sort_values(["ts_code", "end_date"], ascending=[True, False])
+        else:
+            params: dict = {"date": date}
+            sql = (
+                "SELECT ts_code, ann_date, end_date, gross_margin FROM financial_data "
+                "WHERE ann_date <= :date AND gross_margin IS NOT NULL"
+            )
+            if codes and len(codes) <= self._IN_CLAUSE_THRESHOLD:
+                in_clause, in_params = self._build_in_clause(codes)
+                sql += f" AND ts_code IN {in_clause}"
+                params.update(in_params)
+            sql += " ORDER BY ts_code, end_date DESC"
+            df = self.db.query(sql, params=params)
 
         if df.empty:
             return pd.DataFrame(columns=["ts_code", "factor_value"])
@@ -178,25 +210,28 @@ class MarginTrendFactor(FactorBase):
         df["end_date"] = pd.to_datetime(df["end_date"])
         df["gross_margin"] = pd.to_numeric(df["gross_margin"], errors="coerce")
 
-        results = []
-        for ts_code, grp in df.groupby("ts_code"):
-            grp = grp.drop_duplicates(subset=["end_date"]).sort_values(
-                "end_date", ascending=False
-            )
+        # 去重、排序、生成组内排名
+        df = df.drop_duplicates(subset=["ts_code", "end_date"])
+        df = df.sort_values(["ts_code", "end_date"], ascending=[True, False])
+        df["rank"] = df.groupby("ts_code").cumcount()
 
-            if len(grp) < 2:
-                continue
+        # 取 rank 0（当期）和 rank 1（上期）
+        current = df[df["rank"] == 0][["ts_code", "gross_margin"]].rename(
+            columns={"gross_margin": "current_margin"}
+        )
+        prev = df[df["rank"] == 1][["ts_code", "gross_margin"]].rename(
+            columns={"gross_margin": "prev_margin"}
+        )
 
-            current_margin = grp.iloc[0]["gross_margin"]
-            prev_margin = grp.iloc[1]["gross_margin"]
+        merged = current.merge(prev, on="ts_code", how="inner")
+        merged["factor_value"] = np.where(
+            merged["current_margin"].notna() & merged["prev_margin"].notna(),
+            merged["current_margin"] - merged["prev_margin"],
+            np.nan,
+        )
 
-            if pd.notna(current_margin) and pd.notna(prev_margin):
-                results.append({
-                    "ts_code": ts_code,
-                    "factor_value": current_margin - prev_margin,
-                })
+        result = merged[["ts_code", "factor_value"]].dropna(subset=["factor_value"])
+        if codes:
+            result = result[result["ts_code"].isin(codes)]
 
-        if not results:
-            return pd.DataFrame(columns=["ts_code", "factor_value"])
-
-        return pd.DataFrame(results)
+        return result.reset_index(drop=True)

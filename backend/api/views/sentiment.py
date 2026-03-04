@@ -27,10 +27,12 @@ def sentiment_status(request):
         'csrc': 3, 'pbc': 3, 'nfra': 3,
         'nea': 4, 'mohurd': 4,
         'twitter_trump': 5, 'twitter_vance': 5, 'twitter_rubio': 5,
-        'research_report': 6,
+        'eastmoney': 6, 'cls': 6, 'sina': 6,
+        'research_report': 7,
     }
     tier_names = {
-        1: '最高层', 2: '产业层', 3: '金融监管', 4: '专项行业', 5: '美国政策', 6: '券商研报',
+        1: '最高层', 2: '产业层', 3: '金融监管', 4: '专项行业', 5: '美国政策',
+        6: '财经媒体', 7: '券商研报',
     }
     source_labels = {
         'gov_cn': '中国政府网', 'xinhua': '新华社', 'people': '人民日报',
@@ -38,7 +40,8 @@ def sentiment_status(request):
         'mofcom': '商务部', 'cninfo': '巨潮公告', 'csrc': '证监会',
         'pbc': '人民银行', 'nfra': '金融监管总局', 'nea': '能源局',
         'mohurd': '住建部', 'twitter_trump': 'Trump', 'twitter_vance': 'Vance',
-        'twitter_rubio': 'Rubio', 'research_report': '券商研报',
+        'twitter_rubio': 'Rubio', 'eastmoney': '东方财富', 'cls': '财联社',
+        'sina': '新浪财经', 'research_report': '券商研报',
     }
 
     # Query policy_article counts
@@ -200,7 +203,7 @@ def _query_research_reports(db, start_date, end_date, keyword, page, page_size, 
         total = int(total_df['cnt'].iloc[0])
 
         df = db.query(
-            f"SELECT 'research_report' as source, 6 as tier, "
+            f"SELECT 'research_report' as source, 7 as tier, "
             f"CONCAT('[', institution, '] ', title) as title, "
             f"CASE WHEN info_code IS NOT NULL AND info_code != '' "
             f"  THEN CONCAT('https://data.eastmoney.com/report/zw_stock.jshtml?infocode=', info_code) "

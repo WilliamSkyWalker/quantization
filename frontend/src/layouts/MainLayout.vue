@@ -15,6 +15,7 @@ import {
   SettingsOutline,
   MenuOutline,
   PulseOutline,
+  BarChartOutline,
 } from '@vicons/ionicons5'
 
 const route = useRoute()
@@ -33,6 +34,7 @@ const menuOptions: MenuOption[] = [
   { label: '回测', key: '/backtest', icon: renderIcon(AnalyticsOutline) },
   { label: '模拟交易', key: '/paper', icon: renderIcon(WalletOutline) },
   { label: 'Polymarket', key: '/polymarket', icon: renderIcon(PulseOutline) },
+  { label: '美股回测', key: '/us-backtest', icon: renderIcon(BarChartOutline) },
   { label: '系统设置', key: '/settings', icon: renderIcon(SettingsOutline) },
 ]
 

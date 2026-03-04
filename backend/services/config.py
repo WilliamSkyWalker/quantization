@@ -76,7 +76,7 @@ SLIPPAGE = 0.001           # 滑点 0.1%
 
 REBALANCE_FREQ = "M"
 MIN_HOLDINGS = 0                  # 最少持仓数，0 = 允许空仓
-MAX_HOLDINGS = int(os.environ.get("MAX_HOLDINGS", "10"))
+MAX_HOLDINGS = int(os.environ.get("MAX_HOLDINGS", "15"))
 MIN_SELECT_SCORE = float(os.environ.get("MIN_SELECT_SCORE", "0"))  # 选股最低分，低于此分不入选
 MAX_SINGLE_WEIGHT = float(os.environ.get("MAX_SINGLE_WEIGHT", "0.12"))
 MAX_INDUSTRY_WEIGHT = float(os.environ.get("MAX_INDUSTRY_WEIGHT", "0.30"))
@@ -89,7 +89,7 @@ DD_MIN_POSITION = float(os.environ.get("DD_MIN_POSITION", "0.50"))
 MIN_DAILY_TURNOVER = 50_000_000
 
 # 换手惩罚系数（0.0 = 关闭）
-TURNOVER_PENALTY_LAMBDA = float(os.environ.get("TURNOVER_PENALTY_LAMBDA", "0.0"))
+TURNOVER_PENALTY_LAMBDA = float(os.environ.get("TURNOVER_PENALTY_LAMBDA", "0.15"))
 
 # 最小有效大类数（有效大类数低于此值时股票得分设为 NaN，被剔除）
 MIN_VALID_CATEGORIES = int(os.environ.get("MIN_VALID_CATEGORIES", "4"))
@@ -107,7 +107,10 @@ if _raw_cat_neutralize.strip():
         CATEGORY_NEUTRALIZE_OVERRIDES = _json.loads(_raw_cat_neutralize)
     except _json.JSONDecodeError:
         pass
-# 默认: macro/sentiment 使用 size_only，保留行业 alpha
+# 默认: momentum/macro/sentiment 使用 size_only，保留行业 alpha
+# momentum: IND_MOM/CMDTY_MOM 本质是行业级信号，full 中性化会回归掉行业效应导致信号归零
+if "momentum" not in CATEGORY_NEUTRALIZE_OVERRIDES:
+    CATEGORY_NEUTRALIZE_OVERRIDES["momentum"] = "size_only"
 if "macro" not in CATEGORY_NEUTRALIZE_OVERRIDES:
     CATEGORY_NEUTRALIZE_OVERRIDES["macro"] = "size_only"
 if "sentiment" not in CATEGORY_NEUTRALIZE_OVERRIDES:
@@ -121,11 +124,13 @@ WEIGHT_TEMPERATURE = float(os.environ.get("WEIGHT_TEMPERATURE", "2.0"))
 
 # Regime 切换（CSI 300 120 日均线判定牛/熊）
 REGIME_ENABLED = os.environ.get("REGIME_ENABLED", "1") == "1"
-REGIME_MA_WINDOW = int(os.environ.get("REGIME_MA_WINDOW", "120"))
+REGIME_MA_WINDOW = int(os.environ.get("REGIME_MA_WINDOW", "60"))
 REGIME_INDEX_CODE = os.environ.get("REGIME_INDEX_CODE", "000300.SH")
 # 熊市大类权重覆盖
 _raw_regime_bear = os.environ.get("REGIME_BEAR_OVERRIDES", "")
-REGIME_BEAR_OVERRIDES: dict[str, float] = {"momentum": 0.6, "quality": 1.5}
+REGIME_BEAR_OVERRIDES: dict[str, float] = {
+    "momentum": 0.3, "quality": 1.5, "growth": 0.6, "value": 1.3, "technical": 1.0,
+}
 if _raw_regime_bear.strip():
     try:
         REGIME_BEAR_OVERRIDES = {k: float(v) for k, v in _json.loads(_raw_regime_bear).items()}
@@ -133,8 +138,8 @@ if _raw_regime_bear.strip():
         pass
 
 # 波动率目标管理（替代回撤缩仓）
-USE_VOL_TARGETING = os.environ.get("USE_VOL_TARGETING", "0") == "1"
-TARGET_VOL = float(os.environ.get("TARGET_VOL", "0.20"))
+USE_VOL_TARGETING = os.environ.get("USE_VOL_TARGETING", "1") == "1"
+TARGET_VOL = float(os.environ.get("TARGET_VOL", "0.18"))
 VOL_LOOKBACK_DAYS = int(os.environ.get("VOL_LOOKBACK_DAYS", "60"))
 VOL_SCALE_MIN = float(os.environ.get("VOL_SCALE_MIN", "0.3"))
 VOL_SCALE_MAX = float(os.environ.get("VOL_SCALE_MAX", "1.0"))
@@ -204,7 +209,7 @@ COMMODITY_SYMBOLS = [
     "SA", "MA",                                         # 化工
 ]
 
-COMMODITY_MOM_LOOKBACK = int(os.environ.get("COMMODITY_MOM_LOOKBACK", "20"))  # 动量回看窗口（交易日）
+COMMODITY_MOM_LOOKBACK = int(os.environ.get("COMMODITY_MOM_LOOKBACK", "60"))  # 动量回看窗口（交易日），60日捕捉中期商品趋势
 
 # 商品→行业两层映射（l2 精确匹配申万二级，l1 回退到申万一级）
 COMMODITY_INDUSTRY_MAP = {
@@ -350,23 +355,41 @@ INDUSTRY_KEYWORDS = {
     "房地产": ["房地产", "住房", "楼市", "房价", "限购", "公积金", "棚改", "保障房"],
     "银行": ["银行", "存款", "贷款", "利率", "LPR", "准备金", "降息", "加息"],
     "非银金融": ["保险", "证券", "基金", "股市", "IPO", "注册制", "资本市场"],
-    "计算机": ["人工智能", "芯片", "半导体", "数字经济", "信创", "数据安全", "算力", "大模型"],
+    "计算机": [
+        "人工智能", "芯片", "半导体", "数字经济", "信创", "数据安全", "算力", "大模型",
+        # AI/LLM 热词
+        "ChatGPT", "GPT", "生成式AI", "AIGC", "AI大模型", "LLM", "基础模型",
+        "AI应用", "大模型应用", "智能体", "AI Agent", "RAG",
+        "AI芯片", "GPU", "NPU", "CUDA", "AI服务器", "AI算力",
+        "OpenAI", "DeepSeek", "百度文心", "通义千问", "智谱",
+        "Sora", "AI视频", "多模态", "具身智能",
+    ],
     "电力设备": ["新能源", "光伏", "风电", "储能", "电池", "充电桩", "碳中和"],
-    "汽车": ["新能源汽车", "电动车", "智能驾驶", "汽车下乡", "自动驾驶"],
-    "医药生物": ["医药", "医保", "集采", "创新药", "中药", "医疗器械"],
+    "汽车": ["新能源汽车", "电动车", "智能驾驶", "汽车下乡", "自动驾驶", "智能座舱"],
+    "医药生物": ["医药", "医保", "集采", "创新药", "中药", "医疗器械", "GLP-1", "减肥药"],
     "钢铁": ["钢铁", "钢材", "去产能", "限产", "粗钢"],
-    "有色金属": ["稀土", "锂", "铜", "有色金属", "矿产"],
+    "有色金属": [
+        "稀土", "锂", "铜", "有色金属", "矿产",
+        # 贵金属/黄金热词
+        "黄金", "金价", "避险", "央行购金", "金矿",
+        "白银", "银价", "铝", "锌", "镍", "锡", "钴",
+    ],
     "食品饮料": ["食品安全", "白酒", "乳制品", "消费升级", "餐饮"],
-    "电子": ["集成电路", "显示面板", "消费电子", "半导体设备", "封测"],
-    "通信": ["5G", "通信", "网络安全", "物联网", "卫星"],
-    "传媒": ["文化", "游戏", "影视", "出版", "版权"],
+    "电子": [
+        "集成电路", "显示面板", "消费电子", "半导体设备", "封测",
+        # AI 硬件供应链
+        "先进封装", "CoWoS", "HBM", "高带宽存储", "光模块", "CPO",
+        "晶圆代工", "EUV", "光刻机", "芯片制造",
+    ],
+    "通信": ["5G", "通信", "网络安全", "物联网", "卫星", "算力网络", "东数西算", "数据中心"],
+    "传媒": ["文化", "游戏", "影视", "出版", "版权", "AI+内容", "虚拟现实", "元宇宙"],
     "公用事业": ["电力供应", "水务", "燃气", "供热", "核电"],
     "煤炭": ["煤炭", "煤矿", "煤价", "火电", "动力煤"],
-    "石油石化": ["石油", "天然气", "油价", "炼化", "成品油"],
+    "石油石化": ["石油", "天然气", "油价", "炼化", "成品油", "OPEC", "减产"],
     "建筑材料": ["水泥", "玻璃", "建材", "地产基建"],
     "建筑装饰": ["基建", "基础设施", "城镇化", "PPP", "专项债"],
-    "机械设备": ["机械", "工程机械", "机器人", "智能制造", "数控"],
-    "国防军工": ["军工", "国防", "航空航天", "军费"],
+    "机械设备": ["机械", "工程机械", "机器人", "智能制造", "数控", "人形机器人", "工业机器人"],
+    "国防军工": ["军工", "国防", "航空航天", "军费", "无人机", "低空经济"],
     "交通运输": ["航运", "物流", "铁路", "航空", "快递"],
     "商贸零售": ["零售", "电商", "免税", "消费券"],
     "社会服务": ["旅游", "酒店", "教育", "养老"],
@@ -384,15 +407,21 @@ POSITIVE_KEYWORDS = [
     "支持", "鼓励", "扩大", "促进", "减税", "降费", "补贴", "利好",
     "增长", "放宽", "优化", "推动", "加快", "加大", "提升", "深化",
     "创新", "发展", "突破", "改革",
+    # 市场热点正面词
+    "爆发", "崛起", "火爆", "飙升", "暴涨", "新高", "革命", "颠覆",
+    "井喷", "风口", "赛道", "景气", "超预期", "放量", "涨停",
 ]
 NEGATIVE_KEYWORDS = [
     "限制", "收紧", "处罚", "风险", "下滑", "严查", "整治", "叫停",
     "约谈", "下降", "回落", "萎缩", "压降", "清退", "取缔", "禁止",
     "违规", "罚款", "监管", "严控",
+    # 市场热点负面词
+    "暴跌", "崩盘", "泡沫", "制裁", "封锁", "脱钩", "关税", "出口管制",
+    "跌停", "爆雷", "退市", "清仓", "抛售",
 ]
 
 # --- 来源层级权重 ---
-TIER_WEIGHTS = {1: 1.0, 2: 0.8, 3: 0.7, 4: 0.5, 5: 0.0}  # Tier 5 暂时禁用
+TIER_WEIGHTS = {1: 1.0, 2: 0.8, 3: 0.7, 4: 0.5, 5: 0.0, 6: 0.6}  # Tier 5 暂时禁用
 
 # ============================================================
 # 美股数据配置（FMP + FRED）

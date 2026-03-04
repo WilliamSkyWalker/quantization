@@ -2,7 +2,7 @@
 美股数据下载器（yfinance 版）
 
 使用 yfinance 获取以下数据并存入 MySQL：
-    1. NASDAQ 100 成分股列表
+    1. S&P 500 + NASDAQ 100 成分股列表
     2. 日线行情（含复权价）
     3. 季度财务数据
     4. GICS 行业分类
@@ -25,6 +25,7 @@ from backend.services.config import (
     US_DATA_START_DATE,
     US_INDEX_SYMBOLS,
     US_COMMODITY_SYMBOLS,
+    US_FALLBACK_TICKERS,
     LOG_LEVEL,
 )
 from backend.services.data.database import DatabaseManager
@@ -69,24 +70,77 @@ class FMPDownloader:
     # ----------------------------------------------------------
 
     def download_stock_list(self) -> int:
-        """下载 NASDAQ 100 成分股列表并 upsert。"""
+        """下载 S&P 500 + NASDAQ 100 成分股列表并 upsert。"""
         import requests
         from io import StringIO
 
         all_tickers = {}
 
-        # 从 Wikipedia 获取 NASDAQ 100 成分股
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+        }
+        session = requests.Session()
+        session.headers.update(headers)
+
+        # --- 1. 从 Wikipedia 获取 S&P 500 成分股 ---
+        sp500_count = 0
         try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-            }
-            session = requests.Session()
-            session.headers.update(headers)
+            response = session.get(
+                "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+                timeout=15,
+            )
+            response.raise_for_status()
+            tables = pd.read_html(StringIO(response.text), match="Symbol")
+            if tables:
+                wiki_df = tables[0]
+                ticker_col = None
+                name_col = None
+                sector_col = None
+                industry_col = None
+                for col in wiki_df.columns:
+                    col_lower = str(col).lower()
+                    if "symbol" in col_lower or "ticker" in col_lower:
+                        ticker_col = col
+                    elif "security" in col_lower or "company" in col_lower or "name" in col_lower:
+                        name_col = col
+                    elif "gics sector" in col_lower or (
+                        "sector" in col_lower and "sub" not in col_lower
+                    ):
+                        sector_col = col
+                    elif "gics sub-industry" in col_lower or "sub" in col_lower or "industry" in col_lower:
+                        industry_col = col
+
+                if ticker_col:
+                    for _, row in wiki_df.iterrows():
+                        ticker = str(row.get(ticker_col, "")).strip().replace(".", "-")
+                        if not ticker:
+                            continue
+                        all_tickers[ticker] = {
+                            "ticker": ticker,
+                            "name": str(row.get(name_col, "")) if name_col else "",
+                            "exchange": "NYSE",
+                            "sector": str(row.get(sector_col, "")) if sector_col else "",
+                            "industry": str(row.get(industry_col, "")) if industry_col else "",
+                            "is_active": 1,
+                            "country": "US",
+                        }
+                    sp500_count = len(all_tickers)
+                    logger.info(f"S&P 500 成分股: {sp500_count} 只")
+                else:
+                    logger.warning("Wikipedia S&P 500 表格未找到 Symbol 列")
+            else:
+                logger.warning("无法从 Wikipedia 获取 S&P 500 成分股表格")
+        except Exception as e:
+            logger.error(f"Wikipedia S&P 500 页面解析失败: {e}")
+
+        # --- 2. 从 Wikipedia 获取 NASDAQ 100 成分股（合并到 all_tickers）---
+        nq100_new = 0
+        try:
             response = session.get(
                 "https://en.wikipedia.org/wiki/Nasdaq-100",
                 timeout=15,
@@ -114,61 +168,52 @@ class FMPDownloader:
 
                 if ticker_col:
                     for _, row in wiki_df.iterrows():
-                        ticker = str(row.get(ticker_col, "")).strip()
+                        ticker = str(row.get(ticker_col, "")).strip().replace(".", "-")
                         if not ticker:
                             continue
-                        all_tickers[ticker] = {
-                            "ticker": ticker,
-                            "name": str(row.get(name_col, "")) if name_col else "",
-                            "exchange": "NASDAQ",
-                            "sector": str(row.get(sector_col, "")) if sector_col else "",
-                            "industry": str(row.get(industry_col, "")) if industry_col else "",
-                            "is_active": 1,
-                            "country": "US",
-                        }
+                        if ticker not in all_tickers:
+                            all_tickers[ticker] = {
+                                "ticker": ticker,
+                                "name": str(row.get(name_col, "")) if name_col else "",
+                                "exchange": "NASDAQ",
+                                "sector": str(row.get(sector_col, "")) if sector_col else "",
+                                "industry": str(row.get(industry_col, "")) if industry_col else "",
+                                "is_active": 1,
+                                "country": "US",
+                            }
+                            nq100_new += 1
+                    logger.info(f"NASDAQ 100 成分股: 新增 {nq100_new} 只（S&P 500 已有的不重复添加）")
                 else:
-                    logger.warning("Wikipedia 表格未找到 Ticker 列")
+                    logger.warning("Wikipedia NASDAQ 100 表格未找到 Ticker 列")
             else:
                 logger.warning("无法从 Wikipedia 获取 NASDAQ 100 成分股表格")
         except Exception as e:
             logger.error(f"Wikipedia NASDAQ 100 页面解析失败: {e}")
 
-        # Wikipedia 失败时使用兜底列表
+        # --- 3. 兜底：Wikipedia 全部失败时使用 US_FALLBACK_TICKERS ---
         if not all_tickers:
-            all_tickers = self._build_fallback_stock_list()
+            logger.warning("Wikipedia 抓取全部失败，使用 US_FALLBACK_TICKERS 兜底")
+            for ticker in US_FALLBACK_TICKERS:
+                all_tickers[ticker] = {
+                    "ticker": ticker,
+                    "name": "",
+                    "exchange": "NASDAQ",
+                    "sector": "",
+                    "industry": "",
+                    "is_active": 1,
+                    "country": "US",
+                }
+
         if not all_tickers:
-            logger.warning("未获取到成分股数据（Wikipedia + 兜底列表均为空）")
+            logger.error("无法获取任何美股代码")
             return 0
 
-        # 用 yfinance 补充 market_cap 和 ipo_date（逐个查询）
-        for ticker in tqdm(list(all_tickers.keys()), desc="补充股票信息"):
-            t = self._safe_ticker(ticker)
-            if t is None:
-                continue
-            try:
-                info = t.info
-                if info:
-                    mc = info.get("marketCap")
-                    if mc:
-                        all_tickers[ticker]["market_cap"] = mc
-                    # firstTradeDateEpochUtc → ipo_date
-                    epoch = info.get("firstTradeDateEpochUtc")
-                    if epoch:
-                        try:
-                            all_tickers[ticker]["ipo_date"] = datetime.fromtimestamp(epoch, UTC).date()
-                        except Exception:
-                            pass
-            except Exception as e:
-                logger.debug(f"yfinance info 获取失败 {ticker}: {e}")
-
-            time.sleep(0.1)  # 避免过快请求
-
+        # --- 4. Upsert + Deactivate ---
         df = pd.DataFrame(list(all_tickers.values()))
         self.db.upsert_us_stock_basic(df)
         self.db.deactivate_us_stocks_not_in(set(all_tickers.keys()))
-
-        logger.info(f"美股列表下载完成: {len(df)} 只 (NASDAQ 100)")
-        return len(df)
+        logger.info(f"美股列表下载完成: 共 {len(all_tickers)} 只（S&P 500: {sp500_count}, NASDAQ 100 新增: {nq100_new}）")
+        return len(all_tickers)
 
     # ----------------------------------------------------------
     # 日线行情

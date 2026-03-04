@@ -64,7 +64,11 @@
       "WebFetch(domain:financialmodelingprep.com)",
       "WebFetch(domain:docs.polymarket.com)",
       "WebFetch(domain:medium.com)",
-      "WebFetch(domain:www.polymarketdata.co)"
+      "WebFetch(domain:www.polymarketdata.co)",
+      "Bash(pgrep:*)",
+      "WebFetch(domain:www.tiingo.com)",
+      "WebFetch(domain:tiingo-python.readthedocs.io)",
+      "Bash(git add:*)"
     ]
   }
 }

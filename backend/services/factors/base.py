@@ -14,6 +14,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from backend.services.config import LOG_LEVEL
@@ -51,6 +52,7 @@ class FactorBase(ABC):
     # _date_cache: 每个调仓日期清空（close, financial, price_history 等日期相关数据）
     _static_cache: dict = {}
     _date_cache: dict = {}
+    _IN_CLAUSE_THRESHOLD = 2000
 
     @classmethod
     def clear_date_cache(cls):
@@ -62,6 +64,54 @@ class FactorBase(ABC):
         """清空所有缓存（generate_signals 结束时调用）。"""
         cls._static_cache.clear()
         cls._date_cache.clear()
+
+    @classmethod
+    def preload_for_backtest(cls, db: "DatabaseManager", start_date: str, end_date: str):
+        """
+        一次性预加载回测区间所需的 financial_data 和 daily_price 到内存。
+
+        预加载后，get_latest_financial / _compute_ttm_vectorized / get_price_history /
+        get_month_end_price / get_close_on_date 自动从内存过滤，跳过 SQL 查询。
+
+        Args:
+            db: DatabaseManager 实例。
+            start_date: 回测起始日期。
+            end_date: 回测结束日期。
+        """
+        import time
+
+        # 1. 预加载 financial_data 全量（~200K 行）
+        t0 = time.time()
+        fin_sql = (
+            "SELECT ts_code, ann_date, end_date, roe_ttm, gross_margin, bps, "
+            "net_profit, revenue FROM financial_data"
+        )
+        df_fin = db.query(fin_sql, params={})
+        if not df_fin.empty:
+            df_fin["ann_date"] = pd.to_datetime(df_fin["ann_date"])
+            df_fin["end_date"] = pd.to_datetime(df_fin["end_date"])
+            for col in ["roe_ttm", "gross_margin", "bps", "net_profit", "revenue"]:
+                if col in df_fin.columns:
+                    df_fin[col] = pd.to_numeric(df_fin[col], errors="coerce")
+        cls._static_cache["_bulk_financial"] = df_fin
+        logger.info(f"预加载 financial_data: {len(df_fin)} 行, {time.time()-t0:.1f}s")
+
+        # 2. 预加载 daily_price（回测区间 + 400 天前移量，覆盖动量/技术因子回看需求）
+        t0 = time.time()
+        price_start = (
+            pd.to_datetime(start_date) - pd.Timedelta(days=400)
+        ).strftime("%Y-%m-%d")
+        price_sql = (
+            "SELECT ts_code, trade_date, pct_chg, turnover_rate, volume, amount, "
+            "close, adj_factor FROM daily_price "
+            "WHERE trade_date >= :start_date AND trade_date <= :end_date "
+            "ORDER BY ts_code, trade_date"
+        )
+        df_price = db.query(price_sql, params={"start_date": price_start, "end_date": end_date})
+        if not df_price.empty:
+            df_price["trade_date"] = pd.to_datetime(df_price["trade_date"])
+        cls._static_cache["_bulk_daily"] = df_price
+        logger.info(f"预加载 daily_price: {len(df_price)} 行, {time.time()-t0:.1f}s")
 
     def __init__(self, db: DatabaseManager):
         """
@@ -152,6 +202,17 @@ class FactorBase(ABC):
                 df = df[df["ts_code"].isin(universe_codes)]
             return df[["ts_code", "ann_date", "end_date"] + [c for c in columns if c in df.columns]].copy()
 
+        # 预加载数据可用时，从内存过滤
+        bulk_fin = self._static_cache.get("_bulk_financial")
+        if bulk_fin is not None and not bulk_fin.empty:
+            date_ts = pd.to_datetime(date)
+            df = bulk_fin[bulk_fin["ann_date"] <= date_ts].copy()
+            df = df.sort_values("end_date", ascending=False).drop_duplicates(subset=["ts_code"], keep="first")
+            self._date_cache[cache_key] = df
+            if universe_codes:
+                df = df[df["ts_code"].isin(universe_codes)]
+            return df[["ts_code", "ann_date", "end_date"] + [c for c in columns if c in df.columns]].copy()
+
         # 获取宽列数据（合并多个因子常用列，减少重复查询）
         all_columns = list(set(columns) | {"roe_ttm", "gross_margin", "bps", "net_profit", "revenue"})
         cols_str = ", ".join(["ts_code", "ann_date", "end_date"] + all_columns)
@@ -163,7 +224,7 @@ class FactorBase(ABC):
             f"FROM financial_data WHERE ann_date <= :date"
         )
 
-        if universe_codes:
+        if universe_codes and len(universe_codes) <= self._IN_CLAUSE_THRESHOLD:
             in_clause, in_params = self._build_in_clause(universe_codes)
             inner_sql += f" AND ts_code IN {in_clause}"
             params.update(in_params)
@@ -215,9 +276,22 @@ class FactorBase(ABC):
                 df = df[keep]
             return df.copy()
 
-        start_date = (
-            pd.to_datetime(end_date) - pd.Timedelta(days=lookback_days)
-        ).strftime("%Y-%m-%d")
+        start_dt = pd.to_datetime(end_date) - pd.Timedelta(days=lookback_days)
+        start_date = start_dt.strftime("%Y-%m-%d")
+
+        # 预加载数据可用时，从内存过滤
+        bulk_daily = self._static_cache.get("_bulk_daily")
+        if bulk_daily is not None and not bulk_daily.empty:
+            end_ts = pd.to_datetime(end_date)
+            mask = (bulk_daily["trade_date"] >= start_dt) & (bulk_daily["trade_date"] <= end_ts)
+            result = bulk_daily[mask].copy()
+            if universe_codes:
+                result = result[result["ts_code"].isin(universe_codes)]
+            self._date_cache[cache_key] = result
+            if columns:
+                keep = ["ts_code", "trade_date"] + [c for c in columns if c in result.columns]
+                result = result[keep]
+            return result.copy()
 
         # 始终获取常用列宽表以便复用（不含 open 保留字，因子不需要）
         base_cols = {"ts_code", "trade_date", "pct_chg", "turnover_rate",
@@ -235,7 +309,7 @@ class FactorBase(ABC):
             f"AND trade_date <= :end_date"
         )
 
-        if universe_codes:
+        if universe_codes and len(universe_codes) <= self._IN_CLAUSE_THRESHOLD:
             in_clause, in_params = self._build_in_clause(universe_codes)
             sql += f" AND ts_code IN {in_clause}"
             params.update(in_params)
@@ -279,10 +353,29 @@ class FactorBase(ABC):
 
         target_date = pd.to_datetime(date) - pd.DateOffset(months=months_ago)
         # 取目标月份的最后一个交易日
-        month_start = target_date.replace(day=1).strftime("%Y-%m-%d")
-        month_end = (
-            target_date.replace(day=1) + pd.DateOffset(months=1) - pd.Timedelta(days=1)
-        ).strftime("%Y-%m-%d")
+        month_start_dt = target_date.replace(day=1)
+        month_end_dt = month_start_dt + pd.DateOffset(months=1) - pd.Timedelta(days=1)
+
+        # 预加载数据可用时，从内存过滤
+        bulk_daily = self._static_cache.get("_bulk_daily")
+        if bulk_daily is not None and not bulk_daily.empty:
+            mask = (bulk_daily["trade_date"] >= month_start_dt) & (bulk_daily["trade_date"] <= month_end_dt)
+            df = bulk_daily[mask].copy()
+            if universe_codes:
+                df = df[df["ts_code"].isin(universe_codes)]
+            if df.empty:
+                self._date_cache[cache_key] = df
+                return df
+            # 每只股票取月内最后一个交易日
+            df = df.sort_values("trade_date", ascending=False).drop_duplicates(subset=["ts_code"], keep="first")
+            df["adj_factor"] = pd.to_numeric(df["adj_factor"], errors="coerce").fillna(1.0)
+            df["close"] = pd.to_numeric(df["close"], errors="coerce") * df["adj_factor"]
+            result = df[["ts_code", "close"]]
+            self._date_cache[cache_key] = result
+            return result.copy()
+
+        month_start = month_start_dt.strftime("%Y-%m-%d")
+        month_end = month_end_dt.strftime("%Y-%m-%d")
 
         params: dict = {"month_start": month_start, "month_end": month_end}
 
@@ -294,7 +387,7 @@ class FactorBase(ABC):
             "AND trade_date <= :month_end"
         )
 
-        if universe_codes:
+        if universe_codes and len(universe_codes) <= self._IN_CLAUSE_THRESHOLD:
             in_clause, in_params = self._build_in_clause(universe_codes)
             inner_sql += f" AND ts_code IN {in_clause}"
             params.update(in_params)
@@ -313,6 +406,110 @@ class FactorBase(ABC):
         result = df[["ts_code", "close"]]
         self._date_cache[cache_key] = result
         return result.copy()
+
+    def _compute_ttm_vectorized(
+        self,
+        date: str,
+        value_col: str,
+        result_col: str,
+        universe_codes: Optional[list[str]] = None,
+    ) -> pd.DataFrame:
+        """
+        向量化 TTM 计算（供 get_ttm_net_profit / get_ttm_revenue 内部使用）。
+
+        用 groupby + merge 替代逐股票循环，将 O(N) 次 DataFrame 筛选
+        压缩为 2 次 merge 操作。
+
+        Args:
+            date: 截止日期。
+            value_col: 财务数据列名（如 "net_profit"）。
+            result_col: 输出列名（如 "ttm_net_profit"）。
+            universe_codes: 股票代码列表（可选）。
+
+        Returns:
+            DataFrame[ts_code, result_col]。
+        """
+        # 预加载数据可用时，从内存过滤
+        bulk_fin = self._static_cache.get("_bulk_financial")
+        if bulk_fin is not None and not bulk_fin.empty:
+            date_ts = pd.to_datetime(date)
+            df = bulk_fin[["ts_code", "ann_date", "end_date", value_col]].copy()
+            df = df[(df["ann_date"] <= date_ts) & df[value_col].notna()]
+            if universe_codes:
+                df = df[df["ts_code"].isin(universe_codes)]
+            df = df.sort_values(["ts_code", "end_date"], ascending=[True, False])
+        else:
+            params: dict = {"date": date}
+            sql = (
+                f"SELECT ts_code, ann_date, end_date, {value_col} FROM financial_data "
+                f"WHERE ann_date <= :date AND {value_col} IS NOT NULL"
+            )
+            if universe_codes and len(universe_codes) <= self._IN_CLAUSE_THRESHOLD:
+                in_clause, in_params = self._build_in_clause(universe_codes)
+                sql += f" AND ts_code IN {in_clause}"
+                params.update(in_params)
+            sql += " ORDER BY ts_code, end_date DESC"
+
+            df = self.db.query(sql, params=params)
+        if df.empty:
+            return pd.DataFrame(columns=["ts_code", result_col])
+
+        df["end_date"] = pd.to_datetime(df["end_date"])
+        df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+
+        # groupby 保序，first() 取每只股票最新一期（SQL 已按 end_date DESC 排序）
+        latest = df.groupby("ts_code").first().reset_index()[["ts_code", "end_date", value_col]]
+        latest.columns = ["ts_code", "latest_end", "current_val"]
+        latest["month"] = latest["latest_end"].dt.month
+
+        # 年报（month==12）：TTM = 当期值
+        mask_annual = latest["month"] == 12
+        annual = latest.loc[mask_annual, ["ts_code", "current_val"]].copy()
+        annual.rename(columns={"current_val": result_col}, inplace=True)
+
+        non_annual = latest[~mask_annual].copy()
+        if non_annual.empty:
+            return annual[["ts_code", result_col]].reset_index(drop=True)
+
+        # 构建 lookup：(ts_code, end_date) → value（去重后取第一条）
+        lookup = df.drop_duplicates(subset=["ts_code", "end_date"])[
+            ["ts_code", "end_date", value_col]
+        ]
+
+        # 向量化构建上年年报 end_date 和上年同期 end_date
+        non_annual["prev_annual_end"] = pd.to_datetime(dict(
+            year=non_annual["latest_end"].dt.year - 1, month=12, day=31,
+        ))
+        non_annual["prev_same_end"] = pd.to_datetime(dict(
+            year=non_annual["latest_end"].dt.year - 1,
+            month=non_annual["latest_end"].dt.month,
+            day=non_annual["latest_end"].dt.day,
+        ))
+
+        # merge 上年年报
+        non_annual = non_annual.merge(
+            lookup.rename(columns={"end_date": "prev_annual_end", value_col: "annual_val"}),
+            on=["ts_code", "prev_annual_end"],
+            how="left",
+        )
+        # merge 上年同期
+        non_annual = non_annual.merge(
+            lookup.rename(columns={"end_date": "prev_same_end", value_col: "same_val"}),
+            on=["ts_code", "prev_same_end"],
+            how="left",
+        )
+
+        # TTM = 当期累计 + 上年年报 - 上年同期累计
+        non_annual[result_col] = np.where(
+            non_annual["annual_val"].notna() & non_annual["same_val"].notna(),
+            non_annual["current_val"] + non_annual["annual_val"] - non_annual["same_val"],
+            np.nan,
+        )
+
+        return pd.concat(
+            [annual[["ts_code", result_col]], non_annual[["ts_code", result_col]]],
+            ignore_index=True,
+        )
 
     def get_ttm_net_profit(
         self,
@@ -341,55 +538,10 @@ class FactorBase(ABC):
                 return cached[cached["ts_code"].isin(universe_codes)].copy()
             return cached.copy()
 
-        params: dict = {"date": date}
-        sql = (
-            "SELECT ts_code, ann_date, end_date, net_profit FROM financial_data "
-            "WHERE ann_date <= :date AND net_profit IS NOT NULL"
-        )
-        if universe_codes:
-            in_clause, in_params = self._build_in_clause(universe_codes)
-            sql += f" AND ts_code IN {in_clause}"
-            params.update(in_params)
-        sql += " ORDER BY ts_code, end_date DESC"
-
-        df = self.db.query(sql, params=params)
-        if df.empty:
-            result = pd.DataFrame(columns=["ts_code", "ttm_net_profit"])
-            self._date_cache[cache_key] = result
-            return result
-
-        df["end_date"] = pd.to_datetime(df["end_date"])
-        results = []
-
-        for ts_code, grp in df.groupby("ts_code"):
-            grp = grp.sort_values("end_date", ascending=False)
-            # 取最新一期
-            latest = grp.iloc[0]
-            end_dt = latest["end_date"]
-            month = end_dt.month
-
-            if month == 12:
-                # 年报：TTM = 当期净利润
-                results.append({"ts_code": ts_code, "ttm_net_profit": latest["net_profit"]})
-            else:
-                # 需要上年年报和上年同期累计
-                prev_year = end_dt.year - 1
-                prev_annual_end = pd.Timestamp(year=prev_year, month=12, day=31)
-                prev_same_end = pd.Timestamp(year=prev_year, month=month, day=end_dt.day)
-
-                prev_annual = grp[grp["end_date"] == prev_annual_end]
-                prev_same = grp[grp["end_date"] == prev_same_end]
-
-                if not prev_annual.empty and not prev_same.empty:
-                    ttm = (latest["net_profit"]
-                           + prev_annual.iloc[0]["net_profit"]
-                           - prev_same.iloc[0]["net_profit"])
-                    results.append({"ts_code": ts_code, "ttm_net_profit": ttm})
-                else:
-                    results.append({"ts_code": ts_code, "ttm_net_profit": float("nan")})
-
-        result = pd.DataFrame(results) if results else pd.DataFrame(columns=["ts_code", "ttm_net_profit"])
+        result = self._compute_ttm_vectorized(date, "net_profit", "ttm_net_profit", universe_codes)
         self._date_cache[cache_key] = result
+        if universe_codes:
+            return result[result["ts_code"].isin(universe_codes)].copy()
         return result.copy()
 
     def get_ttm_revenue(
@@ -419,52 +571,10 @@ class FactorBase(ABC):
                 return cached[cached["ts_code"].isin(universe_codes)].copy()
             return cached.copy()
 
-        params: dict = {"date": date}
-        sql = (
-            "SELECT ts_code, ann_date, end_date, revenue FROM financial_data "
-            "WHERE ann_date <= :date AND revenue IS NOT NULL"
-        )
-        if universe_codes:
-            in_clause, in_params = self._build_in_clause(universe_codes)
-            sql += f" AND ts_code IN {in_clause}"
-            params.update(in_params)
-        sql += " ORDER BY ts_code, end_date DESC"
-
-        df = self.db.query(sql, params=params)
-        if df.empty:
-            result = pd.DataFrame(columns=["ts_code", "ttm_revenue"])
-            self._date_cache[cache_key] = result
-            return result
-
-        df["end_date"] = pd.to_datetime(df["end_date"])
-        results = []
-
-        for ts_code, grp in df.groupby("ts_code"):
-            grp = grp.sort_values("end_date", ascending=False)
-            latest = grp.iloc[0]
-            end_dt = latest["end_date"]
-            month = end_dt.month
-
-            if month == 12:
-                results.append({"ts_code": ts_code, "ttm_revenue": latest["revenue"]})
-            else:
-                prev_year = end_dt.year - 1
-                prev_annual_end = pd.Timestamp(year=prev_year, month=12, day=31)
-                prev_same_end = pd.Timestamp(year=prev_year, month=month, day=end_dt.day)
-
-                prev_annual = grp[grp["end_date"] == prev_annual_end]
-                prev_same = grp[grp["end_date"] == prev_same_end]
-
-                if not prev_annual.empty and not prev_same.empty:
-                    ttm = (latest["revenue"]
-                           + prev_annual.iloc[0]["revenue"]
-                           - prev_same.iloc[0]["revenue"])
-                    results.append({"ts_code": ts_code, "ttm_revenue": ttm})
-                else:
-                    results.append({"ts_code": ts_code, "ttm_revenue": float("nan")})
-
-        result = pd.DataFrame(results) if results else pd.DataFrame(columns=["ts_code", "ttm_revenue"])
+        result = self._compute_ttm_vectorized(date, "revenue", "ttm_revenue", universe_codes)
         self._date_cache[cache_key] = result
+        if universe_codes:
+            return result[result["ts_code"].isin(universe_codes)].copy()
         return result.copy()
 
     def get_close_on_date(
@@ -489,9 +599,26 @@ class FactorBase(ABC):
                 return cached[cached["ts_code"].isin(universe_codes)].copy()
             return cached.copy()
 
-        # 向前查找最多 10 个自然日
-        lookback = (pd.to_datetime(date) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
+        date_ts = pd.to_datetime(date)
+        lookback_ts = date_ts - pd.Timedelta(days=10)
 
+        # 预加载数据可用时，从内存过滤
+        bulk_daily = self._static_cache.get("_bulk_daily")
+        if bulk_daily is not None and not bulk_daily.empty:
+            mask = (bulk_daily["trade_date"] >= lookback_ts) & (bulk_daily["trade_date"] <= date_ts)
+            df = bulk_daily[mask].copy()
+            if universe_codes:
+                df = df[df["ts_code"].isin(universe_codes)]
+            if df.empty:
+                result = pd.DataFrame(columns=["ts_code", "close"])
+                self._date_cache[cache_key] = result
+                return result
+            df = df.sort_values("trade_date", ascending=False).drop_duplicates(subset=["ts_code"], keep="first")
+            result = df[["ts_code", "close"]]
+            self._date_cache[cache_key] = result
+            return result.copy()
+
+        lookback = lookback_ts.strftime("%Y-%m-%d")
         params: dict = {"lookback": lookback, "date": date}
 
         inner_sql = (
@@ -500,7 +627,7 @@ class FactorBase(ABC):
             "FROM daily_price "
             "WHERE trade_date >= :lookback AND trade_date <= :date"
         )
-        if universe_codes:
+        if universe_codes and len(universe_codes) <= self._IN_CLAUSE_THRESHOLD:
             in_clause, in_params = self._build_in_clause(universe_codes)
             inner_sql += f" AND ts_code IN {in_clause}"
             params.update(in_params)

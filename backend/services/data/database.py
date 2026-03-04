@@ -33,6 +33,7 @@ from sqlalchemy import (
     create_engine,
     text,
 )
+from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from backend.services.config import DB_URL, LOG_LEVEL
@@ -320,7 +321,7 @@ class SelectionResult(Base):
     date = Column(Date, nullable=False, comment="选股日期")
     total = Column(Integer, comment="参与打分的股票总数")
     top_stocks = Column(Text, comment="Top N 选股结果 JSON")
-    by_industry = Column(Text, comment="分行业选股结果 JSON")
+    by_industry = Column(MEDIUMTEXT, comment="分行业选股结果 JSON")
     created_at = Column(DateTime, default=datetime.now, comment="首次计算时间")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment="最近更新时间")
 
@@ -333,6 +334,28 @@ class SelectionResult(Base):
 # ============================================================
 # 因子快照表
 # ============================================================
+
+class BacktestResult(Base):
+    """回测结果持久化表"""
+    __tablename__ = "backtest_result"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    start_date = Column(Date, nullable=False, comment="回测开始日期")
+    end_date = Column(Date, nullable=False, comment="回测结束日期")
+    summary = Column(Text, comment="绩效指标 JSON dict")
+    nav = Column(MEDIUMTEXT, comment="净值曲线 JSON [{date, nav}]")
+    benchmark = Column(MEDIUMTEXT, comment="基准净值 JSON [{date, nav}]")
+    trades = Column(MEDIUMTEXT, comment="交易记录 JSON")
+    monthly = Column(Text, comment="月度收益 JSON")
+    drawdown = Column(MEDIUMTEXT, comment="回撤序列 JSON [{date, drawdown}]")
+    attribution = Column(Text, comment="行业归因 JSON")
+    holdings = Column(Text, comment="最新持仓 JSON")
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        Index("idx_backtest_result_dates", "start_date", "end_date"),
+    )
+
 
 class FactorSnapshot(Base):
     """因子快照表（选股时同步存储全量股票的因子值，供因子明细接口秒查）"""

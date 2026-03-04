@@ -27,6 +27,8 @@ urlpatterns = [
 
     # Backtest
     path('backtest/run', strategy.backtest_run),
+    path('backtest/history', strategy.backtest_history),
+    path('backtest/history/<int:pk>', strategy.backtest_history_detail),
 
     # Paper trading
     path('paper/account', trading.paper_account),
@@ -80,4 +82,8 @@ urlpatterns = [
     path('polymarket/backtest/markets', polymarket.backtest_markets),
     path('polymarket/backtest/price-series/<str:condition_id>', polymarket.backtest_price_series),
     path('polymarket/backtest/run', polymarket.backtest_run),
+
+    # Polymarket - US Stock P&L
+    path('polymarket/backtest/us-stock-pnl', polymarket.us_stock_pnl),
+    path('polymarket/backtest/us-stock-pnl-from-db', polymarket.us_stock_pnl_from_db),
 ]

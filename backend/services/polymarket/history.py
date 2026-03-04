@@ -90,12 +90,10 @@ class PolymarketHistoryDownloader:
 
                     # 解析价格
                     try:
-                        prices_str = market.get("outcomePrices", "[0.5,0.5]")
-                        if isinstance(prices_str, str):
-                            yes_price = float(prices_str.strip("[]").split(",")[0])
-                        else:
-                            yes_price = 0.5
-                    except (ValueError, IndexError):
+                        import json as _json
+                        prices = _json.loads(market.get("outcomePrices", "[0.5,0.5]"))
+                        yes_price = float(prices[0])
+                    except (ValueError, IndexError, TypeError):
                         yes_price = 0.5
 
                     market_info = {
