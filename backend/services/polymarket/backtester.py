@@ -26,7 +26,9 @@ from backend.services.config import (
 )
 
 LLM_CONCURRENCY = 8  # Polymarket 回测 LLM 并发数
-BACKTEST_EXCLUDE_CATEGORIES = {"sports", "pop-culture"}  # 回测默认排除的分类
+BACKTEST_EXCLUDE_CATEGORIES = {"sports", "pop-culture", "crypto"}  # 已迁移到 is_excluded 字段，保留供参考
+RESOLUTION_YES_THRESHOLD = 0.90  # 价格 ≥ 此值视为 YES 出结果
+RESOLUTION_NO_THRESHOLD = 0.10   # 价格 ≤ 此值视为 NO 出结果
 
 from backend.services.data.database import DatabaseManager
 from backend.services.polymarket.models import PolymarketEvent, PolymarketPriceSnapshot, PolymarketAlert
@@ -95,19 +97,15 @@ class PolymarketBacktester:
         session: Session = self._db.get_session()
         try:
             # 获取要回测的市场
-            excl = exclude_categories if exclude_categories is not None else BACKTEST_EXCLUDE_CATEGORIES
             if condition_ids:
                 events = session.query(PolymarketEvent).filter(
                     PolymarketEvent.condition_id.in_(condition_ids)
                 ).all()
             else:
-                q = session.query(PolymarketEvent).filter(
-                    PolymarketEvent.is_active == False  # noqa: E712
-                )
-                if excl:
-                    q = q.filter(PolymarketEvent.category.notin_(excl))
-                    logger.info(f"[回测] 排除分类: {excl}")
-                events = q.order_by(PolymarketEvent.volume.desc()).all()
+                events = session.query(PolymarketEvent).filter(
+                    PolymarketEvent.is_excluded == False  # noqa: E712
+                ).order_by(PolymarketEvent.volume.desc()).all()
+                logger.info(f"[回测] 已排除 is_excluded=True 的事件")
 
             if not events:
                 logger.warning("[回测] 未找到可回测的市场")
@@ -152,20 +150,117 @@ class PolymarketBacktester:
                 market_results.append(self._market_stat(event, snapshots, len(spikes)))
 
             total_spikes = len(alerts_with_ts)
-            logger.info(f"[回测] 阶段 1 完成: {total_spikes} 个 spike")
-            task_manager.update_progress(task_id, 60, f"扫描完成: {total_spikes} 个 spike")
+            n_spike = sum(1 for a, _ in alerts_with_ts if a["alert_type"].startswith("spike"))
+            n_resolved = total_spikes - n_spike
+            logger.info(f"[回测] 阶段 1 完成: {total_spikes} 个 alert (spike {n_spike}, resolution {n_resolved})")
+            task_manager.update_progress(task_id, 60, f"扫描完成: spike {n_spike} + resolution {n_resolved} = {total_spikes} 个 alert")
 
-            # ── 阶段 2: 并发 LLM 分析 ──
+            # ── 阶段 2: 并发 LLM 分析（跳过 DB 中已有 LLM 结果的 alert）──
             if use_llm and self._analyzer.is_available() and alerts_with_ts:
-                logger.info(f"[回测] 阶段 2: LLM 并发分析 {total_spikes} 个 spike (concurrency={LLM_CONCURRENCY})")
+                # 查询 DB 中已有 LLM 分析的 alert，用于跳过
+                existing_keys: set[tuple] = set()
+                try:
+                    existing = session.query(
+                        PolymarketAlert.condition_id,
+                        PolymarketAlert.alert_type,
+                        PolymarketAlert.created_at,
+                    ).filter(
+                        PolymarketAlert.llm_summary.isnot(None),
+                    ).all()
+                    existing_keys = {(r.condition_id, r.alert_type, r.created_at) for r in existing}
+                except Exception:
+                    pass
+
+                pending = []
+                skipped_items = []
+                for item in alerts_with_ts:
+                    alert_data, snap_ts = item
+                    key = (alert_data["condition_id"], alert_data["alert_type"], snap_ts)
+                    if key in existing_keys:
+                        skipped_items.append(item)
+                    else:
+                        pending.append(item)
+
+                skipped = len(skipped_items)
+                total_pending = len(pending)
+                logger.info(
+                    f"[回测] 阶段 2: {total_spikes} 个 alert, "
+                    f"已有 LLM 结果 {skipped} 个(跳过), 待分析 {total_pending} 个 (concurrency={LLM_CONCURRENCY})"
+                )
                 task_manager.update_progress(
                     task_id, 62,
-                    f"LLM 分析 0/{total_spikes}..."
+                    f"LLM 分析: 跳过 {skipped}, 待分析 {total_pending}..."
                 )
+
+                # 从 DB 回填已有结果到 skipped_items
+                if skipped_items:
+                    import json as _json
+                    db_alerts = session.query(PolymarketAlert).filter(
+                        PolymarketAlert.llm_summary.isnot(None),
+                    ).all()
+                    db_map = {}
+                    for r in db_alerts:
+                        db_map[(r.condition_id, r.alert_type, r.created_at)] = r
+                    for item in skipped_items:
+                        alert_data, snap_ts = item
+                        key = (alert_data["condition_id"], alert_data["alert_type"], snap_ts)
+                        row = db_map.get(key)
+                        if row:
+                            def _pj(val):
+                                if not val:
+                                    return []
+                                try:
+                                    return _json.loads(val)
+                                except (ValueError, TypeError):
+                                    return []
+                            alert_data["affected_tickers"] = _pj(row.affected_tickers)
+                            alert_data["affected_a_shares"] = _pj(row.affected_a_shares)
+                            alert_data["affected_sectors"] = _pj(row.affected_sectors)
+                            alert_data["affected_sw_industries"] = _pj(row.affected_sw_industries)
+                            alert_data["llm_summary"] = row.llm_summary
+                            alert_data["llm_sentiment"] = row.llm_sentiment
+                            alert_data["llm_confidence"] = row.llm_confidence
+
                 done_count = 0
 
-                def _analyze_one(item: tuple[dict, datetime]) -> tuple[dict, datetime]:
+                # ── Slug 聚合：同 slug 的 alerts 共享一次 LLM 分析 ──
+                slug_groups: dict[str, list[tuple[dict, datetime]]] = {}
+                for item in pending:
+                    slug = item[0].get("slug", "") or item[0].get("condition_id", "")
+                    slug_groups.setdefault(slug, []).append(item)
+
+                # 每个 slug 选一个代表（price_change 绝对值最大的）
+                slug_representatives: list[tuple[dict, datetime]] = []
+                slug_siblings: dict[str, list[tuple[dict, datetime]]] = {}
+                for slug, items in slug_groups.items():
+                    items.sort(key=lambda x: abs(x[0].get("price_change", 0)), reverse=True)
+                    slug_representatives.append(items[0])
+                    slug_siblings[slug] = items[1:]
+
+                actual_llm_calls = len(slug_representatives)
+                sibling_count = total_pending - actual_llm_calls
+                logger.info(
+                    f"[回测] Slug 聚合: {total_pending} alerts → {actual_llm_calls} 次 LLM 调用 "
+                    f"(节省 {sibling_count} 次)"
+                )
+                task_manager.update_progress(
+                    task_id, 63,
+                    f"LLM 分析: {actual_llm_calls} 次调用 (slug聚合节省 {sibling_count})..."
+                )
+
+                def _apply_result(alert_data: dict, result: dict):
+                    """将 LLM 结果写入 alert_data。"""
+                    alert_data["affected_tickers"] = result.get("affected_tickers", [])
+                    alert_data["affected_a_shares"] = result.get("affected_a_shares", [])
+                    alert_data["affected_sectors"] = result.get("affected_sectors", [])
+                    alert_data["affected_sw_industries"] = result.get("affected_sw_industries", [])
+                    alert_data["llm_summary"] = result.get("summary")
+                    alert_data["llm_sentiment"] = result.get("overall_sentiment")
+                    alert_data["llm_confidence"] = result.get("confidence")
+
+                def _analyze_one(item: tuple[dict, datetime]) -> tuple[dict, datetime, Optional[dict]]:
                     alert_data, snap_ts = item
+                    result = None
                     try:
                         result = self._analyzer.analyze({
                             "question": alert_data["question"],
@@ -178,42 +273,49 @@ class PolymarketBacktester:
                             "timeframe_seconds": alert_data["timeframe_seconds"],
                         })
                         if result:
-                            alert_data["affected_tickers"] = result.get("affected_tickers", [])
-                            alert_data["affected_a_shares"] = result.get("affected_a_shares", [])
-                            alert_data["affected_sectors"] = result.get("affected_sectors", [])
-                            alert_data["affected_sw_industries"] = result.get("affected_sw_industries", [])
-                            alert_data["llm_summary"] = result.get("summary")
-                            alert_data["llm_sentiment"] = result.get("overall_sentiment")
-                            alert_data["llm_confidence"] = result.get("confidence")
+                            _apply_result(alert_data, result)
+                            us_tickers = [t.get("ticker", "") for t in result.get("affected_tickers", [])[:3]]
                             a_shares = [s.get("name", "") for s in result.get("affected_a_shares", [])[:3]]
                             logger.info(
                                 f"[回测] LLM 完成: {alert_data['alert_type']} | "
                                 f"sentiment={result.get('overall_sentiment', '-')}"
+                                + (f" | 美股: {', '.join(us_tickers)}" if us_tickers else "")
                                 + (f" | A股: {', '.join(a_shares)}" if a_shares else "")
                             )
                     except Exception as e:
                         logger.warning(f"[回测] LLM 分析失败: {e}")
-                    return alert_data, snap_ts
+                    return alert_data, snap_ts, result
 
-                with ThreadPoolExecutor(max_workers=LLM_CONCURRENCY) as pool:
-                    futures = {pool.submit(_analyze_one, item): item for item in alerts_with_ts}
-                    analyzed: list[tuple[dict, datetime]] = []
-                    for future in as_completed(futures):
-                        alert_data, snap_ts = future.result()
-                        analyzed.append((alert_data, snap_ts))
-                        done_count += 1
-                        if done_count % max(1, total_spikes // 10) == 0 or done_count == total_spikes:
-                            pct = 62 + int(28 * done_count / total_spikes)
-                            task_manager.update_progress(
-                                task_id, pct,
-                                f"LLM 分析 {done_count}/{total_spikes}..."
-                            )
+                analyzed: list[tuple[dict, datetime]] = list(skipped_items)
+                if slug_representatives:
+                    with ThreadPoolExecutor(max_workers=LLM_CONCURRENCY) as pool:
+                        futures = {pool.submit(_analyze_one, item): item for item in slug_representatives}
+                        for future in as_completed(futures):
+                            alert_data, snap_ts, result = future.result()
+                            analyzed.append((alert_data, snap_ts))
+                            self._persist_alert(alert_data, snap_ts, source="backtest")
+
+                            # 将结果复制给同 slug 的兄弟 alerts
+                            slug = alert_data.get("slug", "") or alert_data.get("condition_id", "")
+                            if result and slug in slug_siblings:
+                                for sib_data, sib_ts in slug_siblings[slug]:
+                                    _apply_result(sib_data, result)
+                                    analyzed.append((sib_data, sib_ts))
+                                    self._persist_alert(sib_data, sib_ts, source="backtest")
+
+                            done_count += 1
+                            if done_count % 50 == 0 or done_count == actual_llm_calls:
+                                pct = 62 + int(28 * done_count / actual_llm_calls)
+                                task_manager.update_progress(
+                                    task_id, pct,
+                                    f"LLM 分析 {done_count}/{actual_llm_calls}..."
+                                )
+                                logger.info(f"[回测] LLM 进度: {done_count}/{actual_llm_calls}")
                 alerts_with_ts = analyzed
 
-            # 持久化 + 收集最终 alert 列表
+            # 收集最终 alert 列表
             for alert_data, snap_ts in alerts_with_ts:
                 all_alerts.append(alert_data)
-                self._persist_alert(alert_data, snap_ts, source="backtest")
 
             # 回填 market_results 的 alerts_triggered（LLM 可能没改数量，但保持一致）
             alerts_per_market: dict[str, int] = {}
@@ -315,6 +417,7 @@ class PolymarketBacktester:
                     "condition_id": event.condition_id,
                     "question": event.question,
                     "category": event.category,
+                    "slug": event.slug or "",
                     "alert_type": alert_type,
                     "price_before": round(old_price, 4),
                     "price_after": round(price, 4),
@@ -331,6 +434,69 @@ class PolymarketBacktester:
                 }
 
                 results.append((alert_data, snap.timestamp))
+
+        # ── Resolution 检测: 事件出结果 ──
+        if len(snapshots) >= 2:
+            final_price = snapshots[-1].yes_price
+            first_price = snapshots[0].yes_price
+
+            resolved_yes = final_price is not None and final_price >= RESOLUTION_YES_THRESHOLD
+            resolved_no = final_price is not None and final_price <= RESOLUTION_NO_THRESHOLD
+
+            if resolved_yes or resolved_no:
+                threshold = RESOLUTION_YES_THRESHOLD if resolved_yes else RESOLUTION_NO_THRESHOLD
+                alert_type = "resolved_yes" if resolved_yes else "resolved_no"
+
+                # 找到价格首次越过阈值的时刻
+                resolution_snap = None
+                for snap in snapshots:
+                    p = snap.yes_price
+                    if p is None:
+                        continue
+                    if resolved_yes and p >= threshold:
+                        resolution_snap = snap
+                        break
+                    if resolved_no and p <= threshold:
+                        resolution_snap = snap
+                        break
+
+                if resolution_snap:
+                    # price_before: 出结果前 24h 的价格，回退到序列首价
+                    res_ts = resolution_snap.timestamp.timestamp()
+                    before_price = first_price
+                    for snap in snapshots:
+                        snap_ts = snap.timestamp.timestamp()
+                        if snap_ts >= res_ts:
+                            break
+                        if res_ts - snap_ts <= 86400:
+                            before_price = snap.yes_price
+                            break
+
+                    change = resolution_snap.yes_price - before_price
+                    logger.info(
+                        f"[回测]   {alert_type}: {before_price:.2%} → {resolution_snap.yes_price:.2%} ({change:+.2%})"
+                    )
+
+                    alert_data = {
+                        "condition_id": event.condition_id,
+                        "question": event.question,
+                        "category": event.category,
+                        "slug": event.slug or "",
+                        "alert_type": alert_type,
+                        "price_before": round(before_price, 4),
+                        "price_after": round(resolution_snap.yes_price, 4),
+                        "price_change": round(change, 4),
+                        "timeframe_seconds": 0,
+                        "timestamp": resolution_snap.timestamp.isoformat() if resolution_snap.timestamp else None,
+                        "affected_tickers": [],
+                        "affected_a_shares": [],
+                        "affected_sectors": [],
+                        "affected_sw_industries": [],
+                        "llm_summary": None,
+                        "llm_sentiment": None,
+                        "llm_confidence": None,
+                    }
+                    results.append((alert_data, resolution_snap.timestamp))
 
         return results
 

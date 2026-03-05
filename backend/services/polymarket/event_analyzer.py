@@ -69,7 +69,7 @@ SYSTEM_PROMPT = """你是一位专业的全球股票市场分析师，擅长预�
 
 只返回 JSON，不要其他内容。"""
 
-USER_TEMPLATE = """Polymarket 预测市场事件分析：
+USER_TEMPLATE_SPIKE = """Polymarket 预测市场事件分析：
 
 事件问题: {question}
 事件描述: {description}
@@ -84,6 +84,21 @@ USER_TEMPLATE = """Polymarket 预测市场事件分析：
 当前 YES 赔率 {price_after:.0%} 意味着市场认为该事件发生的概率为 {price_after:.0%}。
 
 请分析哪些美股和A股会受到该事件及其赔率变动的影响最大，并给出买卖方向建议。"""
+
+USER_TEMPLATE_RESOLVED = """Polymarket 预测市场事件结算分析：
+
+事件问题: {question}
+事件描述: {description}
+分类: {category}
+
+事件已出结果: {outcome}
+- 结算前概率: {price_before:.1%}（YES）
+- 最终概率: {price_after:.1%}（YES）
+- 概率变动: {price_change:+.1%}
+
+该预测市场事件已结算，结果为 {outcome}。市场此前对该事件发生的预期为 {price_before:.0%}，{surprise_text}。
+
+请分析该事件结果确认后对美股和A股的影响，并给出买卖方向建议。"""
 
 
 class EventAnalyzer:
@@ -155,26 +170,49 @@ class EventAnalyzer:
         if not self._available:
             return None
 
-        timeframe_map = {
-            "spike_5m": "5分钟",
-            "spike_1h": "1小时",
-            "spike_24h": "24小时",
-        }
-        timeframe = timeframe_map.get(
-            event_info.get("alert_type", ""),
-            f"{event_info.get('timeframe_seconds', 0)}s"
-        )
+        alert_type = event_info.get("alert_type", "")
 
-        user_content = USER_TEMPLATE.format(
-            question=event_info.get("question", ""),
-            description=(event_info.get("description") or "")[:3000],
-            category=event_info.get("category", ""),
-            price_before=event_info.get("price_before", 0.5),
-            price_after=event_info.get("price_after", 0.5),
-            price_change=event_info.get("price_change", 0),
-            timeframe=timeframe,
-            alert_type=event_info.get("alert_type", ""),
-        )
+        if alert_type.startswith("resolved"):
+            # 事件出结果 — 使用结算模板
+            resolved_yes = alert_type == "resolved_yes"
+            outcome = "YES 胜出（事件发生）" if resolved_yes else "NO 胜出（事件未发生）"
+            price_before = event_info.get("price_before", 0.5)
+            if resolved_yes:
+                surprise_text = "属于预期之内" if price_before >= 0.7 else (
+                    "有一定意外性" if price_before >= 0.4 else "属于重大意外"
+                )
+            else:
+                surprise_text = "属于预期之内" if price_before <= 0.3 else (
+                    "有一定意外性" if price_before <= 0.6 else "属于重大意外"
+                )
+            user_content = USER_TEMPLATE_RESOLVED.format(
+                question=event_info.get("question", ""),
+                description=(event_info.get("description") or "")[:3000],
+                category=event_info.get("category", ""),
+                outcome=outcome,
+                price_before=price_before,
+                price_after=event_info.get("price_after", 0.5),
+                price_change=event_info.get("price_change", 0),
+                surprise_text=surprise_text,
+            )
+        else:
+            # Spike — 使用赔率急变模板
+            timeframe_map = {
+                "spike_5m": "5分钟",
+                "spike_1h": "1小时",
+                "spike_24h": "24小时",
+            }
+            timeframe = timeframe_map.get(alert_type, f"{event_info.get('timeframe_seconds', 0)}s")
+            user_content = USER_TEMPLATE_SPIKE.format(
+                question=event_info.get("question", ""),
+                description=(event_info.get("description") or "")[:3000],
+                category=event_info.get("category", ""),
+                price_before=event_info.get("price_before", 0.5),
+                price_after=event_info.get("price_after", 0.5),
+                price_change=event_info.get("price_change", 0),
+                timeframe=timeframe,
+                alert_type=alert_type,
+            )
 
         try:
             if self._provider == "anthropic":
@@ -189,7 +227,7 @@ class EventAnalyzer:
     def _call_anthropic(self, user_content: str) -> str:
         response = self._client.messages.create(
             model=LLM_MODEL,
-            max_tokens=1200,
+            max_tokens=2500,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
             temperature=0.1,
@@ -205,7 +243,7 @@ class EventAnalyzer:
                 {"role": "user", "content": user_content},
             ],
             temperature=0.1,
-            max_tokens=1200,
+            max_tokens=2500,
             timeout=90,
         )
         return response.choices[0].message.content.strip()

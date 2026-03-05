@@ -15,7 +15,7 @@
 
 import logging
 import re
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, UTC
 
 import pandas as pd
@@ -32,6 +32,10 @@ from backend.services.data.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
+
+# yfinance 无官方频率限制，批量下载 + 多线程安全加速
+_BATCH_SIZE = 50       # yf.download() 每批 ticker 数量
+_MAX_WORKERS = 8       # ThreadPoolExecutor 并发线程数
 
 
 def _check_yf():
@@ -56,6 +60,24 @@ class FMPDownloader:
         self.db = db
         self._start_date = datetime.strptime(US_DATA_START_DATE, "%Y%m%d").strftime("%Y-%m-%d")
         self._yf = _check_yf()
+
+    def _stale_tickers(self, table: str, days: int = 30) -> list[str]:
+        """返回在指定表中超过 days 天未更新（或从未下载）的 ticker 列表。"""
+        all_tickers = self.db.get_us_tickers()
+        if not all_tickers:
+            return []
+        try:
+            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+            result = self.db.query(
+                f"SELECT DISTINCT ticker FROM {table} WHERE updated_at >= :cutoff",
+                params={"cutoff": cutoff},
+            )
+            recent = set(result["ticker"].tolist()) if not result.empty else set()
+            stale = [t for t in all_tickers if t not in recent]
+            return stale
+        except Exception as e:
+            logger.debug(f"_stale_tickers 查询失败 ({table}): {e}")
+            return all_tickers
 
     def _safe_ticker(self, symbol: str):
         """创建 yfinance Ticker，捕获异常返回 None。"""
@@ -220,38 +242,83 @@ class FMPDownloader:
     # ----------------------------------------------------------
 
     def _download_prices_for(self, tickers: list[str], start: str, end: str, desc: str) -> int:
-        """通用日线下载辅助方法。"""
+        """通用日线下载辅助方法（批量并行）。"""
         total = 0
-        for ticker in tqdm(tickers, desc=desc):
-            t = self._safe_ticker(ticker)
-            if t is None:
-                continue
+        n_batches = (len(tickers) + _BATCH_SIZE - 1) // _BATCH_SIZE
+        for i in tqdm(range(0, len(tickers), _BATCH_SIZE), desc=desc, total=n_batches):
+            batch = tickers[i:i + _BATCH_SIZE]
             try:
-                hist = t.history(start=start, end=end, auto_adjust=False)
-                if hist.empty:
+                data = self._yf.download(
+                    tickers=batch,
+                    start=start,
+                    end=end,
+                    auto_adjust=False,
+                    group_by='ticker',
+                    threads=True,
+                    progress=False,
+                )
+                if data is None or data.empty:
                     continue
 
-                records = []
-                for date_idx, row in hist.iterrows():
-                    records.append({
-                        "ticker": ticker,
-                        "trade_date": _safe_date_str(date_idx),
-                        "open": row.get("Open"),
-                        "high": row.get("High"),
-                        "low": row.get("Low"),
-                        "close": row.get("Close"),
-                        "adj_close": row.get("Adj Close"),
-                        "volume": row.get("Volume"),
-                        "change_pct": None,  # yfinance 不直接提供，DB 层可后续计算
-                    })
+                is_multi = isinstance(data.columns, pd.MultiIndex)
+                for ticker in batch:
+                    try:
+                        td = data[ticker].dropna(how='all') if is_multi else data.dropna(how='all')
+                        if td.empty:
+                            continue
 
-                if records:
-                    df = pd.DataFrame(records)
-                    self.db.bulk_upsert_us_daily_price(df)
-                    total += len(records)
+                        records = []
+                        for date_idx, row in td.iterrows():
+                            records.append({
+                                "ticker": ticker,
+                                "trade_date": _safe_date_str(date_idx),
+                                "open": row.get("Open"),
+                                "high": row.get("High"),
+                                "low": row.get("Low"),
+                                "close": row.get("Close"),
+                                "adj_close": row.get("Adj Close"),
+                                "volume": row.get("Volume"),
+                                "change_pct": None,
+                            })
+
+                        if records:
+                            df = pd.DataFrame(records)
+                            self.db.bulk_upsert_us_daily_price(df)
+                            total += len(records)
+                    except KeyError:
+                        continue
+                    except Exception as e:
+                        logger.warning(f"日线解析失败 {ticker}: {e}")
 
             except Exception as e:
-                logger.warning(f"日线下载失败 {ticker}: {e}")
+                logger.warning(f"批量日线下载失败: {e}，逐个重试")
+                for ticker in batch:
+                    try:
+                        t = self._safe_ticker(ticker)
+                        if t is None:
+                            continue
+                        hist = t.history(start=start, end=end, auto_adjust=False)
+                        if hist.empty:
+                            continue
+                        records = []
+                        for date_idx, row in hist.iterrows():
+                            records.append({
+                                "ticker": ticker,
+                                "trade_date": _safe_date_str(date_idx),
+                                "open": row.get("Open"),
+                                "high": row.get("High"),
+                                "low": row.get("Low"),
+                                "close": row.get("Close"),
+                                "adj_close": row.get("Adj Close"),
+                                "volume": row.get("Volume"),
+                                "change_pct": None,
+                            })
+                        if records:
+                            df = pd.DataFrame(records)
+                            self.db.bulk_upsert_us_daily_price(df)
+                            total += len(records)
+                    except Exception as e2:
+                        logger.warning(f"日线下载失败 {ticker}: {e2}")
 
         return total
 
@@ -293,190 +360,200 @@ class FMPDownloader:
     # 财务数据
     # ----------------------------------------------------------
 
+    def _download_financial_single(self, ticker: str) -> int:
+        """下载单只股票的季度财报，返回写入记录数。"""
+        t = self._safe_ticker(ticker)
+        if t is None:
+            return 0
+
+        try:
+            income = t.quarterly_income_stmt
+            balance = t.quarterly_balance_sheet
+            cashflow = t.quarterly_cashflow
+        except Exception as e:
+            logger.warning(f"财务数据获取失败 {ticker}: {e}")
+            return 0
+
+        if income is None or income.empty:
+            return 0
+
+        # 从 sec_filings 构建 报告期末日 → SEC提交日 映射
+        filing_date_map = {}
+        try:
+            sec_filings = t.sec_filings
+            if sec_filings:
+                _sec_entries = []
+                for sf in sec_filings:
+                    if sf.get("type") not in ("10-Q", "10-K"):
+                        continue
+                    sf_date = sf.get("date")
+                    if sf_date is None:
+                        continue
+                    edgar = sf.get("edgarUrl", "")
+                    for url in [edgar] + list((sf.get("exhibits") or {}).values()):
+                        m = re.search(r"-(\d{8})\.", url)
+                        if m:
+                            try:
+                                report_end = datetime.strptime(m.group(1), "%Y%m%d").date()
+                                _sec_entries.append((report_end, sf_date))
+                            except ValueError:
+                                pass
+                            break
+                for col_date in income.columns:
+                    target = col_date.date()
+                    best = None
+                    best_delta = timedelta(days=11)
+                    for report_end, sf_date in _sec_entries:
+                        delta = abs(target - report_end)
+                        if delta < best_delta:
+                            best_delta = delta
+                            best = sf_date
+                    if best is not None:
+                        filing_date_map[target] = best
+        except Exception as e:
+            logger.debug(f"sec_filings 获取失败 {ticker}: {e}")
+
+        balance_map = {}
+        if balance is not None and not balance.empty:
+            for col in balance.columns:
+                balance_map[col] = balance[col]
+
+        cashflow_map = {}
+        if cashflow is not None and not cashflow.empty:
+            for col in cashflow.columns:
+                cashflow_map[col] = cashflow[col]
+
+        records = []
+        for col_date in income.columns:
+            date_str = col_date.strftime("%Y-%m-%d")
+            inc = income[col_date]
+            bal = balance_map.get(col_date, pd.Series(dtype=float))
+            cf = cashflow_map.get(col_date, pd.Series(dtype=float))
+
+            revenue = _safe_get(inc, "Total Revenue")
+            gross_profit = _safe_get(inc, "Gross Profit")
+            operating_income = _safe_get(inc, "Operating Income")
+            net_income = _safe_get(inc, "Net Income")
+            eps = _safe_get(inc, "Basic EPS") or _safe_get(inc, "Diluted EPS")
+
+            gross_margin = None
+            if revenue and gross_profit:
+                try:
+                    gross_margin = float(gross_profit) / float(revenue) * 100
+                except (ZeroDivisionError, TypeError):
+                    pass
+
+            operating_margin = None
+            if revenue and operating_income:
+                try:
+                    operating_margin = float(operating_income) / float(revenue) * 100
+                except (ZeroDivisionError, TypeError):
+                    pass
+
+            month = col_date.month
+            if month <= 3:
+                period = f"Q1 {col_date.year}"
+            elif month <= 6:
+                period = f"Q2 {col_date.year}"
+            elif month <= 9:
+                period = f"Q3 {col_date.year}"
+            else:
+                period = f"Q4 {col_date.year}"
+
+            filing_date = filing_date_map.get(col_date.date(), date_str)
+
+            records.append({
+                "ticker": ticker,
+                "period": period,
+                "date": date_str,
+                "filing_date": filing_date,
+                "revenue": revenue,
+                "net_income": net_income,
+                "eps": eps,
+                "gross_margin": gross_margin,
+                "operating_margin": operating_margin,
+                "roe": None,
+                "total_assets": _safe_get(bal, "Total Assets"),
+                "total_equity": _safe_get(bal, "Stockholders Equity"),
+                "total_debt": _safe_get(bal, "Total Debt"),
+                "free_cash_flow": _safe_get(cf, "Free Cash Flow"),
+                "pe_ratio": None,
+                "pb_ratio": None,
+            })
+
+        if records:
+            df = pd.DataFrame(records)
+            self.db.upsert_us_financial_data(df)
+            return len(records)
+        return 0
+
     def download_financial_data(self, tickers: list[str] = None) -> int:
-        """下载季度财报（income_stmt + balance_sheet + cashflow）。"""
+        """下载季度财报（income_stmt + balance_sheet + cashflow），多线程并行。"""
         if tickers is None:
             tickers = self.db.get_us_tickers()
         if not tickers:
             return 0
 
         total = 0
-        for ticker in tqdm(tickers, desc="美股财务下载"):
-            t = self._safe_ticker(ticker)
-            if t is None:
-                continue
-
-            try:
-                income = t.quarterly_income_stmt
-                balance = t.quarterly_balance_sheet
-                cashflow = t.quarterly_cashflow
-            except Exception as e:
-                logger.warning(f"财务数据获取失败 {ticker}: {e}")
-                continue
-
-            if income is None or income.empty:
-                continue
-
-            # 从 sec_filings 构建 报告期末日 → SEC提交日 映射
-            # income_stmt 用标准季末日（如 12-31），实际财年季末可能偏移几天（如 12-27）
-            # 因此用 ±10 天近似匹配
-            filing_date_map = {}
-            try:
-                sec_filings = t.sec_filings
-                if sec_filings:
-                    _sec_entries = []  # [(报告期末日, SEC提交日)]
-                    for sf in sec_filings:
-                        if sf.get("type") not in ("10-Q", "10-K"):
-                            continue
-                        sf_date = sf.get("date")  # SEC 提交日
-                        if sf_date is None:
-                            continue
-                        # edgarUrl / exhibits URL 中含报告期末日, 如 aapl-20251227.htm
-                        edgar = sf.get("edgarUrl", "")
-                        for url in [edgar] + list((sf.get("exhibits") or {}).values()):
-                            m = re.search(r"-(\d{8})\.", url)
-                            if m:
-                                try:
-                                    report_end = datetime.strptime(m.group(1), "%Y%m%d").date()
-                                    _sec_entries.append((report_end, sf_date))
-                                except ValueError:
-                                    pass
-                                break
-                    # 对 income_stmt 每个季末日做近似匹配
-                    for col_date in income.columns:
-                        target = col_date.date()
-                        best = None
-                        best_delta = timedelta(days=11)
-                        for report_end, sf_date in _sec_entries:
-                            delta = abs(target - report_end)
-                            if delta < best_delta:
-                                best_delta = delta
-                                best = sf_date
-                        if best is not None:
-                            filing_date_map[target] = best
-            except Exception as e:
-                logger.debug(f"sec_filings 获取失败 {ticker}: {e}")
-
-            # 将 balance/cashflow 转为按日期索引的 dict
-            balance_map = {}
-            if balance is not None and not balance.empty:
-                for col in balance.columns:
-                    balance_map[col] = balance[col]
-
-            cashflow_map = {}
-            if cashflow is not None and not cashflow.empty:
-                for col in cashflow.columns:
-                    cashflow_map[col] = cashflow[col]
-
-            records = []
-            for col_date in income.columns:
-                date_str = col_date.strftime("%Y-%m-%d")
-                inc = income[col_date]
-
-                # 从 balance sheet 取同期数据
-                bal = balance_map.get(col_date, pd.Series(dtype=float))
-                cf = cashflow_map.get(col_date, pd.Series(dtype=float))
-
-                revenue = _safe_get(inc, "Total Revenue")
-                gross_profit = _safe_get(inc, "Gross Profit")
-                operating_income = _safe_get(inc, "Operating Income")
-                net_income = _safe_get(inc, "Net Income")
-
-                # EPS: 优先 Basic EPS，回退 Diluted EPS
-                eps = _safe_get(inc, "Basic EPS") or _safe_get(inc, "Diluted EPS")
-
-                # 利润率计算
-                gross_margin = None
-                if revenue and gross_profit:
-                    try:
-                        gross_margin = float(gross_profit) / float(revenue) * 100
-                    except (ZeroDivisionError, TypeError):
-                        pass
-
-                operating_margin = None
-                if revenue and operating_income:
-                    try:
-                        operating_margin = float(operating_income) / float(revenue) * 100
-                    except (ZeroDivisionError, TypeError):
-                        pass
-
-                # 确定 period（Q1-Q4）
-                month = col_date.month
-                if month <= 3:
-                    period = f"Q1 {col_date.year}"
-                elif month <= 6:
-                    period = f"Q2 {col_date.year}"
-                elif month <= 9:
-                    period = f"Q3 {col_date.year}"
-                else:
-                    period = f"Q4 {col_date.year}"
-
-                # filing_date: 优先 SEC 提交日，兜底用报告期末日
-                filing_date = filing_date_map.get(col_date.date(), date_str)
-
-                record = {
-                    "ticker": ticker,
-                    "period": period,
-                    "date": date_str,
-                    "filing_date": filing_date,
-                    "revenue": revenue,
-                    "net_income": net_income,
-                    "eps": eps,
-                    "gross_margin": gross_margin,
-                    "operating_margin": operating_margin,
-                    "roe": None,  # yfinance 季报不直接提供
-                    "total_assets": _safe_get(bal, "Total Assets"),
-                    "total_equity": _safe_get(bal, "Stockholders Equity"),
-                    "total_debt": _safe_get(bal, "Total Debt"),
-                    "free_cash_flow": _safe_get(cf, "Free Cash Flow"),
-                    "pe_ratio": None,  # yfinance 季报不直接提供
-                    "pb_ratio": None,  # yfinance 季报不直接提供
-                }
-                records.append(record)
-
-            if records:
-                df = pd.DataFrame(records)
-                self.db.upsert_us_financial_data(df)
-                total += len(records)
-
-            time.sleep(0.1)
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            futures = {pool.submit(self._download_financial_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="美股财务下载"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"财务下载失败 {futures[future]}: {e}")
 
         logger.info(f"美股财务下载完成: {total} 条")
         return total
 
     def update_financial_data(self) -> int:
-        """增量更新财务数据（最近 8 个季度）。"""
-        return self.download_financial_data()
+        """增量更新财务数据（跳过近 30 天内已更新的 ticker）。"""
+        tickers = self._stale_tickers("us_financial_data", days=30)
+        if not tickers:
+            logger.info("美股财务数据已是最新")
+            return 0
+        logger.info(f"美股财务增量更新: {len(tickers)} 只待更新")
+        return self.download_financial_data(tickers=tickers)
 
     # ----------------------------------------------------------
     # 行业分类
     # ----------------------------------------------------------
 
+    def _download_industry_single(self, ticker: str) -> dict | None:
+        """下载单只股票的行业分类，返回记录 dict 或 None。"""
+        t = self._safe_ticker(ticker)
+        if t is None:
+            return None
+        try:
+            info = t.info
+            if not info:
+                return None
+            return {
+                "ticker": ticker,
+                "sector": info.get("sector", ""),
+                "industry": info.get("industry", ""),
+                "sub_industry": "",
+            }
+        except Exception as e:
+            logger.debug(f"行业信息获取失败 {ticker}: {e}")
+            return None
+
     def download_industry_class(self) -> int:
-        """下载 GICS 行业分类（从 yfinance info 提取）。"""
+        """下载 GICS 行业分类（从 yfinance info 提取），多线程并行。"""
         tickers = self.db.get_us_tickers()
         if not tickers:
             return 0
 
         records = []
-        for ticker in tqdm(tickers, desc="美股行业分类"):
-            t = self._safe_ticker(ticker)
-            if t is None:
-                continue
-            try:
-                info = t.info
-                if not info:
-                    continue
-                records.append({
-                    "ticker": ticker,
-                    "sector": info.get("sector", ""),
-                    "industry": info.get("industry", ""),
-                    "sub_industry": "",
-                })
-            except Exception as e:
-                logger.debug(f"行业信息获取失败 {ticker}: {e}")
-
-            time.sleep(0.1)
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            futures = {pool.submit(self._download_industry_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="美股行业分类"):
+                try:
+                    result = future.result()
+                    if result:
+                        records.append(result)
+                except Exception as e:
+                    logger.debug(f"行业分类失败 {futures[future]}: {e}")
 
         if records:
             df = pd.DataFrame(records)
@@ -676,59 +753,71 @@ class FMPDownloader:
     # 分析师评级
     # ----------------------------------------------------------
 
+    def _download_analyst_single(self, ticker: str) -> int:
+        """下载单只股票的分析师评级，返回写入记录数。"""
+        t = self._safe_ticker(ticker)
+        if t is None:
+            return 0
+
+        try:
+            ud = t.upgrades_downgrades
+            if ud is None or ud.empty:
+                return 0
+
+            records = []
+            for date_idx, row in ud.iterrows():
+                try:
+                    date_str = date_idx.strftime("%Y-%m-%d")
+                except Exception:
+                    date_str = str(date_idx)[:10]
+
+                records.append({
+                    "ticker": ticker,
+                    "date": date_str,
+                    "analyst_company": row.get("Firm", ""),
+                    "analyst_name": "",
+                    "rating": row.get("ToGrade", ""),
+                    "price_target": None,
+                })
+
+            if records:
+                df = pd.DataFrame(records)
+                df = df.drop_duplicates(
+                    subset=["ticker", "date", "analyst_company"], keep="last"
+                )
+                self.db.upsert_us_analyst_recommendation(df)
+                return len(df)
+        except Exception as e:
+            logger.warning(f"分析师评级获取失败 {ticker}: {e}")
+        return 0
+
     def download_analyst_recommendations(self, tickers: list[str] = None) -> int:
-        """下载分析师评级（yfinance upgrades_downgrades）。"""
+        """下载分析师评级（yfinance upgrades_downgrades），多线程并行。"""
         if tickers is None:
             tickers = self.db.get_us_tickers()
         if not tickers:
             return 0
 
         total = 0
-        for ticker in tqdm(tickers, desc="美股分析师评级"):
-            t = self._safe_ticker(ticker)
-            if t is None:
-                continue
-
-            try:
-                ud = t.upgrades_downgrades
-                if ud is None or ud.empty:
-                    continue
-
-                records = []
-                for date_idx, row in ud.iterrows():
-                    try:
-                        date_str = date_idx.strftime("%Y-%m-%d")
-                    except Exception:
-                        date_str = str(date_idx)[:10]
-
-                    records.append({
-                        "ticker": ticker,
-                        "date": date_str,
-                        "analyst_company": row.get("Firm", ""),
-                        "analyst_name": "",  # yfinance 不提供
-                        "rating": row.get("ToGrade", ""),
-                        "price_target": None,  # yfinance 不提供
-                    })
-
-                if records:
-                    df = pd.DataFrame(records)
-                    df = df.drop_duplicates(
-                        subset=["ticker", "date", "analyst_company"], keep="last"
-                    )
-                    self.db.upsert_us_analyst_recommendation(df)
-                    total += len(df)
-
-            except Exception as e:
-                logger.warning(f"分析师评级获取失败 {ticker}: {e}")
-
-            time.sleep(0.1)
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            futures = {pool.submit(self._download_analyst_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="美股分析师评级"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"分析师评级失败 {futures[future]}: {e}")
 
         logger.info(f"美股分析师评级下载完成: {total} 条")
         return total
 
     def update_analyst_recommendations(self) -> int:
-        """增量更新分析师评级。"""
-        return self.download_analyst_recommendations()
+        """增量更新分析师评级（跳过近 7 天内已更新的 ticker）。"""
+        tickers = self._stale_tickers("us_analyst_recommendation", days=7)
+        if not tickers:
+            logger.info("美股分析师评级已是最新")
+            return 0
+        logger.info(f"美股分析师评级增量更新: {len(tickers)} 只待更新")
+        return self.download_analyst_recommendations(tickers=tickers)
 
     # ----------------------------------------------------------
     # SEC 公告（yfinance 不支持）
@@ -747,64 +836,75 @@ class FMPDownloader:
     # 公司行动（分红/拆股）
     # ----------------------------------------------------------
 
+    def _download_corporate_single(self, ticker: str) -> int:
+        """下载单只股票的分红/拆股历史，返回写入记录数。"""
+        t = self._safe_ticker(ticker)
+        if t is None:
+            return 0
+
+        records = []
+
+        try:
+            divs = t.dividends
+            if divs is not None and not divs.empty:
+                for date_idx, value in divs.items():
+                    records.append({
+                        "ticker": ticker,
+                        "date": _safe_date_str(date_idx),
+                        "action_type": "dividend",
+                        "label": f"${value:.4f} per share",
+                        "value": float(value),
+                    })
+        except Exception as e:
+            logger.debug(f"分红数据获取失败 {ticker}: {e}")
+
+        try:
+            splits = t.splits
+            if splits is not None and not splits.empty:
+                for date_idx, value in splits.items():
+                    records.append({
+                        "ticker": ticker,
+                        "date": _safe_date_str(date_idx),
+                        "action_type": "split",
+                        "label": f"{value:.0f}:1 split",
+                        "value": float(value),
+                    })
+        except Exception as e:
+            logger.debug(f"拆股数据获取失败 {ticker}: {e}")
+
+        if records:
+            df = pd.DataFrame(records)
+            self.db.upsert_us_corporate_action(df)
+            return len(records)
+        return 0
+
     def download_corporate_actions(self, tickers: list[str] = None) -> int:
-        """下载分红和拆股历史。"""
+        """下载分红和拆股历史，多线程并行。"""
         if tickers is None:
             tickers = self.db.get_us_tickers()
         if not tickers:
             return 0
 
         total = 0
-        for ticker in tqdm(tickers, desc="美股公司行动"):
-            t = self._safe_ticker(ticker)
-            if t is None:
-                continue
-
-            records = []
-
-            # 分红
-            try:
-                divs = t.dividends
-                if divs is not None and not divs.empty:
-                    for date_idx, value in divs.items():
-                        records.append({
-                            "ticker": ticker,
-                            "date": _safe_date_str(date_idx),
-                            "action_type": "dividend",
-                            "label": f"${value:.4f} per share",
-                            "value": float(value),
-                        })
-            except Exception as e:
-                logger.debug(f"分红数据获取失败 {ticker}: {e}")
-
-            # 拆股
-            try:
-                splits = t.splits
-                if splits is not None and not splits.empty:
-                    for date_idx, value in splits.items():
-                        records.append({
-                            "ticker": ticker,
-                            "date": _safe_date_str(date_idx),
-                            "action_type": "split",
-                            "label": f"{value:.0f}:1 split",
-                            "value": float(value),
-                        })
-            except Exception as e:
-                logger.debug(f"拆股数据获取失败 {ticker}: {e}")
-
-            if records:
-                df = pd.DataFrame(records)
-                self.db.upsert_us_corporate_action(df)
-                total += len(records)
-
-            time.sleep(0.1)
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            futures = {pool.submit(self._download_corporate_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="美股公司行动"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"公司行动失败 {futures[future]}: {e}")
 
         logger.info(f"美股公司行动下载完成: {total} 条")
         return total
 
     def update_corporate_actions(self) -> int:
-        """增量更新公司行动。"""
-        return self.download_corporate_actions()
+        """增量更新公司行动（跳过近 30 天内已更新的 ticker）。"""
+        tickers = self._stale_tickers("us_corporate_action", days=30)
+        if not tickers:
+            logger.info("美股公司行动已是最新")
+            return 0
+        logger.info(f"美股公司行动增量更新: {len(tickers)} 只待更新")
+        return self.download_corporate_actions(tickers=tickers)
 
     # ----------------------------------------------------------
     # 全量下载

@@ -18,10 +18,16 @@ def _resilient_run_in_executor(self, executor, func, *args):
     try:
         return _orig_run_in_executor(self, executor, func, *args)
     except RuntimeError:
-        new_executor = ThreadPoolExecutor()
-        if executor is None:
-            self._default_executor = new_executor
-        return _orig_run_in_executor(self, new_executor, func, *args)
+        try:
+            new_executor = ThreadPoolExecutor()
+            if executor is None:
+                self._default_executor = new_executor
+            return _orig_run_in_executor(self, new_executor, func, *args)
+        except RuntimeError:
+            # Interpreter truly shutting down — return no-op future
+            fut = self.create_future()
+            fut.set_result(None)
+            return fut
 
 
 asyncio.BaseEventLoop.run_in_executor = _resilient_run_in_executor

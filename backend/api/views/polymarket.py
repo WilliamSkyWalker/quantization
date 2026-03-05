@@ -9,6 +9,7 @@ from backend.services.polymarket.alert_manager import AlertManager
 from backend.services.polymarket.history import PolymarketHistoryDownloader
 from backend.services.polymarket.backtester import PolymarketBacktester
 from backend.services.polymarket.us_stock_backtester import UsStockBacktester
+from backend.services.polymarket.a_share_backtester import AShareBacktester
 from backend.services.data.database import DatabaseManager
 from backend.services.polymarket.models import PolymarketEvent
 from backend.tasks.manager import task_manager
@@ -19,6 +20,7 @@ _alert_manager = AlertManager()
 _history_downloader = PolymarketHistoryDownloader()
 _backtester = PolymarketBacktester()
 _us_backtester = UsStockBacktester()
+_a_share_backtester = AShareBacktester()
 _db = DatabaseManager()
 
 
@@ -232,14 +234,17 @@ def backtest_discover(request):
     }
     """
     data = request.data
-    limit = int(data.get("limit", 50))
+    limit = int(data.get("limit", 0))  # 0 = 全部（自动分页）
     min_volume = int(data.get("min_volume", 0))
+    exclude_cats = data.get("exclude_categories", ["sports", "pop-culture", "crypto"])
+    exclude_set = set(exclude_cats) if exclude_cats else set()
 
     def _run(task_id):
         return _history_downloader.discover_resolved_markets(
             task_id=task_id,
             limit=limit,
             min_volume=min_volume,
+            exclude_categories=exclude_set,
         )
 
     tid = task_manager.submit("发现已结算市场", _run)
@@ -260,7 +265,7 @@ def backtest_download(request):
     """
     data = request.data
     condition_ids = data.get("condition_ids")
-    limit = int(data.get("limit", 20))
+    limit = int(data.get("limit", 0))  # 0 = 全部
     fidelity = int(data.get("fidelity", 60))
 
     # 如果指定了 condition_ids，从 DB 获取对应市场信息
@@ -329,7 +334,7 @@ def backtest_run(request):
         "spike_5m": 0.05,                   // 可选，自定义阈值
         "spike_1h": 0.15,
         "spike_24h": 0.25,
-        "exclude_categories": ["sports", "pop-culture"]  // 可选，排除分类
+        "exclude_categories": ["sports", "pop-culture"]  // 已迁移到 is_excluded 字段
     }
     """
     data = request.data
@@ -362,6 +367,156 @@ def backtest_run(request):
 
     tid = task_manager.submit("Polymarket 回测", _run)
     return Response({"status": "started", "task_id": tid})
+
+
+@api_view(['GET'])
+def backtest_result(request):
+    """
+    从 DB 重建回测结果（alerts + summary），页面刷新后恢复回测数据。
+    """
+    import json as _json
+    from collections import Counter
+
+    _db.init_tables()
+    from backend.services.polymarket.models import PolymarketAlert
+
+    session = _db.get_session()
+    try:
+        rows = session.query(PolymarketAlert).order_by(
+            PolymarketAlert.created_at.desc()
+        ).all()
+
+        if not rows:
+            return Response({"total_markets": 0, "alerts": [], "summary": {}})
+
+        alerts = []
+        for r in rows:
+            def _parse_json(val):
+                if not val:
+                    return []
+                try:
+                    return _json.loads(val)
+                except (ValueError, TypeError):
+                    return []
+
+            alerts.append({
+                "id": r.id,
+                "condition_id": r.condition_id,
+                "question": r.question,
+                "category": None,
+                "alert_type": r.alert_type,
+                "price_before": r.price_before,
+                "price_after": r.price_after,
+                "price_change": r.price_change,
+                "timeframe_seconds": r.timeframe_seconds,
+                "timestamp": r.created_at.isoformat() if r.created_at else None,
+                "affected_tickers": _parse_json(r.affected_tickers),
+                "affected_a_shares": _parse_json(r.affected_a_shares),
+                "affected_sectors": _parse_json(r.affected_sectors),
+                "affected_sw_industries": _parse_json(r.affected_sw_industries),
+                "llm_summary": r.llm_summary,
+                "llm_sentiment": r.llm_sentiment,
+                "llm_confidence": r.llm_confidence,
+            })
+
+        # 补充 category
+        cid_set = {a["condition_id"] for a in alerts}
+        from backend.services.polymarket.models import PolymarketEvent
+        events = session.query(PolymarketEvent).filter(
+            PolymarketEvent.condition_id.in_(cid_set)
+        ).all()
+        cat_map = {e.condition_id: e.category for e in events}
+        for a in alerts:
+            a["category"] = cat_map.get(a["condition_id"])
+
+        # Summary
+        total_alerts = len(alerts)
+        condition_ids_with_alerts = {a["condition_id"] for a in alerts}
+
+        alert_type_counts = dict(Counter(a["alert_type"] for a in alerts))
+        category_counts = dict(Counter(a.get("category") or "unknown" for a in alerts))
+
+        alerts_with_llm = sum(1 for a in alerts if a.get("llm_summary"))
+        sentiments = [a["llm_sentiment"] for a in alerts if a.get("llm_sentiment") is not None]
+        confidences = [a["llm_confidence"] for a in alerts if a.get("llm_confidence") is not None]
+
+        us_freq: Counter = Counter()
+        a_freq: Counter = Counter()
+        for a in alerts:
+            for t in a.get("affected_tickers") or []:
+                tk = t.get("ticker", "")
+                if tk:
+                    us_freq[tk] += 1
+            for s in a.get("affected_a_shares") or []:
+                nm = s.get("name", "")
+                if nm:
+                    a_freq[nm] += 1
+
+        summary = {
+            "total_markets": len(condition_ids_with_alerts),
+            "markets_with_alerts": len(condition_ids_with_alerts),
+            "total_alerts": total_alerts,
+            "alert_type_counts": alert_type_counts,
+            "category_counts": category_counts,
+            "alerts_with_llm": alerts_with_llm,
+            "avg_sentiment": round(sum(sentiments) / len(sentiments), 4) if sentiments else None,
+            "avg_confidence": round(sum(confidences) / len(confidences), 4) if confidences else None,
+            "top_us_tickers": [{"ticker": t, "count": c} for t, c in us_freq.most_common(10)],
+            "top_a_shares": [{"name": n, "count": c} for n, c in a_freq.most_common(10)],
+        }
+
+        # Markets 详情（从 event + snapshot 重建）
+        from backend.services.polymarket.models import PolymarketPriceSnapshot
+        from sqlalchemy import func
+
+        alerts_per_market = dict(Counter(a["condition_id"] for a in alerts))
+        markets = []
+        for ev in events:
+            cid = ev.condition_id
+            if cid not in condition_ids_with_alerts:
+                continue
+            # 快照统计
+            stats = session.query(
+                func.count(PolymarketPriceSnapshot.id),
+                func.min(PolymarketPriceSnapshot.yes_price),
+                func.max(PolymarketPriceSnapshot.yes_price),
+                func.min(PolymarketPriceSnapshot.timestamp),
+                func.max(PolymarketPriceSnapshot.timestamp),
+            ).filter(
+                PolymarketPriceSnapshot.condition_id == cid
+            ).first()
+            n_points, p_min, p_max, t_min, t_max = stats or (0, None, None, None, None)
+            # 起止价
+            first_snap = session.query(PolymarketPriceSnapshot.yes_price).filter(
+                PolymarketPriceSnapshot.condition_id == cid
+            ).order_by(PolymarketPriceSnapshot.timestamp.asc()).first()
+            last_snap = session.query(PolymarketPriceSnapshot.yes_price).filter(
+                PolymarketPriceSnapshot.condition_id == cid
+            ).order_by(PolymarketPriceSnapshot.timestamp.desc()).first()
+
+            markets.append({
+                "condition_id": cid,
+                "question": ev.question,
+                "category": ev.category,
+                "volume": ev.volume,
+                "data_points": n_points or 0,
+                "alerts_triggered": alerts_per_market.get(cid, 0),
+                "price_start": first_snap[0] if first_snap else None,
+                "price_end": last_snap[0] if last_snap else None,
+                "price_range": round((p_max or 0) - (p_min or 0), 4) if p_min is not None else 0,
+                "time_start": t_min.isoformat() if t_min else None,
+                "time_end": t_max.isoformat() if t_max else None,
+            })
+        markets.sort(key=lambda m: m["volume"] or 0, reverse=True)
+
+        return Response({
+            "total_markets": len(condition_ids_with_alerts),
+            "markets": markets,
+            "alerts": alerts,
+            "summary": summary,
+        })
+    finally:
+        session.close()
 
 
 # ============================================================
@@ -682,4 +837,33 @@ def us_stock_pnl_from_db(request):
         )
 
     tid = task_manager.submit("美股 P&L 回测 (DB)", _run)
+    return Response({"status": "started", "task_id": tid})
+
+
+@api_view(['POST'])
+def a_share_pnl_from_db(request):
+    """
+    从 DB 告警表运行 A 股 P&L 回测。
+
+    POST body (JSON):
+    {
+        "holding_days": 5,              // 可选，持仓天数，默认 5
+        "min_confidence": 0.0,          // 可选，最低置信度，默认 0.0
+        "limit": 200                    // 可选，告警数量上限，默认 200
+    }
+    """
+    data = request.data
+    holding_days = int(data.get("holding_days", 5))
+    min_confidence = float(data.get("min_confidence", 0.0))
+    limit = int(data.get("limit", 200))
+
+    def _run(task_id):
+        return _a_share_backtester.run_from_db(
+            task_id=task_id,
+            holding_days=holding_days,
+            min_confidence=min_confidence,
+            limit=limit,
+        )
+
+    tid = task_manager.submit("A股 P&L 回测 (DB)", _run)
     return Response({"status": "started", "task_id": tid})

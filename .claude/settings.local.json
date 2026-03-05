@@ -70,7 +70,8 @@
       "WebFetch(domain:tiingo-python.readthedocs.io)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(git status:*)"
     ]
   }
 }

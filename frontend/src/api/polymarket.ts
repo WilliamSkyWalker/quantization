@@ -38,7 +38,7 @@ export const triggerMockAlert = (data: {
 export const deleteMockAlerts = () => api.post('/polymarket/mock-alert/delete')
 
 // Backtest
-export const backtestDiscover = (data: { limit?: number; min_volume?: number } = {}) =>
+export const backtestDiscover = (data: { limit?: number; min_volume?: number; exclude_categories?: string[] } = {}) =>
   api.post('/polymarket/backtest/discover', data)
 
 export const backtestDownload = (data: {
@@ -52,6 +52,8 @@ export const getBacktestMarkets = (params: { page?: number; page_size?: number }
 
 export const getBacktestPriceSeries = (conditionId: string) =>
   api.get(`/polymarket/backtest/price-series/${conditionId}`)
+
+export const getBacktestResult = () => api.get('/polymarket/backtest/result')
 
 export const runBacktest = (data: {
   condition_ids?: string[]
@@ -77,3 +79,10 @@ export const runUsStockPnlFromDb = (data: {
   min_confidence?: number
   limit?: number
 }) => api.post('/polymarket/backtest/us-stock-pnl-from-db', data)
+
+// A-Share P&L Backtest
+export const runASharePnlFromDb = (data: {
+  holding_days?: number
+  min_confidence?: number
+  limit?: number
+}) => api.post('/polymarket/backtest/a-share-pnl-from-db', data)

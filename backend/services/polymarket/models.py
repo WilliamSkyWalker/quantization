@@ -40,6 +40,7 @@ class PolymarketEvent(Base):
     liquidity = Column(Float, comment="流动性 (USD)")
     end_date = Column(DateTime, comment="市场结束日期")
     is_active = Column(Boolean, default=True, comment="是否在监控中")
+    is_excluded = Column(Boolean, default=False, comment="软删除：排除的分类(sports/pop-culture等)")
     slug = Column(String(500), comment="Polymarket URL slug")
     gamma_market_id = Column(String(100), comment="Gamma API market ID")
     created_at = Column(DateTime, default=datetime.now)

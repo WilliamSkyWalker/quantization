@@ -572,7 +572,7 @@ async function runBackfillLLM() {
 async function runPmDiscover() {
   running.value = true
   try {
-    const { data } = await backtestDiscover({ limit: 50 })
+    const { data } = await backtestDiscover({ limit: 0 })
     taskStore.trackTask(data.task_id, '发现已结算市场')
     message.success('Polymarket 市场发现任务已启动')
   } catch (e: any) {
@@ -585,7 +585,7 @@ async function runPmDiscover() {
 async function runPmDownload() {
   running.value = true
   try {
-    const { data } = await backtestDownload({ limit: 20, fidelity: 60 })
+    const { data } = await backtestDownload({ limit: 0, fidelity: 60 })
     taskStore.trackTask(data.task_id, '下载 Polymarket 历史数据')
     message.success('Polymarket 历史数据下载任务已启动')
   } catch (e: any) {

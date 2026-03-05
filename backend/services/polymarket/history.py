@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from backend.services.config import POLYMARKET_GAMMA_API, POLYMARKET_MIN_VOLUME, LOG_LEVEL
 from backend.services.data.database import DatabaseManager
 from backend.services.polymarket.models import PolymarketEvent, PolymarketPriceSnapshot
-from backend.services.polymarket.utils import category_from_tags
+from backend.services.polymarket.utils import category_from_tags, is_noise_slug, EXCLUDED_CATEGORIES
 from backend.tasks.manager import task_manager
 
 logger = logging.getLogger(__name__)
@@ -39,11 +39,17 @@ class PolymarketHistoryDownloader:
     def discover_resolved_markets(
         self,
         task_id: str,
-        limit: int = 50,
+        limit: int = 0,
         min_volume: int = 0,
+        exclude_categories: Optional[set[str]] = None,
     ) -> list[dict]:
         """
         从 Gamma API 发现已结算的高交易量市场。
+
+        Args:
+            limit: 最大获取 event 数，0 = 全部（自动分页）
+            min_volume: 最低交易量过滤
+            exclude_categories: 排除的分类（默认排除 sports）
 
         Returns:
             已结算市场列表 [{condition_id, token_id, question, ...}]
@@ -51,32 +57,74 @@ class PolymarketHistoryDownloader:
         self._db.init_tables()
         task_manager.update_progress(task_id, 5, "正在从 Gamma API 获取已结算市场...")
 
+        if exclude_categories is None:
+            exclude_categories = EXCLUDED_CATEGORIES
+
         url = f"{POLYMARKET_GAMMA_API}/events"
-        params = {
-            "closed": "true",
-            "order": "volume",
-            "ascending": "false",
-            "limit": limit,
-        }
-
-        resp = requests.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        events = resp.json()
-
+        page_size = 500
         vol_threshold = min_volume or POLYMARKET_MIN_VOLUME
+
+        # 分页获取所有已结算 events
+        all_events = []
+        offset = 0
+        while True:
+            params = {
+                "closed": "true",
+                "order": "volume",
+                "ascending": "false",
+                "limit": page_size,
+                "offset": offset,
+            }
+            try:
+                resp = requests.get(url, params=params, timeout=60)
+                resp.raise_for_status()
+                events = resp.json()
+            except Exception as e:
+                logger.warning(f"Gamma API 请求失败 (offset={offset}): {e}")
+                break
+
+            if not events:
+                break
+
+            all_events.extend(events)
+            offset += page_size
+            task_manager.update_progress(
+                task_id, 5, f"获取已结算事件 {len(all_events)}..."
+            )
+            logger.info(f"[发现] offset={offset - page_size}: {len(events)} events (累计 {len(all_events)})")
+
+            if len(events) < page_size:
+                break
+            # 如果有 limit 限制
+            if limit > 0 and len(all_events) >= limit:
+                all_events = all_events[:limit]
+                break
+
+            time.sleep(0.1)
+
+        logger.info(f"[发现] Gamma API 共返回 {len(all_events)} 个已结算事件")
+
         results = []
+        seen_condition_ids = set()
         session: Session = self._db.get_session()
 
         try:
-            for event in events:
+            import json as _json
+
+            for event in all_events:
+                category = category_from_tags(event.get("tags", []))
+                event_slug = event.get("slug", "")
+                excluded = bool(category and category in exclude_categories) or is_noise_slug(event_slug)
+
                 for market in event.get("markets", []):
                     volume = float(market.get("volume", 0) or 0)
                     if volume < vol_threshold:
                         continue
 
                     condition_id = market.get("conditionId") or market.get("condition_id", "")
-                    if not condition_id:
+                    if not condition_id or condition_id in seen_condition_ids:
                         continue
+                    seen_condition_ids.add(condition_id)
 
                     # 解析 token IDs
                     raw_tokens = market.get("clobTokenIds", "")
@@ -91,13 +139,11 @@ class PolymarketHistoryDownloader:
 
                     # 解析价格
                     try:
-                        import json as _json
                         prices = _json.loads(market.get("outcomePrices", "[0.5,0.5]"))
                         yes_price = float(prices[0])
                     except (ValueError, IndexError, TypeError):
                         yes_price = 0.5
 
-                    category = category_from_tags(event.get("tags", []))
                     market_info = {
                         "condition_id": condition_id,
                         "token_id": token_id,
@@ -112,7 +158,8 @@ class PolymarketHistoryDownloader:
                         "end_date": market.get("endDate"),
                         "resolved": True,
                     }
-                    results.append(market_info)
+                    if not excluded:
+                        results.append(market_info)
 
                     # Upsert to DB
                     existing = session.query(PolymarketEvent).filter_by(
@@ -121,6 +168,7 @@ class PolymarketHistoryDownloader:
                     if existing:
                         existing.volume = volume
                         existing.is_active = False
+                        existing.is_excluded = excluded
                         if category and not existing.category:
                             existing.category = category
                     else:
@@ -145,6 +193,7 @@ class PolymarketHistoryDownloader:
                             liquidity=market_info["liquidity"],
                             end_date=end_date,
                             is_active=False,
+                            is_excluded=excluded,
                             slug=market_info["slug"],
                             gamma_market_id=market_info["gamma_market_id"],
                         ))
@@ -158,9 +207,9 @@ class PolymarketHistoryDownloader:
 
         task_manager.update_progress(
             task_id, 20,
-            f"发现 {len(results)} 个已结算市场"
+            f"发现 {len(results)} 个已结算市场（排除 {', '.join(exclude_categories)}）"
         )
-        logger.info(f"已结算市场发现完成: {len(results)} 个")
+        logger.info(f"已结算市场发现完成: {len(results)} 个（从 {len(all_events)} 个事件中）")
         return results
 
     def backfill_categories(self) -> dict:
@@ -198,8 +247,10 @@ class PolymarketHistoryDownloader:
                     if data:
                         cat = category_from_tags(data[0].get("tags", []))
                         if cat:
+                            is_excl = cat in EXCLUDED_CATEGORIES
                             for ev in slug_to_cids[slug]:
                                 ev.category = cat
+                                ev.is_excluded = is_excl
                                 updated += 1
                     time.sleep(0.05)
                 except Exception as exc:
@@ -244,7 +295,7 @@ class PolymarketHistoryDownloader:
         else:
             params["interval"] = "max"
 
-        resp = requests.get(url, params=params, timeout=30)
+        resp = requests.get(url, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
 
@@ -252,9 +303,8 @@ class PolymarketHistoryDownloader:
         if not history:
             # 已结算市场在细粒度下可能返回空数据，尝试更粗粒度（12h）
             if fidelity < 720:
-                logger.info(f"token {token_id} 在 {fidelity}min 粒度下无数据，尝试 720min")
                 params["fidelity"] = 720
-                resp2 = requests.get(url, params=params, timeout=30)
+                resp2 = requests.get(url, params=params, timeout=15)
                 resp2.raise_for_status()
                 data = resp2.json()
                 history = data.get("history", [])
@@ -263,17 +313,17 @@ class PolymarketHistoryDownloader:
             logger.warning(f"token {token_id} 无历史数据")
             return []
 
-        # 存入 DB
+        # 批量存入 DB
         session: Session = self._db.get_session()
         saved = 0
         try:
+            objects = []
             for point in history:
                 ts = point.get("t", 0)
                 price = float(point.get("p", 0))
                 if ts == 0 or price == 0:
                     continue
-
-                snapshot = PolymarketPriceSnapshot(
+                objects.append(PolymarketPriceSnapshot(
                     condition_id=condition_id,
                     timestamp=datetime.fromtimestamp(ts),
                     yes_price=price,
@@ -281,10 +331,10 @@ class PolymarketHistoryDownloader:
                     spread=0.0,
                     volume_24h=0,
                     source="clob_history",
-                )
-                session.add(snapshot)
-                saved += 1
-
+                ))
+            if objects:
+                session.bulk_save_objects(objects)
+                saved = len(objects)
             session.commit()
             logger.info(f"保存 {saved} 条历史快照: {condition_id}")
         except Exception:
@@ -295,73 +345,153 @@ class PolymarketHistoryDownloader:
 
         return history
 
+    def _download_one_market(self, market: dict, fidelity: int) -> dict:
+        """下载单个市场的历史数据（线程安全）。返回 {condition_id, question, data_points, error}。"""
+        token_id = market.get("token_id", "")
+        condition_id = market.get("condition_id", "")
+        if not token_id:
+            return {"condition_id": condition_id, "question": "", "data_points": 0, "error": "no token_id"}
+
+        try:
+            history = self.download_price_history(
+                task_id="",
+                token_id=token_id,
+                condition_id=condition_id,
+                fidelity=fidelity,
+            )
+            return {
+                "condition_id": condition_id,
+                "question": market.get("question", ""),
+                "data_points": len(history),
+                "error": None,
+            }
+        except Exception as e:
+            return {
+                "condition_id": condition_id,
+                "question": market.get("question", ""),
+                "data_points": 0,
+                "error": str(e),
+            }
+
     def download_batch(
         self,
         task_id: str,
         markets: Optional[list[dict]] = None,
-        limit: int = 20,
+        limit: int = 0,
         fidelity: int = 60,
+        skip_existing: bool = True,
+        concurrency: int = 50,
     ):
         """
-        批量下载已结算市场历史数据。
+        批量下载已结算市场历史数据（多线程并发）。
 
         完整流程：
         1. 发现已结算市场（如未提供 markets）
-        2. 逐个下载历史价格
+        2. 跳过已有快照的市场（skip_existing=True）
+        3. 多线程并发下载历史价格
         """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         self._db.init_tables()
 
         if markets is None:
-            markets = self.discover_resolved_markets(task_id, limit=limit)
+            # 优先从 DB 取可用事件（避免重新全量拉 Gamma API）
+            session_m: Session = self._db.get_session()
+            try:
+                db_events = session_m.query(PolymarketEvent).filter(
+                    PolymarketEvent.is_excluded == False  # noqa: E712
+                ).order_by(PolymarketEvent.volume.desc()).all()
+                if db_events:
+                    markets = [
+                        {"condition_id": e.condition_id, "token_id": e.token_id or "",
+                         "question": e.question or ""}
+                        for e in db_events if e.token_id
+                    ]
+                    if limit > 0:
+                        markets = markets[:limit]
+                    logger.info(f"[下载] 从 DB 获取 {len(markets)} 个可用事件")
+                    task_manager.update_progress(task_id, 10, f"从 DB 获取 {len(markets)} 个可用事件")
+                else:
+                    # DB 为空时回退到 Gamma API
+                    markets = self.discover_resolved_markets(task_id, limit=limit)
+            finally:
+                session_m.close()
 
         if not markets:
             task_manager.update_progress(task_id, 100, "未发现符合条件的已结算市场")
-            return {"total_markets": 0, "total_snapshots": 0}
+            return {"total_markets": 0, "total_snapshots": 0, "skipped": 0}
+
+        # 跳过已有快照的市场
+        skipped = 0
+        if skip_existing:
+            session: Session = self._db.get_session()
+            try:
+                from sqlalchemy import func
+                existing_cids = set(
+                    r[0] for r in session.query(PolymarketPriceSnapshot.condition_id)
+                    .group_by(PolymarketPriceSnapshot.condition_id)
+                    .having(func.count() >= 2)
+                    .all()
+                )
+            finally:
+                session.close()
+            before = len(markets)
+            markets = [m for m in markets if m["condition_id"] not in existing_cids]
+            skipped = before - len(markets)
+            logger.info(f"[下载] 跳过 {skipped} 个已有数据的市场，剩余 {len(markets)} 待下载")
+            task_manager.update_progress(
+                task_id, 22,
+                f"跳过 {skipped} 个已有数据，待下载 {len(markets)} 个市场"
+            )
+
+        if not markets:
+            task_manager.update_progress(task_id, 100, f"全部 {skipped} 个市场已有数据，无需下载")
+            return {"total_markets": 0, "total_snapshots": 0, "skipped": skipped}
 
         total = len(markets)
         total_snapshots = 0
         downloaded_markets = []
+        failed = 0
+        done_count = 0
 
-        for i, market in enumerate(markets):
-            token_id = market.get("token_id", "")
-            condition_id = market.get("condition_id", "")
-            if not token_id:
-                continue
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = {
+                pool.submit(self._download_one_market, m, fidelity): m
+                for m in markets
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                done_count += 1
 
-            progress = 20 + int(70 * (i / total))
-            task_manager.update_progress(
-                task_id, progress,
-                f"下载历史数据 ({i + 1}/{total}): {market.get('question', '')[:40]}..."
-            )
+                if result["error"]:
+                    failed += 1
+                    if failed <= 10:
+                        logger.warning(f"[下载] 失败 {result['condition_id']}: {result['error']}")
+                else:
+                    total_snapshots += result["data_points"]
+                    downloaded_markets.append(result)
 
-            try:
-                history = self.download_price_history(
-                    task_id=task_id,
-                    token_id=token_id,
-                    condition_id=condition_id,
-                    fidelity=fidelity,
-                )
-                count = len(history)
-                total_snapshots += count
-                downloaded_markets.append({
-                    "condition_id": condition_id,
-                    "question": market.get("question", ""),
-                    "data_points": count,
-                })
-                logger.info(f"[{i + 1}/{total}] {condition_id}: {count} 条数据")
-            except Exception as e:
-                logger.warning(f"下载失败 {condition_id}: {e}")
+                if done_count % 100 == 0 or done_count == total:
+                    pct = 22 + int(68 * done_count / total)
+                    task_manager.update_progress(
+                        task_id, pct,
+                        f"下载进度 {done_count}/{total}, 成功 {len(downloaded_markets)}, "
+                        f"累计 {total_snapshots} 条数据"
+                    )
 
-            time.sleep(CLOB_REQUEST_INTERVAL)
-
-        task_manager.update_progress(
-            task_id, 95,
-            f"下载完成: {len(downloaded_markets)}/{total} 个市场, {total_snapshots} 条数据"
-        )
+        msg = f"下载完成: {len(downloaded_markets)}/{total} 个市场, {total_snapshots} 条数据"
+        if skipped:
+            msg += f", 跳过 {skipped} 个已有数据"
+        if failed:
+            msg += f", {failed} 个失败"
+        task_manager.update_progress(task_id, 95, msg)
+        logger.info(f"[下载] {msg}")
 
         return {
             "total_markets": len(downloaded_markets),
             "total_snapshots": total_snapshots,
+            "skipped": skipped,
+            "failed": failed,
             "markets": downloaded_markets,
         }
 
@@ -371,9 +501,9 @@ class PolymarketHistoryDownloader:
         try:
             from sqlalchemy import func
 
-            # 查询所有非活跃（已结算）事件
+            # 查询所有非排除的已结算事件
             query = session.query(PolymarketEvent).filter(
-                PolymarketEvent.is_active == False  # noqa: E712
+                PolymarketEvent.is_excluded == False  # noqa: E712
             ).order_by(PolymarketEvent.volume.desc())
 
             total = query.count()

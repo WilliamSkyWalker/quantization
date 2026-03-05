@@ -44,6 +44,8 @@ def paper_account(request):
             'initial_capital': PAPER_INITIAL_CAPITAL,
             'cash': PAPER_INITIAL_CAPITAL,
             'total_assets': PAPER_INITIAL_CAPITAL,
+            'pnl': 0,
+            'pnl_pct': 0,
             'positions': [],
         })
 

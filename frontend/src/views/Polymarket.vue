@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch, h } from 'vue'
 import { useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import {
   startMonitor, stopMonitor, getMonitorStatus, getAlerts, markAlertRead, triggerMockAlert,
-  runBacktest, getImpactOverview, deleteMockAlerts,
+  runBacktest, getBacktestResult, getImpactOverview, deleteMockAlerts, runUsStockPnlFromDb, runASharePnlFromDb,
 } from '../api/polymarket'
 import { useTaskStore } from '../stores/task'
 
@@ -344,10 +344,10 @@ watch(
     if (status === 'completed') {
       btResult.value = btTask.value?.result
       btRunLoading.value = false
-      message.success('回测完成')
+      message.success('量化回测完成')
     } else if (status === 'failed') {
       btRunLoading.value = false
-      message.error('回测失败: ' + (btTask.value?.error || ''))
+      message.error('量化回测失败: ' + (btTask.value?.error || ''))
     } else if (status === 'cancelled') {
       btRunLoading.value = false
     }
@@ -367,10 +367,10 @@ async function doRunBacktest() {
     }
     const { data } = await runBacktest(payload)
     btTaskId.value = data.task_id
-    taskStore.trackTask(data.task_id, 'Polymarket 回测')
-    message.success('已提交回测任务')
+    taskStore.trackTask(data.task_id, 'Polymarket 量化回测')
+    message.success('已提交量化回测任务')
   } catch (e: any) {
-    message.error('回测失败: ' + (e.response?.data?.error || e.message))
+    message.error('量化回测失败: ' + (e.response?.data?.error || e.message))
     btRunLoading.value = false
   }
 }
@@ -419,6 +419,230 @@ const btAlertColumns: DataTableColumns = [
     key: 'timestamp',
     width: 140,
     render: (row: any) => (row.timestamp ? new Date(row.timestamp).toLocaleString() : '-'),
+  },
+]
+
+// ============================================================
+// US Stock P&L State (within backtest tab)
+// ============================================================
+const pnlRunLoading = ref(false)
+const pnlTaskId = ref<string | null>(null)
+const pnlResult = ref<any>(null)
+const pnlConfig = ref({
+  holding_days: 5,
+  min_confidence: 0.0,
+})
+
+const pnlTask = computed(() => pnlTaskId.value ? taskStore.getTask(pnlTaskId.value) : undefined)
+
+watch(
+  () => pnlTask.value?.status,
+  (status) => {
+    if (!status || !pnlTaskId.value) return
+    if (status === 'completed') {
+      pnlResult.value = pnlTask.value?.result
+      pnlRunLoading.value = false
+      message.success('美股新闻信号回测完成')
+    } else if (status === 'failed') {
+      pnlRunLoading.value = false
+      message.error('美股新闻信号回测失败: ' + (pnlTask.value?.error || ''))
+    } else if (status === 'cancelled') {
+      pnlRunLoading.value = false
+    }
+  },
+)
+
+async function doRunPnl() {
+  pnlRunLoading.value = true
+  pnlResult.value = null
+  pnlTaskId.value = null
+  try {
+    const { data } = await runUsStockPnlFromDb({
+      holding_days: pnlConfig.value.holding_days,
+      min_confidence: pnlConfig.value.min_confidence,
+    })
+    pnlTaskId.value = data.task_id
+    taskStore.trackTask(data.task_id, '美股新闻信号回测')
+    message.success('已提交美股新闻信号回测任务')
+  } catch (e: any) {
+    message.error('美股新闻信号回测失败: ' + (e.response?.data?.error || e.message))
+    pnlRunLoading.value = false
+  }
+}
+
+// P&L trade table columns (共用渲染函数)
+function renderReturnPct(row: any, key: string, bold = true) {
+  const v = row[key]
+  if (v == null) return '-'
+  const color = v >= 0 ? '#18a058' : '#d03050'
+  return h('span', { style: { color, fontWeight: bold ? 600 : 400 } }, `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`)
+}
+
+const pnlTradeColumns: DataTableColumns = [
+  { title: 'Ticker', key: 'ticker', width: 80 },
+  {
+    title: '方向',
+    key: 'direction',
+    width: 70,
+    render: (row: any) => row.direction === 'bullish' ? '看多' : '看空',
+  },
+  { title: '入场日', key: 'entry_date', width: 100 },
+  {
+    title: '入场价',
+    key: 'entry_price',
+    width: 85,
+    render: (row: any) => row.entry_price != null ? `$${row.entry_price.toFixed(2)}` : '-',
+  },
+  { title: '出场日', key: 'exit_date', width: 100 },
+  {
+    title: '出场价',
+    key: 'exit_price',
+    width: 85,
+    render: (row: any) => row.exit_price != null ? `$${row.exit_price.toFixed(2)}` : '-',
+  },
+  {
+    title: '收益%',
+    key: 'return_pct',
+    width: 80,
+    sorter: (a: any, b: any) => (a.return_pct ?? 0) - (b.return_pct ?? 0),
+    render: (row: any) => renderReturnPct(row, 'return_pct'),
+  },
+  {
+    title: 'BM%',
+    key: 'benchmark_pct',
+    width: 75,
+    render: (row: any) => renderReturnPct(row, 'benchmark_pct', false),
+  },
+  {
+    title: 'Alpha',
+    key: 'alpha_pct',
+    width: 75,
+    sorter: (a: any, b: any) => (a.alpha_pct ?? 0) - (b.alpha_pct ?? 0),
+    render: (row: any) => renderReturnPct(row, 'alpha_pct'),
+  },
+  {
+    title: '持仓天',
+    key: 'holding_days',
+    width: 70,
+  },
+  {
+    title: '事件',
+    key: 'event_question',
+    ellipsis: { tooltip: true },
+    width: 250,
+  },
+]
+
+// ============================================================
+// A-Share P&L State (within backtest tab)
+// ============================================================
+const cnPnlRunLoading = ref(false)
+const cnPnlTaskId = ref<string | null>(null)
+const cnPnlResult = ref<any>(null)
+const cnPnlConfig = ref({
+  holding_days: 5,
+  min_confidence: 0.0,
+})
+
+const cnPnlTask = computed(() => cnPnlTaskId.value ? taskStore.getTask(cnPnlTaskId.value) : undefined)
+
+watch(
+  () => cnPnlTask.value?.status,
+  (status) => {
+    if (!status || !cnPnlTaskId.value) return
+    if (status === 'completed') {
+      cnPnlResult.value = cnPnlTask.value?.result
+      cnPnlRunLoading.value = false
+      message.success('A股新闻信号回测完成')
+    } else if (status === 'failed') {
+      cnPnlRunLoading.value = false
+      message.error('A股新闻信号回测失败: ' + (cnPnlTask.value?.error || ''))
+    } else if (status === 'cancelled') {
+      cnPnlRunLoading.value = false
+    }
+  },
+)
+
+async function doRunCnPnl() {
+  cnPnlRunLoading.value = true
+  cnPnlResult.value = null
+  cnPnlTaskId.value = null
+  try {
+    const { data } = await runASharePnlFromDb({
+      holding_days: cnPnlConfig.value.holding_days,
+      min_confidence: cnPnlConfig.value.min_confidence,
+    })
+    cnPnlTaskId.value = data.task_id
+    taskStore.trackTask(data.task_id, 'A股新闻信号回测')
+    message.success('已提交 A 股新闻信号回测任务')
+  } catch (e: any) {
+    message.error('A股新闻信号回测失败: ' + (e.response?.data?.error || e.message))
+    cnPnlRunLoading.value = false
+  }
+}
+
+// A-share P&L trade table columns
+const cnPnlTradeColumns: DataTableColumns = [
+  {
+    title: '股票',
+    key: 'name',
+    width: 80,
+  },
+  {
+    title: '代码',
+    key: 'ticker',
+    width: 100,
+  },
+  {
+    title: '方向',
+    key: 'direction',
+    width: 70,
+    render: (row: any) => row.direction === 'bullish' ? '看多' : '看空',
+  },
+  { title: '入场日', key: 'entry_date', width: 100 },
+  {
+    title: '入场价',
+    key: 'entry_price',
+    width: 85,
+    render: (row: any) => row.entry_price != null ? `¥${row.entry_price.toFixed(2)}` : '-',
+  },
+  { title: '出场日', key: 'exit_date', width: 100 },
+  {
+    title: '出场价',
+    key: 'exit_price',
+    width: 85,
+    render: (row: any) => row.exit_price != null ? `¥${row.exit_price.toFixed(2)}` : '-',
+  },
+  {
+    title: '收益%',
+    key: 'return_pct',
+    width: 80,
+    sorter: (a: any, b: any) => (a.return_pct ?? 0) - (b.return_pct ?? 0),
+    render: (row: any) => renderReturnPct(row, 'return_pct'),
+  },
+  {
+    title: 'BM%',
+    key: 'benchmark_pct',
+    width: 75,
+    render: (row: any) => renderReturnPct(row, 'benchmark_pct', false),
+  },
+  {
+    title: 'Alpha',
+    key: 'alpha_pct',
+    width: 75,
+    sorter: (a: any, b: any) => (a.alpha_pct ?? 0) - (b.alpha_pct ?? 0),
+    render: (row: any) => renderReturnPct(row, 'alpha_pct'),
+  },
+  {
+    title: '持仓天',
+    key: 'holding_days',
+    width: 70,
+  },
+  {
+    title: '事件',
+    key: 'event_question',
+    ellipsis: { tooltip: true },
+    width: 250,
   },
 ]
 
@@ -526,8 +750,20 @@ onUnmounted(() => {
   disconnectWs()
 })
 
+async function loadBacktestResult() {
+  try {
+    const { data } = await getBacktestResult()
+    if (data?.alerts?.length) {
+      btResult.value = data
+    }
+  } catch { /* ignore */ }
+}
+
 function handleTabChange(tab: string) {
   activeTab.value = tab
+  if (tab === 'backtest' && !btResult.value && !btRunLoading.value) {
+    loadBacktestResult()
+  }
   if (tab === 'impact' && !impactData.value) {
     loadImpact()
   }
@@ -626,10 +862,10 @@ function handleTabChange(tab: string) {
     <!-- ============================================================ -->
     <!-- 回测 Tab -->
     <!-- ============================================================ -->
-    <n-tab-pane name="backtest" tab="历史回测">
+    <n-tab-pane name="backtest" tab="回测">
       <n-space vertical :size="16">
-        <!-- 回测配置 + 启动 -->
-        <n-card size="small" title="回测配置">
+        <!-- 量化回测配置 + 启动 -->
+        <n-card size="small" title="量化回测配置">
           <n-grid :cols="4" :x-gap="12" :y-gap="12">
             <n-gi>
               <n-form-item label="5min 阈值" :show-feedback="false">
@@ -654,7 +890,7 @@ function handleTabChange(tab: string) {
           </n-grid>
           <n-space style="margin-top: 12px" :size="12" align="center">
             <n-button type="primary" :loading="btRunLoading" @click="doRunBacktest">
-              启动回测 (全部已结算市场)
+              启动量化回测
             </n-button>
             <span style="color: #999; font-size: 13px">
               数据准备请前往「数据管理」页
@@ -662,8 +898,8 @@ function handleTabChange(tab: string) {
           </n-space>
         </n-card>
 
-        <!-- 回测进度 -->
-        <n-card v-if="btTaskId && btTask && btTask.status === 'running'" size="small" title="回测进度">
+        <!-- 量化回测进度 -->
+        <n-card v-if="btTaskId && btTask && btTask.status === 'running'" size="small" title="量化回测进度">
           <n-progress type="line" :percentage="btTask.progress" :indicator-placement="'inside'" />
           <div style="margin-top: 8px; color: #999; font-size: 13px">{{ btTask.message }}</div>
         </n-card>
@@ -671,10 +907,10 @@ function handleTabChange(tab: string) {
         <!-- 回测结果 -->
         <template v-if="btResult">
           <!-- 汇总统计 -->
-          <n-card size="small" title="回测汇总">
+          <n-card size="small" title="量化回测汇总">
             <n-grid :cols="4" :x-gap="16" :y-gap="12">
               <n-gi>
-                <n-statistic label="回测市场数" :value="btResult.summary?.total_markets ?? 0" />
+                <n-statistic label="量化回测市场数" :value="btResult.summary?.total_markets ?? 0" />
               </n-gi>
               <n-gi>
                 <n-statistic label="触发告警市场" :value="btResult.summary?.markets_with_alerts ?? 0" />
@@ -752,8 +988,8 @@ function handleTabChange(tab: string) {
             </n-gi>
           </n-grid>
 
-          <!-- 市场回测详情 -->
-          <n-card size="small" title="市场回测详情" :segmented="{ content: true }">
+          <!-- 市场量化回测详情 -->
+          <n-card size="small" title="市场量化回测详情" :segmented="{ content: true }">
             <n-data-table
               :columns="[
                 { title: '事件', key: 'question', ellipsis: { tooltip: true }, width: 350 },
@@ -773,8 +1009,8 @@ function handleTabChange(tab: string) {
             />
           </n-card>
 
-          <!-- 回测告警列表 -->
-          <n-card size="small" title="回测触发的告警" :segmented="{ content: true }">
+          <!-- 量化回测告警列表 -->
+          <n-card size="small" title="量化回测触发的告警" :segmented="{ content: true }">
             <n-data-table
               :columns="btAlertColumns"
               :data="btResult.alerts || []"
@@ -786,6 +1022,560 @@ function handleTabChange(tab: string) {
                 style: 'cursor: pointer',
                 onClick: () => openBtAlertDetail(row),
               })"
+            />
+          </n-card>
+        </template>
+
+        <!-- ============================================================ -->
+        <!-- 美股新闻信号回测 -->
+        <!-- ============================================================ -->
+
+        <!-- 美股新闻信号回测配置 + 按钮 -->
+        <n-card size="small" title="美股新闻信号回测">
+          <n-grid :cols="3" :x-gap="12" :y-gap="12">
+            <n-gi>
+              <n-form-item label="持仓天数" :show-feedback="false">
+                <n-input-number v-model:value="pnlConfig.holding_days" :min="1" :max="30" :step="1" size="small" />
+              </n-form-item>
+            </n-gi>
+            <n-gi>
+              <n-form-item label="最低置信度" :show-feedback="false">
+                <n-input-number v-model:value="pnlConfig.min_confidence" :min="0" :max="1" :step="0.1" size="small" />
+              </n-form-item>
+            </n-gi>
+            <n-gi style="display: flex; align-items: flex-end">
+              <n-button
+                type="primary"
+                :loading="pnlRunLoading"
+                :disabled="!btResult"
+                @click="doRunPnl"
+              >
+                运行美股新闻信号回测
+              </n-button>
+            </n-gi>
+          </n-grid>
+          <div v-if="!btResult" style="color: #999; font-size: 12px; margin-top: 8px">
+            请先运行上方量化回测生成告警数据
+          </div>
+        </n-card>
+
+        <!-- 美股新闻信号回测进度 -->
+        <n-card v-if="pnlTaskId && pnlTask && pnlTask.status === 'running'" size="small" title="美股新闻信号回测进度">
+          <n-progress type="line" :percentage="pnlTask.progress" :indicator-placement="'inside'" />
+          <div style="margin-top: 8px; color: #999; font-size: 13px">{{ pnlTask.message }}</div>
+        </n-card>
+
+        <!-- P&L 结果 -->
+        <template v-if="pnlResult">
+          <!-- 汇总统计 -->
+          <n-card size="small" title="美股新闻信号回测汇总">
+            <n-grid :cols="6" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
+              <n-gi span="6 m:1">
+                <n-statistic label="总交易数" :value="pnlResult.summary?.total_trades ?? 0" />
+              </n-gi>
+              <n-gi span="6 m:1">
+                <n-statistic label="胜率">
+                  <template #default>
+                    <span :style="{ color: (pnlResult.summary?.win_rate ?? 0) >= 0.5 ? '#18a058' : '#d03050' }">
+                      {{ ((pnlResult.summary?.win_rate ?? 0) * 100).toFixed(1) }}%
+                    </span>
+                  </template>
+                </n-statistic>
+              </n-gi>
+              <n-gi span="6 m:1">
+                <n-statistic label="平均收益">
+                  <template #default>
+                    <span :style="{ color: (pnlResult.summary?.avg_return_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                      {{ (pnlResult.summary?.avg_return_pct ?? 0) >= 0 ? '+' : '' }}{{ (pnlResult.summary?.avg_return_pct ?? 0).toFixed(2) }}%
+                    </span>
+                  </template>
+                </n-statistic>
+              </n-gi>
+              <n-gi span="6 m:1">
+                <n-statistic label="Sharpe">
+                  <template #default>
+                    <span :style="{ color: (pnlResult.summary?.sharpe_ratio ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                      {{ (pnlResult.summary?.sharpe_ratio ?? 0).toFixed(2) }}
+                    </span>
+                  </template>
+                </n-statistic>
+              </n-gi>
+              <n-gi span="6 m:1">
+                <n-statistic label="Profit Factor">
+                  <template #default>
+                    {{ pnlResult.summary?.profit_factor != null ? pnlResult.summary.profit_factor.toFixed(2) : '-' }}
+                  </template>
+                </n-statistic>
+              </n-gi>
+              <n-gi span="6 m:1">
+                <n-statistic label="总收益">
+                  <template #default>
+                    <span :style="{ color: (pnlResult.summary?.total_return_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                      {{ (pnlResult.summary?.total_return_pct ?? 0) >= 0 ? '+' : '' }}{{ (pnlResult.summary?.total_return_pct ?? 0).toFixed(2) }}%
+                    </span>
+                  </template>
+                </n-statistic>
+              </n-gi>
+            </n-grid>
+
+            <!-- 极值 -->
+            <n-space style="margin-top: 12px" :size="12">
+              <n-tag type="success" size="small">
+                最大单笔盈利: +{{ (pnlResult.summary?.max_single_win_pct ?? 0).toFixed(2) }}%
+              </n-tag>
+              <n-tag type="error" size="small">
+                最大单笔亏损: {{ (pnlResult.summary?.max_single_loss_pct ?? 0).toFixed(2) }}%
+              </n-tag>
+              <n-tag size="small">
+                胜 {{ pnlResult.summary?.win_count ?? 0 }} / 负 {{ pnlResult.summary?.loss_count ?? 0 }}
+              </n-tag>
+              <n-tag v-if="pnlResult.summary?.mtm_trades" size="small" type="warning">
+                MTM: {{ pnlResult.summary.mtm_trades }}
+              </n-tag>
+            </n-space>
+
+            <!-- Benchmark 对比 -->
+            <div v-if="pnlResult.summary?.benchmark_avg_pct != null" style="margin-top: 12px; padding: 10px 12px; background: rgba(64,158,255,0.04); border-radius: 6px; border: 1px solid rgba(64,158,255,0.12)">
+              <span style="font-size: 13px; color: #666">vs 同期买入持有 (Benchmark):</span>
+              <n-space style="margin-top: 6px" :size="16">
+                <span style="font-size: 13px">
+                  策略均收益
+                  <span style="font-weight: 600" :style="{ color: (pnlResult.summary?.avg_return_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                    {{ (pnlResult.summary?.avg_return_pct ?? 0) >= 0 ? '+' : '' }}{{ (pnlResult.summary?.avg_return_pct ?? 0).toFixed(2) }}%
+                  </span>
+                </span>
+                <span style="font-size: 13px">
+                  Benchmark 均收益
+                  <span style="font-weight: 600" :style="{ color: (pnlResult.summary?.benchmark_avg_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                    {{ (pnlResult.summary?.benchmark_avg_pct ?? 0) >= 0 ? '+' : '' }}{{ (pnlResult.summary?.benchmark_avg_pct ?? 0).toFixed(2) }}%
+                  </span>
+                </span>
+                <span style="font-size: 13px">
+                  Alpha
+                  <span style="font-weight: 700" :style="{ color: (pnlResult.summary?.alpha_avg_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                    {{ (pnlResult.summary?.alpha_avg_pct ?? 0) >= 0 ? '+' : '' }}{{ (pnlResult.summary?.alpha_avg_pct ?? 0).toFixed(2) }}%
+                  </span>
+                </span>
+                <span style="font-size: 13px">
+                  策略胜率 <span style="font-weight: 600">{{ ((pnlResult.summary?.win_rate ?? 0) * 100).toFixed(1) }}%</span>
+                  vs Benchmark 胜率 <span style="font-weight: 600">{{ ((pnlResult.summary?.benchmark_win_rate ?? 0) * 100).toFixed(1) }}%</span>
+                </span>
+              </n-space>
+            </div>
+          </n-card>
+
+          <!-- 分组统计 -->
+          <n-grid :cols="3" :x-gap="16" responsive="screen" item-responsive>
+            <!-- 按方向 -->
+            <n-gi span="3 m:1" v-if="pnlResult.summary?.by_direction">
+              <n-card size="small" title="按方向">
+                <n-descriptions :column="1" label-placement="left" size="small" bordered>
+                  <template v-for="(stats, dir) in pnlResult.summary.by_direction" :key="dir">
+                    <n-descriptions-item :label="dir === 'bullish' ? '看多' : '看空'">
+                      {{ stats.count }}笔,
+                      胜率 {{ (stats.win_rate * 100).toFixed(1) }}%,
+                      均收益
+                      <span :style="{ color: stats.avg_return >= 0 ? '#18a058' : '#d03050' }">
+                        {{ stats.avg_return >= 0 ? '+' : '' }}{{ stats.avg_return.toFixed(2) }}%
+                      </span>
+                    </n-descriptions-item>
+                  </template>
+                </n-descriptions>
+              </n-card>
+            </n-gi>
+
+            <!-- 按告警类型 -->
+            <n-gi span="3 m:1" v-if="pnlResult.summary?.by_alert_type">
+              <n-card size="small" title="按告警类型">
+                <n-descriptions :column="1" label-placement="left" size="small" bordered>
+                  <template v-for="(stats, type) in pnlResult.summary.by_alert_type" :key="type">
+                    <n-descriptions-item :label="alertTypeLabel(type as string)">
+                      {{ stats.count }}笔,
+                      胜率 {{ (stats.win_rate * 100).toFixed(1) }}%,
+                      均收益
+                      <span :style="{ color: stats.avg_return >= 0 ? '#18a058' : '#d03050' }">
+                        {{ stats.avg_return >= 0 ? '+' : '' }}{{ stats.avg_return.toFixed(2) }}%
+                      </span>
+                    </n-descriptions-item>
+                  </template>
+                </n-descriptions>
+              </n-card>
+            </n-gi>
+
+            <!-- 按置信度 -->
+            <n-gi span="3 m:1" v-if="pnlResult.summary?.by_confidence_tier">
+              <n-card size="small" title="按置信度">
+                <n-descriptions :column="1" label-placement="left" size="small" bordered>
+                  <template v-for="(stats, tier) in pnlResult.summary.by_confidence_tier" :key="tier">
+                    <n-descriptions-item :label="(tier as string)">
+                      {{ stats.count }}笔,
+                      胜率 {{ (stats.win_rate * 100).toFixed(1) }}%,
+                      均收益
+                      <span :style="{ color: stats.avg_return >= 0 ? '#18a058' : '#d03050' }">
+                        {{ stats.avg_return >= 0 ? '+' : '' }}{{ stats.avg_return.toFixed(2) }}%
+                      </span>
+                    </n-descriptions-item>
+                  </template>
+                </n-descriptions>
+              </n-card>
+            </n-gi>
+          </n-grid>
+
+          <!-- Ticker 统计 -->
+          <n-card v-if="pnlResult.summary?.ticker_stats?.length" size="small" title="Ticker 表现">
+            <n-space vertical :size="4">
+              <div
+                v-for="t in pnlResult.summary.ticker_stats"
+                :key="t.ticker"
+                style="display: flex; align-items: center; gap: 8px; padding: 4px 0"
+              >
+                <n-tag size="small" type="info" round style="min-width: 56px; text-align: center">{{ t.ticker }}</n-tag>
+                <span style="color: #666; font-size: 12px; min-width: 40px">{{ t.count }}笔</span>
+                <span style="font-size: 12px; min-width: 60px">
+                  胜率 {{ (t.win_rate * 100).toFixed(0) }}%
+                </span>
+                <span
+                  style="font-size: 12px; font-weight: 600; min-width: 65px"
+                  :style="{ color: t.avg_return >= 0 ? '#18a058' : '#d03050' }"
+                >
+                  {{ t.avg_return >= 0 ? '+' : '' }}{{ t.avg_return.toFixed(2) }}%
+                </span>
+                <n-progress
+                  type="line"
+                  :percentage="Math.round(t.win_rate * 100)"
+                  :show-indicator="false"
+                  style="flex: 1"
+                  :color="t.win_rate >= 0.5 ? '#18a058' : '#d03050'"
+                />
+              </div>
+            </n-space>
+          </n-card>
+
+          <!-- Top Winners / Losers -->
+          <n-grid :cols="2" :x-gap="16" responsive="screen" item-responsive>
+            <n-gi span="2 m:1" v-if="pnlResult.summary?.top_winners?.length">
+              <n-card size="small" title="Top Winners">
+                <n-space vertical :size="4">
+                  <div
+                    v-for="(t, i) in pnlResult.summary.top_winners"
+                    :key="i"
+                    style="display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px"
+                  >
+                    <n-tag size="small" type="success" round>{{ t.ticker }}</n-tag>
+                    <span style="color: #18a058; font-weight: 600">+{{ t.return_pct.toFixed(2) }}%</span>
+                    <span style="color: #999; font-size: 12px">{{ t.entry_date }} → {{ t.exit_date }}</span>
+                    <span style="color: #666; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+                      {{ t.event_question }}
+                    </span>
+                  </div>
+                </n-space>
+              </n-card>
+            </n-gi>
+            <n-gi span="2 m:1" v-if="pnlResult.summary?.top_losers?.length">
+              <n-card size="small" title="Top Losers">
+                <n-space vertical :size="4">
+                  <div
+                    v-for="(t, i) in pnlResult.summary.top_losers"
+                    :key="i"
+                    style="display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px"
+                  >
+                    <n-tag size="small" type="error" round>{{ t.ticker }}</n-tag>
+                    <span style="color: #d03050; font-weight: 600">{{ t.return_pct.toFixed(2) }}%</span>
+                    <span style="color: #999; font-size: 12px">{{ t.entry_date }} → {{ t.exit_date }}</span>
+                    <span style="color: #666; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+                      {{ t.event_question }}
+                    </span>
+                  </div>
+                </n-space>
+              </n-card>
+            </n-gi>
+          </n-grid>
+
+          <!-- 交易明细表 -->
+          <n-card size="small" title="交易明细" :segmented="{ content: true }">
+            <n-data-table
+              :columns="pnlTradeColumns"
+              :data="pnlResult.trades || []"
+              :row-key="(row: any, idx: number) => idx"
+              size="small"
+              :max-height="400"
+              :scroll-x="1000"
+              :row-class-name="(row: any) => row.return_pct >= 0 ? '' : ''"
+            />
+          </n-card>
+        </template>
+
+        <!-- ============================================================ -->
+        <!-- A股新闻信号回测 -->
+        <!-- ============================================================ -->
+
+        <!-- A股新闻信号回测配置 + 按钮 -->
+        <n-card size="small" title="A股新闻信号回测">
+          <n-grid :cols="3" :x-gap="12" :y-gap="12">
+            <n-gi>
+              <n-form-item label="持仓天数" :show-feedback="false">
+                <n-input-number v-model:value="cnPnlConfig.holding_days" :min="1" :max="30" :step="1" size="small" />
+              </n-form-item>
+            </n-gi>
+            <n-gi>
+              <n-form-item label="最低置信度" :show-feedback="false">
+                <n-input-number v-model:value="cnPnlConfig.min_confidence" :min="0" :max="1" :step="0.1" size="small" />
+              </n-form-item>
+            </n-gi>
+            <n-gi style="display: flex; align-items: flex-end">
+              <n-button
+                type="primary"
+                :loading="cnPnlRunLoading"
+                :disabled="!btResult"
+                @click="doRunCnPnl"
+              >
+                运行 A 股新闻信号回测
+              </n-button>
+            </n-gi>
+          </n-grid>
+          <div v-if="!btResult" style="color: #999; font-size: 12px; margin-top: 8px">
+            请先运行上方量化回测生成告警数据
+          </div>
+        </n-card>
+
+        <!-- A股新闻信号回测进度 -->
+        <n-card v-if="cnPnlTaskId && cnPnlTask && cnPnlTask.status === 'running'" size="small" title="A股新闻信号回测进度">
+          <n-progress type="line" :percentage="cnPnlTask.progress" :indicator-placement="'inside'" />
+          <div style="margin-top: 8px; color: #999; font-size: 13px">{{ cnPnlTask.message }}</div>
+        </n-card>
+
+        <!-- A股 P&L 结果 -->
+        <template v-if="cnPnlResult">
+          <!-- 汇总统计 -->
+          <n-card size="small" title="A股新闻信号回测汇总">
+            <n-grid :cols="6" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
+              <n-gi span="6 m:1">
+                <n-statistic label="总交易数" :value="cnPnlResult.summary?.total_trades ?? 0" />
+              </n-gi>
+              <n-gi span="6 m:1">
+                <n-statistic label="胜率">
+                  <template #default>
+                    <span :style="{ color: (cnPnlResult.summary?.win_rate ?? 0) >= 0.5 ? '#18a058' : '#d03050' }">
+                      {{ ((cnPnlResult.summary?.win_rate ?? 0) * 100).toFixed(1) }}%
+                    </span>
+                  </template>
+                </n-statistic>
+              </n-gi>
+              <n-gi span="6 m:1">
+                <n-statistic label="平均收益">
+                  <template #default>
+                    <span :style="{ color: (cnPnlResult.summary?.avg_return_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                      {{ (cnPnlResult.summary?.avg_return_pct ?? 0) >= 0 ? '+' : '' }}{{ (cnPnlResult.summary?.avg_return_pct ?? 0).toFixed(2) }}%
+                    </span>
+                  </template>
+                </n-statistic>
+              </n-gi>
+              <n-gi span="6 m:1">
+                <n-statistic label="Sharpe">
+                  <template #default>
+                    <span :style="{ color: (cnPnlResult.summary?.sharpe_ratio ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                      {{ (cnPnlResult.summary?.sharpe_ratio ?? 0).toFixed(2) }}
+                    </span>
+                  </template>
+                </n-statistic>
+              </n-gi>
+              <n-gi span="6 m:1">
+                <n-statistic label="Profit Factor">
+                  <template #default>
+                    {{ cnPnlResult.summary?.profit_factor != null ? cnPnlResult.summary.profit_factor.toFixed(2) : '-' }}
+                  </template>
+                </n-statistic>
+              </n-gi>
+              <n-gi span="6 m:1">
+                <n-statistic label="总收益">
+                  <template #default>
+                    <span :style="{ color: (cnPnlResult.summary?.total_return_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                      {{ (cnPnlResult.summary?.total_return_pct ?? 0) >= 0 ? '+' : '' }}{{ (cnPnlResult.summary?.total_return_pct ?? 0).toFixed(2) }}%
+                    </span>
+                  </template>
+                </n-statistic>
+              </n-gi>
+            </n-grid>
+
+            <n-space style="margin-top: 12px" :size="12">
+              <n-tag type="success" size="small">
+                最大单笔盈利: +{{ (cnPnlResult.summary?.max_single_win_pct ?? 0).toFixed(2) }}%
+              </n-tag>
+              <n-tag type="error" size="small">
+                最大单笔亏损: {{ (cnPnlResult.summary?.max_single_loss_pct ?? 0).toFixed(2) }}%
+              </n-tag>
+              <n-tag size="small">
+                胜 {{ cnPnlResult.summary?.win_count ?? 0 }} / 负 {{ cnPnlResult.summary?.loss_count ?? 0 }}
+              </n-tag>
+              <n-tag v-if="cnPnlResult.summary?.mtm_trades" size="small" type="warning">
+                MTM: {{ cnPnlResult.summary.mtm_trades }}
+              </n-tag>
+            </n-space>
+
+            <!-- Benchmark 对比 -->
+            <div v-if="cnPnlResult.summary?.benchmark_avg_pct != null" style="margin-top: 12px; padding: 10px 12px; background: rgba(64,158,255,0.04); border-radius: 6px; border: 1px solid rgba(64,158,255,0.12)">
+              <span style="font-size: 13px; color: #666">vs 同期买入持有 (Benchmark):</span>
+              <n-space style="margin-top: 6px" :size="16">
+                <span style="font-size: 13px">
+                  策略均收益
+                  <span style="font-weight: 600" :style="{ color: (cnPnlResult.summary?.avg_return_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                    {{ (cnPnlResult.summary?.avg_return_pct ?? 0) >= 0 ? '+' : '' }}{{ (cnPnlResult.summary?.avg_return_pct ?? 0).toFixed(2) }}%
+                  </span>
+                </span>
+                <span style="font-size: 13px">
+                  Benchmark 均收益
+                  <span style="font-weight: 600" :style="{ color: (cnPnlResult.summary?.benchmark_avg_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                    {{ (cnPnlResult.summary?.benchmark_avg_pct ?? 0) >= 0 ? '+' : '' }}{{ (cnPnlResult.summary?.benchmark_avg_pct ?? 0).toFixed(2) }}%
+                  </span>
+                </span>
+                <span style="font-size: 13px">
+                  Alpha
+                  <span style="font-weight: 700" :style="{ color: (cnPnlResult.summary?.alpha_avg_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                    {{ (cnPnlResult.summary?.alpha_avg_pct ?? 0) >= 0 ? '+' : '' }}{{ (cnPnlResult.summary?.alpha_avg_pct ?? 0).toFixed(2) }}%
+                  </span>
+                </span>
+                <span style="font-size: 13px">
+                  策略胜率 <span style="font-weight: 600">{{ ((cnPnlResult.summary?.win_rate ?? 0) * 100).toFixed(1) }}%</span>
+                  vs Benchmark 胜率 <span style="font-weight: 600">{{ ((cnPnlResult.summary?.benchmark_win_rate ?? 0) * 100).toFixed(1) }}%</span>
+                </span>
+              </n-space>
+            </div>
+          </n-card>
+
+          <!-- 分组统计 -->
+          <n-grid :cols="3" :x-gap="16" responsive="screen" item-responsive>
+            <n-gi span="3 m:1" v-if="cnPnlResult.summary?.by_direction">
+              <n-card size="small" title="按方向">
+                <n-descriptions :column="1" label-placement="left" size="small" bordered>
+                  <template v-for="(stats, dir) in cnPnlResult.summary.by_direction" :key="dir">
+                    <n-descriptions-item :label="dir === 'bullish' ? '看多' : '看空'">
+                      {{ stats.count }}笔,
+                      胜率 {{ (stats.win_rate * 100).toFixed(1) }}%,
+                      均收益
+                      <span :style="{ color: stats.avg_return >= 0 ? '#18a058' : '#d03050' }">
+                        {{ stats.avg_return >= 0 ? '+' : '' }}{{ stats.avg_return.toFixed(2) }}%
+                      </span>
+                    </n-descriptions-item>
+                  </template>
+                </n-descriptions>
+              </n-card>
+            </n-gi>
+
+            <n-gi span="3 m:1" v-if="cnPnlResult.summary?.by_alert_type">
+              <n-card size="small" title="按告警类型">
+                <n-descriptions :column="1" label-placement="left" size="small" bordered>
+                  <template v-for="(stats, type) in cnPnlResult.summary.by_alert_type" :key="type">
+                    <n-descriptions-item :label="alertTypeLabel(type as string)">
+                      {{ stats.count }}笔,
+                      胜率 {{ (stats.win_rate * 100).toFixed(1) }}%,
+                      均收益
+                      <span :style="{ color: stats.avg_return >= 0 ? '#18a058' : '#d03050' }">
+                        {{ stats.avg_return >= 0 ? '+' : '' }}{{ stats.avg_return.toFixed(2) }}%
+                      </span>
+                    </n-descriptions-item>
+                  </template>
+                </n-descriptions>
+              </n-card>
+            </n-gi>
+
+            <n-gi span="3 m:1" v-if="cnPnlResult.summary?.by_confidence_tier">
+              <n-card size="small" title="按置信度">
+                <n-descriptions :column="1" label-placement="left" size="small" bordered>
+                  <template v-for="(stats, tier) in cnPnlResult.summary.by_confidence_tier" :key="tier">
+                    <n-descriptions-item :label="(tier as string)">
+                      {{ stats.count }}笔,
+                      胜率 {{ (stats.win_rate * 100).toFixed(1) }}%,
+                      均收益
+                      <span :style="{ color: stats.avg_return >= 0 ? '#18a058' : '#d03050' }">
+                        {{ stats.avg_return >= 0 ? '+' : '' }}{{ stats.avg_return.toFixed(2) }}%
+                      </span>
+                    </n-descriptions-item>
+                  </template>
+                </n-descriptions>
+              </n-card>
+            </n-gi>
+          </n-grid>
+
+          <!-- Ticker 统计 -->
+          <n-card v-if="cnPnlResult.summary?.ticker_stats?.length" size="small" title="A股个股表现">
+            <n-space vertical :size="4">
+              <div
+                v-for="t in cnPnlResult.summary.ticker_stats"
+                :key="t.ticker"
+                style="display: flex; align-items: center; gap: 8px; padding: 4px 0"
+              >
+                <n-tag size="small" type="warning" round style="min-width: 56px; text-align: center">{{ t.name || t.ticker }}</n-tag>
+                <span style="color: #999; font-size: 11px; min-width: 75px">{{ t.ticker }}</span>
+                <span style="color: #666; font-size: 12px; min-width: 40px">{{ t.count }}笔</span>
+                <span style="font-size: 12px; min-width: 60px">
+                  胜率 {{ (t.win_rate * 100).toFixed(0) }}%
+                </span>
+                <span
+                  style="font-size: 12px; font-weight: 600; min-width: 65px"
+                  :style="{ color: t.avg_return >= 0 ? '#18a058' : '#d03050' }"
+                >
+                  {{ t.avg_return >= 0 ? '+' : '' }}{{ t.avg_return.toFixed(2) }}%
+                </span>
+                <n-progress
+                  type="line"
+                  :percentage="Math.round(t.win_rate * 100)"
+                  :show-indicator="false"
+                  style="flex: 1"
+                  :color="t.win_rate >= 0.5 ? '#18a058' : '#d03050'"
+                />
+              </div>
+            </n-space>
+          </n-card>
+
+          <!-- Top Winners / Losers -->
+          <n-grid :cols="2" :x-gap="16" responsive="screen" item-responsive>
+            <n-gi span="2 m:1" v-if="cnPnlResult.summary?.top_winners?.length">
+              <n-card size="small" title="Top Winners">
+                <n-space vertical :size="4">
+                  <div
+                    v-for="(t, i) in cnPnlResult.summary.top_winners"
+                    :key="i"
+                    style="display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px"
+                  >
+                    <n-tag size="small" type="success" round>{{ t.name || t.ticker }}</n-tag>
+                    <span style="color: #18a058; font-weight: 600">+{{ t.return_pct.toFixed(2) }}%</span>
+                    <span style="color: #999; font-size: 12px">{{ t.entry_date }} → {{ t.exit_date }}</span>
+                    <span style="color: #666; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+                      {{ t.event_question }}
+                    </span>
+                  </div>
+                </n-space>
+              </n-card>
+            </n-gi>
+            <n-gi span="2 m:1" v-if="cnPnlResult.summary?.top_losers?.length">
+              <n-card size="small" title="Top Losers">
+                <n-space vertical :size="4">
+                  <div
+                    v-for="(t, i) in cnPnlResult.summary.top_losers"
+                    :key="i"
+                    style="display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px"
+                  >
+                    <n-tag size="small" type="error" round>{{ t.name || t.ticker }}</n-tag>
+                    <span style="color: #d03050; font-weight: 600">{{ t.return_pct.toFixed(2) }}%</span>
+                    <span style="color: #999; font-size: 12px">{{ t.entry_date }} → {{ t.exit_date }}</span>
+                    <span style="color: #666; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+                      {{ t.event_question }}
+                    </span>
+                  </div>
+                </n-space>
+              </n-card>
+            </n-gi>
+          </n-grid>
+
+          <!-- 交易明细表 -->
+          <n-card size="small" title="A股交易明细" :segmented="{ content: true }">
+            <n-data-table
+              :columns="cnPnlTradeColumns"
+              :data="cnPnlResult.trades || []"
+              :row-key="(row: any, idx: number) => idx"
+              size="small"
+              :max-height="400"
+              :scroll-x="1100"
             />
           </n-card>
         </template>
@@ -1029,7 +1819,7 @@ function handleTabChange(tab: string) {
               <n-empty description="暂无 Polymarket 历史告警数据">
                 <template #extra>
                   <span style="color: #999; font-size: 13px">
-                    请先运行「历史回测」或启动「实时监控」生成告警
+                    请先运行「量化回测」或启动「实时监控」生成告警
                   </span>
                 </template>
               </n-empty>
@@ -1165,9 +1955,9 @@ function handleTabChange(tab: string) {
     </n-drawer-content>
   </n-drawer>
 
-  <!-- 回测告警详情抽屉 -->
+  <!-- 量化回测告警详情抽屉 -->
   <n-drawer v-model:show="btShowAlertDetail" :width="520" placement="right">
-    <n-drawer-content v-if="btSelectedAlert" title="回测告警详情">
+    <n-drawer-content v-if="btSelectedAlert" title="量化回测告警详情">
       <n-space vertical :size="16">
         <n-card size="small" title="事件信息">
           <n-descriptions :column="1" label-placement="left" size="small">

@@ -84,6 +84,7 @@ urlpatterns = [
     path('polymarket/backtest/price-series/<str:condition_id>', polymarket.backtest_price_series),
     path('polymarket/backtest/backfill-categories', polymarket.backtest_backfill_categories),
     path('polymarket/backtest/run', polymarket.backtest_run),
+    path('polymarket/backtest/result', polymarket.backtest_result),
 
     # Polymarket - Impact Analysis
     path('polymarket/impact', polymarket.impact_overview),
@@ -91,4 +92,7 @@ urlpatterns = [
     # Polymarket - US Stock P&L
     path('polymarket/backtest/us-stock-pnl', polymarket.us_stock_pnl),
     path('polymarket/backtest/us-stock-pnl-from-db', polymarket.us_stock_pnl_from_db),
+
+    # Polymarket - A-Share P&L
+    path('polymarket/backtest/a-share-pnl-from-db', polymarket.a_share_pnl_from_db),
 ]
