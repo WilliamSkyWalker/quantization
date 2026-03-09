@@ -187,14 +187,43 @@ class PolymarketBacktester:
                     f"[回测] 阶段 2: {total_spikes} 个 alert, "
                     f"已有 LLM 结果 {skipped} 个(跳过), 待分析 {total_pending} 个 (concurrency={LLM_CONCURRENCY})"
                 )
-                task_manager.update_progress(
-                    task_id, 62,
-                    f"LLM 分析: 跳过 {skipped}, 待分析 {total_pending}..."
-                )
 
-                # 从 DB 回填已有结果到 skipped_items
+                # 从 DB 回填已有结果到 skipped_items，同时构建 slug → LLM 结果缓存
+                import json as _json
+
+                def _pj(val):
+                    if not val:
+                        return []
+                    try:
+                        return _json.loads(val)
+                    except (ValueError, TypeError):
+                        return []
+
+                def _apply_result(alert_data: dict, result: dict):
+                    """将 LLM 结果写入 alert_data。"""
+                    alert_data["affected_tickers"] = result.get("affected_tickers", [])
+                    alert_data["affected_a_shares"] = result.get("affected_a_shares", [])
+                    alert_data["affected_sectors"] = result.get("affected_sectors", [])
+                    alert_data["affected_sw_industries"] = result.get("affected_sw_industries", [])
+                    alert_data["llm_summary"] = result.get("summary")
+                    alert_data["llm_sentiment"] = result.get("overall_sentiment")
+                    alert_data["llm_confidence"] = result.get("confidence")
+
+                def _row_to_result(row) -> dict:
+                    return {
+                        "affected_tickers": _pj(row.affected_tickers),
+                        "affected_a_shares": _pj(row.affected_a_shares),
+                        "affected_sectors": _pj(row.affected_sectors),
+                        "affected_sw_industries": _pj(row.affected_sw_industries),
+                        "summary": row.llm_summary,
+                        "overall_sentiment": row.llm_sentiment,
+                        "confidence": row.llm_confidence,
+                    }
+
+                # slug → LLM 结果缓存（跨 condition_id 复用）
+                slug_llm_cache: dict[str, dict] = {}
+
                 if skipped_items:
-                    import json as _json
                     db_alerts = session.query(PolymarketAlert).filter(
                         PolymarketAlert.llm_summary.isnot(None),
                     ).all()
@@ -206,13 +235,6 @@ class PolymarketBacktester:
                         key = (alert_data["condition_id"], alert_data["alert_type"], snap_ts)
                         row = db_map.get(key)
                         if row:
-                            def _pj(val):
-                                if not val:
-                                    return []
-                                try:
-                                    return _json.loads(val)
-                                except (ValueError, TypeError):
-                                    return []
                             alert_data["affected_tickers"] = _pj(row.affected_tickers)
                             alert_data["affected_a_shares"] = _pj(row.affected_a_shares)
                             alert_data["affected_sectors"] = _pj(row.affected_sectors)
@@ -220,12 +242,42 @@ class PolymarketBacktester:
                             alert_data["llm_summary"] = row.llm_summary
                             alert_data["llm_sentiment"] = row.llm_sentiment
                             alert_data["llm_confidence"] = row.llm_confidence
+                            # 缓存到 slug 级别，供 pending alerts 复用
+                            slug = alert_data.get("slug", "") or alert_data.get("condition_id", "")
+                            if slug and slug not in slug_llm_cache:
+                                slug_llm_cache[slug] = _row_to_result(row)
+
+                # ── 用 slug 缓存预填充 pending alerts ──
+                still_pending = []
+                slug_cache_hits = 0
+                for item in pending:
+                    alert_data, snap_ts = item
+                    slug = alert_data.get("slug", "") or alert_data.get("condition_id", "")
+                    cached = slug_llm_cache.get(slug)
+                    if cached:
+                        _apply_result(alert_data, cached)
+                        skipped_items.append(item)
+                        slug_cache_hits += 1
+                    else:
+                        still_pending.append(item)
+
+                if slug_cache_hits:
+                    logger.info(f"[回测] Slug 缓存命中: {slug_cache_hits} 个 alert 复用已有 LLM 结果")
+
+                # ── Resolution alerts 不调 LLM，从同 slug 的 spike 分析复用 ──
+                pending_spikes = []
+                pending_resolutions = []
+                for item in still_pending:
+                    if item[0]["alert_type"].startswith("resolved"):
+                        pending_resolutions.append(item)
+                    else:
+                        pending_spikes.append(item)
 
                 done_count = 0
 
-                # ── Slug 聚合：同 slug 的 alerts 共享一次 LLM 分析 ──
+                # ── Slug 聚合：仅对 spike alerts 调 LLM ──
                 slug_groups: dict[str, list[tuple[dict, datetime]]] = {}
-                for item in pending:
+                for item in pending_spikes:
                     slug = item[0].get("slug", "") or item[0].get("condition_id", "")
                     slug_groups.setdefault(slug, []).append(item)
 
@@ -238,25 +290,18 @@ class PolymarketBacktester:
                     slug_siblings[slug] = items[1:]
 
                 actual_llm_calls = len(slug_representatives)
-                sibling_count = total_pending - actual_llm_calls
+                n_res_skipped = len(pending_resolutions)
+                sibling_count = len(pending_spikes) - actual_llm_calls
                 logger.info(
                     f"[回测] Slug 聚合: {total_pending} alerts → {actual_llm_calls} 次 LLM 调用 "
-                    f"(节省 {sibling_count} 次)"
+                    f"(slug缓存 {slug_cache_hits}, slug聚合 {sibling_count}, "
+                    f"resolution跳过 {n_res_skipped})"
                 )
                 task_manager.update_progress(
                     task_id, 63,
-                    f"LLM 分析: {actual_llm_calls} 次调用 (slug聚合节省 {sibling_count})..."
+                    f"LLM 分析: {actual_llm_calls} 次调用 "
+                    f"(缓存{slug_cache_hits}+聚合{sibling_count}+resolution{n_res_skipped})..."
                 )
-
-                def _apply_result(alert_data: dict, result: dict):
-                    """将 LLM 结果写入 alert_data。"""
-                    alert_data["affected_tickers"] = result.get("affected_tickers", [])
-                    alert_data["affected_a_shares"] = result.get("affected_a_shares", [])
-                    alert_data["affected_sectors"] = result.get("affected_sectors", [])
-                    alert_data["affected_sw_industries"] = result.get("affected_sw_industries", [])
-                    alert_data["llm_summary"] = result.get("summary")
-                    alert_data["llm_sentiment"] = result.get("overall_sentiment")
-                    alert_data["llm_confidence"] = result.get("confidence")
 
                 def _analyze_one(item: tuple[dict, datetime]) -> tuple[dict, datetime, Optional[dict]]:
                     alert_data, snap_ts = item
@@ -295,13 +340,15 @@ class PolymarketBacktester:
                             analyzed.append((alert_data, snap_ts))
                             self._persist_alert(alert_data, snap_ts, source="backtest")
 
-                            # 将结果复制给同 slug 的兄弟 alerts
+                            # 将结果复制给同 slug 的 spike 兄弟 alerts
                             slug = alert_data.get("slug", "") or alert_data.get("condition_id", "")
-                            if result and slug in slug_siblings:
-                                for sib_data, sib_ts in slug_siblings[slug]:
-                                    _apply_result(sib_data, result)
-                                    analyzed.append((sib_data, sib_ts))
-                                    self._persist_alert(sib_data, sib_ts, source="backtest")
+                            if result:
+                                slug_llm_cache[slug] = result
+                                if slug in slug_siblings:
+                                    for sib_data, sib_ts in slug_siblings[slug]:
+                                        _apply_result(sib_data, result)
+                                        analyzed.append((sib_data, sib_ts))
+                                        self._persist_alert(sib_data, sib_ts, source="backtest")
 
                             done_count += 1
                             if done_count % 50 == 0 or done_count == actual_llm_calls:
@@ -311,6 +358,25 @@ class PolymarketBacktester:
                                     f"LLM 分析 {done_count}/{actual_llm_calls}..."
                                 )
                                 logger.info(f"[回测] LLM 进度: {done_count}/{actual_llm_calls}")
+
+                # ── Resolution alerts: 从 slug_llm_cache 复用，不调 LLM ──
+                res_filled = 0
+                for item in pending_resolutions:
+                    alert_data, snap_ts = item
+                    slug = alert_data.get("slug", "") or alert_data.get("condition_id", "")
+                    cached = slug_llm_cache.get(slug)
+                    if cached:
+                        _apply_result(alert_data, cached)
+                        res_filled += 1
+                    analyzed.append(item)
+                    self._persist_alert(alert_data, snap_ts, source="backtest")
+
+                if pending_resolutions:
+                    logger.info(
+                        f"[回测] Resolution alerts: {len(pending_resolutions)} 个, "
+                        f"从缓存复用 {res_filled} 个, 无 LLM {len(pending_resolutions) - res_filled} 个"
+                    )
+
                 alerts_with_ts = analyzed
 
             # 收集最终 alert 列表
@@ -379,7 +445,8 @@ class PolymarketBacktester:
         max_age = 86400
 
         results: list[tuple[dict, datetime]] = []
-        cooldown: dict[tuple[str, str], float] = {}
+        # 冷却键: condition_id（不再区分 alert_type，同一市场共享冷却）
+        cooldown: dict[str, float] = {}
 
         for snap in snapshots:
             ts = snap.timestamp.timestamp() if snap.timestamp else 0
@@ -393,6 +460,16 @@ class PolymarketBacktester:
             while price_history and price_history[0][0] < cutoff:
                 price_history.popleft()
 
+            # 冷却检查：同一市场在冷却期内只触发一次（不区分 alert_type）
+            cache_key = event.condition_id
+            last_trigger = cooldown.get(cache_key, 0)
+            if ts - last_trigger < POLYMARKET_LLM_COOLDOWN:
+                continue
+
+            # 只保留最显著的一档 spike（与实时监控一致）
+            best_spike = None
+            best_abs_change = 0.0
+
             for alert_type, lookback_seconds, threshold in rules:
                 target_ts = ts - lookback_seconds
                 old_price = self._find_nearest_price(price_history, target_ts, lookback_seconds)
@@ -400,40 +477,41 @@ class PolymarketBacktester:
                     continue
 
                 change = price - old_price
-                if abs(change) < threshold:
-                    continue
+                if abs(change) >= threshold and abs(change) > best_abs_change:
+                    best_abs_change = abs(change)
+                    best_spike = (alert_type, old_price, change, lookback_seconds)
 
-                cache_key = (event.condition_id, alert_type)
-                last_trigger = cooldown.get(cache_key, 0)
-                if ts - last_trigger < POLYMARKET_LLM_COOLDOWN:
-                    continue
-                cooldown[cache_key] = ts
+            if not best_spike:
+                continue
 
-                logger.info(
-                    f"[回测]   {alert_type}: {old_price:.2%} → {price:.2%} ({change:+.2%})"
-                )
+            alert_type, old_price, change, lookback_seconds = best_spike
+            cooldown[cache_key] = ts
 
-                alert_data = {
-                    "condition_id": event.condition_id,
-                    "question": event.question,
-                    "category": event.category,
-                    "slug": event.slug or "",
-                    "alert_type": alert_type,
-                    "price_before": round(old_price, 4),
-                    "price_after": round(price, 4),
-                    "price_change": round(change, 4),
-                    "timeframe_seconds": lookback_seconds,
-                    "timestamp": snap.timestamp.isoformat() if snap.timestamp else None,
-                    "affected_tickers": [],
-                    "affected_a_shares": [],
-                    "affected_sectors": [],
-                    "affected_sw_industries": [],
-                    "llm_summary": None,
-                    "llm_sentiment": None,
-                    "llm_confidence": None,
-                }
+            logger.info(
+                f"[回测]   {alert_type}: {old_price:.2%} → {price:.2%} ({change:+.2%})"
+            )
 
-                results.append((alert_data, snap.timestamp))
+            alert_data = {
+                "condition_id": event.condition_id,
+                "question": event.question,
+                "category": event.category,
+                "slug": event.slug or "",
+                "alert_type": alert_type,
+                "price_before": round(old_price, 4),
+                "price_after": round(price, 4),
+                "price_change": round(change, 4),
+                "timeframe_seconds": lookback_seconds,
+                "timestamp": snap.timestamp.isoformat() if snap.timestamp else None,
+                "affected_tickers": [],
+                "affected_a_shares": [],
+                "affected_sectors": [],
+                "affected_sw_industries": [],
+                "llm_summary": None,
+                "llm_sentiment": None,
+                "llm_confidence": None,
+            }
+
+            results.append((alert_data, snap.timestamp))
 
         # ── Resolution 检测: 事件出结果 ──
         if len(snapshots) >= 2:
@@ -501,44 +579,71 @@ class PolymarketBacktester:
         return results
 
     def _persist_alert(self, alert_data: dict, timestamp, source: str = "backtest"):
-        """将回测 alert 写入 polymarket_alert 表。"""
+        """将回测 alert 写入 polymarket_alert 表（单条，仅 LLM 代表用）。"""
+        self._persist_alerts_batch([(alert_data, timestamp)], source=source)
+
+    def _persist_alerts_batch(self, items: list[tuple[dict, ...]], source: str = "backtest"):
+        """批量将回测 alerts 写入 polymarket_alert 表。"""
+        if not items:
+            return
         import json as _json
 
         session = self._db.get_session()
         try:
-            # 用 condition_id + alert_type + timestamp 去重
-            existing = session.query(PolymarketAlert).filter(
-                PolymarketAlert.condition_id == alert_data["condition_id"],
-                PolymarketAlert.alert_type == alert_data["alert_type"],
-                PolymarketAlert.created_at == timestamp,
-            ).first()
-            if existing:
-                session.close()
-                return
+            # 一次性查出已存在的 keys
+            from sqlalchemy import tuple_
+            existing_keys: set[tuple] = set()
+            # 分批查询避免 SQL 过长
+            batch_size = 500
+            for i in range(0, len(items), batch_size):
+                batch = items[i:i + batch_size]
+                conditions = [(it[0]["condition_id"], it[0]["alert_type"], it[1]) for it in batch]
+                rows = session.query(
+                    PolymarketAlert.condition_id,
+                    PolymarketAlert.alert_type,
+                    PolymarketAlert.created_at,
+                ).filter(
+                    tuple_(
+                        PolymarketAlert.condition_id,
+                        PolymarketAlert.alert_type,
+                        PolymarketAlert.created_at,
+                    ).in_(conditions)
+                ).all()
+                existing_keys.update((r[0], r[1], r[2]) for r in rows)
 
-            record = PolymarketAlert(
-                condition_id=alert_data["condition_id"],
-                alert_type=alert_data["alert_type"],
-                price_before=alert_data.get("price_before"),
-                price_after=alert_data.get("price_after"),
-                price_change=alert_data.get("price_change"),
-                timeframe_seconds=alert_data.get("timeframe_seconds"),
-                question=alert_data.get("question"),
-                affected_tickers=_json.dumps(alert_data.get("affected_tickers", []), ensure_ascii=False),
-                affected_a_shares=_json.dumps(alert_data.get("affected_a_shares", []), ensure_ascii=False),
-                affected_sectors=_json.dumps(alert_data.get("affected_sectors", []), ensure_ascii=False),
-                affected_sw_industries=_json.dumps(alert_data.get("affected_sw_industries", []), ensure_ascii=False),
-                llm_summary=alert_data.get("llm_summary"),
-                llm_sentiment=alert_data.get("llm_sentiment"),
-                llm_confidence=alert_data.get("llm_confidence"),
-                is_read=False,
-                created_at=timestamp,
-            )
-            session.add(record)
-            session.commit()
+            new_records = []
+            for alert_data, timestamp in items:
+                key = (alert_data["condition_id"], alert_data["alert_type"], timestamp)
+                if key in existing_keys:
+                    continue
+                new_records.append(PolymarketAlert(
+                    condition_id=alert_data["condition_id"],
+                    alert_type=alert_data["alert_type"],
+                    price_before=alert_data.get("price_before"),
+                    price_after=alert_data.get("price_after"),
+                    price_change=alert_data.get("price_change"),
+                    timeframe_seconds=alert_data.get("timeframe_seconds"),
+                    question=alert_data.get("question"),
+                    affected_tickers=_json.dumps(alert_data.get("affected_tickers", []), ensure_ascii=False),
+                    affected_a_shares=_json.dumps(alert_data.get("affected_a_shares", []), ensure_ascii=False),
+                    affected_sectors=_json.dumps(alert_data.get("affected_sectors", []), ensure_ascii=False),
+                    affected_sw_industries=_json.dumps(alert_data.get("affected_sw_industries", []), ensure_ascii=False),
+                    llm_summary=alert_data.get("llm_summary"),
+                    llm_sentiment=alert_data.get("llm_sentiment"),
+                    llm_confidence=alert_data.get("llm_confidence"),
+                    is_read=False,
+                    created_at=timestamp,
+                ))
+
+            if new_records:
+                session.bulk_save_objects(new_records)
+                session.commit()
+                logger.info(f"[回测] 批量持久化 {len(new_records)} 条 alerts (跳过 {len(items) - len(new_records)} 条已存在)")
+            else:
+                logger.info(f"[回测] 全部 {len(items)} 条 alerts 已存在，跳过")
         except Exception as e:
             session.rollback()
-            logger.debug(f"持久化回测 alert 失败: {e}")
+            logger.warning(f"批量持久化 alerts 失败: {e}")
         finally:
             session.close()
 

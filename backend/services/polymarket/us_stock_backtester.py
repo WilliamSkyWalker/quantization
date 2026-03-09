@@ -60,7 +60,7 @@ class UsStockBacktester:
         task_id: str,
         holding_days: int = 5,
         min_confidence: float = 0.0,
-        limit: int = 200,
+        limit: int = 0,
     ) -> dict:
         """模式 B: 从 DB 告警表运行 P&L 回测（同日同市场同类型自动去重）。"""
         task_manager.update_progress(task_id, 5, "从数据库加载告警...")
@@ -70,7 +70,7 @@ class UsStockBacktester:
             query = session.query(PolymarketAlert).order_by(
                 PolymarketAlert.created_at.desc()
             )
-            if limit:
+            if limit and limit > 0:
                 query = query.limit(limit)
             db_alerts = query.all()
 
@@ -289,16 +289,19 @@ class UsStockBacktester:
                 "alert_type": trade["alert_type"],
             })
 
-        task_manager.update_progress(task_id, 92, "汇总统计...")
+        task_manager.update_progress(task_id, 92, f"汇总统计 ({len(results)} 笔交易)...")
         summary = self._compute_summary(results, total_alerts)
 
+        # 按收益排序，只返回前 500 条给前端（summary 已用全量计算）
+        sorted_trades = sorted(results, key=lambda t: abs(t["return_pct"]), reverse=True)
         return {
-            "trades": results,
+            "trades": sorted_trades[:500],
             "summary": summary,
             "config": {
                 "holding_days": holding_days,
                 "total_alerts": total_alerts,
                 "min_confidence": min_confidence,
+                "total_trades_computed": len(results),
             },
         }
 

@@ -24,6 +24,7 @@ import pandas as pd
 from backend.services.config import (
     IPO_FILTER_DAYS,
     MIN_DAILY_TURNOVER,
+    MIN_MARKET_CAP,
     EXCLUDE_STAR_MARKET,
     ALLOWED_INDUSTRIES,
     LOG_LEVEL,
@@ -265,7 +266,25 @@ def get_clean_universe(
         df_daily["avg_amount"] = None
 
     # ----------------------------------------------------------
-    # 4. 合并基本信息
+    # 4. 市值过滤（剔除微盘股）
+    # ----------------------------------------------------------
+    if MIN_MARKET_CAP and MIN_MARKET_CAP > 0:
+        codes_str_mv = "','".join(df_daily["ts_code"].tolist())
+        df_mv = db.query(
+            f"SELECT ts_code, `close`, total_share "
+            f"FROM daily_price "
+            f"WHERE trade_date = '{target_date_str}' "
+            f"AND ts_code IN ('{codes_str_mv}')"
+        )
+        if not df_mv.empty and "total_share" in df_mv.columns:
+            df_mv["total_mv"] = df_mv["close"] * df_mv["total_share"]
+            large_codes = df_mv[df_mv["total_mv"] >= MIN_MARKET_CAP]["ts_code"].tolist()
+            before_mv = len(df_daily)
+            df_daily = df_daily[df_daily["ts_code"].isin(large_codes)]
+            logger.info(f"市值过滤(>={MIN_MARKET_CAP/1e8:.0f}亿): {before_mv} -> {len(df_daily)} 只")
+
+    # ----------------------------------------------------------
+    # 5. 合并基本信息
     # ----------------------------------------------------------
     df_result = df_daily.merge(
         df_basic[["ts_code", "name", "market", "list_date"]],

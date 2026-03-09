@@ -826,7 +826,7 @@ def us_stock_pnl_from_db(request):
     data = request.data
     holding_days = int(data.get("holding_days", 5))
     min_confidence = float(data.get("min_confidence", 0.0))
-    limit = int(data.get("limit", 200))
+    limit = int(data.get("limit", 0))
 
     def _run(task_id):
         return _us_backtester.run_from_db(
@@ -855,7 +855,7 @@ def a_share_pnl_from_db(request):
     data = request.data
     holding_days = int(data.get("holding_days", 5))
     min_confidence = float(data.get("min_confidence", 0.0))
-    limit = int(data.get("limit", 200))
+    limit = int(data.get("limit", 0))
 
     def _run(task_id):
         return _a_share_backtester.run_from_db(

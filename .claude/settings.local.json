@@ -71,7 +71,9 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "Bash(git status:*)"
+      "Bash(git status:*)",
+      "Bash(PYTHONPATH=/Users/daweilun/Documents/quantization python3:*)",
+      "Bash(brew services:*)"
     ]
   }
 }

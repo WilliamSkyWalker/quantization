@@ -379,10 +379,13 @@ class PolymarketMonitor:
         self._check_spikes(condition_id, price)
 
     def _check_spikes(self, condition_id: str, current_price: float):
-        """检查三档时间窗口是否有 Spike。"""
+        """检查三档时间窗口是否有 Spike，仅触发最显著的一档。"""
         history = self._price_histories.get(condition_id)
         if not history:
             return
+
+        best_spike = None
+        best_abs_change = 0.0
 
         for alert_type, lookback_seconds, threshold in SPIKE_RULES:
             old_price = history.get_price_at(lookback_seconds)
@@ -390,14 +393,19 @@ class PolymarketMonitor:
                 continue
 
             change = current_price - old_price
-            if abs(change) >= threshold:
-                self._trigger_alert(
-                    condition_id=condition_id,
-                    alert_type=alert_type,
-                    price_before=old_price,
-                    price_after=current_price,
-                    timeframe_seconds=lookback_seconds,
-                )
+            if abs(change) >= threshold and abs(change) > best_abs_change:
+                best_abs_change = abs(change)
+                best_spike = (alert_type, old_price, lookback_seconds)
+
+        if best_spike:
+            alert_type, price_before, timeframe_seconds = best_spike
+            self._trigger_alert(
+                condition_id=condition_id,
+                alert_type=alert_type,
+                price_before=price_before,
+                price_after=current_price,
+                timeframe_seconds=timeframe_seconds,
+            )
 
     def _trigger_alert(self, condition_id: str, alert_type: str,
                        price_before: float, price_after: float,

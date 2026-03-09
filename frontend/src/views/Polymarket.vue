@@ -1047,16 +1047,12 @@ function handleTabChange(tab: string) {
               <n-button
                 type="primary"
                 :loading="pnlRunLoading"
-                :disabled="!btResult"
                 @click="doRunPnl"
               >
                 运行美股新闻信号回测
               </n-button>
             </n-gi>
           </n-grid>
-          <div v-if="!btResult" style="color: #999; font-size: 12px; margin-top: 8px">
-            请先运行上方量化回测生成告警数据
-          </div>
         </n-card>
 
         <!-- 美股新闻信号回测进度 -->
@@ -1326,16 +1322,12 @@ function handleTabChange(tab: string) {
               <n-button
                 type="primary"
                 :loading="cnPnlRunLoading"
-                :disabled="!btResult"
                 @click="doRunCnPnl"
               >
                 运行 A 股新闻信号回测
               </n-button>
             </n-gi>
           </n-grid>
-          <div v-if="!btResult" style="color: #999; font-size: 12px; margin-top: 8px">
-            请先运行上方量化回测生成告警数据
-          </div>
         </n-card>
 
         <!-- A股新闻信号回测进度 -->

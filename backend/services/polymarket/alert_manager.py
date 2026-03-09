@@ -31,8 +31,9 @@ class AlertManager:
     def __init__(self):
         self._db = DatabaseManager()
         self._analyzer = EventAnalyzer()
-        # 去重缓存: (condition_id, alert_type) -> last_trigger_timestamp
-        self._cooldown_cache: dict[tuple[str, str], float] = {}
+        # 去重缓存: event_slug (或 condition_id) -> last_trigger_timestamp
+        # 同一事件的所有 market 共享冷却，不再按 alert_type 区分
+        self._cooldown_cache: dict[str, float] = {}
 
     def trigger_alert(
         self,
@@ -51,13 +52,14 @@ class AlertManager:
         3. 写入 DB
         4. WebSocket 推送
         """
-        # 去重
-        cache_key = (condition_id, alert_type)
+        # 去重：按事件 slug 聚合（同一事件的所有 market + 所有 alert_type 共享冷却）
+        event_slug = market_info.get("slug", "")
+        cache_key = event_slug if event_slug else condition_id
         now = time.time()
         last_trigger = self._cooldown_cache.get(cache_key, 0)
         if now - last_trigger < POLYMARKET_LLM_COOLDOWN:
             logger.debug(
-                f"告警冷却中: {condition_id} {alert_type}, "
+                f"告警冷却中 (event={cache_key[:40]}): {condition_id} {alert_type}, "
                 f"距上次 {now - last_trigger:.0f}s < {POLYMARKET_LLM_COOLDOWN}s"
             )
             return

@@ -709,7 +709,7 @@ class MultiFactorStrategy:
 
     def get_rebalance_dates(self, start_date: str, end_date: str) -> list[str]:
         """
-        获取调仓日期列表（每月最后一个交易日）。
+        获取调仓日期列表（每月两次：月中 + 月末最后交易日）。
 
         Args:
             start_date: 起始日期。
@@ -732,10 +732,20 @@ class MultiFactorStrategy:
         df["trade_date"] = pd.to_datetime(df["trade_date"])
         df["year_month"] = df["trade_date"].dt.to_period("M")
 
-        # 每月最后一个交易日
-        month_end = df.groupby("year_month")["trade_date"].max()
-        dates = [d.strftime("%Y-%m-%d") for d in month_end]
+        dates = []
+        for _, group in df.groupby("year_month"):
+            trading_days = group["trade_date"].sort_values()
+            # 月中：第 15 日当天或之后的第一个交易日
+            month_start = trading_days.iloc[0]
+            mid_target = month_start.replace(day=15)
+            mid_days = trading_days[trading_days >= mid_target]
+            if not mid_days.empty:
+                dates.append(mid_days.iloc[0].strftime("%Y-%m-%d"))
+            # 月末：最后一个交易日
+            dates.append(trading_days.iloc[-1].strftime("%Y-%m-%d"))
 
+        # 去重并排序（月中和月末可能重合于短月）
+        dates = sorted(set(dates))
         return dates
 
     def generate_signals(

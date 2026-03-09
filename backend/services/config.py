@@ -87,6 +87,7 @@ DD_START_THRESHOLD = float(os.environ.get("DD_START_THRESHOLD", "0.10"))
 DD_MAX_THRESHOLD = float(os.environ.get("DD_MAX_THRESHOLD", "0.25"))
 DD_MIN_POSITION = float(os.environ.get("DD_MIN_POSITION", "0.50"))
 MIN_DAILY_TURNOVER = 50_000_000
+MIN_MARKET_CAP = float(os.environ.get("MIN_MARKET_CAP", "3e9"))  # 最低总市值（元），默认 30 亿
 
 # 换手惩罚系数（0.0 = 关闭）
 TURNOVER_PENALTY_LAMBDA = float(os.environ.get("TURNOVER_PENALTY_LAMBDA", "0.15"))
