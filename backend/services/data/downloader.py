@@ -224,7 +224,7 @@ class TushareDownloader:
         logger.info("开始下载股票列表...")
 
         # 获取上市中 + 已退市股票（不传 exchange，返回全部交易所）
-        fields = "ts_code,name,market,list_date,delist_date,total_share,float_share"
+        fields = "ts_code,name,market,list_date,delist_date"
         df_listed = _tushare_call(self.pro, "stock_basic", self.limiter,
                                   list_status="L", fields=fields)
         df_delisted = _tushare_call(self.pro, "stock_basic", self.limiter,
@@ -255,14 +255,8 @@ class TushareDownloader:
             lambda n: 1 if any(kw in str(n) for kw in ST_KEYWORDS) else 0
         )
 
-        # 股本数值转换
-        for col in ["total_share", "float_share"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-
         # 写入数据库
-        write_cols = ["ts_code", "name", "market", "list_date", "delist_date", "is_st",
-                       "total_share", "float_share"]
+        write_cols = ["ts_code", "name", "market", "list_date", "delist_date", "is_st"]
         self.db.upsert_stock_basic(df[write_cols])
 
         logger.info(
