@@ -35,6 +35,11 @@ from backend.services.config import (
     PROJECT_ROOT,
     ALLOWED_INDUSTRIES,
     INDUSTRY_INDEX_MAP,
+    USE_VOL_TARGETING,
+    TARGET_VOL,
+    VOL_LOOKBACK_DAYS,
+    VOL_SCALE_MIN,
+    VOL_SCALE_MAX,
 )
 from backend.services.data.database import DatabaseManager
 
@@ -357,9 +362,28 @@ class BacktestEngine:
             # === 检查今天是否产生新信号（收盘后生效，明天执行）===
             if signal_idx < len(signal_dates) and today_str >= signal_dates[signal_idx]:
                 new_signal = signals[signal_dates[signal_idx]]
-                pending_signal = dict(
+                raw_weights = dict(
                     zip(new_signal["ts_code"], new_signal["weight"])
                 )
+
+                # 波动率目标管理：根据已实现波动率缩放仓位
+                if USE_VOL_TARGETING and len(nav) >= VOL_LOOKBACK_DAYS + 1:
+                    nav_arr = nav.values
+                    recent_rets = np.diff(nav_arr[-VOL_LOOKBACK_DAYS - 1:]) / nav_arr[-VOL_LOOKBACK_DAYS - 1:-1]
+                    realized_vol = np.std(recent_rets) * np.sqrt(252)
+                    if realized_vol > 0:
+                        vol_scale = np.clip(
+                            TARGET_VOL / realized_vol,
+                            VOL_SCALE_MIN, VOL_SCALE_MAX,
+                        )
+                        if vol_scale < 1.0:
+                            raw_weights = {k: v * vol_scale for k, v in raw_weights.items()}
+                            logger.info(
+                                f"回测波动率管理: realized={realized_vol:.2%}, "
+                                f"scale={vol_scale:.2f}"
+                            )
+
+                pending_signal = raw_weights
                 signal_idx += 1
 
             # === 每日净值 = (现金 + 持仓市值) / 初始资金 ===

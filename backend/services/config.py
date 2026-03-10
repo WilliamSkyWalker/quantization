@@ -92,9 +92,9 @@ INDUSTRY_GROUPS: dict[str, list[str]] = {
 MAX_DRAWDOWN_THRESHOLD = 0.25
 DRAWDOWN_REDUCE_POSITION = 0.70
 # 线性回撤响应参数
-DD_START_THRESHOLD = float(os.environ.get("DD_START_THRESHOLD", "0.10"))
-DD_MAX_THRESHOLD = float(os.environ.get("DD_MAX_THRESHOLD", "0.25"))
-DD_MIN_POSITION = float(os.environ.get("DD_MIN_POSITION", "0.50"))
+DD_START_THRESHOLD = float(os.environ.get("DD_START_THRESHOLD", "0.07"))
+DD_MAX_THRESHOLD = float(os.environ.get("DD_MAX_THRESHOLD", "0.20"))
+DD_MIN_POSITION = float(os.environ.get("DD_MIN_POSITION", "0.40"))
 MIN_DAILY_TURNOVER = 50_000_000
 MIN_MARKET_CAP = float(os.environ.get("MIN_MARKET_CAP", "3e9"))  # 最低总市值（元），默认 30 亿
 
@@ -146,10 +146,20 @@ if _raw_regime_bear.strip():
         REGIME_BEAR_OVERRIDES = {k: float(v) for k, v in _json.loads(_raw_regime_bear).items()}
     except Exception:
         pass
+# 牛市大类权重覆盖（强牛时提升动量/成长，降低质量防守）
+_raw_regime_bull = os.environ.get("REGIME_BULL_OVERRIDES", "")
+REGIME_BULL_OVERRIDES: dict[str, float] = {
+    "momentum": 1.2, "quality": 0.9, "growth": 1.2, "value": 0.5, "technical": 0.6,
+}
+if _raw_regime_bull.strip():
+    try:
+        REGIME_BULL_OVERRIDES = {k: float(v) for k, v in _json.loads(_raw_regime_bull).items()}
+    except Exception:
+        pass
 
 # 波动率目标管理（替代回撤缩仓）
 USE_VOL_TARGETING = os.environ.get("USE_VOL_TARGETING", "1") == "1"
-TARGET_VOL = float(os.environ.get("TARGET_VOL", "0.18"))
+TARGET_VOL = float(os.environ.get("TARGET_VOL", "0.16"))
 VOL_LOOKBACK_DAYS = int(os.environ.get("VOL_LOOKBACK_DAYS", "60"))
 VOL_SCALE_MIN = float(os.environ.get("VOL_SCALE_MIN", "0.3"))
 VOL_SCALE_MAX = float(os.environ.get("VOL_SCALE_MAX", "1.0"))
