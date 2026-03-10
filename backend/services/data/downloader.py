@@ -224,7 +224,7 @@ class TushareDownloader:
         logger.info("开始下载股票列表...")
 
         # 获取上市中 + 已退市股票（不传 exchange，返回全部交易所）
-        fields = "ts_code,name,market,list_date,delist_date"
+        fields = "ts_code,name,market,list_date,delist_date,total_share,float_share"
         df_listed = _tushare_call(self.pro, "stock_basic", self.limiter,
                                   list_status="L", fields=fields)
         df_delisted = _tushare_call(self.pro, "stock_basic", self.limiter,
@@ -255,8 +255,14 @@ class TushareDownloader:
             lambda n: 1 if any(kw in str(n) for kw in ST_KEYWORDS) else 0
         )
 
+        # 股本数值转换
+        for col in ["total_share", "float_share"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
         # 写入数据库
-        write_cols = ["ts_code", "name", "market", "list_date", "delist_date", "is_st"]
+        write_cols = ["ts_code", "name", "market", "list_date", "delist_date", "is_st",
+                       "total_share", "float_share"]
         self.db.upsert_stock_basic(df[write_cols])
 
         logger.info(
@@ -351,9 +357,12 @@ class TushareDownloader:
         if df_daily.empty:
             return None
 
-        # 2. 换手率
+        # 2. 每日指标（换手率、估值、市值等）
         df_basic = _tushare_call(self.pro, "daily_basic", self.limiter,
-                                 trade_date=trade_date, fields="ts_code,trade_date,turnover_rate")
+                                 trade_date=trade_date,
+                                 fields="ts_code,trade_date,turnover_rate,dv_ttm,"
+                                        "pe_ttm,pb,ps_ttm,total_mv,circ_mv,"
+                                        "turnover_rate_f,volume_ratio")
 
         # 3. 复权因子
         df_adj = _tushare_call(self.pro, "adj_factor", self.limiter,
@@ -364,10 +373,15 @@ class TushareDownloader:
         if df_daily.empty:
             return None
 
-        # 合并换手率
+        # 合并每日指标（换手率、估值、市值等）
         if not df_basic.empty:
+            basic_cols = ["ts_code"]
+            for col in ["turnover_rate", "dv_ttm", "pe_ttm", "pb", "ps_ttm",
+                         "total_mv", "circ_mv", "turnover_rate_f", "volume_ratio"]:
+                if col in df_basic.columns:
+                    basic_cols.append(col)
             df_daily = df_daily.merge(
-                df_basic[["ts_code", "turnover_rate"]],
+                df_basic[basic_cols],
                 on="ts_code", how="left",
             )
 
@@ -391,6 +405,8 @@ class TushareDownloader:
         keep_cols = [
             "ts_code", "trade_date", "open", "high", "low", "close",
             "vol", "amount", "pct_chg", "turnover_rate", "adj_factor",
+            "dv_ttm", "pe_ttm", "pb", "ps_ttm",
+            "total_mv", "circ_mv", "turnover_rate_f", "volume_ratio",
             "is_limit_up", "is_limit_down",
         ]
         df_out = df_daily[[c for c in keep_cols if c in df_daily.columns]].copy()
@@ -452,6 +468,112 @@ class TushareDownloader:
 
         logger.info(f"日线行情补录完成: 缺失 {len(missing)} 日, 成功补录 {filled} 日")
         return {'missing_dates': len(missing), 'filled': filled}
+
+    # ----------------------------------------------------------
+    # daily_basic 字段补录
+    # ----------------------------------------------------------
+
+    def backfill_daily_basic(
+        self,
+        start_date: str = DATA_START_DATE,
+        end_date: Optional[str] = None,
+    ) -> dict:
+        """
+        补录 daily_price 中缺失的 daily_basic 字段（pe_ttm/pb/dv_ttm 等）。
+
+        仅对 pe_ttm IS NULL 的交易日重新拉取 daily_basic 并 UPDATE，
+        不重新下载 daily/adj_factor，节省 2/3 的 API 调用。
+
+        Returns:
+            {'total_dates': int, 'filled': int}
+        """
+        if end_date is None:
+            end_date = datetime.now().strftime("%Y%m%d")
+
+        # 找出需要补录的交易日（pe_ttm 为 NULL 的日期）
+        df_missing = self.db.query(
+            "SELECT DISTINCT trade_date as td "
+            "FROM daily_price "
+            "WHERE pe_ttm IS NULL "
+            "AND ts_code LIKE '00%' "
+            "AND trade_date >= :start_date AND trade_date <= :end_date "
+            "ORDER BY td",
+            params={"start_date": start_date, "end_date": end_date},
+        )
+
+        if df_missing.empty:
+            logger.info("daily_basic 字段无需补录")
+            return {'total_dates': 0, 'filled': 0}
+
+        # 转为 YYYYMMDD 格式
+        dates = pd.to_datetime(df_missing["td"]).dt.strftime("%Y%m%d").tolist()
+        logger.info(f"需补录 daily_basic 的交易日: {len(dates)} 个")
+
+        filled = 0
+        basic_fields = (
+            "ts_code,trade_date,turnover_rate,dv_ttm,pe_ttm,pb,ps_ttm,"
+            "total_mv,circ_mv,turnover_rate_f,volume_ratio"
+        )
+
+        from sqlalchemy import text as sa_text
+
+        for trade_date in tqdm(dates, desc="补录 daily_basic"):
+            try:
+                df = _tushare_call(
+                    self.pro, "daily_basic", self.limiter,
+                    trade_date=trade_date, fields=basic_fields,
+                )
+                if df.empty:
+                    continue
+
+                # 筛选沪深两市
+                df = df[df["ts_code"].str.match(r"^(00|30|60|68)")].copy()
+                if df.empty:
+                    continue
+
+                # 构建批量 UPDATE（通过临时 INSERT ON DUPLICATE KEY UPDATE）
+                update_cols = [
+                    "dv_ttm", "pe_ttm", "pb", "ps_ttm",
+                    "total_mv", "circ_mv", "turnover_rate_f", "volume_ratio",
+                ]
+                existing_update_cols = [c for c in update_cols if c in df.columns]
+
+                if not existing_update_cols:
+                    continue
+
+                # 转日期格式
+                df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+
+                # 使用 ON DUPLICATE KEY UPDATE 只更新新字段
+                col_names = ", ".join([f"`{c}`" for c in ["ts_code", "trade_date"] + existing_update_cols])
+                placeholders = ", ".join([f":{c}" for c in ["ts_code", "trade_date"] + existing_update_cols])
+                update_clause = ", ".join([f"`{c}` = VALUES(`{c}`)" for c in existing_update_cols])
+
+                sql = sa_text(
+                    f"INSERT INTO daily_price ({col_names}) VALUES ({placeholders}) "
+                    f"ON DUPLICATE KEY UPDATE {update_clause}"
+                )
+
+                records = df[["ts_code", "trade_date"] + existing_update_cols].to_dict("records")
+                # NaN → None
+                for rec in records:
+                    for k, v in rec.items():
+                        if isinstance(v, float) and pd.isna(v):
+                            rec[k] = None
+
+                batch_size = 1000
+                with self.db.engine.begin() as conn:
+                    for i in range(0, len(records), batch_size):
+                        batch = records[i:i + batch_size]
+                        conn.execute(sql, batch)
+
+                filled += 1
+
+            except Exception as e:
+                logger.warning(f"补录交易日 {trade_date} daily_basic 失败: {e}")
+
+        logger.info(f"daily_basic 补录完成: {filled}/{len(dates)} 个交易日")
+        return {'total_dates': len(dates), 'filled': filled}
 
     # ----------------------------------------------------------
     # 指数数据补录

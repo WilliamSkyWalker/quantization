@@ -177,6 +177,7 @@ def data_download(request):
         'update_reports': ('刷新券商研报', _run_update_reports),
         'update_sentiment': ('增量更新舆情', _run_update_sentiment),
         'backfill_daily': ('补录日线行情', _run_backfill_daily),
+        'backfill_daily_basic': ('补录日度指标(PE/PB/市值等)', _run_backfill_daily_basic),
         'backfill_financial': ('补录财务季度', _run_backfill_financial),
         'backfill_index': ('补录指数数据', _run_backfill_index),
         'backfill_commodity': ('补录商品期货', _run_backfill_commodity),
@@ -570,6 +571,15 @@ def _run_backfill_daily(task_id):
     dl = TushareDownloader(db)
     task_manager.update_progress(task_id, 10, '检测缺失交易日...')
     result = dl.backfill_daily_prices()
+    return result
+
+
+def _run_backfill_daily_basic(task_id):
+    from backend.services.data.downloader import TushareDownloader
+    db = _get_db()
+    dl = TushareDownloader(db)
+    task_manager.update_progress(task_id, 10, '检测缺失daily_basic字段...')
+    result = dl.backfill_daily_basic()
     return result
 
 

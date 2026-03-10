@@ -42,6 +42,7 @@ from backend.services.config import (
 from backend.services.data.database import DatabaseManager
 from backend.services.data.cleaner import get_clean_universe
 from backend.services.factors.value import EPFactor, BPFactor
+from backend.services.factors.dividend import DividendYieldFactor
 from backend.services.factors.momentum import MOM1MFactor, MOM3MFactor, MOM12MFactor, ShortReversalFactor, ResidualMomentumFactor
 from backend.services.factors.quality import ROEFactor, GrossMarginFactor, ProfitStabilityFactor, MarginTrendFactor
 from backend.services.factors.growth import NetProfitYOYFactor, RevenueYOYFactor, NetProfitCAGR3YFactor
@@ -91,7 +92,7 @@ class MultiFactorStrategy:
     # 因子大类定义（组内加权平均 → 组间固定分母合成）
     # ----------------------------------------------------------
     FACTOR_CATEGORIES = {
-        "value":    ["EP", "BP"],
+        "value":    ["EP", "BP", "DIV_YIELD"],
         "quality":  ["ROE_TTM", "GROSS_MARGIN", "PROFIT_STB", "MARGIN_TREND"],
         "growth":   ["NET_PROFIT_YOY", "REVENUE_YOY", "NET_PROFIT_CAGR_3Y"],
         "momentum": ["MOM_1M", "MOM_3M", "MOM_12M", "REV_5D", "IND_MOM", "RESIDUAL_MOM", "CMDTY_MOM"],
@@ -148,6 +149,7 @@ class MultiFactorStrategy:
             # 价值因子
             EPFactor(db),
             BPFactor(db),
+            DividendYieldFactor(db),
             # 动量因子
             MOM1MFactor(db),
             MOM3MFactor(db),
@@ -195,6 +197,8 @@ class MultiFactorStrategy:
         # 因子权重（默认等权，新因子使用差异化权重）
         if factor_weights is None:
             self.factor_weights = {f.name: 1.0 for f in self.factors}
+            # 股息率因子
+            self.factor_weights["DIV_YIELD"] = 0.8
             # 动量因子（降低纯趋势因子权重，提升反转因子）
             self.factor_weights["MOM_1M"] = 0.6            # 1月动量噪音大（1.0→0.6）
             self.factor_weights["MOM_3M"] = 0.8            # 3月动量适度降权（1.0→0.8）

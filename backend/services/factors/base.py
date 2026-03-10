@@ -103,7 +103,9 @@ class FactorBase(ABC):
         ).strftime("%Y-%m-%d")
         price_sql = (
             "SELECT ts_code, trade_date, pct_chg, turnover_rate, volume, amount, "
-            "close, adj_factor FROM daily_price "
+            "close, adj_factor, dv_ttm, pe_ttm, pb, ps_ttm, "
+            "total_mv, circ_mv, turnover_rate_f, volume_ratio "
+            "FROM daily_price "
             "WHERE trade_date >= :start_date AND trade_date <= :end_date "
             "ORDER BY ts_code, trade_date"
         )

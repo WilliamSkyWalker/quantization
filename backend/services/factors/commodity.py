@@ -21,6 +21,7 @@ import pandas as pd
 
 from backend.services.config import (
     COMMODITY_INDUSTRY_MAP,
+    COMMODITY_SECONDARY_MAP,
     COMMODITY_MOM_LOOKBACK,
     COMMODITY_SURGE_ZSCORE,
     COMMODITY_SURGE_MULTIPLIER,
@@ -77,9 +78,10 @@ class CommodityMomentumFactor(FactorBase):
             logger.warning("CMDTY_MOM: 商品动量计算结果为空")
             return result
 
-        # 4. 构建行业→商品动量映射（L2 和 L1 两层）
+        # 4. 构建行业→商品动量映射（L2 和 L1 两层 + 二级映射）
         l2_momentum = self._aggregate_by_industry(commodity_mom, level="l2")
         l1_momentum = self._aggregate_by_industry(commodity_mom, level="l1")
+        secondary_momentum = self._aggregate_secondary(commodity_mom)
 
         # 5. 为每只股票赋值
         stock_industry = industry_df[
@@ -98,6 +100,9 @@ class CommodityMomentumFactor(FactorBase):
             # L1 回退
             if pd.notna(l1) and l1 in l1_momentum:
                 return l1_momentum[l1]
+            # 二级映射回退（间接受商品价格影响的行业）
+            if pd.notna(l1) and l1 in secondary_momentum:
+                return secondary_momentum[l1] * 0.5  # 间接影响打折
             return np.nan
 
         stock_industry["factor_value"] = stock_industry.apply(_get_momentum, axis=1)
@@ -197,6 +202,32 @@ class CommodityMomentumFactor(FactorBase):
             industry_data[ind_name].append((data["mom"], data["oi"]))
 
         # OI 加权平均
+        result = {}
+        for ind_name, items in industry_data.items():
+            total_oi = sum(oi for _, oi in items)
+            if total_oi > 0:
+                weighted_mom = sum(mom * oi for mom, oi in items) / total_oi
+                result[ind_name] = weighted_mom
+
+        return result
+
+    @staticmethod
+    def _aggregate_secondary(
+        commodity_mom: dict[str, dict],
+    ) -> dict[str, float]:
+        """
+        通过二级映射聚合商品动量到间接受影响的行业。
+
+        同一行业可被多个商品映射，取 OI 加权平均。
+        """
+        industry_data: dict[str, list] = {}
+        for code, data in commodity_mom.items():
+            secondary = COMMODITY_SECONDARY_MAP.get(code, [])
+            for ind_name in secondary:
+                if ind_name not in industry_data:
+                    industry_data[ind_name] = []
+                industry_data[ind_name].append((data["mom"], data["oi"]))
+
         result = {}
         for ind_name, items in industry_data.items():
             total_oi = sum(oi for _, oi in items)

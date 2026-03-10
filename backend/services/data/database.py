@@ -99,6 +99,14 @@ class DailyPrice(Base):
     turnover_rate = Column(Float, comment="换手率（%）")
     pct_chg = Column(Float, comment="涨跌幅（%）")
     adj_factor = Column(Float, comment="复权因子")
+    dv_ttm = Column(Float, comment="近12个月股息率（%）")
+    pe_ttm = Column(Float, comment="滚动市盈率TTM")
+    pb = Column(Float, comment="市净率")
+    ps_ttm = Column(Float, comment="滚动市销率TTM")
+    total_mv = Column(Float, comment="总市值（万元）")
+    circ_mv = Column(Float, comment="流通市值（万元）")
+    turnover_rate_f = Column(Float, comment="换手率（自由流通股本）")
+    volume_ratio = Column(Float, comment="量比")
     is_limit_up = Column(Integer, default=0, comment="是否涨停：0=否，1=是")
     is_limit_down = Column(Integer, default=0, comment="是否跌停：0=否，1=是")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -932,7 +940,9 @@ class DatabaseManager:
             cols = [
                 "ts_code", "trade_date", "open", "high", "low", "close",
                 "volume", "amount", "turnover_rate", "pct_chg",
-                "adj_factor", "is_limit_up", "is_limit_down", "updated_at",
+                "adj_factor", "dv_ttm", "pe_ttm", "pb", "ps_ttm",
+                "total_mv", "circ_mv", "turnover_rate_f", "volume_ratio",
+                "is_limit_up", "is_limit_down", "updated_at",
             ]
             existing_cols = [c for c in cols if c in df.columns]
             update_cols = [c for c in existing_cols if c not in ("ts_code", "trade_date")]
