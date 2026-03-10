@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { h } from 'vue'
 import type { DataTableColumns } from 'naive-ui'
+import { pnlColor } from '../theme'
 
 defineProps<{
   positions: any[]
@@ -26,15 +27,13 @@ const columns: DataTableColumns = [
   {
     title: '盈亏', key: 'pnl', width: 90, align: 'right',
     render: (row: any) => {
-      const color = row.pnl > 0 ? '#f56c6c' : row.pnl < 0 ? '#67c23a' : '#999'
-      return h('span', { style: { color } }, row.pnl?.toFixed(2))
+      return h('span', { style: { color: pnlColor(row.pnl), fontWeight: 600 } }, row.pnl?.toFixed(2))
     },
   },
   {
     title: '盈亏%', key: 'pnl_pct', width: 80, align: 'right',
     render: (row: any) => {
-      const color = row.pnl_pct > 0 ? '#f56c6c' : row.pnl_pct < 0 ? '#67c23a' : '#999'
-      return h('span', { style: { color } }, row.pnl_pct != null ? (row.pnl_pct * 100).toFixed(2) + '%' : '-')
+      return h('span', { style: { color: pnlColor(row.pnl_pct), fontWeight: 600 } }, row.pnl_pct != null ? (row.pnl_pct * 100).toFixed(2) + '%' : '-')
     },
   },
 ]

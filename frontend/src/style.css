@@ -2,10 +2,6 @@
   --sidebar-width: 220px;
   --sidebar-collapsed-width: 64px;
   --header-height: 50px;
-  --primary-color: #409eff;
-  --bg-dark: #1d1e1f;
-  --bg-sidebar: #252627;
-  --text-light: #e0e0e0;
 }
 
 * {
@@ -15,7 +11,7 @@
 body {
   margin: 0;
   padding: 0;
-  background: #f5f7fa;
+  background: #f6f8fa;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
 }
 

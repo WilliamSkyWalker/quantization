@@ -22,6 +22,27 @@ logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
 
 
+def _get_sentiment_data(db, date: str, date_cache: dict) -> tuple:
+    """
+    获取舆情数据（带缓存）。
+
+    POLICY_SENT 和 POLICY_INTENSITY 共享同一份数据，
+    通过 FactorBase._date_cache 缓存避免重复 DB 查询。
+
+    Returns:
+        (daily_score_df, stock_score_df)
+    """
+    cache_key = f"_sentiment_{date}"
+    if cache_key in date_cache:
+        return date_cache[cache_key]
+
+    analyzer = SentimentAnalyzer(db)
+    daily_score = analyzer.get_daily_score(date)
+    stock_score = analyzer.get_daily_stock_score(date)
+    date_cache[cache_key] = (daily_score, stock_score)
+    return daily_score, stock_score
+
+
 class SentimentPolicyFactor(FactorBase):
     """
     政策情感因子 (POLICY_SENT)
@@ -34,53 +55,45 @@ class SentimentPolicyFactor(FactorBase):
     name = "POLICY_SENT"
     description = "政策舆情情感因子，个股/行业级政策利好/利空信号"
 
-    def __init__(self, db):
-        super().__init__(db)
-        self._analyzer = SentimentAnalyzer(db)
-
     def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
         codes = universe["ts_code"].tolist()
         result = pd.DataFrame({"ts_code": codes, "factor_value": np.nan})
 
+        daily_score, stock_score = _get_sentiment_data(self.db, date, self._date_cache)
+
         # 1. 个股级信号（LLM affected_stocks）
-        stock_score = self._analyzer.get_daily_stock_score(date)
         stock_direct = {}
         if not stock_score.empty:
             for _, row in stock_score.iterrows():
                 stock_direct[row["ts_code"]] = row["sentiment"] * row["intensity"]
             logger.debug(f"POLICY_SENT: {len(stock_direct)} 只个股有直接信号")
 
-        # 2. 行业级信号（回退）
+        # 2. 行业级信号（回退）— 构建 industry→score 和 ts_code→industry 字典
         industry_df = self.get_industry_map_cached()
-        daily_score = self._analyzer.get_daily_score(date)
-        score_map = {}
+        ind_score_map = {}  # industry_name → sent * intensity
         if not daily_score.empty:
             for _, row in daily_score.iterrows():
-                score_map[row["industry_name"]] = {
-                    "sentiment": row["sentiment"],
-                    "intensity": row["intensity"],
-                }
+                ind_score_map[row["industry_name"]] = row["sentiment"] * row["intensity"]
 
-        stock_industry = pd.DataFrame()
+        code_to_ind = {}  # ts_code → industry_name
         if not industry_df.empty:
-            stock_industry = industry_df[
-                industry_df["ts_code"].isin(codes)
-            ][["ts_code", "industry_name"]].copy()
+            mask = industry_df["ts_code"].isin(codes)
+            for _, row in industry_df[mask][["ts_code", "industry_name"]].iterrows():
+                code_to_ind[row["ts_code"]] = row["industry_name"]
 
-        # 3. 合并：个股信号优先，无则用行业映射
-        def _map(ts_code):
-            if ts_code in stock_direct:
-                return stock_direct[ts_code]
-            if not stock_industry.empty:
-                ind_rows = stock_industry[stock_industry["ts_code"] == ts_code]
-                if not ind_rows.empty:
-                    ind = ind_rows.iloc[0]["industry_name"]
-                    if pd.notna(ind) and ind in score_map:
-                        s = score_map[ind]
-                        return s["sentiment"] * s["intensity"]
-            return np.nan
+        # 3. 合并：个股信号优先，无则用行业映射（纯 dict 查找，O(1)）
+        values = []
+        for code in codes:
+            if code in stock_direct:
+                values.append(stock_direct[code])
+            else:
+                ind = code_to_ind.get(code)
+                if ind and ind in ind_score_map:
+                    values.append(ind_score_map[ind])
+                else:
+                    values.append(np.nan)
 
-        result["factor_value"] = result["ts_code"].apply(_map)
+        result["factor_value"] = values
         result["factor_value"] = result["factor_value"].astype(float)
 
         valid = result["factor_value"].notna().sum()
@@ -99,49 +112,45 @@ class SentimentIntensityFactor(FactorBase):
     name = "POLICY_INTENSITY"
     description = "政策关注度因子，个股/行业政策关注热度信号"
 
-    def __init__(self, db):
-        super().__init__(db)
-        self._analyzer = SentimentAnalyzer(db)
-
     def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
         codes = universe["ts_code"].tolist()
         result = pd.DataFrame({"ts_code": codes, "factor_value": np.nan})
 
+        daily_score, stock_score = _get_sentiment_data(self.db, date, self._date_cache)
+
         # 1. 个股级信号（LLM affected_stocks）
-        stock_score = self._analyzer.get_daily_stock_score(date)
         stock_direct = {}
         if not stock_score.empty:
             for _, row in stock_score.iterrows():
                 stock_direct[row["ts_code"]] = row["intensity"]
             logger.debug(f"POLICY_INTENSITY: {len(stock_direct)} 只个股有直接信号")
 
-        # 2. 行业级信号（回退）
+        # 2. 行业级信号（回退）— 构建字典
         industry_df = self.get_industry_map_cached()
-        daily_score = self._analyzer.get_daily_score(date)
-        intensity_map = {}
+        ind_intensity_map = {}
         if not daily_score.empty:
             for _, row in daily_score.iterrows():
-                intensity_map[row["industry_name"]] = row["intensity"]
+                ind_intensity_map[row["industry_name"]] = row["intensity"]
 
-        stock_industry = pd.DataFrame()
+        code_to_ind = {}
         if not industry_df.empty:
-            stock_industry = industry_df[
-                industry_df["ts_code"].isin(codes)
-            ][["ts_code", "industry_name"]].copy()
+            mask = industry_df["ts_code"].isin(codes)
+            for _, row in industry_df[mask][["ts_code", "industry_name"]].iterrows():
+                code_to_ind[row["ts_code"]] = row["industry_name"]
 
-        # 3. 合并：个股信号优先，无则用行业映射
-        def _map(ts_code):
-            if ts_code in stock_direct:
-                return stock_direct[ts_code]
-            if not stock_industry.empty:
-                ind_rows = stock_industry[stock_industry["ts_code"] == ts_code]
-                if not ind_rows.empty:
-                    ind = ind_rows.iloc[0]["industry_name"]
-                    if pd.notna(ind) and ind in intensity_map:
-                        return intensity_map[ind]
-            return np.nan
+        # 3. 合并：个股信号优先，无则用行业映射（纯 dict 查找，O(1)）
+        values = []
+        for code in codes:
+            if code in stock_direct:
+                values.append(stock_direct[code])
+            else:
+                ind = code_to_ind.get(code)
+                if ind and ind in ind_intensity_map:
+                    values.append(ind_intensity_map[ind])
+                else:
+                    values.append(np.nan)
 
-        result["factor_value"] = result["ts_code"].apply(_map)
+        result["factor_value"] = values
         result["factor_value"] = result["factor_value"].astype(float)
 
         valid = result["factor_value"].notna().sum()

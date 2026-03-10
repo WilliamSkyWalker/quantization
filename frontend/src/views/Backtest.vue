@@ -11,6 +11,7 @@ import DrawdownChart from '../components/DrawdownChart.vue'
 import MonthlyHeatmap from '../components/MonthlyHeatmap.vue'
 import IndustryBar from '../components/IndustryBar.vue'
 import TradeLog from '../components/TradeLog.vue'
+import { colors } from '../theme'
 
 const message = useMessage()
 const dateRange = ref<[string, string]>(['2020-01-01', '2024-12-31'])
@@ -139,10 +140,10 @@ async function runBacktest() {
 }
 
 const summaryItems = [
-  { key: '总收益', color: '#409eff' },
-  { key: '年化收益', color: '#67c23a' },
-  { key: '最大回撤', color: '#f56c6c' },
-  { key: '夏普比率', color: '#e6a23c' },
+  { key: '总收益', color: colors.primary },
+  { key: '年化收益', color: colors.success },
+  { key: '最大回撤', color: colors.error },
+  { key: '夏普比率', color: colors.warning },
 ]
 </script>
 
@@ -183,7 +184,7 @@ const summaryItems = [
     <!-- History selector -->
     <n-card hoverable style="margin-bottom: 20px" v-if="historyList.length">
       <n-space align="center">
-        <span style="font-size: 14px; color: #606266">历史回测:</span>
+        <span :style="{ fontSize: '14px', color: colors.textSecondary }">历史回测:</span>
         <n-select
           :value="selectedHistoryId"
           @update:value="loadSavedResult"
@@ -201,7 +202,7 @@ const summaryItems = [
     <n-card hoverable style="margin-bottom: 20px" v-if="historyLoading">
       <div style="text-align: center; padding: 40px 0">
         <n-spin size="large" />
-        <div style="margin-top: 12px; color: #909399">加载历史回测数据...</div>
+        <div :style="{ marginTop: '12px', color: colors.textTertiary }">加载历史回测数据...</div>
       </div>
     </n-card>
 
@@ -209,7 +210,7 @@ const summaryItems = [
     <n-card hoverable style="margin-bottom: 20px" v-if="loading">
       <div style="text-align: center; padding: 40px 0">
         <n-spin size="large" />
-        <div style="margin-top: 12px; color: #909399">
+        <div :style="{ marginTop: '12px', color: colors.textTertiary }">
           {{ taskId ? (taskStore.tasks[taskId]?.message || '回测中...') : '启动中...' }}
         </div>
         <n-progress
@@ -231,7 +232,7 @@ const summaryItems = [
             <div style="display: flex; align-items: center; gap: 12px">
               <div>
                 <div style="font-size: 20px; font-weight: 600">{{ result.summary?.[item.key] || '-' }}</div>
-                <div style="font-size: 12px; color: #909399">{{ item.key }}</div>
+                <div :style="{ fontSize: '12px', color: colors.textTertiary }">{{ item.key }}</div>
               </div>
             </div>
           </n-card>

@@ -5,6 +5,7 @@ import { startSelectStocks, getFactorDetail, getSelectHistory, getSelectHistoryD
 import { useTaskStore } from '../stores/task'
 import { formatDate, todayStr } from '../utils/format'
 import StockTable from '../components/StockTable.vue'
+import { colors, pnlColor } from '../theme'
 
 const message = useMessage()
 const taskStore = useTaskStore()
@@ -210,7 +211,7 @@ onMounted(async () => {
 
 <template>
   <div>
-    <h2 style="margin: 0 0 16px 0; font-size: 20px; font-weight: 600">今日选股</h2>
+    <h2 :style="{ margin: '0 0 16px 0', fontSize: '20px', fontWeight: 600, color: colors.textPrimary }">今日选股</h2>
     <n-card hoverable style="margin-bottom: 20px">
       <n-space align="center" wrap>
         <n-button
@@ -241,7 +242,7 @@ onMounted(async () => {
           @update:value="handleHistorySelect"
         />
       </n-space>
-      <div v-if="result" style="margin-top: 8px; color: #909399; font-size: 13px">
+      <div v-if="result" :style="{ marginTop: '8px', color: colors.textTertiary, fontSize: '13px' }">
         {{ result.date }} · 共 {{ result.total }} 只股票参与打分
       </div>
       <n-alert v-if="fallbackNotice" type="warning" :show-icon="true" style="margin-top: 8px" closable @close="fallbackNotice = ''">
@@ -253,7 +254,7 @@ onMounted(async () => {
     <n-card hoverable style="margin-bottom: 20px" v-if="loading">
       <div style="text-align: center; padding: 40px 0">
         <n-spin size="large" />
-        <div style="margin-top: 12px; color: #909399">{{ progressMsg }}</div>
+        <div :style="{ marginTop: '12px', color: colors.textTertiary }">{{ progressMsg }}</div>
         <n-progress
           type="line"
           :percentage="progress"
@@ -295,21 +296,21 @@ onMounted(async () => {
             </template>
             <div v-if="factorDetail">
               <!-- Composite score -->
-              <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0 10px; margin-bottom: 10px; border-bottom: 1px solid #f0f0f0; font-size: 13px">
-                <span style="font-weight: 600; color: #303133">综合得分</span>
-                <span style="font-size: 15px; font-weight: 700" :style="{ color: factorDetail.score > 0 ? '#f56c6c' : factorDetail.score < 0 ? '#67c23a' : '#999' }">
+              <div :style="{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0 10px', marginBottom: '10px', borderBottom: `1px solid ${colors.borderLight}`, fontSize: '13px' }">
+                <span :style="{ fontWeight: 600, color: colors.textPrimary }">综合得分</span>
+                <span style="font-size: 15px; font-weight: 700" :style="{ color: pnlColor(factorDetail.score) }">
                   {{ factorDetail.score != null ? Number(factorDetail.score).toFixed(4) : '-' }}
                 </span>
               </div>
               <!-- Factor groups -->
               <div v-for="(factors, group) in factorGroups" :key="group" style="margin-bottom: 16px">
-                <div style="font-weight: 600; margin-bottom: 8px; color: #303133">{{ group }}</div>
+                <div :style="{ fontWeight: 600, marginBottom: '8px', color: colors.textPrimary }">{{ group }}</div>
                 <div v-for="f in factors" :key="f" style="display: flex; justify-content: space-between; align-items: center; padding: 2px 0; font-size: 13px">
-                  <span style="color: #606266; display: flex; align-items: center; gap: 3px">
+                  <span :style="{ color: colors.textSecondary, display: 'flex', alignItems: 'center', gap: '3px' }">
                     {{ f }}
                     <n-tooltip v-if="factorMeta[f]" trigger="hover" placement="right" :style="{ maxWidth: '240px' }">
                       <template #trigger>
-                        <span style="cursor: help; color: #c0c4cc; font-size: 11px; line-height: 1; user-select: none">ⓘ</span>
+                        <span :style="{ cursor: 'help', color: colors.textDisabled, fontSize: '11px', lineHeight: 1, userSelect: 'none' }">ⓘ</span>
                       </template>
                       <div>
                         <div style="font-weight: 600; margin-bottom: 4px">{{ factorMeta[f].name }}</div>
@@ -317,7 +318,7 @@ onMounted(async () => {
                       </div>
                     </n-tooltip>
                   </span>
-                  <span :style="{ color: factorDetail[f] > 0 ? '#f56c6c' : factorDetail[f] < 0 ? '#67c23a' : '#999' }">
+                  <span :style="{ color: pnlColor(factorDetail[f]) }">
                     {{ factorDetail[f] != null ? factorDetail[f].toFixed(3) : '-' }}
                   </span>
                 </div>

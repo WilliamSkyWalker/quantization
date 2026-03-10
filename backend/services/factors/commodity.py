@@ -22,6 +22,9 @@ import pandas as pd
 from backend.services.config import (
     COMMODITY_INDUSTRY_MAP,
     COMMODITY_MOM_LOOKBACK,
+    COMMODITY_SURGE_ZSCORE,
+    COMMODITY_SURGE_MULTIPLIER,
+    COMMODITY_SURGE_LOOKBACK,
     COMMODITY_SYMBOLS,
     LOG_LEVEL,
 )
@@ -58,8 +61,9 @@ class CommodityMomentumFactor(FactorBase):
             logger.warning("CMDTY_MOM: 无行业分类数据")
             return result
 
-        # 2. 获取商品价格历史
-        lookback_cal_days = int(COMMODITY_MOM_LOOKBACK * 1.8)  # 交易日→自然日
+        # 2. 获取商品价格历史（拉取足够长的窗口用于暴涨检测）
+        surge_lookback = max(COMMODITY_SURGE_LOOKBACK, COMMODITY_MOM_LOOKBACK)
+        lookback_cal_days = int(surge_lookback * 1.8)  # 交易日→自然日
         commodity_df = self.db.get_commodity_price_history(
             COMMODITY_SYMBOLS, date, lookback_cal_days
         )
@@ -67,7 +71,7 @@ class CommodityMomentumFactor(FactorBase):
             logger.warning("CMDTY_MOM: 无商品价格数据")
             return result
 
-        # 3. 计算每种商品的动量和 OI
+        # 3. 计算每种商品的动量和 OI（含暴涨放大）
         commodity_mom = self._calc_commodity_momentum(commodity_df)
         if not commodity_mom:
             logger.warning("CMDTY_MOM: 商品动量计算结果为空")
@@ -114,7 +118,12 @@ class CommodityMomentumFactor(FactorBase):
         self, df: pd.DataFrame
     ) -> dict[str, dict]:
         """
-        计算每种商品的 N 日收益率和最新 OI。
+        计算每种商品的 N 日收益率和最新 OI，对暴涨行情非线性放大。
+
+        暴涨检测：计算当前动量在历史滚动动量分布中的 z-score，
+        z-score >= COMMODITY_SURGE_ZSCORE 时，用凸函数放大信号：
+            amplified_mom = mom × (1 + (z - threshold) / (3 - threshold) × (multiplier - 1))
+        放大系数在 [1.0, multiplier] 之间线性插值，z=3 时达到最大放大倍数。
 
         Returns:
             {commodity_code: {"mom": float, "oi": float}}
@@ -134,6 +143,23 @@ class CommodityMomentumFactor(FactorBase):
             # N 日收益率（取最后 N+1 个数据点）
             n = min(COMMODITY_MOM_LOOKBACK, len(prices) - 1)
             mom = prices.iloc[-1] / prices.iloc[-(n + 1)] - 1
+
+            # 暴涨放大：计算历史滚动动量分布
+            if len(prices) > COMMODITY_MOM_LOOKBACK + 20:
+                rolling_mom = prices / prices.shift(COMMODITY_MOM_LOOKBACK) - 1
+                rolling_mom = rolling_mom.dropna()
+                if len(rolling_mom) >= 30:
+                    hist_mean = rolling_mom.mean()
+                    hist_std = rolling_mom.std()
+                    if hist_std > 1e-8:
+                        z = (mom - hist_mean) / hist_std
+                        threshold = COMMODITY_SURGE_ZSCORE
+                        if z >= threshold:
+                            # 线性插值放大：z=threshold → 1.0x, z=3 → multiplier x
+                            cap_z = min(z, 3.0)
+                            amp = 1.0 + (cap_z - threshold) / max(3.0 - threshold, 0.1) * (COMMODITY_SURGE_MULTIPLIER - 1.0)
+                            logger.info(f"CMDTY_MOM 暴涨检测: {code} mom={mom*100:+.1f}% z={z:.1f} 放大{amp:.2f}x")
+                            mom = mom * amp
 
             # 最新 OI
             oi = grp["oi"].dropna().iloc[-1] if grp["oi"].notna().any() else 1.0

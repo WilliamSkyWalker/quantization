@@ -271,13 +271,15 @@ def get_clean_universe(
     if MIN_MARKET_CAP and MIN_MARKET_CAP > 0:
         codes_str_mv = "','".join(df_daily["ts_code"].tolist())
         df_mv = db.query(
-            f"SELECT ts_code, `close`, total_share "
-            f"FROM daily_price "
-            f"WHERE trade_date = '{target_date_str}' "
-            f"AND ts_code IN ('{codes_str_mv}')"
+            f"SELECT d.ts_code, d.`close`, s.total_share "
+            f"FROM daily_price d "
+            f"INNER JOIN stock_basic s ON d.ts_code = s.ts_code "
+            f"WHERE d.trade_date = '{target_date_str}' "
+            f"AND d.ts_code IN ('{codes_str_mv}')"
         )
         if not df_mv.empty and "total_share" in df_mv.columns:
-            df_mv["total_mv"] = df_mv["close"] * df_mv["total_share"]
+            # total_share 单位为万股，close 单位为元，total_mv = close * total_share * 10000（元）
+            df_mv["total_mv"] = df_mv["close"] * df_mv["total_share"] * 10000
             large_codes = df_mv[df_mv["total_mv"] >= MIN_MARKET_CAP]["ts_code"].tolist()
             before_mv = len(df_daily)
             df_daily = df_daily[df_daily["ts_code"].isin(large_codes)]

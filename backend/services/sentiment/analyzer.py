@@ -24,6 +24,7 @@ from backend.services.config import (
     LOG_LEVEL,
 )
 from backend.services.data.database import DatabaseManager
+from backend.services.factors.base import FactorBase
 from backend.services.sentiment.keyword_analyzer import KeywordAnalyzer
 from backend.services.sentiment.llm_analyzer import LLMAnalyzer
 
@@ -176,6 +177,28 @@ class SentimentAnalyzer:
                     )
         return count
 
+    def _get_policy_analysis_fast(
+        self,
+        end_date: str,
+        lookback_days: int,
+        analysis_type: str | None = None,
+    ) -> pd.DataFrame:
+        """
+        获取政策分析数据，优先使用预加载的内存数据。
+
+        当 FactorBase.preload_for_backtest 已执行时，从内存过滤；
+        否则回退到 DB 查询。
+        """
+        bulk = FactorBase._static_cache.get("_bulk_policy_analysis")
+        if bulk is not None and not bulk.empty:
+            ref = pd.to_datetime(end_date)
+            start = ref - pd.Timedelta(days=lookback_days)
+            mask = (bulk["publish_date"] >= start) & (bulk["publish_date"] <= ref)
+            if analysis_type:
+                mask = mask & (bulk["analysis_type"] == analysis_type)
+            return bulk[mask].copy()
+        return self.db.get_policy_analysis(end_date, lookback_days, analysis_type)
+
     def _get_high_intensity_ids(self, article_ids: list[int]) -> set[int]:
         """查询 keyword 分析中 intensity >= 阈值的 article_id。"""
         if not article_ids:
@@ -214,7 +237,7 @@ class SentimentAnalyzer:
         if lookback_days is None:
             lookback_days = SENTIMENT_LOOKBACK_DAYS
 
-        df = self.db.get_policy_analysis(date, lookback_days)
+        df = self._get_policy_analysis_fast(date, lookback_days)
         if df.empty:
             return pd.DataFrame(columns=["industry_name", "sentiment", "intensity"])
 
@@ -266,18 +289,25 @@ class SentimentAnalyzer:
 
         expanded = pd.DataFrame(rows)
 
-        # 按行业聚合：加权平均
+        # 按行业聚合：时间衰减加权平均
         def _weighted_agg(grp):
             w = grp["time_weight"] * grp["intensity"]
             total_w = w.sum()
             if total_w == 0:
                 return pd.Series({"sentiment": 0.0, "intensity": 0.0})
             sent = (grp["sentiment"] * w).sum() / total_w
-            # 行业强度 = 所有文章强度的加权均值
             inten = (grp["intensity"] * grp["time_weight"]).sum() / grp["time_weight"].sum()
-            return pd.Series({"sentiment": round(sent, 4), "intensity": round(inten, 4)})
+            return pd.Series({
+                "sentiment": round(sent, 4),
+                "intensity": round(inten, 4),
+            })
 
         result = expanded.groupby("industry_name").apply(_weighted_agg, include_groups=False).reset_index()
+
+        # 附加文章计数（供策略层判断信号质量）
+        article_counts = expanded.groupby("industry_name").size().reset_index(name="n_articles")
+        result = result.merge(article_counts, on="industry_name", how="left")
+
         return result
 
     def get_daily_stock_score(
@@ -301,7 +331,7 @@ class SentimentAnalyzer:
         if lookback_days is None:
             lookback_days = SENTIMENT_LOOKBACK_DAYS
 
-        df = self.db.get_policy_analysis(date, lookback_days, analysis_type="llm")
+        df = self._get_policy_analysis_fast(date, lookback_days, analysis_type="llm")
         if df.empty:
             return pd.DataFrame(columns=["ts_code", "sentiment", "intensity"])
 

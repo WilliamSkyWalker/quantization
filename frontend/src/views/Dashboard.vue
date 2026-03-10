@@ -8,6 +8,7 @@ import {
   ChatbubblesOutline,
 } from '@vicons/ionicons5'
 import { getDataStatus, getPaperAccount, getPaperNav, getSentimentStatus } from '../api'
+import { colors } from '../theme'
 import NavChart from '../components/NavChart.vue'
 
 const loading = ref(true)
@@ -64,6 +65,20 @@ onMounted(async () => {
     loading.value = false
   }
 })
+
+const statCards = [
+  { key: 'stockCount', label: '股票数量', icon: ListOutline, bg: colors.statBlue, fg: colors.primary },
+  { key: 'latestDate', label: '最新行情日期', icon: CalendarOutline, bg: colors.statGreen, fg: colors.success },
+  { key: 'paperNav', label: '模拟盘净值', icon: TrendingUpOutline, bg: colors.statRed, fg: colors.error },
+  { key: 'articleCount', label: '舆情文章数', icon: ChatbubblesOutline, bg: colors.statOrange, fg: colors.warning },
+]
+
+function formatStat(key: string) {
+  const v = (stats.value as any)[key]
+  if (key === 'paperNav') return v ? v.toFixed(4) : '-'
+  if (typeof v === 'number') return v.toLocaleString()
+  return v || '-'
+}
 </script>
 
 <template>
@@ -73,55 +88,16 @@ onMounted(async () => {
     </n-alert>
 
     <!-- Stats cards -->
-    <n-grid :cols="4" :x-gap="20" style="margin-bottom: 20px">
-      <n-gi>
+    <n-grid :cols="4" :x-gap="16" style="margin-bottom: 20px">
+      <n-gi v-for="card in statCards" :key="card.key">
         <n-card hoverable>
           <div class="stat-card">
-            <div class="stat-icon" style="background: #ecf5ff">
-              <n-icon size="28" color="#409eff"><ListOutline /></n-icon>
+            <div class="stat-icon" :style="{ background: card.bg }">
+              <n-icon size="28" :color="card.fg"><component :is="card.icon" /></n-icon>
             </div>
             <div>
-              <div class="stat-value">{{ stats.stockCount.toLocaleString() }}</div>
-              <div class="stat-label">股票数量</div>
-            </div>
-          </div>
-        </n-card>
-      </n-gi>
-      <n-gi>
-        <n-card hoverable>
-          <div class="stat-card">
-            <div class="stat-icon" style="background: #f0f9eb">
-              <n-icon size="28" color="#67c23a"><CalendarOutline /></n-icon>
-            </div>
-            <div>
-              <div class="stat-value">{{ stats.latestDate }}</div>
-              <div class="stat-label">最新行情日期</div>
-            </div>
-          </div>
-        </n-card>
-      </n-gi>
-      <n-gi>
-        <n-card hoverable>
-          <div class="stat-card">
-            <div class="stat-icon" style="background: #fef0f0">
-              <n-icon size="28" color="#f56c6c"><TrendingUpOutline /></n-icon>
-            </div>
-            <div>
-              <div class="stat-value">{{ stats.paperNav ? stats.paperNav.toFixed(4) : '-' }}</div>
-              <div class="stat-label">模拟盘净值</div>
-            </div>
-          </div>
-        </n-card>
-      </n-gi>
-      <n-gi>
-        <n-card hoverable>
-          <div class="stat-card">
-            <div class="stat-icon" style="background: #fdf6ec">
-              <n-icon size="28" color="#e6a23c"><ChatbubblesOutline /></n-icon>
-            </div>
-            <div>
-              <div class="stat-value">{{ stats.articleCount.toLocaleString() }}</div>
-              <div class="stat-label">舆情文章数</div>
+              <div class="stat-value">{{ formatStat(card.key) }}</div>
+              <div class="stat-label">{{ card.label }}</div>
             </div>
           </div>
         </n-card>
@@ -153,17 +129,18 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
 }
 
 .stat-value {
   font-size: 22px;
   font-weight: 600;
-  color: #303133;
+  color: v-bind('colors.textPrimary');
 }
 
 .stat-label {
   font-size: 13px;
-  color: #909399;
+  color: v-bind('colors.textTertiary');
   margin-top: 4px;
 }
 </style>

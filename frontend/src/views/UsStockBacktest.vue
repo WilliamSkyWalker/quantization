@@ -3,6 +3,7 @@ import { ref, computed, h } from 'vue'
 import { useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { useTaskPolling } from '../composables/useTaskPolling'
+import { colors, semanticColor } from '../theme'
 import { runUsStockPnl, runUsStockPnlFromDb, runBacktest } from '../api/polymarket'
 
 const message = useMessage()
@@ -142,7 +143,7 @@ const tradeColumns: DataTableColumns = [
     render: (row: any) =>
       h(
         'span',
-        { style: { color: row.return_pct >= 0 ? '#18a058' : '#d03050', fontWeight: 600 } },
+        { style: { color: semanticColor(row.return_pct), fontWeight: 600 } },
         fmtPct(row.return_pct),
       ),
   },
@@ -155,7 +156,7 @@ const tradeColumns: DataTableColumns = [
         'span',
         {
           style: {
-            color: row.is_win ? '#18a058' : '#d03050',
+            color: row.is_win ? colors.positive : colors.negative,
             fontWeight: 600,
           },
         },
@@ -197,7 +198,7 @@ const tickerColumns: DataTableColumns = [
     render: (row: any) =>
       h(
         'span',
-        { style: { color: row.avg_return >= 0 ? '#18a058' : '#d03050' } },
+        { style: { color: semanticColor(row.avg_return) } },
         fmtPct(row.avg_return),
       ),
   },
@@ -224,7 +225,7 @@ const topColumns: DataTableColumns = [
     render: (row: any) =>
       h(
         'span',
-        { style: { color: row.return_pct >= 0 ? '#18a058' : '#d03050', fontWeight: 600 } },
+        { style: { color: semanticColor(row.return_pct), fontWeight: 600 } },
         fmtPct(row.return_pct),
       ),
   },
@@ -251,10 +252,10 @@ const topColumns: DataTableColumns = [
             <n-button type="info" :loading="pmLoading" @click="runPolymarketBacktest" size="small">
               运行 Polymarket 回测
             </n-button>
-            <span v-if="pmAlertCount > 0" style="color: #18a058; font-weight: 600">
+            <span v-if="pmAlertCount > 0" :style="{ color: colors.positive, fontWeight: 600 }">
               已有 {{ pmAlertCount }} 条告警
             </span>
-            <span v-else style="color: #999">尚无告警数据</span>
+            <span v-else :style="{ color: colors.neutral }">尚无告警数据</span>
           </n-space>
         </template>
 
@@ -305,7 +306,7 @@ const topColumns: DataTableColumns = [
           <n-gi>
             <n-statistic label="胜率">
               <template #default>
-                <span :style="{ color: summary.win_rate >= 0.5 ? '#18a058' : '#d03050' }">
+                <span :style="{ color: summary.win_rate >= 0.5 ? colors.positive : colors.negative }">
                   {{ fmtRate(summary.win_rate) }}
                 </span>
               </template>
@@ -319,7 +320,7 @@ const topColumns: DataTableColumns = [
           <n-gi>
             <n-statistic label="平均收益">
               <template #default>
-                <span :style="{ color: summary.avg_return_pct >= 0 ? '#18a058' : '#d03050' }">
+                <span :style="{ color: summary.avg_return_pct >= 0 ? colors.positive : colors.negative }">
                   {{ fmtPct(summary.avg_return_pct) }}
                 </span>
               </template>
@@ -328,7 +329,7 @@ const topColumns: DataTableColumns = [
           <n-gi>
             <n-statistic label="夏普比率">
               <template #default>
-                <span :style="{ color: summary.sharpe_ratio >= 0 ? '#18a058' : '#d03050' }">
+                <span :style="{ color: summary.sharpe_ratio >= 0 ? colors.positive : colors.negative }">
                   {{ summary.sharpe_ratio?.toFixed(2) || '-' }}
                 </span>
               </template>
@@ -338,7 +339,7 @@ const topColumns: DataTableColumns = [
           <n-gi>
             <n-statistic label="总收益" tabular-nums>
               <template #default>
-                <span :style="{ color: summary.total_return_pct >= 0 ? '#18a058' : '#d03050' }">
+                <span :style="{ color: summary.total_return_pct >= 0 ? colors.positive : colors.negative }">
                   {{ fmtPct(summary.total_return_pct) }}
                 </span>
               </template>
@@ -347,7 +348,7 @@ const topColumns: DataTableColumns = [
           <n-gi>
             <n-statistic label="中位收益">
               <template #default>
-                <span :style="{ color: summary.median_return_pct >= 0 ? '#18a058' : '#d03050' }">
+                <span :style="{ color: summary.median_return_pct >= 0 ? colors.positive : colors.negative }">
                   {{ fmtPct(summary.median_return_pct) }}
                 </span>
               </template>
@@ -356,14 +357,14 @@ const topColumns: DataTableColumns = [
           <n-gi>
             <n-statistic label="最大单笔盈利">
               <template #default>
-                <span style="color: #18a058">{{ fmtPct(summary.max_single_win_pct) }}</span>
+                <span :style="{ color: colors.positive }">{{ fmtPct(summary.max_single_win_pct) }}</span>
               </template>
             </n-statistic>
           </n-gi>
           <n-gi>
             <n-statistic label="最大单笔亏损">
               <template #default>
-                <span style="color: #d03050">{{ fmtPct(summary.max_single_loss_pct) }}</span>
+                <span :style="{ color: colors.negative }">{{ fmtPct(summary.max_single_loss_pct) }}</span>
               </template>
             </n-statistic>
           </n-gi>
@@ -371,14 +372,14 @@ const topColumns: DataTableColumns = [
           <n-gi>
             <n-statistic label="平均盈利">
               <template #default>
-                <span style="color: #18a058">{{ fmtPct(summary.avg_win_return_pct) }}</span>
+                <span :style="{ color: colors.positive }">{{ fmtPct(summary.avg_win_return_pct) }}</span>
               </template>
             </n-statistic>
           </n-gi>
           <n-gi>
             <n-statistic label="平均亏损">
               <template #default>
-                <span style="color: #d03050">{{ fmtPct(summary.avg_loss_return_pct) }}</span>
+                <span :style="{ color: colors.negative }">{{ fmtPct(summary.avg_loss_return_pct) }}</span>
               </template>
             </n-statistic>
           </n-gi>
@@ -403,14 +404,14 @@ const topColumns: DataTableColumns = [
         <n-gi>
           <n-card title="按方向" size="small">
             <n-space vertical :size="8">
-              <div v-for="(val, key) in summary.by_direction" :key="key" style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #f0f0f0">
+              <div v-for="(val, key) in summary.by_direction" :key="key" style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #f0f2f5">
                 <span style="font-weight: 600">{{ dirLabel(key as string) }}</span>
                 <n-space :size="12">
                   <span>{{ val.count }} 笔</span>
-                  <span :style="{ color: val.win_rate >= 0.5 ? '#18a058' : '#d03050' }">
+                  <span :style="{ color: val.win_rate >= 0.5 ? colors.positive : colors.negative }">
                     {{ fmtRate(val.win_rate) }}
                   </span>
-                  <span :style="{ color: val.avg_return >= 0 ? '#18a058' : '#d03050' }">
+                  <span :style="{ color: val.avg_return >= 0 ? colors.positive : colors.negative }">
                     {{ fmtPct(val.avg_return) }}
                   </span>
                 </n-space>
@@ -426,14 +427,14 @@ const topColumns: DataTableColumns = [
         <n-gi>
           <n-card title="按告警类型" size="small">
             <n-space vertical :size="8">
-              <div v-for="(val, key) in summary.by_alert_type" :key="key" style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #f0f0f0">
+              <div v-for="(val, key) in summary.by_alert_type" :key="key" style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #f0f2f5">
                 <span style="font-weight: 600">{{ alertLabel(key as string) }}</span>
                 <n-space :size="12">
                   <span>{{ val.count }} 笔</span>
-                  <span :style="{ color: val.win_rate >= 0.5 ? '#18a058' : '#d03050' }">
+                  <span :style="{ color: val.win_rate >= 0.5 ? colors.positive : colors.negative }">
                     {{ fmtRate(val.win_rate) }}
                   </span>
-                  <span :style="{ color: val.avg_return >= 0 ? '#18a058' : '#d03050' }">
+                  <span :style="{ color: val.avg_return >= 0 ? colors.positive : colors.negative }">
                     {{ fmtPct(val.avg_return) }}
                   </span>
                 </n-space>
@@ -449,14 +450,14 @@ const topColumns: DataTableColumns = [
         <n-gi>
           <n-card title="按置信度" size="small">
             <n-space vertical :size="8">
-              <div v-for="(val, key) in summary.by_confidence_tier" :key="key" style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #f0f0f0">
+              <div v-for="(val, key) in summary.by_confidence_tier" :key="key" style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #f0f2f5">
                 <span style="font-weight: 600">{{ key }}</span>
                 <n-space :size="12">
                   <span>{{ val.count }} 笔</span>
-                  <span :style="{ color: val.win_rate >= 0.5 ? '#18a058' : '#d03050' }">
+                  <span :style="{ color: val.win_rate >= 0.5 ? colors.positive : colors.negative }">
                     {{ fmtRate(val.win_rate) }}
                   </span>
-                  <span :style="{ color: val.avg_return >= 0 ? '#18a058' : '#d03050' }">
+                  <span :style="{ color: val.avg_return >= 0 ? colors.positive : colors.negative }">
                     {{ fmtPct(val.avg_return) }}
                   </span>
                 </n-space>

@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { useMessage, useDialog } from 'naive-ui'
 import { CloseOutline, RefreshOutline, ReorderFourOutline } from '@vicons/ionicons5'
 import { useTaskStore } from '../stores/task'
+import { colors } from '../theme'
 
 const message = useMessage()
 const dialog = useDialog()
@@ -132,7 +133,7 @@ function clearFinished() {
 
           <!-- Message -->
           <div class="task-message" v-if="task.message">
-            <span v-if="task.status === 'failed'" style="color: #f56c6c">{{ task.message }}</span>
+            <span v-if="task.status === 'failed'" :style="{ color: colors.error }">{{ task.message }}</span>
             <span v-else>{{ task.message }}</span>
           </div>
         </div>
@@ -148,23 +149,23 @@ function clearFinished() {
   right: 20px;
   z-index: 2001;
   background: #fff;
-  border: 1px solid #e0e0e0;
+  border: 1px solid v-bind('colors.borderLight');
   border-radius: 24px;
   padding: 8px 16px;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 6px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
   transition: box-shadow 0.2s;
   user-select: none;
 }
 .task-trigger:hover {
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
 }
 .trigger-text {
   font-size: 13px;
-  color: #606266;
+  color: v-bind('colors.textSecondary');
 }
 
 .task-panel {
@@ -175,9 +176,9 @@ function clearFinished() {
   max-height: 480px;
   z-index: 2000;
   background: #fff;
-  border: 1px solid #e0e0e0;
+  border: 1px solid v-bind('colors.borderLight');
   border-radius: 12px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.1);
   display: flex;
   flex-direction: column;
 }
@@ -187,12 +188,12 @@ function clearFinished() {
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid v-bind('colors.borderLight');
 }
 .panel-title {
   font-size: 14px;
   font-weight: 600;
-  color: #303133;
+  color: v-bind('colors.textPrimary');
 }
 
 .panel-body {
@@ -203,14 +204,14 @@ function clearFinished() {
 
 .empty-hint {
   text-align: center;
-  color: #c0c4cc;
+  color: v-bind('colors.textDisabled');
   padding: 32px 0;
   font-size: 13px;
 }
 
 .task-row {
   padding: 10px 16px;
-  border-bottom: 1px solid #fafafa;
+  border-bottom: 1px solid v-bind('colors.borderSubtle');
 }
 .task-row:last-child {
   border-bottom: none;
@@ -231,14 +232,14 @@ function clearFinished() {
 
 .task-name {
   font-size: 13px;
-  color: #303133;
+  color: v-bind('colors.textPrimary');
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .task-id {
   font-size: 11px;
-  color: #c0c4cc;
+  color: v-bind('colors.textDisabled');
   font-family: monospace;
 }
 
@@ -251,7 +252,7 @@ function clearFinished() {
 
 .task-elapsed {
   font-size: 12px;
-  color: #909399;
+  color: v-bind('colors.textTertiary');
   white-space: nowrap;
 }
 
@@ -263,14 +264,14 @@ function clearFinished() {
 }
 .task-pct {
   font-size: 12px;
-  color: #909399;
+  color: v-bind('colors.textTertiary');
   min-width: 32px;
   text-align: right;
 }
 
 .task-message {
   font-size: 12px;
-  color: #909399;
+  color: v-bind('colors.textTertiary');
   margin-top: 4px;
   white-space: nowrap;
   overflow: hidden;

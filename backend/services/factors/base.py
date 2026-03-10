@@ -113,6 +113,28 @@ class FactorBase(ABC):
         cls._static_cache["_bulk_daily"] = df_price
         logger.info(f"预加载 daily_price: {len(df_price)} 行, {time.time()-t0:.1f}s")
 
+        # 3. 预加载 policy_analysis + policy_article（舆情因子，~30K 行）
+        t0 = time.time()
+        sentiment_start = (
+            pd.to_datetime(start_date) - pd.Timedelta(days=30)
+        ).strftime("%Y-%m-%d")
+        pa_sql = (
+            "SELECT pa.article_id, pa.analysis_type, pa.industries, "
+            "pa.sentiment, pa.intensity, pa.keywords_hit, "
+            "pa.affected_stocks, "
+            "a.publish_date, a.tier "
+            "FROM policy_analysis pa "
+            "JOIN policy_article a ON pa.article_id = a.id "
+            "WHERE a.publish_date >= :start_date "
+            "AND a.publish_date <= :end_date "
+            "ORDER BY a.publish_date DESC"
+        )
+        df_pa = db.query(pa_sql, params={"start_date": sentiment_start, "end_date": end_date})
+        if not df_pa.empty:
+            df_pa["publish_date"] = pd.to_datetime(df_pa["publish_date"])
+        cls._static_cache["_bulk_policy_analysis"] = df_pa
+        logger.info(f"预加载 policy_analysis: {len(df_pa)} 行, {time.time()-t0:.1f}s")
+
     def __init__(self, db: DatabaseManager):
         """
         Args:

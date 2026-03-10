@@ -242,42 +242,49 @@ class VolPriceDivFactor(FactorBase):
         if df_price.empty:
             return pd.DataFrame(columns=["ts_code", "factor_value"])
 
-        df_price["trade_date"] = pd.to_datetime(df_price["trade_date"])
         df_price["pct_chg"] = pd.to_numeric(df_price["pct_chg"], errors="coerce")
         df_price["volume"] = pd.to_numeric(df_price["volume"], errors="coerce")
+        df_price["trade_date"] = pd.to_datetime(df_price["trade_date"])
         df_price = df_price.sort_values(["ts_code", "trade_date"])
 
         # 每只股票取最近 20 个交易日
         df_recent = df_price.groupby("ts_code").tail(20).copy()
 
-        def _divergence(g):
-            g = g.dropna(subset=["pct_chg", "volume"])
-            if len(g) < 10:
-                return np.nan
-            # 价格趋势：20D 累计收益
-            price_trend = (1 + g["pct_chg"] / 100).prod() - 1
-            # 量能趋势：OLS 斜率（volume ~ t）
-            t = np.arange(len(g), dtype=float)
-            vol = g["volume"].values.astype(float)
-            t_mean = t.mean()
-            vol_mean = vol.mean()
-            if vol_mean == 0:
-                return np.nan
-            slope = ((t - t_mean) * (vol - vol_mean)).sum() / ((t - t_mean) ** 2).sum()
-            # 标准化斜率（除以均值使不同股票可比）
-            norm_slope = slope / vol_mean
-            # 方向不一致时产生正的背离信号
-            if np.sign(price_trend) != np.sign(norm_slope):
-                return abs(price_trend)
-            else:
-                return 0.0
+        # 向量化计算量价背离（避免逐股票 apply）
+        # 1. 价格趋势：20D 累计收益
+        df_recent["_ret"] = 1 + df_recent["pct_chg"] / 100
+        price_trend = df_recent.groupby("ts_code")["_ret"].prod() - 1
 
-        df_div = (
-            df_recent.groupby("ts_code")
-            .apply(_divergence, include_groups=False)
-            .reset_index()
-        )
-        df_div.columns = ["ts_code", "factor_value"]
+        # 2. 量能趋势 OLS 斜率：slope = cov(t, vol) / var(t)
+        #    在每组内 t = 0,1,...,n-1，用组内排名作为 t
+        df_recent["_rank"] = df_recent.groupby("ts_code").cumcount()
+        grp_size = df_recent.groupby("ts_code")["_rank"].transform("count")
+        # t_mean = (n-1)/2, var(t) = n*(n-1)/12 (for 0..n-1)
+        t_mean = (grp_size - 1) / 2.0
+        df_recent["_t_dev"] = df_recent["_rank"] - t_mean
+        vol_mean = df_recent.groupby("ts_code")["volume"].transform("mean")
+        df_recent["_vol_dev"] = df_recent["volume"] - vol_mean
+
+        cov_tv = (df_recent["_t_dev"] * df_recent["_vol_dev"]).groupby(df_recent["ts_code"]).sum()
+        var_t = (df_recent["_t_dev"] ** 2).groupby(df_recent["ts_code"]).sum()
+
+        # 标准化斜率
+        vol_mean_per_stock = df_recent.groupby("ts_code")["volume"].mean()
+        n_per_stock = df_recent.groupby("ts_code").size()
+
+        slope = cov_tv / var_t.replace(0, np.nan)
+        norm_slope = slope / vol_mean_per_stock.replace(0, np.nan)
+
+        # 方向不一致时产生正的背离信号
+        sign_mismatch = np.sign(price_trend) != np.sign(norm_slope)
+        divergence = np.where(sign_mismatch, price_trend.abs(), 0.0)
+        # 数据不足（<10 个交易日）的标记为 NaN
+        divergence = np.where(n_per_stock >= 10, divergence, np.nan)
+
+        df_div = pd.DataFrame({
+            "ts_code": price_trend.index,
+            "factor_value": divergence,
+        })
 
         return df_div
 

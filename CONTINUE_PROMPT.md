@@ -55,9 +55,12 @@
 | Phase 13 Polymarket | 事件监控 + LLM 情感分析 + 回测引擎 | ✅ 完成 |
 | Phase 14 美股数据 | S&P 500 + NASDAQ 100 数据接入（yfinance）+ 美股 P&L 回测 | ✅ 完成 |
 | Phase 15 性能优化 | 因子计算向量化（TTM / 质量因子）+ SQL 查询优化 | ✅ 完成 |
-| Phase 16 策略优化 | 降动量/升质量/渐进Regime/增持仓/波动率目标/换手惩罚 | ✅ 完成 |
+| Phase 16 策略优化 | 降动量/升质量/渐进Regime/增持仓/波动率目标/换手惩罚（已被 Phase 21 进一步优化） | ✅ 完成 |
 | Phase 17 财经媒体 | 东方财富/财联社/新浪财经快讯爬虫（AKShare），Tier 6 | ✅ 完成 |
 | Phase 18 预测市场桥接 | Polymarket alert → 舆情管道（Tier 8），回测 alert 持久化 | ✅ 完成 |
+| Phase 19 信号增强 | CMDTY_MOM 暴涨检测 + 舆情动态权重 + 市值过滤修复 + analyzer n_articles | ✅ 完成 |
+| Phase 20 性能优化 | 预加载架构 + VOL_PRICE_DIV 向量化 + 舆情缓存/预加载 + 股票池缓存 | ✅ 完成 |
+| Phase 21 回测优化 | 熊市Regime修复 + 行业集中度控制 + 大类权重调整 + 价值陷阱惩罚 + 趋势门槛过滤 | ✅ 完成 |
 | 远期规划 | 行业轮动数据深度接入 | 📋 备忘 |
 
 ---
@@ -133,15 +136,15 @@ backend/
 │   │   ├── macro_downloader.py      # 宏观经济数据下载（8 个 Tushare API）
 │   │   └── seed_config.py           # 行业因子配置种子数据
 │   ├── factors/
-│   │   ├── base.py                  # 因子基类 ABC + 向量化 TTM/收盘价/总股本 工具方法
+│   │   ├── base.py                  # 因子基类 ABC + 向量化 TTM/收盘价/总股本 + preload_for_backtest
 │   │   ├── value.py                 # EP, BP
 │   │   ├── momentum.py              # MOM_1M, MOM_3M, MOM_12M, REV_5D, IND_MOM, RESIDUAL_MOM
 │   │   ├── quality.py               # ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND（向量化）
-│   │   ├── technical.py             # TURN_20D, VOL_20D, PRICE_DEV_60D, SIZE, VOL_PRICE_DIV
+│   │   ├── technical.py             # TURN_20D, VOL_20D, PRICE_DEV_60D, SIZE, VOL_PRICE_DIV（向量化）
 │   │   ├── growth.py                # NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y
 │   │   ├── commodity.py             # CMDTY_MOM（商品轮动）
 │   │   ├── macro.py                 # MACRO_CYCLE, MACRO_LIQD, MACRO_INFL, MACRO_EXTR（宏观因子）
-│   │   ├── sentiment.py             # POLICY_SENT, POLICY_INTENSITY（舆情因子）
+│   │   ├── sentiment.py             # POLICY_SENT, POLICY_INTENSITY（舆情因子，共享缓存）
 │   │   ├── research.py              # ANALYST_RATING, ANALYST_COVERAGE（券商研报因子）
 │   │   ├── processor.py             # 去极值 → 中性化(full/size_only/none) → Z-score → clip ±3
 │   │   └── evaluation.py            # IC/ICIR/分层回测
@@ -213,6 +216,49 @@ A_SHARE_STRATEGY.md                         # 完整算法设计文档
 9. **商品回看窗口**：COMMODITY_MOM_LOOKBACK 20→60（捕捉黄金等中期趋势）
 10. **行业关键词大幅扩展**：计算机新增 AI/LLM 热词（ChatGPT/GPT/生成式AI/AI芯片等）；有色金属新增贵金属热词（黄金/金价/央行购金等）；电子新增 AI 硬件供应链（HBM/光模块/CoWoS 等）
 11. **情感关键词扩展**：新增市场热点正面词（爆发/崛起/飙升/新高/风口等）和负面词（暴跌/泡沫/制裁/封锁等）
+
+---
+
+## Phase 19 信号增强（已完成）摘要
+
+1. **CMDTY_MOM 商品暴涨检测**：`commodity.py` 新增 z-score 暴涨放大机制。基于历史滚动动量分布（`COMMODITY_SURGE_LOOKBACK=500` 交易日窗口）计算 z-score，z ≥ `COMMODITY_SURGE_ZSCORE`（默认 2.0）时触发非线性放大，最大 `COMMODITY_SURGE_MULTIPLIER=1.5x`。用于捕捉黄金、原油等商品暴涨对相关行业的超额影响。
+2. **舆情动态权重提升**：`multi_factor.py` 新增 `_adjust_sentiment_weight()` 方法，当行业文章数量异常集中时（z > `SENTIMENT_SURGE_ZSCORE`）自动提升 sentiment 大类权重。默认禁用（`SENTIMENT_SURGE_MULTIPLIER=1.0`），因当前数据源（CCTV 等政府新闻）行业区分度不足。
+3. **市值过滤修复**：`cleaner.py` 市值过滤 SQL 改为 JOIN `stock_basic` 获取 `total_share`，修正单位换算（万股 × close × 10000 = 元）。
+4. **analyzer.py get_daily_score() 增强**：返回值新增 `n_articles` 列（行业文章计数），供策略层判断信号质量。
+5. **新增配置参数**（`config.py`）：`COMMODITY_SURGE_ZSCORE`(2.0)、`COMMODITY_SURGE_MULTIPLIER`(1.5)、`COMMODITY_SURGE_LOOKBACK`(500)、`SENTIMENT_SURGE_MULTIPLIER`(1.0, 禁用)、`SENTIMENT_SURGE_ZSCORE`(1.5)。
+
+## Phase 21 回测优化（已完成）摘要
+
+针对 2018-2026 回测跑输沪深300的问题（总收益 -39% vs 沪深300 +16%），进行系统性诊断和优化：
+
+**问题诊断**：行业归因显示房地产（占比 16.6%，收益 -51.66%）+ 建筑装饰/建筑材料合计占比 ~42%，EP/BP 因子持续给地产链高分（价值陷阱），熊市时 Regime 反向加码价值权重（1.0→1.3）更加剧了问题。
+
+**五项优化**：
+1. **熊市 Regime 权重修复**：value 1.3→0.6（避免熊市价值陷阱）、momentum 0.3→0.6（保留趋势过滤）、growth 0.6→0.8
+2. **行业集中度控制**：`MAX_INDUSTRY_WEIGHT` 30%→20%；新增 `MAX_INDUSTRY_GROUP_WEIGHT=30%` + `INDUSTRY_GROUPS`（地产链/金融/TMT 组合上限）
+3. **大类权重重新平衡**：value 1.0→0.7、quality 1.2→1.3、momentum 0.8→0.9
+4. **价值陷阱惩罚**：value 得分 > 0 且 quality 得分 < -0.5 时，压缩 value 得分（penalty = clip(1.5 + quality, 0.3, 1.0)）
+5. **趋势门槛过滤**：MOM_12M < -1.0 的股票得分乘以衰减系数（clip(1.0 + 0.3×MOM_12M, 0.3, 0.7)），防止买入持续下跌股
+
+**回测效果（2018-01-01 ~ 2026-03-06）**：
+- 总收益：-38.98% → **+5.28%**（改善 44 个百分点）
+- 年化收益：-6.09% → **+0.66%**
+- 超额年化：-7.78% → **-1.03%**
+- 最大回撤：-69.03% → **-55.69%**
+- 2023 超额：-14.19% → -3.61%；2024-2026 连续正超额（+6.69%、+11.00%、+16.78%）
+
+---
+
+## Phase 20 性能优化（已完成）摘要
+
+回测信号生成性能优化，单日因子计算 ~5s → ~2.1s，1 年回测 ~68s（25 个调仓日）：
+
+1. **预加载架构扩展**：`FactorBase.preload_for_backtest()` 新增 `policy_analysis` JOIN `policy_article` 预加载（~6K 行），`SentimentAnalyzer._get_policy_analysis_fast()` 优先使用内存数据（0.97s → 0.015s/日）。
+2. **VOL_PRICE_DIV 向量化**：`technical.py` 消除 `groupby.apply` 逐股票 Python 循环，改为向量化 `cov(t, vol) / var(t)` 计算 OLS 斜率（1.0s → 0.05s）。
+3. **舆情因子缓存**：`sentiment.py` 新增 `_get_sentiment_data()` 模块函数，POLICY_SENT 和 POLICY_INTENSITY 共享 `FactorBase._date_cache` 中的 `get_daily_score`/`get_daily_stock_score` 结果，消除重复 DB 查询（0.68s → 0.05s）。
+4. **舆情因子 dict 查找**：`sentiment.py` 两个因子的行业→个股映射从 O(n²) DataFrame 过滤改为 O(1) dict 查找。
+5. **股票池缓存**：`multi_factor.py` 中 `get_clean_universe` 结果按日期缓存在 `_date_cache`，避免同日期重复构建。
+6. **ThreadPoolExecutor 无效验证**：Python GIL 限制下，CPU-bound 的 pandas/numpy 因子计算无法受益于多线程（实测 0.90x，反而更慢）。
 
 ---
 
@@ -399,6 +445,9 @@ A股量化系统遇到问题，请帮我排查。
 - [x] 因子计算向量化优化：TTM 计算 O(N) 循环 → 2 次 merge，ProfitStability/MarginTrend 向量化
 - [x] SQL 查询优化：IN 条件阈值（>2000 股票跳过 IN 过滤），SelectionResult.by_industry 升级 MEDIUMTEXT
 - [x] 选股 API 按行业结果精简展示列（减少 JSON 体积）
+- [x] Phase 19 信号增强：CMDTY_MOM 暴涨 z-score 放大（1.5x）+ 舆情动态权重（默认禁用）+ 市值过滤 JOIN stock_basic 修复 + analyzer n_articles 列
+- [x] Phase 20 性能优化：预加载架构（financial+daily+policy_analysis）+ VOL_PRICE_DIV 向量化（1.0s→0.05s）+ 舆情因子缓存/预加载（0.97s→0.015s）+ 股票池缓存 + dict 查找优化（单日 5s→2.1s，1 年回测 ~68s）
+- [x] Phase 21 回测优化：熊市Regime修复（value 1.3→0.6, momentum 0.3→0.6）+ 行业集中度（MAX_INDUSTRY_WEIGHT 30→20%, 关联行业组上限 30%）+ 大类权重（value 1.0→0.7, quality 1.2→1.3, momentum 0.8→0.9）+ 价值陷阱惩罚 + 趋势门槛过滤（MOM_12M<-1.0 惩罚），总收益 -39%→+5%
 
 ## 已知待优化项
 

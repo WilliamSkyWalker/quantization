@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import '../utils/echarts'
 import VChart from 'vue-echarts'
+import { colors } from '../theme'
 
 export interface KlineItem {
   date: string
@@ -25,7 +26,7 @@ const option = computed(() => {
   const ohlc = d.map(i => [i.open, i.close, i.low, i.high])
   const volumes = d.map((i, idx) => ({
     value: i.volume,
-    itemStyle: { color: i.close >= i.open ? '#ec0000' : '#00da3c' },
+    itemStyle: { color: i.close >= i.open ? colors.klineUp : colors.klineDown },
   }))
 
   return {
@@ -94,10 +95,10 @@ const option = computed(() => {
         type: 'candlestick',
         data: ohlc,
         itemStyle: {
-          color: '#ec0000',
-          color0: '#00da3c',
-          borderColor: '#ec0000',
-          borderColor0: '#00da3c',
+          color: colors.klineUp,
+          color0: colors.klineDown,
+          borderColor: colors.klineUp,
+          borderColor0: colors.klineDown,
         },
       },
       {

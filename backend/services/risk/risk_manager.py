@@ -20,6 +20,8 @@ import pandas as pd
 from backend.services.config import (
     MAX_SINGLE_WEIGHT,
     MAX_INDUSTRY_WEIGHT,
+    MAX_INDUSTRY_GROUP_WEIGHT,
+    INDUSTRY_GROUPS,
     MAX_DRAWDOWN_THRESHOLD,
     DRAWDOWN_REDUCE_POSITION,
     DD_START_THRESHOLD,
@@ -136,6 +138,9 @@ class RiskManager:
 
         # 3. 行业暴露上限
         df = self._cap_industry_weight(df, date)
+
+        # 3.5 关联行业组合上限
+        df = self._cap_industry_group_weight(df, date)
 
         # 4. 权重归一化（在降仓之前归一化）
         df = self._normalize_weights(df)
@@ -287,6 +292,42 @@ class RiskManager:
             logger.info(
                 f"行业暴露截断: {ind_name} {ind_weight:.1%} -> {self.max_industry_weight:.0%}"
             )
+
+        df = df.drop(columns=["industry_name"], errors="ignore")
+        return df
+
+    # ----------------------------------------------------------
+    # 关联行业组合上限
+    # ----------------------------------------------------------
+
+    def _cap_industry_group_weight(self, df: pd.DataFrame, date: str) -> pd.DataFrame:
+        """
+        截断关联行业组合权重（如地产链=房地产+建筑装饰+建筑材料合计不超过上限）。
+        """
+        if not INDUSTRY_GROUPS or MAX_INDUSTRY_GROUP_WEIGHT >= 1.0:
+            return df
+
+        try:
+            industry_map = self.db.get_industry_map()
+        except Exception:
+            return df
+
+        if industry_map.empty:
+            return df
+
+        df = df.merge(industry_map, on="ts_code", how="left")
+        df["industry_name"] = df["industry_name"].fillna("未知")
+
+        for group_name, industries in INDUSTRY_GROUPS.items():
+            mask = df["industry_name"].isin(industries)
+            group_weight = df.loc[mask, "weight"].sum()
+            if group_weight > MAX_INDUSTRY_GROUP_WEIGHT:
+                scale = MAX_INDUSTRY_GROUP_WEIGHT / group_weight
+                df.loc[mask, "weight"] *= scale
+                logger.info(
+                    f"关联行业组截断: {group_name}({','.join(industries)}) "
+                    f"{group_weight:.1%} -> {MAX_INDUSTRY_GROUP_WEIGHT:.0%}"
+                )
 
         df = df.drop(columns=["industry_name"], errors="ignore")
         return df

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { h } from 'vue'
 import type { DataTableColumns } from 'naive-ui'
+import { pnlColor } from '../theme'
 
 const props = defineProps<{
   stocks: any[]
@@ -30,8 +31,7 @@ const columns: DataTableColumns = [
   {
     title: '涨跌幅', key: 'pct_chg', width: 80, sorter: (a: any, b: any) => (a.pct_chg ?? 0) - (b.pct_chg ?? 0),
     render: (row: any) => {
-      const color = row.pct_chg > 0 ? '#f56c6c' : row.pct_chg < 0 ? '#67c23a' : '#999'
-      return h('span', { style: { color } }, row.pct_chg != null ? row.pct_chg.toFixed(2) + '%' : '-')
+      return h('span', { style: { color: pnlColor(row.pct_chg), fontWeight: 600 } }, row.pct_chg != null ? row.pct_chg.toFixed(2) + '%' : '-')
     },
   },
   {

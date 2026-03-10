@@ -6,6 +6,7 @@ import { startPaperReplay } from '../api'
 import { useTaskPolling } from '../composables/useTaskPolling'
 import { formatDate } from '../utils/format'
 import NavChart from '../components/NavChart.vue'
+import { colors } from '../theme'
 
 const message = useMessage()
 const dateRange = ref<[string, string]>(['2020-01-01', '2024-12-31'])
@@ -79,7 +80,7 @@ async function runReplay() {
     <n-card hoverable style="margin-bottom: 20px" v-if="loading">
       <div style="text-align: center; padding: 40px 0">
         <n-spin size="large" />
-        <div style="margin-top: 12px; color: #909399">
+        <div :style="{ marginTop: '12px', color: colors.textTertiary }">
           {{ taskId ? (taskStore.tasks[taskId]?.message || '回放中...') : '启动中...' }}
         </div>
         <n-progress

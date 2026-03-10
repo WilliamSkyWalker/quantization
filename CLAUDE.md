@@ -58,7 +58,7 @@ start.sh → 一键启动 + crontab 安装（cron 通过 curl 调用 API）
 
 **券商研报管道：** `services/data/akshare_downloader.py` 通过 AKShare `stock_research_report_em()` 下载东方财富券商研报数据，存入 `research_report` 表。`services/factors/research.py` 提供 ANALYST_RATING（共识评级）和 ANALYST_COVERAGE（覆盖度）两个因子，直接按 ts_code 匹配（无需行业映射），归入 sentiment 大类。
 
-**舆情因子化管道：** `services/sentiment/analyzer.py` 调度两层分析（`keyword_analyzer.py` 关键词底层 + `llm_analyzer.py` LLM 增强层），分析结果存入 `policy_analysis` 表。`services/factors/sentiment.py` 将行业级情感得分映射到个股（POLICY_SENT + POLICY_INTENSITY），注册到 sentiment 大类（权重 0.4）。LLM 仅对 keyword intensity ≥ 0.5 的文章调用，无 API key 时优雅降级。
+**舆情因子化管道：** `services/sentiment/analyzer.py` 调度两层分析（`keyword_analyzer.py` 关键词底层 + `llm_analyzer.py` LLM 增强层），分析结果存入 `policy_analysis` 表。`services/factors/sentiment.py` 将行业级情感得分映射到个股（POLICY_SENT + POLICY_INTENSITY），注册到 sentiment 大类（权重 0.6）。两个舆情因子通过 `_get_sentiment_data()` 共享缓存避免重复 DB 查询。LLM 仅对 keyword intensity ≥ 0.5 的文章调用，无 API key 时优雅降级。
 
 ### 核心设计决策
 
@@ -66,18 +66,22 @@ start.sh → 一键启动 + crontab 安装（cron 通过 curl 调用 API）
 - **两层因子打分：** 类内使用动态分母（缺失因子等比缩减权重）；类间使用动态分母（缺失大类权重按比例再分配给有值大类），`MIN_VALID_CATEGORIES=4` 限制最大膨胀。
 - **Upsert 语义：** 所有数据库写入为幂等操作（唯一键冲突时 insert-or-update）。
 - **可配置中性化：** `NEUTRALIZE_MODE = full | size_only | none` 控制 OLS 行业+市值残差中性化；`CATEGORY_NEUTRALIZE_OVERRIDES` 支持按大类覆盖（默认 momentum/macro/sentiment → size_only 保留行业 alpha）。
-- **Regime 切换：** CSI 300 60 日 MA ±5% 渐进式切换（线性插值，避免 whipsaw），熊市时降低动量（0.8→0.3）/成长（1.0→0.6）、提高质量（1.2→1.5）/价值（1.0→1.3）/技术（0.7→1.0），可通过 `REGIME_ENABLED=0` 关闭。
+- **Regime 切换：** CSI 300 60 日 MA ±5% 渐进式切换（线性插值，避免 whipsaw），熊市时降低价值（0.7→0.6）/动量（0.9→0.6）、提高质量（1.3→1.5）/成长（1.0→0.8）/技术（0.7→1.0），可通过 `REGIME_ENABLED=0` 关闭。
+- **价值陷阱惩罚：** value 大类得分 > 0 且 quality 大类得分 < -0.5 时，压缩 value 得分，避免买入低估值但基本面恶化的股票（如地产链）。
+- **趋势门槛过滤：** MOM_12M < -1.0 的股票最终得分乘以衰减系数，防止买入持续下跌的股票。
+- **关联行业组上限：** `INDUSTRY_GROUPS` 定义关联行业组（地产链/金融/TMT），`MAX_INDUSTRY_GROUP_WEIGHT=30%` 限制同一产业链合计权重。
 - **T+1 执行模型：** 先卖后买。涨停股排除在买入之外；跌停股加入 `pending_sells` 队列下一交易日重试。
 - **可插拔交易后端：** `BaseTrader` ABC + `main.py::_create_trader()` 工厂方法，目前仅实现 `PaperTrader`。
+- **回测预加载架构：** `FactorBase.preload_for_backtest()` 一次性加载 financial_data + daily_price + policy_analysis 到内存，因子计算全部从内存过滤（单日 ~2.1s，1 年 25 日 ~68s）。
 
 ### 因子体系（29 个因子）
 
 | 大类 | 权重 | 因子 |
 |---|---|---|
-| 价值 | 1.0 | EP, BP |
-| 质量 | 1.2 | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND |
+| 价值 | 0.7 | EP, BP |
+| 质量 | 1.3 | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND |
 | 成长 | 1.0 | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y |
-| 动量 | 0.8 | MOM_1M, MOM_3M, MOM_12M, REV_5D, IND_MOM, RESIDUAL_MOM, CMDTY_MOM |
+| 动量 | 0.9 | MOM_1M, MOM_3M, MOM_12M, REV_5D, IND_MOM, RESIDUAL_MOM, CMDTY_MOM |
 | 技术 | 0.7 | TURN_20D, VOL_20D, PRICE_DEV_60D, SIZE, VOL_PRICE_DIV |
 | 宏观 | 0.6 | MACRO_CYCLE, MACRO_LIQD, MACRO_INFL, MACRO_EXTR |
 | 舆情 | 0.6 | POLICY_SENT, POLICY_INTENSITY, ANALYST_RATING, ANALYST_COVERAGE |

@@ -7,6 +7,7 @@ import { useTaskStore } from '../stores/task'
 import NavChart from '../components/NavChart.vue'
 import PositionTable from '../components/PositionTable.vue'
 import TradeLog from '../components/TradeLog.vue'
+import { colors, pnlColor } from '../theme'
 
 const message = useMessage()
 const dialogCtrl = useDialog()
@@ -98,7 +99,7 @@ onMounted(loadAll)
         <n-card hoverable>
           <div class="metric">
             <div class="metric-label">盈亏</div>
-            <div class="metric-value" :style="{ color: account.pnl > 0 ? '#f56c6c' : account.pnl < 0 ? '#67c23a' : '#999' }">
+            <div class="metric-value" :style="{ color: pnlColor(account.pnl) }">
               {{ account.pnl?.toLocaleString(undefined, { maximumFractionDigits: 0 }) }}
               ({{ account.pnl_pct != null ? (account.pnl_pct * 100).toFixed(2) + '%' : '-' }})
             </div>
@@ -155,12 +156,12 @@ onMounted(loadAll)
 }
 .metric-label {
   font-size: 13px;
-  color: #909399;
+  color: v-bind('colors.textTertiary');
   margin-bottom: 8px;
 }
 .metric-value {
   font-size: 20px;
   font-weight: 600;
-  color: #303133;
+  color: v-bind('colors.textPrimary');
 }
 </style>

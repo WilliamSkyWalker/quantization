@@ -5,6 +5,7 @@ import { NIcon } from 'naive-ui'
 import type { MenuOption } from 'naive-ui'
 import { useAppStore } from '../stores/app'
 import TaskProgress from '../components/TaskProgress.vue'
+import { colors, sidebarMenuOverrides } from '../theme'
 import {
   SpeedometerOutline,
   DownloadOutline,
@@ -62,10 +63,10 @@ function handleMenuUpdate(key: string) {
       @collapse="appStore.sidebarCollapsed = true"
       @expand="appStore.sidebarCollapsed = false"
       content-style="padding: 0;"
-      style="background: #252627"
+      :style="{ background: colors.bgSidebar }"
     >
       <div class="logo">
-        <n-icon size="24" color="#409eff"><TrendingUpOutline /></n-icon>
+        <n-icon size="24" :color="colors.primary"><TrendingUpOutline /></n-icon>
         <span v-show="!appStore.sidebarCollapsed" class="logo-text">量化系统</span>
       </div>
       <n-menu
@@ -77,25 +78,13 @@ function handleMenuUpdate(key: string) {
         @update:value="handleMenuUpdate"
         :root-indent="18"
         :indent="18"
-        :theme-overrides="{
-          itemTextColor: 'rgba(255,255,255,0.65)',
-          itemIconColor: 'rgba(255,255,255,0.65)',
-          itemTextColorHover: '#fff',
-          itemIconColorHover: '#fff',
-          itemColorHover: 'rgba(255,255,255,0.09)',
-          itemTextColorActive: '#fff',
-          itemIconColorActive: '#409eff',
-          itemTextColorActiveHover: '#fff',
-          itemIconColorActiveHover: '#409eff',
-          itemColorActive: 'rgba(64,158,255,0.15)',
-          itemColorActiveHover: 'rgba(64,158,255,0.15)',
-        }"
+        :theme-overrides="sidebarMenuOverrides"
       />
     </n-layout-sider>
 
     <!-- Main -->
     <n-layout>
-      <n-layout-header bordered style="height: 50px; background: #fff; display: flex; align-items: center; padding: 0 20px">
+      <n-layout-header bordered class="header">
         <div class="header-left">
           <n-icon class="collapse-btn" size="20" @click="appStore.toggleSidebar">
             <MenuOutline />
@@ -107,7 +96,7 @@ function handleMenuUpdate(key: string) {
         </div>
       </n-layout-header>
 
-      <n-layout-content content-style="padding: 20px;" style="background: #f5f7fa; height: calc(100vh - 50px); overflow-y: auto">
+      <n-layout-content content-style="padding: 20px;" class="main-content">
         <router-view />
       </n-layout-content>
     </n-layout>
@@ -124,14 +113,22 @@ function handleMenuUpdate(key: string) {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid v-bind('colors.bgSidebarBorder');
 }
 
 .logo-text {
-  color: #e0e0e0;
+  color: v-bind('colors.textSidebar');
   font-size: 16px;
   font-weight: 600;
   white-space: nowrap;
+}
+
+.header {
+  height: 50px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
 }
 
 .header-left {
@@ -142,9 +139,16 @@ function handleMenuUpdate(key: string) {
 
 .collapse-btn {
   cursor: pointer;
-  color: #666;
+  color: v-bind('colors.textTertiary');
+  transition: color 0.2s;
 }
 .collapse-btn:hover {
-  color: #409eff;
+  color: v-bind('colors.primary');
+}
+
+.main-content {
+  background: v-bind('colors.bgPage');
+  height: calc(100vh - 50px);
+  overflow-y: auto;
 }
 </style>

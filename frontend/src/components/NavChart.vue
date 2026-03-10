@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import '../utils/echarts'
 import VChart from 'vue-echarts'
+import { colors } from '../theme'
 
 const props = defineProps<{
   nav: { date: string; nav: number }[]
@@ -27,7 +28,7 @@ const option = computed(() => ({
       type: 'line',
       showSymbol: false,
       lineStyle: { width: 2 },
-      itemStyle: { color: '#409eff' },
+      itemStyle: { color: colors.chartLine },
       data: props.nav.map(d => [d.date, d.nav]),
     },
     ...(props.benchmark?.length ? [{
@@ -35,7 +36,7 @@ const option = computed(() => ({
       type: 'line',
       showSymbol: false,
       lineStyle: { width: 1.5, type: 'dashed' as const },
-      itemStyle: { color: '#999' },
+      itemStyle: { color: colors.chartBenchmark },
       data: props.benchmark.map(d => [d.date, d.nav]),
     }] : []),
   ],

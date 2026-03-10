@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import '../utils/echarts'
 import VChart from 'vue-echarts'
+import { colors } from '../theme'
 
 const props = defineProps<{
   data: { industry: string; contribution: number }[]
@@ -32,7 +33,7 @@ const option = computed(() => {
       type: 'bar',
       data: sorted.map(d => ({
         value: d.contribution,
-        itemStyle: { color: d.contribution >= 0 ? '#67c23a' : '#f56c6c' },
+        itemStyle: { color: d.contribution >= 0 ? colors.positive : colors.negative },
       })),
     }],
   }

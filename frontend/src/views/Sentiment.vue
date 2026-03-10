@@ -6,6 +6,7 @@ import type { DataTableColumns } from 'naive-ui'
 import { getSentimentStatus, getSentimentArticles, getSentimentAnalysisStats, startSentimentDownload, startSentimentDownloadAndAnalyze, startSentimentBackfillAnalyze, startSentimentBackfillContent, startDownload } from '../api'
 import { formatDate } from '../utils/format'
 import { useTaskStore } from '../stores/task'
+import { colors } from '../theme'
 
 const message = useMessage()
 const taskStore = useTaskStore()
@@ -44,7 +45,7 @@ const tierNames: Record<number, string> = {
 }
 
 const tierColors: Record<number, string> = {
-  1: '#f56c6c', 2: '#e6a23c', 3: '#409eff', 4: '#67c23a', 5: '#909399', 6: '#8b5cf6',
+  1: colors.tier1, 2: colors.tier2, 3: colors.tier3, 4: colors.tier4, 5: colors.tier5, 6: colors.tier7,
 }
 
 // Source table columns
@@ -60,7 +61,7 @@ const sourceColumns: DataTableColumns = [
   {
     title: '篇数', key: 'count', width: 80, align: 'right',
     render: (row: any) => h('span', {
-      style: row.count > 0 ? 'font-weight: 600' : 'color: #c0c4cc',
+      style: row.count > 0 ? 'font-weight: 600' : `color: ${colors.textDisabled}`,
     }, row.count?.toLocaleString() ?? '0'),
   },
   { title: '最早', key: 'earliest', width: 110, render: (row: any) => row.earliest || '-' },
@@ -157,12 +158,12 @@ const articleColumns: DataTableColumns = [
   {
     title: '栏目', key: 'category', width: 100,
     ellipsis: { tooltip: true },
-    render: (row: any) => h('span', { style: 'color: #909399; font-size: 12px' }, row.category || '-'),
+    render: (row: any) => h('span', { style: `color: ${colors.textTertiary}; font-size: 12px` }, row.category || '-'),
   },
   {
     title: '标题', key: 'title', minWidth: 300,
     ellipsis: { tooltip: true },
-    render: (row: any) => h('span', { style: 'color: #303133; cursor: pointer' }, row.title),
+    render: (row: any) => h('span', { style: `color: ${colors.textPrimary}; cursor: pointer` }, row.title),
   },
   { title: '发布日期', key: 'publish_date', width: 110, sorter: 'default' },
   { title: '抓取时间', key: 'scraped_at', width: 170 },
@@ -286,7 +287,7 @@ onMounted(() => {
             <n-button size="small" :disabled="scraping" @click="backfillAnalyze">补录分析</n-button>
             <n-button size="small" :disabled="scraping" @click="backfillContent">补录全文</n-button>
             <n-divider vertical />
-            <span style="color: #606266; font-weight: 600">共 {{ total }} 篇</span>
+            <span :style="{ color: colors.textSecondary, fontWeight: 600 }">共 {{ total }} 篇</span>
             <n-tag type="info" size="small">关键词已分析: {{ analysisStats.keyword_analyzed }}</n-tag>
             <n-tag type="success" size="small">LLM 已分析: {{ analysisStats.llm_analyzed }}</n-tag>
             <n-tag type="warning" size="small">待分析: {{ analysisStats.pending_keyword }}</n-tag>
@@ -350,7 +351,7 @@ onMounted(() => {
 
         <!-- Active filter tags -->
         <div v-if="currentSource || currentCategory || keyword || dateRange" style="margin-top: 10px">
-          <span style="font-size: 12px; color: #909399; margin-right: 8px">筛选条件:</span>
+          <span :style="{ fontSize: '12px', color: colors.textTertiary, marginRight: '8px' }">筛选条件:</span>
           <n-tag
             v-if="currentSource"
             size="small"
@@ -395,7 +396,7 @@ onMounted(() => {
           <div style="display: flex; justify-content: space-between; align-items: center; width: 100%">
             <span>
               文章列表
-              <span style="font-size: 13px; color: #909399; margin-left: 8px">
+              <span :style="{ fontSize: '13px', color: colors.textTertiary, marginLeft: '8px' }">
                 共 {{ articleTotal }} 篇
               </span>
             </span>
@@ -435,7 +436,7 @@ onMounted(() => {
         <template #header>文章详情</template>
 
         <!-- Title -->
-        <h2 style="margin: 0 0 16px 0; font-size: 20px; line-height: 1.4; color: #303133">
+        <h2 :style="{ margin: '0 0 16px 0', fontSize: '20px', lineHeight: 1.4, color: colors.textPrimary }">
           {{ selectedArticle.title }}
         </h2>
 
@@ -447,10 +448,10 @@ onMounted(() => {
           >
             {{ selectedArticle.source }}
           </n-tag>
-          <span v-if="selectedArticle.category" style="font-size: 13px; color: #909399">
+          <span v-if="selectedArticle.category" :style="{ fontSize: '13px', color: colors.textTertiary }">
             {{ selectedArticle.category }}
           </span>
-          <span style="font-size: 13px; color: #909399">
+          <span :style="{ fontSize: '13px', color: colors.textTertiary }">
             {{ selectedArticle.publish_date }}
           </span>
         </n-space>
@@ -459,12 +460,12 @@ onMounted(() => {
 
         <!-- Summary -->
         <div v-if="selectedArticle.summary" style="margin-bottom: 20px">
-          <div style="font-size: 13px; font-weight: 600; color: #606266; margin-bottom: 8px">摘要</div>
+          <div :style="{ fontSize: '13px', fontWeight: '600', color: colors.textSecondary, marginBottom: '8px' }">摘要</div>
           <div class="drawer-summary">
             {{ selectedArticle.summary }}
           </div>
         </div>
-        <div v-else style="margin-bottom: 20px; color: #909399; font-size: 13px">
+        <div v-else :style="{ marginBottom: '20px', color: colors.textTertiary, fontSize: '13px' }">
           暂无摘要内容
         </div>
 
@@ -484,7 +485,7 @@ onMounted(() => {
         <n-divider style="margin: 12px 0" />
 
         <!-- Scraped time -->
-        <div style="font-size: 12px; color: #909399">
+        <div :style="{ fontSize: '12px', color: colors.textTertiary }">
           抓取时间：{{ selectedArticle.scraped_at || '-' }}
         </div>
       </n-drawer-content>
@@ -495,10 +496,10 @@ onMounted(() => {
 <style scoped>
 .drawer-summary {
   padding: 12px 16px;
-  background: #f5f7fa;
+  background: v-bind('colors.bgPage');
   border-radius: 6px;
   font-size: 14px;
-  color: #606266;
+  color: v-bind('colors.textSecondary');
   line-height: 1.8;
   white-space: pre-wrap;
   word-break: break-all;

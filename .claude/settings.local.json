@@ -73,7 +73,10 @@
       "Bash(git push:*)",
       "Bash(git status:*)",
       "Bash(PYTHONPATH=/Users/daweilun/Documents/quantization python3:*)",
-      "Bash(brew services:*)"
+      "Bash(brew services:*)",
+      "Bash(kill:*)",
+      "Bash(/tmp/color_findings.txt:*)",
+      "Read(//tmp/**)"
     ]
   }
 }

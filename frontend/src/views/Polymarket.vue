@@ -7,6 +7,7 @@ import {
   runBacktest, getBacktestResult, getImpactOverview, deleteMockAlerts, runUsStockPnlFromDb, runASharePnlFromDb,
 } from '../api/polymarket'
 import { useTaskStore } from '../stores/task'
+import { colors, semanticColor } from '../theme'
 
 const message = useMessage()
 const taskStore = useTaskStore()
@@ -474,7 +475,7 @@ async function doRunPnl() {
 function renderReturnPct(row: any, key: string, bold = true) {
   const v = row[key]
   if (v == null) return '-'
-  const color = v >= 0 ? '#18a058' : '#d03050'
+  const color = semanticColor(v)
   return h('span', { style: { color, fontWeight: bold ? 600 : 400 } }, `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`)
 }
 
@@ -675,12 +676,12 @@ function openImpactAlertDetail(row: any) {
 
 // 情感色值：-1 红，0 灰，+1 绿
 function sentimentColor(val: number | null): string {
-  if (val == null) return '#999'
-  if (val > 0.3) return '#18a058'
-  if (val > 0.1) return '#5cb85c'
-  if (val < -0.3) return '#d03050'
-  if (val < -0.1) return '#e88080'
-  return '#999'
+  if (val == null) return colors.neutral
+  if (val > 0.3) return colors.positive
+  if (val > 0.1) return '#66ba76'
+  if (val < -0.3) return colors.negative
+  if (val < -0.1) return '#e08686'
+  return colors.neutral
 }
 
 function sentimentBg(val: number | null): string {
@@ -785,7 +786,7 @@ function handleTabChange(tab: string) {
                 <n-tag :type="monitorRunning ? 'success' : 'default'" round>
                   {{ monitorRunning ? '运行中' : '已停止' }}
                 </n-tag>
-                <span style="color: #999; font-size: 13px">
+                <span :style="{ color: colors.textTertiary, fontSize: '13px' }">
                   正在监控 {{ markets.length }} 个预测市场
                 </span>
                 <n-badge v-if="unreadCount > 0" :value="unreadCount" type="error">
@@ -892,7 +893,7 @@ function handleTabChange(tab: string) {
             <n-button type="primary" :loading="btRunLoading" @click="doRunBacktest">
               启动量化回测
             </n-button>
-            <span style="color: #999; font-size: 13px">
+            <span :style="{ color: colors.textTertiary, fontSize: '13px' }">
               数据准备请前往「数据管理」页
             </span>
           </n-space>
@@ -901,7 +902,7 @@ function handleTabChange(tab: string) {
         <!-- 量化回测进度 -->
         <n-card v-if="btTaskId && btTask && btTask.status === 'running'" size="small" title="量化回测进度">
           <n-progress type="line" :percentage="btTask.progress" :indicator-placement="'inside'" />
-          <div style="margin-top: 8px; color: #999; font-size: 13px">{{ btTask.message }}</div>
+          <div :style="{ marginTop: '8px', color: colors.textTertiary, fontSize: '13px' }">{{ btTask.message }}</div>
         </n-card>
 
         <!-- 回测结果 -->
@@ -925,7 +926,7 @@ function handleTabChange(tab: string) {
 
             <!-- 告警类型分布 -->
             <n-space style="margin-top: 16px" :size="8">
-              <span style="color: #999; font-size: 13px">告警类型分布:</span>
+              <span :style="{ color: colors.textTertiary, fontSize: '13px' }">告警类型分布:</span>
               <n-tag v-for="(count, type) in (btResult.summary?.alert_type_counts || {})" :key="type as string" size="small">
                 {{ alertTypeLabel(type as string) }}: {{ count }}
               </n-tag>
@@ -933,11 +934,11 @@ function handleTabChange(tab: string) {
 
             <!-- 平均情感 -->
             <n-space style="margin-top: 8px" :size="8" v-if="btResult.summary?.avg_sentiment != null">
-              <span style="color: #999; font-size: 13px">平均情感:</span>
+              <span :style="{ color: colors.textTertiary, fontSize: '13px' }">平均情感:</span>
               <n-tag :type="btResult.summary.avg_sentiment >= 0 ? 'success' : 'error'" size="small">
                 {{ btResult.summary.avg_sentiment.toFixed(3) }}
               </n-tag>
-              <span style="color: #999; font-size: 13px">平均置信度:</span>
+              <span :style="{ color: colors.textTertiary, fontSize: '13px' }">平均置信度:</span>
               <n-tag size="small">
                 {{ btResult.summary.avg_confidence?.toFixed(3) ?? '-' }}
               </n-tag>
@@ -961,7 +962,7 @@ function handleTabChange(tab: string) {
                       :show-indicator="false"
                       style="flex: 1"
                     />
-                    <span style="color: #666; font-size: 12px; white-space: nowrap">{{ t.count }} 次</span>
+                    <span :style="{ color: colors.textSecondary, fontSize: '12px', whiteSpace: 'nowrap' }">{{ t.count }} 次</span>
                   </div>
                 </n-space>
               </n-card>
@@ -981,7 +982,7 @@ function handleTabChange(tab: string) {
                       :show-indicator="false"
                       style="flex: 1"
                     />
-                    <span style="color: #666; font-size: 12px; white-space: nowrap">{{ s.count }} 次</span>
+                    <span :style="{ color: colors.textSecondary, fontSize: '12px', whiteSpace: 'nowrap' }">{{ s.count }} 次</span>
                   </div>
                 </n-space>
               </n-card>
@@ -1058,7 +1059,7 @@ function handleTabChange(tab: string) {
         <!-- 美股新闻信号回测进度 -->
         <n-card v-if="pnlTaskId && pnlTask && pnlTask.status === 'running'" size="small" title="美股新闻信号回测进度">
           <n-progress type="line" :percentage="pnlTask.progress" :indicator-placement="'inside'" />
-          <div style="margin-top: 8px; color: #999; font-size: 13px">{{ pnlTask.message }}</div>
+          <div :style="{ marginTop: '8px', color: colors.textTertiary, fontSize: '13px' }">{{ pnlTask.message }}</div>
         </n-card>
 
         <!-- P&L 结果 -->
@@ -1072,7 +1073,7 @@ function handleTabChange(tab: string) {
               <n-gi span="6 m:1">
                 <n-statistic label="胜率">
                   <template #default>
-                    <span :style="{ color: (pnlResult.summary?.win_rate ?? 0) >= 0.5 ? '#18a058' : '#d03050' }">
+                    <span :style="{ color: (pnlResult.summary?.win_rate ?? 0) >= 0.5 ? colors.positive : colors.negative }">
                       {{ ((pnlResult.summary?.win_rate ?? 0) * 100).toFixed(1) }}%
                     </span>
                   </template>
@@ -1081,7 +1082,7 @@ function handleTabChange(tab: string) {
               <n-gi span="6 m:1">
                 <n-statistic label="平均收益">
                   <template #default>
-                    <span :style="{ color: (pnlResult.summary?.avg_return_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                    <span :style="{ color: (pnlResult.summary?.avg_return_pct ?? 0) >= 0 ? colors.positive : colors.negative }">
                       {{ (pnlResult.summary?.avg_return_pct ?? 0) >= 0 ? '+' : '' }}{{ (pnlResult.summary?.avg_return_pct ?? 0).toFixed(2) }}%
                     </span>
                   </template>
@@ -1090,7 +1091,7 @@ function handleTabChange(tab: string) {
               <n-gi span="6 m:1">
                 <n-statistic label="Sharpe">
                   <template #default>
-                    <span :style="{ color: (pnlResult.summary?.sharpe_ratio ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                    <span :style="{ color: (pnlResult.summary?.sharpe_ratio ?? 0) >= 0 ? colors.positive : colors.negative }">
                       {{ (pnlResult.summary?.sharpe_ratio ?? 0).toFixed(2) }}
                     </span>
                   </template>
@@ -1106,7 +1107,7 @@ function handleTabChange(tab: string) {
               <n-gi span="6 m:1">
                 <n-statistic label="总收益">
                   <template #default>
-                    <span :style="{ color: (pnlResult.summary?.total_return_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                    <span :style="{ color: (pnlResult.summary?.total_return_pct ?? 0) >= 0 ? colors.positive : colors.negative }">
                       {{ (pnlResult.summary?.total_return_pct ?? 0) >= 0 ? '+' : '' }}{{ (pnlResult.summary?.total_return_pct ?? 0).toFixed(2) }}%
                     </span>
                   </template>
@@ -1132,23 +1133,23 @@ function handleTabChange(tab: string) {
 
             <!-- Benchmark 对比 -->
             <div v-if="pnlResult.summary?.benchmark_avg_pct != null" style="margin-top: 12px; padding: 10px 12px; background: rgba(64,158,255,0.04); border-radius: 6px; border: 1px solid rgba(64,158,255,0.12)">
-              <span style="font-size: 13px; color: #666">vs 同期买入持有 (Benchmark):</span>
+              <span :style="{ fontSize: '13px', color: colors.textSecondary }">vs 同期买入持有 (Benchmark):</span>
               <n-space style="margin-top: 6px" :size="16">
                 <span style="font-size: 13px">
                   策略均收益
-                  <span style="font-weight: 600" :style="{ color: (pnlResult.summary?.avg_return_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                  <span style="font-weight: 600" :style="{ color: (pnlResult.summary?.avg_return_pct ?? 0) >= 0 ? colors.positive : colors.negative }">
                     {{ (pnlResult.summary?.avg_return_pct ?? 0) >= 0 ? '+' : '' }}{{ (pnlResult.summary?.avg_return_pct ?? 0).toFixed(2) }}%
                   </span>
                 </span>
                 <span style="font-size: 13px">
                   Benchmark 均收益
-                  <span style="font-weight: 600" :style="{ color: (pnlResult.summary?.benchmark_avg_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                  <span style="font-weight: 600" :style="{ color: (pnlResult.summary?.benchmark_avg_pct ?? 0) >= 0 ? colors.positive : colors.negative }">
                     {{ (pnlResult.summary?.benchmark_avg_pct ?? 0) >= 0 ? '+' : '' }}{{ (pnlResult.summary?.benchmark_avg_pct ?? 0).toFixed(2) }}%
                   </span>
                 </span>
                 <span style="font-size: 13px">
                   Alpha
-                  <span style="font-weight: 700" :style="{ color: (pnlResult.summary?.alpha_avg_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                  <span style="font-weight: 700" :style="{ color: (pnlResult.summary?.alpha_avg_pct ?? 0) >= 0 ? colors.positive : colors.negative }">
                     {{ (pnlResult.summary?.alpha_avg_pct ?? 0) >= 0 ? '+' : '' }}{{ (pnlResult.summary?.alpha_avg_pct ?? 0).toFixed(2) }}%
                   </span>
                 </span>
@@ -1171,7 +1172,7 @@ function handleTabChange(tab: string) {
                       {{ stats.count }}笔,
                       胜率 {{ (stats.win_rate * 100).toFixed(1) }}%,
                       均收益
-                      <span :style="{ color: stats.avg_return >= 0 ? '#18a058' : '#d03050' }">
+                      <span :style="{ color: stats.avg_return >= 0 ? colors.positive : colors.negative }">
                         {{ stats.avg_return >= 0 ? '+' : '' }}{{ stats.avg_return.toFixed(2) }}%
                       </span>
                     </n-descriptions-item>
@@ -1189,7 +1190,7 @@ function handleTabChange(tab: string) {
                       {{ stats.count }}笔,
                       胜率 {{ (stats.win_rate * 100).toFixed(1) }}%,
                       均收益
-                      <span :style="{ color: stats.avg_return >= 0 ? '#18a058' : '#d03050' }">
+                      <span :style="{ color: stats.avg_return >= 0 ? colors.positive : colors.negative }">
                         {{ stats.avg_return >= 0 ? '+' : '' }}{{ stats.avg_return.toFixed(2) }}%
                       </span>
                     </n-descriptions-item>
@@ -1207,7 +1208,7 @@ function handleTabChange(tab: string) {
                       {{ stats.count }}笔,
                       胜率 {{ (stats.win_rate * 100).toFixed(1) }}%,
                       均收益
-                      <span :style="{ color: stats.avg_return >= 0 ? '#18a058' : '#d03050' }">
+                      <span :style="{ color: stats.avg_return >= 0 ? colors.positive : colors.negative }">
                         {{ stats.avg_return >= 0 ? '+' : '' }}{{ stats.avg_return.toFixed(2) }}%
                       </span>
                     </n-descriptions-item>
@@ -1226,13 +1227,13 @@ function handleTabChange(tab: string) {
                 style="display: flex; align-items: center; gap: 8px; padding: 4px 0"
               >
                 <n-tag size="small" type="info" round style="min-width: 56px; text-align: center">{{ t.ticker }}</n-tag>
-                <span style="color: #666; font-size: 12px; min-width: 40px">{{ t.count }}笔</span>
+                <span :style="{ color: colors.textSecondary, fontSize: '12px', minWidth: '40px' }">{{ t.count }}笔</span>
                 <span style="font-size: 12px; min-width: 60px">
                   胜率 {{ (t.win_rate * 100).toFixed(0) }}%
                 </span>
                 <span
                   style="font-size: 12px; font-weight: 600; min-width: 65px"
-                  :style="{ color: t.avg_return >= 0 ? '#18a058' : '#d03050' }"
+                  :style="{ color: t.avg_return >= 0 ? colors.positive : colors.negative }"
                 >
                   {{ t.avg_return >= 0 ? '+' : '' }}{{ t.avg_return.toFixed(2) }}%
                 </span>
@@ -1241,7 +1242,7 @@ function handleTabChange(tab: string) {
                   :percentage="Math.round(t.win_rate * 100)"
                   :show-indicator="false"
                   style="flex: 1"
-                  :color="t.win_rate >= 0.5 ? '#18a058' : '#d03050'"
+                  :color="t.win_rate >= 0.5 ? colors.positive : colors.negative"
                 />
               </div>
             </n-space>
@@ -1258,9 +1259,9 @@ function handleTabChange(tab: string) {
                     style="display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px"
                   >
                     <n-tag size="small" type="success" round>{{ t.ticker }}</n-tag>
-                    <span style="color: #18a058; font-weight: 600">+{{ t.return_pct.toFixed(2) }}%</span>
-                    <span style="color: #999; font-size: 12px">{{ t.entry_date }} → {{ t.exit_date }}</span>
-                    <span style="color: #666; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+                    <span :style="{ color: colors.positive, fontWeight: 600 }">+{{ t.return_pct.toFixed(2) }}%</span>
+                    <span :style="{ color: colors.textTertiary, fontSize: '12px' }">{{ t.entry_date }} → {{ t.exit_date }}</span>
+                    <span :style="{ color: colors.textSecondary, fontSize: '12px', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }">
                       {{ t.event_question }}
                     </span>
                   </div>
@@ -1276,9 +1277,9 @@ function handleTabChange(tab: string) {
                     style="display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px"
                   >
                     <n-tag size="small" type="error" round>{{ t.ticker }}</n-tag>
-                    <span style="color: #d03050; font-weight: 600">{{ t.return_pct.toFixed(2) }}%</span>
-                    <span style="color: #999; font-size: 12px">{{ t.entry_date }} → {{ t.exit_date }}</span>
-                    <span style="color: #666; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+                    <span :style="{ color: colors.negative, fontWeight: 600 }">{{ t.return_pct.toFixed(2) }}%</span>
+                    <span :style="{ color: colors.textTertiary, fontSize: '12px' }">{{ t.entry_date }} → {{ t.exit_date }}</span>
+                    <span :style="{ color: colors.textSecondary, fontSize: '12px', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }">
                       {{ t.event_question }}
                     </span>
                   </div>
@@ -1333,7 +1334,7 @@ function handleTabChange(tab: string) {
         <!-- A股新闻信号回测进度 -->
         <n-card v-if="cnPnlTaskId && cnPnlTask && cnPnlTask.status === 'running'" size="small" title="A股新闻信号回测进度">
           <n-progress type="line" :percentage="cnPnlTask.progress" :indicator-placement="'inside'" />
-          <div style="margin-top: 8px; color: #999; font-size: 13px">{{ cnPnlTask.message }}</div>
+          <div :style="{ marginTop: '8px', color: colors.textTertiary, fontSize: '13px' }">{{ cnPnlTask.message }}</div>
         </n-card>
 
         <!-- A股 P&L 结果 -->
@@ -1347,7 +1348,7 @@ function handleTabChange(tab: string) {
               <n-gi span="6 m:1">
                 <n-statistic label="胜率">
                   <template #default>
-                    <span :style="{ color: (cnPnlResult.summary?.win_rate ?? 0) >= 0.5 ? '#18a058' : '#d03050' }">
+                    <span :style="{ color: (cnPnlResult.summary?.win_rate ?? 0) >= 0.5 ? colors.positive : colors.negative }">
                       {{ ((cnPnlResult.summary?.win_rate ?? 0) * 100).toFixed(1) }}%
                     </span>
                   </template>
@@ -1356,7 +1357,7 @@ function handleTabChange(tab: string) {
               <n-gi span="6 m:1">
                 <n-statistic label="平均收益">
                   <template #default>
-                    <span :style="{ color: (cnPnlResult.summary?.avg_return_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                    <span :style="{ color: (cnPnlResult.summary?.avg_return_pct ?? 0) >= 0 ? colors.positive : colors.negative }">
                       {{ (cnPnlResult.summary?.avg_return_pct ?? 0) >= 0 ? '+' : '' }}{{ (cnPnlResult.summary?.avg_return_pct ?? 0).toFixed(2) }}%
                     </span>
                   </template>
@@ -1365,7 +1366,7 @@ function handleTabChange(tab: string) {
               <n-gi span="6 m:1">
                 <n-statistic label="Sharpe">
                   <template #default>
-                    <span :style="{ color: (cnPnlResult.summary?.sharpe_ratio ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                    <span :style="{ color: (cnPnlResult.summary?.sharpe_ratio ?? 0) >= 0 ? colors.positive : colors.negative }">
                       {{ (cnPnlResult.summary?.sharpe_ratio ?? 0).toFixed(2) }}
                     </span>
                   </template>
@@ -1381,7 +1382,7 @@ function handleTabChange(tab: string) {
               <n-gi span="6 m:1">
                 <n-statistic label="总收益">
                   <template #default>
-                    <span :style="{ color: (cnPnlResult.summary?.total_return_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                    <span :style="{ color: (cnPnlResult.summary?.total_return_pct ?? 0) >= 0 ? colors.positive : colors.negative }">
                       {{ (cnPnlResult.summary?.total_return_pct ?? 0) >= 0 ? '+' : '' }}{{ (cnPnlResult.summary?.total_return_pct ?? 0).toFixed(2) }}%
                     </span>
                   </template>
@@ -1406,23 +1407,23 @@ function handleTabChange(tab: string) {
 
             <!-- Benchmark 对比 -->
             <div v-if="cnPnlResult.summary?.benchmark_avg_pct != null" style="margin-top: 12px; padding: 10px 12px; background: rgba(64,158,255,0.04); border-radius: 6px; border: 1px solid rgba(64,158,255,0.12)">
-              <span style="font-size: 13px; color: #666">vs 同期买入持有 (Benchmark):</span>
+              <span :style="{ fontSize: '13px', color: colors.textSecondary }">vs 同期买入持有 (Benchmark):</span>
               <n-space style="margin-top: 6px" :size="16">
                 <span style="font-size: 13px">
                   策略均收益
-                  <span style="font-weight: 600" :style="{ color: (cnPnlResult.summary?.avg_return_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                  <span style="font-weight: 600" :style="{ color: (cnPnlResult.summary?.avg_return_pct ?? 0) >= 0 ? colors.positive : colors.negative }">
                     {{ (cnPnlResult.summary?.avg_return_pct ?? 0) >= 0 ? '+' : '' }}{{ (cnPnlResult.summary?.avg_return_pct ?? 0).toFixed(2) }}%
                   </span>
                 </span>
                 <span style="font-size: 13px">
                   Benchmark 均收益
-                  <span style="font-weight: 600" :style="{ color: (cnPnlResult.summary?.benchmark_avg_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                  <span style="font-weight: 600" :style="{ color: (cnPnlResult.summary?.benchmark_avg_pct ?? 0) >= 0 ? colors.positive : colors.negative }">
                     {{ (cnPnlResult.summary?.benchmark_avg_pct ?? 0) >= 0 ? '+' : '' }}{{ (cnPnlResult.summary?.benchmark_avg_pct ?? 0).toFixed(2) }}%
                   </span>
                 </span>
                 <span style="font-size: 13px">
                   Alpha
-                  <span style="font-weight: 700" :style="{ color: (cnPnlResult.summary?.alpha_avg_pct ?? 0) >= 0 ? '#18a058' : '#d03050' }">
+                  <span style="font-weight: 700" :style="{ color: (cnPnlResult.summary?.alpha_avg_pct ?? 0) >= 0 ? colors.positive : colors.negative }">
                     {{ (cnPnlResult.summary?.alpha_avg_pct ?? 0) >= 0 ? '+' : '' }}{{ (cnPnlResult.summary?.alpha_avg_pct ?? 0).toFixed(2) }}%
                   </span>
                 </span>
@@ -1444,7 +1445,7 @@ function handleTabChange(tab: string) {
                       {{ stats.count }}笔,
                       胜率 {{ (stats.win_rate * 100).toFixed(1) }}%,
                       均收益
-                      <span :style="{ color: stats.avg_return >= 0 ? '#18a058' : '#d03050' }">
+                      <span :style="{ color: stats.avg_return >= 0 ? colors.positive : colors.negative }">
                         {{ stats.avg_return >= 0 ? '+' : '' }}{{ stats.avg_return.toFixed(2) }}%
                       </span>
                     </n-descriptions-item>
@@ -1461,7 +1462,7 @@ function handleTabChange(tab: string) {
                       {{ stats.count }}笔,
                       胜率 {{ (stats.win_rate * 100).toFixed(1) }}%,
                       均收益
-                      <span :style="{ color: stats.avg_return >= 0 ? '#18a058' : '#d03050' }">
+                      <span :style="{ color: stats.avg_return >= 0 ? colors.positive : colors.negative }">
                         {{ stats.avg_return >= 0 ? '+' : '' }}{{ stats.avg_return.toFixed(2) }}%
                       </span>
                     </n-descriptions-item>
@@ -1478,7 +1479,7 @@ function handleTabChange(tab: string) {
                       {{ stats.count }}笔,
                       胜率 {{ (stats.win_rate * 100).toFixed(1) }}%,
                       均收益
-                      <span :style="{ color: stats.avg_return >= 0 ? '#18a058' : '#d03050' }">
+                      <span :style="{ color: stats.avg_return >= 0 ? colors.positive : colors.negative }">
                         {{ stats.avg_return >= 0 ? '+' : '' }}{{ stats.avg_return.toFixed(2) }}%
                       </span>
                     </n-descriptions-item>
@@ -1497,14 +1498,14 @@ function handleTabChange(tab: string) {
                 style="display: flex; align-items: center; gap: 8px; padding: 4px 0"
               >
                 <n-tag size="small" type="warning" round style="min-width: 56px; text-align: center">{{ t.name || t.ticker }}</n-tag>
-                <span style="color: #999; font-size: 11px; min-width: 75px">{{ t.ticker }}</span>
-                <span style="color: #666; font-size: 12px; min-width: 40px">{{ t.count }}笔</span>
+                <span :style="{ color: colors.textTertiary, fontSize: '11px', minWidth: '75px' }">{{ t.ticker }}</span>
+                <span :style="{ color: colors.textSecondary, fontSize: '12px', minWidth: '40px' }">{{ t.count }}笔</span>
                 <span style="font-size: 12px; min-width: 60px">
                   胜率 {{ (t.win_rate * 100).toFixed(0) }}%
                 </span>
                 <span
                   style="font-size: 12px; font-weight: 600; min-width: 65px"
-                  :style="{ color: t.avg_return >= 0 ? '#18a058' : '#d03050' }"
+                  :style="{ color: t.avg_return >= 0 ? colors.positive : colors.negative }"
                 >
                   {{ t.avg_return >= 0 ? '+' : '' }}{{ t.avg_return.toFixed(2) }}%
                 </span>
@@ -1513,7 +1514,7 @@ function handleTabChange(tab: string) {
                   :percentage="Math.round(t.win_rate * 100)"
                   :show-indicator="false"
                   style="flex: 1"
-                  :color="t.win_rate >= 0.5 ? '#18a058' : '#d03050'"
+                  :color="t.win_rate >= 0.5 ? colors.positive : colors.negative"
                 />
               </div>
             </n-space>
@@ -1530,9 +1531,9 @@ function handleTabChange(tab: string) {
                     style="display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px"
                   >
                     <n-tag size="small" type="success" round>{{ t.name || t.ticker }}</n-tag>
-                    <span style="color: #18a058; font-weight: 600">+{{ t.return_pct.toFixed(2) }}%</span>
-                    <span style="color: #999; font-size: 12px">{{ t.entry_date }} → {{ t.exit_date }}</span>
-                    <span style="color: #666; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+                    <span :style="{ color: colors.positive, fontWeight: 600 }">+{{ t.return_pct.toFixed(2) }}%</span>
+                    <span :style="{ color: colors.textTertiary, fontSize: '12px' }">{{ t.entry_date }} → {{ t.exit_date }}</span>
+                    <span :style="{ color: colors.textSecondary, fontSize: '12px', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }">
                       {{ t.event_question }}
                     </span>
                   </div>
@@ -1548,9 +1549,9 @@ function handleTabChange(tab: string) {
                     style="display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px"
                   >
                     <n-tag size="small" type="error" round>{{ t.name || t.ticker }}</n-tag>
-                    <span style="color: #d03050; font-weight: 600">{{ t.return_pct.toFixed(2) }}%</span>
-                    <span style="color: #999; font-size: 12px">{{ t.entry_date }} → {{ t.exit_date }}</span>
-                    <span style="color: #666; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+                    <span :style="{ color: colors.negative, fontWeight: 600 }">{{ t.return_pct.toFixed(2) }}%</span>
+                    <span :style="{ color: colors.textTertiary, fontSize: '12px' }">{{ t.entry_date }} → {{ t.exit_date }}</span>
+                    <span :style="{ color: colors.textSecondary, fontSize: '12px', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }">
                       {{ t.event_question }}
                     </span>
                   </div>
@@ -1621,17 +1622,17 @@ function handleTabChange(tab: string) {
 
               <n-space style="margin-top: 12px" :size="8">
                 <template v-if="impactData.summary?.avg_sentiment != null">
-                  <span style="color: #999; font-size: 13px">平均情感:</span>
+                  <span :style="{ color: colors.textTertiary, fontSize: '13px' }">平均情感:</span>
                   <n-tag :type="impactData.summary.avg_sentiment >= 0 ? 'success' : 'error'" size="small">
                     {{ impactData.summary.avg_sentiment.toFixed(3) }}
                   </n-tag>
                 </template>
                 <template v-if="impactData.summary?.avg_confidence != null">
-                  <span style="color: #999; font-size: 13px">平均置信度:</span>
+                  <span :style="{ color: colors.textTertiary, fontSize: '13px' }">平均置信度:</span>
                   <n-tag size="small">{{ impactData.summary.avg_confidence.toFixed(3) }}</n-tag>
                 </template>
                 <template v-if="impactData.summary?.date_range">
-                  <span style="color: #999; font-size: 13px">时间范围:</span>
+                  <span :style="{ color: colors.textTertiary, fontSize: '13px' }">时间范围:</span>
                   <span style="font-size: 13px">
                     {{ impactData.summary.date_range.earliest }} ~ {{ impactData.summary.date_range.latest }}
                   </span>
@@ -1656,9 +1657,9 @@ function handleTabChange(tab: string) {
                         :percentage="Math.round((count as number / impactData.summary.total_alerts) * 100)"
                         :show-indicator="false"
                         style="flex: 1"
-                        color="#409eff"
+                        :color="colors.primary"
                       />
-                      <span style="color: #666; font-size: 12px; min-width: 40px; text-align: right">{{ count }}</span>
+                      <span :style="{ color: colors.textSecondary, fontSize: '12px', minWidth: '40px', textAlign: 'right' }">{{ count }}</span>
                     </div>
                   </n-space>
                 </n-card>
@@ -1679,9 +1680,9 @@ function handleTabChange(tab: string) {
                         :percentage="Math.round((count as number / impactData.summary.total_alerts) * 100)"
                         :show-indicator="false"
                         style="flex: 1"
-                        color="#e6a23c"
+                        :color="colors.warning"
                       />
-                      <span style="color: #666; font-size: 12px; min-width: 40px; text-align: right">{{ count }}</span>
+                      <span :style="{ color: colors.textSecondary, fontSize: '12px', minWidth: '40px', textAlign: 'right' }">{{ count }}</span>
                     </div>
                   </n-space>
                 </n-card>
@@ -1696,7 +1697,7 @@ function handleTabChange(tab: string) {
                   <div style="max-height: 500px; overflow-y: auto">
                     <table style="width: 100%; border-collapse: collapse; font-size: 13px">
                       <thead>
-                        <tr style="border-bottom: 1px solid #e0e0e0; color: #999; font-size: 12px">
+                        <tr :style="{ borderBottom: `1px solid ${colors.borderLight}`, color: colors.textTertiary, fontSize: '12px' }">
                           <th style="text-align: left; padding: 6px 8px">行业</th>
                           <th style="text-align: right; padding: 6px 8px">命中次数</th>
                           <th style="text-align: right; padding: 6px 8px">平均情感</th>
@@ -1707,14 +1708,14 @@ function handleTabChange(tab: string) {
                         <tr
                           v-for="ind in impactData.industry_impact"
                           :key="ind.industry"
-                          :style="{ backgroundColor: sentimentBg(ind.avg_sentiment), borderBottom: '1px solid #f5f5f5' }"
+                          :style="{ backgroundColor: sentimentBg(ind.avg_sentiment), borderBottom: `1px solid ${colors.borderSubtle}` }"
                         >
                           <td style="padding: 6px 8px; font-weight: 500">{{ ind.industry }}</td>
                           <td style="padding: 6px 8px; text-align: right">{{ ind.count }}</td>
                           <td style="padding: 6px 8px; text-align: right; font-weight: 600" :style="{ color: sentimentColor(ind.avg_sentiment) }">
                             {{ ind.avg_sentiment != null ? ind.avg_sentiment.toFixed(3) : '-' }}
                           </td>
-                          <td style="padding: 6px 8px; text-align: right; color: #666">
+                          <td :style="{ padding: '6px 8px', textAlign: 'right', color: colors.textSecondary }">
                             {{ ind.avg_confidence != null ? ind.avg_confidence.toFixed(2) : '-' }}
                           </td>
                         </tr>
@@ -1730,7 +1731,7 @@ function handleTabChange(tab: string) {
                   <div style="max-height: 500px; overflow-y: auto">
                     <table style="width: 100%; border-collapse: collapse; font-size: 13px">
                       <thead>
-                        <tr style="border-bottom: 1px solid #e0e0e0; color: #999; font-size: 12px">
+                        <tr :style="{ borderBottom: `1px solid ${colors.borderLight}`, color: colors.textTertiary, fontSize: '12px' }">
                           <th style="text-align: left; padding: 6px 8px">股票</th>
                           <th style="text-align: left; padding: 6px 4px">代码</th>
                           <th style="text-align: right; padding: 6px 8px">次数</th>
@@ -1742,18 +1743,18 @@ function handleTabChange(tab: string) {
                         <tr
                           v-for="s in impactData.stock_impact"
                           :key="s.code"
-                          :style="{ backgroundColor: sentimentBg(s.avg_sentiment), borderBottom: '1px solid #f5f5f5' }"
+                          :style="{ backgroundColor: sentimentBg(s.avg_sentiment), borderBottom: `1px solid ${colors.borderSubtle}` }"
                         >
                           <td style="padding: 6px 8px; font-weight: 500">{{ s.name }}</td>
-                          <td style="padding: 6px 4px; color: #999; font-size: 12px">{{ s.code }}</td>
+                          <td :style="{ padding: '6px 4px', color: colors.textTertiary, fontSize: '12px' }">{{ s.code }}</td>
                           <td style="padding: 6px 8px; text-align: right">{{ s.count }}</td>
                           <td style="padding: 6px 8px; text-align: right; font-weight: 600" :style="{ color: sentimentColor(s.avg_sentiment) }">
                             {{ s.avg_sentiment != null ? s.avg_sentiment.toFixed(3) : '-' }}
                           </td>
                           <td style="padding: 6px 8px; text-align: center">
-                            <span v-if="s.bullish" style="color: #18a058; font-size: 12px">{{ s.bullish }}↑</span>
+                            <span v-if="s.bullish" :style="{ color: colors.positive, fontSize: '12px' }">{{ s.bullish }}↑</span>
                             <span v-if="s.bullish && s.bearish" style="color: #ccc; margin: 0 2px">/</span>
-                            <span v-if="s.bearish" style="color: #d03050; font-size: 12px">{{ s.bearish }}↓</span>
+                            <span v-if="s.bearish" :style="{ color: colors.negative, fontSize: '12px' }">{{ s.bearish }}↓</span>
                           </td>
                         </tr>
                       </tbody>
@@ -1783,7 +1784,7 @@ function handleTabChange(tab: string) {
                     }"
                   />
                 </div>
-                <div style="display: flex; justify-content: space-between; font-size: 11px; color: #999; padding: 0 2px">
+                <div :style="{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: colors.textTertiary, padding: '0 2px' }">
                   <span>{{ impactData.daily_timeline[0]?.date }}</span>
                   <span>{{ impactData.daily_timeline[impactData.daily_timeline.length - 1]?.date }}</span>
                 </div>
@@ -1810,7 +1811,7 @@ function handleTabChange(tab: string) {
             <n-card v-if="impactData.summary?.total_alerts === 0" size="small">
               <n-empty description="暂无 Polymarket 历史告警数据">
                 <template #extra>
-                  <span style="color: #999; font-size: 13px">
+                  <span :style="{ color: colors.textTertiary, fontSize: '13px' }">
                     请先运行「量化回测」或启动「实时监控」生成告警
                   </span>
                 </template>
@@ -1875,7 +1876,7 @@ function handleTabChange(tab: string) {
             <div
               v-for="(t, i) in selectedAlert.affected_tickers"
               :key="i"
-              style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #f0f0f0"
+              style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #e8ecf0"
             >
               <n-tag :type="directionTag(t.direction)" size="small" round style="min-width: 56px; text-align: center">
                 {{ t.ticker }}
@@ -1883,10 +1884,10 @@ function handleTabChange(tab: string) {
               <n-tag size="small" :type="directionTag(t.direction)" :bordered="false">
                 {{ directionLabel(t.direction) }}
               </n-tag>
-              <span style="color: #999; font-size: 12px; white-space: nowrap">
+              <span :style="{ color: colors.textTertiary, fontSize: '12px', whiteSpace: 'nowrap' }">
                 {{ (t.confidence * 100).toFixed(0) }}%
               </span>
-              <span v-if="t.reasoning" style="color: #666; font-size: 12px; flex: 1; line-height: 1.4">
+              <span v-if="t.reasoning" :style="{ color: colors.textSecondary, fontSize: '12px', flex: 1, lineHeight: 1.4 }">
                 {{ t.reasoning }}
               </span>
             </div>
@@ -1902,21 +1903,21 @@ function handleTabChange(tab: string) {
             <div
               v-for="(s, i) in selectedAlert.affected_a_shares"
               :key="i"
-              style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #f0f0f0"
+              style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #e8ecf0"
             >
               <n-tag :type="directionTag(s.direction)" size="small" round style="min-width: 56px; text-align: center">
                 {{ s.name }}
               </n-tag>
-              <span style="color: #999; font-size: 12px; white-space: nowrap">
+              <span :style="{ color: colors.textTertiary, fontSize: '12px', whiteSpace: 'nowrap' }">
                 {{ s.code }}
               </span>
               <n-tag size="small" :type="directionTag(s.direction)" :bordered="false">
                 {{ directionLabel(s.direction) }}
               </n-tag>
-              <span style="color: #999; font-size: 12px; white-space: nowrap">
+              <span :style="{ color: colors.textTertiary, fontSize: '12px', whiteSpace: 'nowrap' }">
                 {{ (s.confidence * 100).toFixed(0) }}%
               </span>
-              <span v-if="s.reasoning" style="color: #666; font-size: 12px; flex: 1; line-height: 1.4">
+              <span v-if="s.reasoning" :style="{ color: colors.textSecondary, fontSize: '12px', flex: 1, lineHeight: 1.4 }">
                 {{ s.reasoning }}
               </span>
             </div>
@@ -1930,13 +1931,13 @@ function handleTabChange(tab: string) {
         >
           <n-space vertical :size="8">
             <div v-if="selectedAlert.affected_sw_industries && selectedAlert.affected_sw_industries.length">
-              <span style="color: #999; font-size: 12px; margin-right: 8px">申万行业:</span>
+              <span :style="{ color: colors.textTertiary, fontSize: '12px', marginRight: '8px' }">申万行业:</span>
               <n-tag v-for="s in selectedAlert.affected_sw_industries" :key="s" size="small" style="margin: 2px">
                 {{ s }}
               </n-tag>
             </div>
             <div v-if="selectedAlert.affected_sectors && selectedAlert.affected_sectors.length">
-              <span style="color: #999; font-size: 12px; margin-right: 8px">GICS 行业:</span>
+              <span :style="{ color: colors.textTertiary, fontSize: '12px', marginRight: '8px' }">GICS 行业:</span>
               <n-tag v-for="s in selectedAlert.affected_sectors" :key="s" size="small" style="margin: 2px">
                 {{ s }}
               </n-tag>
@@ -2000,7 +2001,7 @@ function handleTabChange(tab: string) {
             <div
               v-for="(t, i) in btSelectedAlert.affected_tickers"
               :key="i"
-              style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #f0f0f0"
+              style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #e8ecf0"
             >
               <n-tag :type="directionTag(t.direction)" size="small" round style="min-width: 56px; text-align: center">
                 {{ t.ticker }}
@@ -2008,10 +2009,10 @@ function handleTabChange(tab: string) {
               <n-tag size="small" :type="directionTag(t.direction)" :bordered="false">
                 {{ directionLabel(t.direction) }}
               </n-tag>
-              <span style="color: #999; font-size: 12px; white-space: nowrap">
+              <span :style="{ color: colors.textTertiary, fontSize: '12px', whiteSpace: 'nowrap' }">
                 {{ (t.confidence * 100).toFixed(0) }}%
               </span>
-              <span v-if="t.reasoning" style="color: #666; font-size: 12px; flex: 1; line-height: 1.4">
+              <span v-if="t.reasoning" :style="{ color: colors.textSecondary, fontSize: '12px', flex: 1, lineHeight: 1.4 }">
                 {{ t.reasoning }}
               </span>
             </div>
@@ -2027,21 +2028,21 @@ function handleTabChange(tab: string) {
             <div
               v-for="(s, i) in btSelectedAlert.affected_a_shares"
               :key="i"
-              style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #f0f0f0"
+              style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #e8ecf0"
             >
               <n-tag :type="directionTag(s.direction)" size="small" round style="min-width: 56px; text-align: center">
                 {{ s.name }}
               </n-tag>
-              <span style="color: #999; font-size: 12px; white-space: nowrap">
+              <span :style="{ color: colors.textTertiary, fontSize: '12px', whiteSpace: 'nowrap' }">
                 {{ s.code }}
               </span>
               <n-tag size="small" :type="directionTag(s.direction)" :bordered="false">
                 {{ directionLabel(s.direction) }}
               </n-tag>
-              <span style="color: #999; font-size: 12px; white-space: nowrap">
+              <span :style="{ color: colors.textTertiary, fontSize: '12px', whiteSpace: 'nowrap' }">
                 {{ (s.confidence * 100).toFixed(0) }}%
               </span>
-              <span v-if="s.reasoning" style="color: #666; font-size: 12px; flex: 1; line-height: 1.4">
+              <span v-if="s.reasoning" :style="{ color: colors.textSecondary, fontSize: '12px', flex: 1, lineHeight: 1.4 }">
                 {{ s.reasoning }}
               </span>
             </div>
@@ -2055,13 +2056,13 @@ function handleTabChange(tab: string) {
         >
           <n-space vertical :size="8">
             <div v-if="btSelectedAlert.affected_sw_industries && btSelectedAlert.affected_sw_industries.length">
-              <span style="color: #999; font-size: 12px; margin-right: 8px">申万行业:</span>
+              <span :style="{ color: colors.textTertiary, fontSize: '12px', marginRight: '8px' }">申万行业:</span>
               <n-tag v-for="s in btSelectedAlert.affected_sw_industries" :key="s" size="small" style="margin: 2px">
                 {{ s }}
               </n-tag>
             </div>
             <div v-if="btSelectedAlert.affected_sectors && btSelectedAlert.affected_sectors.length">
-              <span style="color: #999; font-size: 12px; margin-right: 8px">GICS 行业:</span>
+              <span :style="{ color: colors.textTertiary, fontSize: '12px', marginRight: '8px' }">GICS 行业:</span>
               <n-tag v-for="s in btSelectedAlert.affected_sectors" :key="s" size="small" style="margin: 2px">
                 {{ s }}
               </n-tag>
@@ -2128,7 +2129,7 @@ function handleTabChange(tab: string) {
             <div
               v-for="(t, i) in impactSelectedAlert.affected_tickers"
               :key="i"
-              style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #f0f0f0"
+              style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #e8ecf0"
             >
               <n-tag :type="directionTag(t.direction)" size="small" round style="min-width: 56px; text-align: center">
                 {{ t.ticker }}
@@ -2136,10 +2137,10 @@ function handleTabChange(tab: string) {
               <n-tag size="small" :type="directionTag(t.direction)" :bordered="false">
                 {{ directionLabel(t.direction) }}
               </n-tag>
-              <span style="color: #999; font-size: 12px; white-space: nowrap">
+              <span :style="{ color: colors.textTertiary, fontSize: '12px', whiteSpace: 'nowrap' }">
                 {{ (t.confidence * 100).toFixed(0) }}%
               </span>
-              <span v-if="t.reasoning" style="color: #666; font-size: 12px; flex: 1; line-height: 1.4">
+              <span v-if="t.reasoning" :style="{ color: colors.textSecondary, fontSize: '12px', flex: 1, lineHeight: 1.4 }">
                 {{ t.reasoning }}
               </span>
             </div>
@@ -2155,18 +2156,18 @@ function handleTabChange(tab: string) {
             <div
               v-for="(s, i) in impactSelectedAlert.affected_a_shares"
               :key="i"
-              style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #f0f0f0"
+              style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #e8ecf0"
             >
               <n-tag :type="directionTag(s.direction)" size="small" round style="min-width: 56px; text-align: center">
                 {{ s.name }}
               </n-tag>
-              <span style="color: #999; font-size: 12px; white-space: nowrap">
+              <span :style="{ color: colors.textTertiary, fontSize: '12px', whiteSpace: 'nowrap' }">
                 {{ s.code }}
               </span>
               <n-tag size="small" :type="directionTag(s.direction)" :bordered="false">
                 {{ directionLabel(s.direction) }}
               </n-tag>
-              <span style="color: #999; font-size: 12px; white-space: nowrap">
+              <span :style="{ color: colors.textTertiary, fontSize: '12px', whiteSpace: 'nowrap' }">
                 {{ (s.confidence * 100).toFixed(0) }}%
               </span>
             </div>
@@ -2180,13 +2181,13 @@ function handleTabChange(tab: string) {
         >
           <n-space vertical :size="8">
             <div v-if="impactSelectedAlert.affected_sw_industries && impactSelectedAlert.affected_sw_industries.length">
-              <span style="color: #999; font-size: 12px; margin-right: 8px">申万行业:</span>
+              <span :style="{ color: colors.textTertiary, fontSize: '12px', marginRight: '8px' }">申万行业:</span>
               <n-tag v-for="s in impactSelectedAlert.affected_sw_industries" :key="s" size="small" style="margin: 2px">
                 {{ s }}
               </n-tag>
             </div>
             <div v-if="impactSelectedAlert.affected_sectors && impactSelectedAlert.affected_sectors.length">
-              <span style="color: #999; font-size: 12px; margin-right: 8px">GICS 行业:</span>
+              <span :style="{ color: colors.textTertiary, fontSize: '12px', marginRight: '8px' }">GICS 行业:</span>
               <n-tag v-for="s in impactSelectedAlert.affected_sectors" :key="s" size="small" style="margin: 2px">
                 {{ s }}
               </n-tag>
@@ -2201,7 +2202,7 @@ function handleTabChange(tab: string) {
   <n-modal v-model:show="showMockDialog" preset="card" title="模拟告警" style="width: 520px">
     <n-space vertical :size="12">
       <div>
-        <span style="font-size: 13px; color: #666; margin-right: 8px">快捷预设:</span>
+        <span :style="{ fontSize: '13px', color: colors.textSecondary, marginRight: '8px' }">快捷预设:</span>
         <n-space :size="6" inline>
           <n-button v-for="p in mockPresets" :key="p.label" size="small" secondary @click="applyPreset(p)">
             {{ p.label }}

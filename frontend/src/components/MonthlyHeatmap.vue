@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import '../utils/echarts'
 import VChart from 'vue-echarts'
+import { colors } from '../theme'
 
 const props = defineProps<{
   data: { year: number; month: number; return: number }[]
@@ -31,7 +32,7 @@ const option = computed(() => {
       right: 0,
       top: 'center',
       inRange: {
-        color: ['#c23531', '#fff', '#2f4554'],
+        color: [colors.heatmapNeg, colors.heatmapZero, colors.heatmapPos],
       },
       formatter: (v: number) => `${(v * 100).toFixed(1)}%`,
     },

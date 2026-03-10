@@ -2,6 +2,7 @@
 import { onMounted } from 'vue'
 import { zhCN, dateZhCN } from 'naive-ui'
 import { useTaskStore } from './stores/task'
+import { themeOverrides } from './theme'
 
 const taskStore = useTaskStore()
 
@@ -11,7 +12,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <n-config-provider :locale="zhCN" :date-locale="dateZhCN">
+  <n-config-provider :locale="zhCN" :date-locale="dateZhCN" :theme-overrides="themeOverrides">
     <n-message-provider>
       <n-dialog-provider>
         <n-notification-provider>
@@ -21,10 +22,3 @@ onMounted(() => {
     </n-message-provider>
   </n-config-provider>
 </template>
-
-<style>
-body {
-  margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-}
-</style>

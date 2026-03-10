@@ -15,6 +15,7 @@ import {
 import { backtestDiscover, backtestDownload, getBacktestMarkets } from '../api/polymarket'
 import { formatDate } from '../utils/format'
 import { useTaskStore } from '../stores/task'
+import { colors } from '../theme'
 
 const message = useMessage()
 const taskStore = useTaskStore()
@@ -259,7 +260,7 @@ const opColumns: DataTableColumns = [
       }, [
         h(NSpace, { size: 'small', align: 'center' }, {
           default: () => [
-            h('span', { style: 'color: #606266; font-weight: 600; font-size: 13px' },
+            h('span', { style: `color: ${colors.textSecondary}; font-weight: 600; font-size: 13px` },
               `共 ${sentTotal.value} 篇`),
             h(NTag, { type: 'info', size: 'small' },
               { default: () => `关键词已分析: ${analysisStats.value.keyword_analyzed}` }),
@@ -296,7 +297,7 @@ const opColumns: DataTableColumns = [
     title: '数据类型', key: 'label', width: 100,
     render: (row: any) => {
       if (row.key.endsWith('_divider')) {
-        return h('span', { style: 'font-weight: 700; color: #409eff; font-size: 12px' }, row.label)
+        return h('span', { style: `font-weight: 700; color: ${colors.primary}; font-size: 12px` }, row.label)
       }
       return row.label
     },
@@ -310,7 +311,7 @@ const opColumns: DataTableColumns = [
       const info = tableInfoMap.value[tableName]
       if (!info) return '-'
       return h('span', {
-        style: info.count > 0 ? 'font-weight: 600; color: #18a058' : 'color: #c0c4cc',
+        style: info.count > 0 ? `font-weight: 600; color: ${colors.success}` : `color: ${colors.textDisabled}`,
       }, info.count.toLocaleString())
     },
   },
@@ -321,7 +322,7 @@ const opColumns: DataTableColumns = [
       const tableName = _COUNT_TABLE_MAP[row.key]
       if (!tableName) return '-'
       const info = tableInfoMap.value[tableName]
-      return h('span', { style: 'font-size: 12px; color: #606266' }, info?.dataDate || '-')
+      return h('span', { style: `font-size: 12px; color: ${colors.textSecondary}` }, info?.dataDate || '-')
     },
   },
   {
@@ -331,7 +332,7 @@ const opColumns: DataTableColumns = [
       const tableName = _COUNT_TABLE_MAP[row.key]
       if (!tableName) return '-'
       const info = tableInfoMap.value[tableName]
-      return h('span', { style: 'font-size: 12px; color: #909399' }, info?.latestDate || '-')
+      return h('span', { style: `font-size: 12px; color: ${colors.textTertiary}` }, info?.latestDate || '-')
     },
   },
   {
@@ -636,7 +637,7 @@ const tierNames: Record<number, string> = {
   1: '最高层', 2: '产业层', 3: '金融监管', 4: '专项行业', 5: '美国政策', 6: '财经媒体', 7: '券商研报', 8: '预测市场',
 }
 const tierColors: Record<number, string> = {
-  1: '#f56c6c', 2: '#e6a23c', 3: '#409eff', 4: '#67c23a', 5: '#909399', 6: '#f59e0b', 7: '#8b5cf6', 8: '#3b82f6',
+  1: colors.tier1, 2: colors.tier2, 3: colors.tier3, 4: colors.tier4, 5: colors.tier5, 6: colors.tier6, 7: colors.tier7, 8: colors.tier8,
 }
 
 const sourceColumns: DataTableColumns = [
@@ -651,7 +652,7 @@ const sourceColumns: DataTableColumns = [
   {
     title: '篇数', key: 'count', width: 80, align: 'right',
     render: (row: any) => h('span', {
-      style: row.count > 0 ? 'font-weight: 600' : 'color: #c0c4cc',
+      style: row.count > 0 ? 'font-weight: 600' : `color: ${colors.textDisabled}`,
     }, row.count?.toLocaleString() ?? '0'),
   },
   { title: '最早', key: 'earliest', width: 110, render: (row: any) => row.earliest || '-' },
@@ -695,12 +696,12 @@ const articleColumns: DataTableColumns = [
   {
     title: '栏目', key: 'category', width: 100,
     ellipsis: { tooltip: true },
-    render: (row: any) => h('span', { style: 'color: #909399; font-size: 12px' }, row.category || '-'),
+    render: (row: any) => h('span', { style: `color: ${colors.textTertiary}; font-size: 12px` }, row.category || '-'),
   },
   {
     title: '标题', key: 'title', minWidth: 300,
     ellipsis: { tooltip: true },
-    render: (row: any) => h('span', { style: 'color: #303133; cursor: pointer' }, row.title),
+    render: (row: any) => h('span', { style: `color: ${colors.textPrimary}; cursor: pointer` }, row.title),
   },
   { title: '发布日期', key: 'publish_date', width: 110, sorter: 'default' },
   { title: '抓取时间', key: 'scraped_at', width: 170 },
@@ -1025,7 +1026,7 @@ onMounted(() => {
         </n-space>
 
         <div v-if="currentSource || currentCategory || keyword || dateRange" style="margin-top: 10px">
-          <span style="font-size: 12px; color: #909399; margin-right: 8px">筛选条件:</span>
+          <span :style="{ fontSize: '12px', color: colors.textTertiary, marginRight: '8px' }">筛选条件:</span>
           <n-tag v-if="currentSource" size="small" closable @close="currentSource = ''; loadArticles(1)" style="margin-right: 6px">
             来源: {{ currentSource }}
           </n-tag>
@@ -1046,7 +1047,7 @@ onMounted(() => {
           <div style="display: flex; justify-content: space-between; align-items: center; width: 100%">
             <span>
               文章列表
-              <span style="font-size: 13px; color: #909399; margin-left: 8px">共 {{ articleTotal }} 篇</span>
+              <span :style="{ fontSize: '13px', color: colors.textTertiary, marginLeft: '8px' }">共 {{ articleTotal }} 篇</span>
             </span>
             <n-button text @click="loadArticles(articlePage)">
               <template #icon><n-icon><RefreshOutline /></n-icon></template>
@@ -1098,7 +1099,7 @@ onMounted(() => {
       <n-drawer-content v-if="selectedArticle" closable>
         <template #header>文章详情</template>
 
-        <h2 style="margin: 0 0 16px 0; font-size: 20px; line-height: 1.4; color: #303133">
+        <h2 :style="{ margin: '0 0 16px 0', fontSize: '20px', lineHeight: 1.4, color: colors.textPrimary }">
           {{ selectedArticle.title }}
         </h2>
 
@@ -1106,10 +1107,10 @@ onMounted(() => {
           <n-tag :type="getTierTagType(selectedArticle.tier)" size="small">
             {{ selectedArticle.source }}
           </n-tag>
-          <span v-if="selectedArticle.category" style="font-size: 13px; color: #909399">
+          <span v-if="selectedArticle.category" :style="{ fontSize: '13px', color: colors.textTertiary }">
             {{ selectedArticle.category }}
           </span>
-          <span style="font-size: 13px; color: #909399">
+          <span :style="{ fontSize: '13px', color: colors.textTertiary }">
             {{ selectedArticle.publish_date }}
           </span>
         </n-space>
@@ -1117,12 +1118,12 @@ onMounted(() => {
         <n-divider style="margin: 12px 0" />
 
         <div v-if="selectedArticle.summary" style="margin-bottom: 20px">
-          <div style="font-size: 13px; font-weight: 600; color: #606266; margin-bottom: 8px">摘要</div>
+          <div :style="{ fontSize: '13px', fontWeight: 600, color: colors.textSecondary, marginBottom: '8px' }">摘要</div>
           <div class="drawer-summary">
             {{ selectedArticle.summary }}
           </div>
         </div>
-        <div v-else style="margin-bottom: 20px; color: #909399; font-size: 13px">
+        <div v-else :style="{ marginBottom: '20px', color: colors.textTertiary, fontSize: '13px' }">
           暂无摘要内容
         </div>
 
@@ -1140,7 +1141,7 @@ onMounted(() => {
 
         <n-divider style="margin: 12px 0" />
 
-        <div style="font-size: 12px; color: #909399">
+        <div :style="{ fontSize: '12px', color: colors.textTertiary }">
           抓取时间：{{ selectedArticle.scraped_at || '-' }}
         </div>
       </n-drawer-content>
@@ -1151,7 +1152,7 @@ onMounted(() => {
       <n-drawer-content closable>
         <template #header>
           {{ browserLabel }}
-          <span style="font-size: 13px; color: #909399; margin-left: 8px">
+          <span :style="{ fontSize: '13px', color: colors.textTertiary, marginLeft: '8px' }">
             共 {{ browserTotal.toLocaleString() }} 条
           </span>
         </template>
@@ -1197,10 +1198,10 @@ onMounted(() => {
 <style scoped>
 .drawer-summary {
   padding: 12px 16px;
-  background: #f5f7fa;
+  background: v-bind('colors.bgPage');
   border-radius: 6px;
   font-size: 14px;
-  color: #606266;
+  color: v-bind('colors.textSecondary');
   line-height: 1.8;
   white-space: pre-wrap;
   word-break: break-all;

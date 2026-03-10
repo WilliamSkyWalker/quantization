@@ -46,8 +46,9 @@
 | 3 | 剔除科创板 | 代码前缀 `68`（`EXCLUDE_STAR_MARKET=1` 时） |
 | 4 | 剔除次新股 | 上市不足 `IPO_FILTER_DAYS`（默认 180 天） |
 | 5 | 剔除停牌 | 当日 `volume > 0` |
-| 6 | 流动性过滤 | 近 20 个交易日日均成交额 ≥ `MIN_DAILY_TURNOVER`（默认 5000 万元） |
-| 7 | **核心财务准入** | EP/BP/ROE_TTM/GROSS_MARGIN 至少一项非空，否则剔除 |
+| 6 | 市值过滤 | JOIN `stock_basic` 获取 `total_share`（万股），市值 = `total_share × close × 10000`（元），过滤极小市值 |
+| 7 | 流动性过滤 | 近 20 个交易日日均成交额 ≥ `MIN_DAILY_TURNOVER`（默认 5000 万元） |
+| 8 | **核心财务准入** | EP/BP/ROE_TTM/GROSS_MARGIN 至少一项非空，否则剔除 |
 
 涨停/跌停标记：主板 ±10%（阈值 9.9%），创业板/科创板 ±20%（阈值 19.9%）。涨停股不可买入但保留在池中。
 
@@ -107,6 +108,7 @@
 - MOM_12M 跳过最近 1 个月，避免短期反转污染
 - RESIDUAL_MOM 剥离了行业 beta，捕捉个股 alpha
 - CMDTY_MOM 通过两层映射（L2 优先 → L1 回退）将商品价格动量传导到对应行业股票。无映射行业（如银行、计算机）返回 NaN，由动态分母机制正确处理。同行业多商品按 OI（持仓量）加权平均。数据来源：Tushare `fut_mapping` + `fut_daily`。
+- **CMDTY_MOM 暴涨检测**：基于历史滚动动量分布计算 z-score（`COMMODITY_SURGE_LOOKBACK=500` 交易日窗口），当 z ≥ `COMMODITY_SURGE_ZSCORE`（默认 2.0）时触发非线性放大，放大倍率 = `1 + (COMMODITY_SURGE_MULTIPLIER - 1) × min((z - threshold) / threshold, 1.0)`，最大 `COMMODITY_SURGE_MULTIPLIER`（默认 1.5x）。用于捕捉黄金、原油等商品暴涨对相关行业的超额影响。
 
 ### 3.5 技术因子（technical）
 
@@ -122,11 +124,12 @@
 
 **PRICE_DEV_60D** 使用前复权价格 `adj_close = close × adj_factor` 计算 MA60 和偏离度，避免除权除息导致均线失真。
 
-**VOL_PRICE_DIV 趋势背离公式**（正向因子，高值 = 背离 = 反转信号强）：
-1. 20D 累计收益 → 价格趋势方向
-2. 20D 成交量 OLS 斜率（标准化） → 量能趋势方向
+**VOL_PRICE_DIV 趋势背离公式**（正向因子，高值 = 背离 = 反转信号强，向量化实现）：
+1. 20D 累计收益 `prod(1 + pct_chg/100) - 1` → 价格趋势方向
+2. 20D 成交量 OLS 斜率（向量化 `cov(t, vol) / var(t)`，标准化除以均量） → 量能趋势方向
 3. 当价格方向与量能方向不一致时，divergence = |price_trend|；否则 = 0
 4. 量增价跌 / 量缩价升 → 高值 → 反转信号
+5. 数据不足（< 10 个交易日）→ NaN
 
 ### 3.6 宏观因子（macro）
 
@@ -163,6 +166,7 @@
 - **合并逻辑**: 同一文章 LLM 结果优先，否则用 keyword 结果
 - **强度计算**: tier 权重 × min(命中数/3, 1.0)；标题命中 × 2.0，摘要 × 1.0
 - **降级策略**: 无 LLM API key 时仅用 keyword 分析，不报错
+- **get_daily_score() 返回值**: 包含 `n_articles` 列（各行业在窗口期内的文章计数），供策略层判断信号质量和触发动态权重调整
 - **政策影响类型** (`impact_type`): 每条分析记录标注影响类型，支持后续按类型差异化处理
   - `trade_tariff`: 贸易关税（进出口关税、贸易壁垒、贸易协定）
   - `tech_sanction`: 技术制裁（芯片禁令、实体清单、出口管制）
@@ -289,15 +293,15 @@ score = Σ(cat_score × cat_weight) / Σ|有值大类的 cat_weight|
 
 | 大类 | 包含因子 | 大类权重 | 占比 |
 |------|---------|---------|------|
-| **value** | EP, BP | 1.0 | 21.3% |
-| **quality** | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND | 1.2 | 25.5% |
-| **growth** | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y | 1.0 | 21.3% |
-| **momentum** | MOM_1M, MOM_3M, MOM_12M, REV_5D, IND_MOM, RESIDUAL_MOM, CMDTY_MOM | 0.8 | 17.0% |
-| **technical** | TURN_20D, VOL_20D, PRICE_DEV_60D, SIZE, VOL_PRICE_DIV | 0.7 | 14.9% |
+| **value** | EP, BP | 0.7 | 14.0% |
+| **quality** | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND | 1.3 | 26.0% |
+| **growth** | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y | 1.0 | 20.0% |
+| **momentum** | MOM_1M, MOM_3M, MOM_12M, REV_5D, IND_MOM, RESIDUAL_MOM, CMDTY_MOM | 0.9 | 18.0% |
+| **technical** | TURN_20D, VOL_20D, PRICE_DEV_60D, SIZE, VOL_PRICE_DIV | 0.7 | 14.0% |
 | **macro** | MACRO_CYCLE, MACRO_LIQD, MACRO_INFL, MACRO_EXTR | 0.6 | — |
 | **sentiment** | POLICY_SENT, POLICY_INTENSITY, ANALYST_RATING, ANALYST_COVERAGE | 0.6 | — |
 
-设计目的（Phase 16 优化）：质量增强（1.2）提升防守能力；动量降权（1.3→0.8）降低震荡市追涨杀跌；成长基准（1.2→1.0）避免熊市高估值陷阱；技术因子提权（0.5→0.7）增强低波/超跌保护信号；宏观因子权重 0.6（市场级信号，补充个股因子盲区）；舆情因子提权（0.4→0.6），政策信号和分析师评级对A股影响显著。
+设计目的（Phase 21 优化）：质量主导（1.3）最高权重防守；价值降权（1.0→0.7）避免价值陷阱（地产等低估值结构性下行行业）；动量提升（0.8→0.9）增强趋势跟踪过滤能力；成长/技术/宏观/舆情不变。
 
 ### 5.3 因子级权重（类内）
 
@@ -339,12 +343,14 @@ score = Σ(cat_score × cat_weight) / Σ|有值大类的 cat_weight|
 
 1. **核心财务准入过滤**：EP/BP/ROE_TTM/GROSS_MARGIN 全部缺失的股票剔除
 2. 剔除综合得分为 NaN 的股票（因子全缺失）
-3. **排除涨停股**（不可买入）
-4. 换手惩罚加分（若 `TURNOVER_PENALTY_LAMBDA > 0`，已持仓股 +λ）
-5. 按综合得分降序排列
-6. 过滤 `score < MIN_SELECT_SCORE`（默认 0）
-7. 取前 `MAX_HOLDINGS` 只（默认 10）
-8. 允许空仓（无股票达标时持现金）
+3. **价值陷阱惩罚**：value 大类得分 > 0 且 quality 大类得分 < -0.5 时，value 得分 × penalty（penalty = clip(1.5 + quality, 0.3, 1.0)），质量越差惩罚越重
+4. **趋势门槛过滤**：MOM_12M < -1.0（底部 ~16%）的股票得分乘以衰减系数（penalty = clip(1.0 + 0.3×MOM_12M, 0.3, 0.7)），防止买入持续下跌股
+5. **排除涨停股**（不可买入）
+6. 换手惩罚加分（若 `TURNOVER_PENALTY_LAMBDA > 0`，已持仓股 +λ）
+7. 按综合得分降序排列
+8. 过滤 `score < MIN_SELECT_SCORE`（默认 0）
+9. 取前 `MAX_HOLDINGS` 只（默认 15）
+10. 允许空仓（无股票达标时持现金）
 
 ### 5.5 仓位分配 — Softmax 权重
 
@@ -362,7 +368,25 @@ weight = raw_w / sum(raw_w)                 # 归一化
 - τ=0 退化为等权
 - 优势：比线性比例权重更平滑，头部集中可控
 
-### 5.6 换手惩罚（可选）
+### 5.6 舆情动态权重提升（可选）
+
+> 方法: `multi_factor.py::_adjust_sentiment_weight()`
+
+当某些行业在窗口期内文章数量异常集中时（z-score > `SENTIMENT_SURGE_ZSCORE`），自动提升 sentiment 大类权重，放大集中报道行业的舆情信号：
+
+```
+行业文章分布 z-score = (n_articles_i - mean) / std
+if z > SENTIMENT_SURGE_ZSCORE:
+    sentiment_weight *= SENTIMENT_SURGE_MULTIPLIER
+```
+
+**默认禁用**（`SENTIMENT_SURGE_MULTIPLIER=1.0`），原因：当前数据源（CCTV 等政府新闻）行业区分度不足，启用后可能放大噪音。待接入更多行业细分数据源后可开启。
+
+配置参数：
+- `SENTIMENT_SURGE_MULTIPLIER`（默认 1.0，即禁用；建议开启值 1.3~1.5）
+- `SENTIMENT_SURGE_ZSCORE`（默认 1.5，触发阈值）
+
+### 5.7 换手惩罚（可选）
 
 ```
 score += λ × is_in_portfolio
@@ -401,7 +425,7 @@ score += λ × is_in_portfolio
 ### 7.1 权重调整流程
 
 ```
-原始选股结果 → 流动性过滤 → 个股上限 → 行业上限 → 归一化 → 回撤缩仓/波动率目标
+原始选股结果 → 流动性过滤 → 个股上限 → 行业上限 → 关联行业组上限 → 归一化 → 回撤缩仓/波动率目标
 ```
 
 ### 7.2 限制规则
@@ -409,7 +433,8 @@ score += λ × is_in_portfolio
 | 规则 | 参数 | 说明 |
 |------|------|------|
 | 个股上限 | `MAX_SINGLE_WEIGHT = 12%` | 超限部分按比例分配给其他持仓，迭代至收敛（最多 10 轮） |
-| 行业上限 | `MAX_INDUSTRY_WEIGHT = 30%` | 超限行业内所有股票等比例缩减 |
+| 行业上限 | `MAX_INDUSTRY_WEIGHT = 20%` | 超限行业内所有股票等比例缩减 |
+| 关联行业组上限 | `MAX_INDUSTRY_GROUP_WEIGHT = 30%` | 同一产业链（如地产链=房地产+建筑装饰+建筑材料）合计不超过上限 |
 | 线性回撤响应 | `DD_START=10%, DD_MAX=25%` | 10%开始线性降仓，25%降至50%（`USE_VOL_TARGETING=0` 时） |
 | 波动率目标 | `USE_VOL_TARGETING=1` | `scale = target_vol / realized_vol`，clipped [0.3, 1.0] |
 | 流动性 | `MIN_DAILY_TURNOVER = 5000 万` | 近 20 日日均成交额不足则剔除 |
@@ -463,13 +488,13 @@ deviation ≤ -5%  → strength = 0.0（纯熊）
 
 | 大类 | 牛市权重 | 熊市权重 | 说明 |
 |------|---------|---------|------|
-| momentum | 0.8 | 0.3 | 大幅降低动量暴露 |
-| quality | 1.2 | 1.5 | 提高质量防御 |
-| growth | 1.0 | 0.6 | 降低成长（避免高估值陷阱） |
-| value | 1.0 | 1.3 | 提升价值防守 |
+| momentum | 0.9 | 0.6 | 保留趋势过滤能力（避免关闭动量安全阀） |
+| quality | 1.3 | 1.5 | 提高质量防御 |
+| growth | 1.0 | 0.8 | 适度保留成长信号 |
+| value | 0.7 | 0.6 | 降低价值暴露（避免熊市价值陷阱） |
 | technical | 0.7 | 1.0 | 提升防守因子信号 |
 | macro | 0.6 | 0.6 | 不变 |
-| sentiment | 0.4 | 0.4 | 不变 |
+| sentiment | 0.6 | 0.6 | 不变 |
 
 - 可通过 `REGIME_BEAR_OVERRIDES` 环境变量自定义（JSON 格式）
 - `REGIME_ENABLED=0` 完全关闭 regime 切换
@@ -563,6 +588,43 @@ deviation ≤ -5%  → strength = 0.0（纯熊）
 
 基准: 沪深 300 指数（000300.SH）
 
+### 9.9 回测性能优化
+
+> 文件: `factors/base.py`, `factors/sentiment.py`, `factors/technical.py`, `strategy/multi_factor.py`
+
+回测信号生成采用 **预加载 + 缓存** 架构，将单日因子计算从 ~5s 降至 ~2.1s：
+
+**预加载阶段**（`FactorBase.preload_for_backtest()`，一次性）：
+- `financial_data` 全量加载到内存（~191K 行）
+- `daily_price` 按回测区间 +400 天加载（~2.6M 行）
+- `policy_analysis` JOIN `policy_article` 按回测区间 +30 天加载（~6K 行）
+- 预加载后，`get_price_history`/`get_latest_financial`/`get_close_on_date` 等自动从内存过滤
+
+**因子级优化**：
+
+| 优化 | 文件 | 效果 |
+|------|------|------|
+| VOL_PRICE_DIV 向量化 | `technical.py` | 1.0s → 0.05s（消除 `groupby.apply` 循环） |
+| 舆情因子缓存 | `sentiment.py` | POLICY_INTENSITY 0.68s → 0.05s（`_get_sentiment_data` 共享缓存） |
+| 舆情数据预加载 | `analyzer.py` | POLICY_SENT 0.97s → 0.015s（`_get_policy_analysis_fast` 内存过滤） |
+| 舆情因子 dict 查找 | `sentiment.py` | O(n²) DataFrame 过滤 → O(1) dict 查找 |
+| 股票池缓存 | `multi_factor.py` | `get_clean_universe` 结果按日期缓存在 `_date_cache` |
+
+**信号生成流程**（`generate_signals()`）：
+```
+preload_for_backtest()（一次性 ~15s）
+  → 逐日 _compute_scores_for_date()（~2.1s/日）
+    → get_clean_universe()（~0.12s，缓存后）
+    → 29 个因子 compute()（~1.9s，全部从内存过滤）
+    → 因子处理 + 合成评分
+  → 逐日 _select_from_scores()（<0.01s/日）
+    → 换手惩罚 + Top-N + Softmax 权重
+```
+
+**基准数据**（1 年回测，25 个调仓日）：
+- 总耗时：~68s（预加载 15s + 计算 53s）
+- 单日平均：2.1s（含股票池构建、29 因子计算、因子处理、评分合成）
+
 ---
 
 ## 10. 可配置参数汇总
@@ -594,14 +656,15 @@ deviation ≤ -5%  → strength = 0.0（纯熊）
 | REGIME_ENABLED | 1（开启） | REGIME_ENABLED |
 | REGIME_MA_WINDOW | 60 | REGIME_MA_WINDOW |
 | REGIME_INDEX_CODE | 000300.SH | REGIME_INDEX_CODE |
-| REGIME_BEAR_OVERRIDES | {"momentum":0.3,"quality":1.5,"growth":0.6,"value":1.3,"technical":1.0} | REGIME_BEAR_OVERRIDES |
+| REGIME_BEAR_OVERRIDES | {"momentum":0.6,"quality":1.5,"growth":0.8,"value":0.6,"technical":1.0} | REGIME_BEAR_OVERRIDES |
 
 ### 风控
 
 | 参数 | 默认值 | 环境变量 |
 |------|--------|---------|
 | MAX_SINGLE_WEIGHT | 0.12 | MAX_SINGLE_WEIGHT |
-| MAX_INDUSTRY_WEIGHT | 0.30 | MAX_INDUSTRY_WEIGHT |
+| MAX_INDUSTRY_WEIGHT | 0.20 | MAX_INDUSTRY_WEIGHT |
+| MAX_INDUSTRY_GROUP_WEIGHT | 0.30 | MAX_INDUSTRY_GROUP_WEIGHT |
 | DD_START_THRESHOLD | 0.10 | DD_START_THRESHOLD |
 | DD_MAX_THRESHOLD | 0.25 | DD_MAX_THRESHOLD |
 | DD_MIN_POSITION | 0.50 | DD_MIN_POSITION |
@@ -656,6 +719,14 @@ deviation ≤ -5%  → strength = 0.0（纯熊）
 | TWITTER_RATE_LIMIT | 90 req/min | TWITTER_RATE_LIMIT |
 | TWITTER_MAX_TWEETS | 100 | TWITTER_MAX_TWEETS |
 
+### 商品因子
+
+| 参数 | 默认值 | 环境变量 |
+|------|--------|---------|
+| COMMODITY_SURGE_ZSCORE | 2.0 | COMMODITY_SURGE_ZSCORE |
+| COMMODITY_SURGE_MULTIPLIER | 1.5 | COMMODITY_SURGE_MULTIPLIER |
+| COMMODITY_SURGE_LOOKBACK | 500（交易日） | COMMODITY_SURGE_LOOKBACK |
+
 ### 舆情因子
 
 | 参数 | 默认值 | 环境变量 |
@@ -663,6 +734,8 @@ deviation ≤ -5%  → strength = 0.0（纯熊）
 | SENTIMENT_LOOKBACK_DAYS | 7 | SENTIMENT_LOOKBACK_DAYS |
 | SENTIMENT_DECAY | 0.3 | SENTIMENT_DECAY |
 | SENTIMENT_LLM_THRESHOLD | 0.5 | SENTIMENT_LLM_THRESHOLD |
+| SENTIMENT_SURGE_MULTIPLIER | 1.0（禁用） | SENTIMENT_SURGE_MULTIPLIER |
+| SENTIMENT_SURGE_ZSCORE | 1.5 | SENTIMENT_SURGE_ZSCORE |
 | LLM_PROVIDER | anthropic | LLM_PROVIDER |
 | LLM_API_KEY | （空） | LLM_API_KEY |
 | LLM_API_BASE | https://api.openai.com/v1 | LLM_API_BASE |

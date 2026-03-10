@@ -79,7 +79,16 @@ MIN_HOLDINGS = 0                  # 最少持仓数，0 = 允许空仓
 MAX_HOLDINGS = int(os.environ.get("MAX_HOLDINGS", "15"))
 MIN_SELECT_SCORE = float(os.environ.get("MIN_SELECT_SCORE", "0"))  # 选股最低分，低于此分不入选
 MAX_SINGLE_WEIGHT = float(os.environ.get("MAX_SINGLE_WEIGHT", "0.12"))
-MAX_INDUSTRY_WEIGHT = float(os.environ.get("MAX_INDUSTRY_WEIGHT", "0.30"))
+MAX_INDUSTRY_WEIGHT = float(os.environ.get("MAX_INDUSTRY_WEIGHT", "0.20"))
+
+# 关联行业组合上限（同一产业链合计不超过此值）
+MAX_INDUSTRY_GROUP_WEIGHT = float(os.environ.get("MAX_INDUSTRY_GROUP_WEIGHT", "0.30"))
+# 关联行业分组定义
+INDUSTRY_GROUPS: dict[str, list[str]] = {
+    "地产链": ["房地产", "建筑装饰", "建筑材料"],
+    "金融": ["银行", "非银金融"],
+    "TMT": ["计算机", "电子", "通信", "传媒"],
+}
 MAX_DRAWDOWN_THRESHOLD = 0.25
 DRAWDOWN_REDUCE_POSITION = 0.70
 # 线性回撤响应参数
@@ -130,7 +139,7 @@ REGIME_INDEX_CODE = os.environ.get("REGIME_INDEX_CODE", "000300.SH")
 # 熊市大类权重覆盖
 _raw_regime_bear = os.environ.get("REGIME_BEAR_OVERRIDES", "")
 REGIME_BEAR_OVERRIDES: dict[str, float] = {
-    "momentum": 0.3, "quality": 1.5, "growth": 0.6, "value": 1.3, "technical": 1.0,
+    "momentum": 0.6, "quality": 1.5, "growth": 0.8, "value": 0.6, "technical": 1.0,
 }
 if _raw_regime_bear.strip():
     try:
@@ -211,6 +220,9 @@ COMMODITY_SYMBOLS = [
 ]
 
 COMMODITY_MOM_LOOKBACK = int(os.environ.get("COMMODITY_MOM_LOOKBACK", "60"))  # 动量回看窗口（交易日），60日捕捉中期商品趋势
+COMMODITY_SURGE_ZSCORE = float(os.environ.get("COMMODITY_SURGE_ZSCORE", "2.0"))   # 暴涨判定阈值（动量 z-score >= 此值触发放大）
+COMMODITY_SURGE_MULTIPLIER = float(os.environ.get("COMMODITY_SURGE_MULTIPLIER", "1.5"))  # 暴涨最大放大倍数（z=3 时达到此倍数）
+COMMODITY_SURGE_LOOKBACK = int(os.environ.get("COMMODITY_SURGE_LOOKBACK", "500"))  # 历史动量分布回看窗口（交易日，约2年）
 
 # 商品→行业两层映射（l2 精确匹配申万二级，l1 回退到申万一级）
 COMMODITY_INDUSTRY_MAP = {
@@ -344,6 +356,9 @@ MACRO_EXTR_SENSITIVITY = {
 SENTIMENT_LOOKBACK_DAYS = int(os.environ.get("SENTIMENT_LOOKBACK_DAYS", "7"))
 SENTIMENT_DECAY = float(os.environ.get("SENTIMENT_DECAY", "0.3"))          # 时间衰减系数（约 3 天半衰期）
 SENTIMENT_LLM_THRESHOLD = float(os.environ.get("SENTIMENT_LLM_THRESHOLD", "0.5"))  # keyword intensity 阈值
+SENTIMENT_SURGE_BASELINE = int(os.environ.get("SENTIMENT_SURGE_BASELINE", "5"))     # 行业文章数基线（已废弃，改用截面 z-score）
+SENTIMENT_SURGE_MULTIPLIER = float(os.environ.get("SENTIMENT_SURGE_MULTIPLIER", "1.0"))  # 舆情权重动态提升倍数（1.0=禁用，需配合更精准的数据源）
+SENTIMENT_SURGE_ZSCORE = float(os.environ.get("SENTIMENT_SURGE_ZSCORE", "1.5"))     # 舆情热度 z-score 阈值（行业文章数异常时触发权重提升）
 SENTIMENT_CONTENT_MAX_CHARS = int(os.environ.get("SENTIMENT_CONTENT_MAX_CHARS", "10000"))  # LLM 传入正文最大字符数
 
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "anthropic")  # anthropic | openai

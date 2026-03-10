@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import '../utils/echarts'
 import VChart from 'vue-echarts'
+import { colors } from '../theme'
 
 const props = defineProps<{
   data: { date: string; drawdown: number }[]
@@ -26,8 +27,8 @@ const option = computed(() => ({
   series: [{
     type: 'line',
     showSymbol: false,
-    lineStyle: { width: 1.5, color: '#f56c6c' },
-    areaStyle: { color: 'rgba(245,108,108,0.15)' },
+    lineStyle: { width: 1.5, color: colors.chartDrawdown },
+    areaStyle: { color: colors.chartDrawdownArea },
     data: props.data.map(d => [d.date, d.drawdown]),
   }],
 }))

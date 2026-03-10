@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useMessage, NTag, NIcon } from 'naive-ui'
 import { CheckmarkOutline, CloseOutline, AddOutline } from '@vicons/ionicons5'
 import { getSettings, updateSettings, getIndustryFactors, getAllIndustries } from '../api'
+import { colors } from '../theme'
 
 const message = useMessage()
 const loading = ref(false)
@@ -145,7 +146,7 @@ onMounted(loadSettings)
     <!-- Industry whitelist -->
     <n-card hoverable style="margin-bottom: 20px" title="行业白名单">
       <template #header-extra>
-        <span style="font-size: 12px; color: #909399">
+        <span :style="{ fontSize: '12px', color: colors.textTertiary }">
           {{ allowedIndustries.length === 0 ? '不限制（允许所有行业）' : `已选 ${allowedIndustries.length} 个行业` }}
         </span>
       </template>
@@ -178,7 +179,7 @@ onMounted(loadSettings)
           {{ name }}
         </n-tag>
       </n-space>
-      <div v-else style="color: #909399; font-size: 13px">
+      <div v-else :style="{ color: colors.textTertiary, fontSize: '13px' }">
         空白名单表示允许所有行业，添加行业后将仅允许买入已选行业的股票
       </div>
     </n-card>
@@ -197,7 +198,7 @@ onMounted(loadSettings)
           <div v-for="(info, factor) in factors" :key="factor" style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px">
             <span style="width: 200px; font-size: 13px">{{ factor }}</span>
             <n-input-number v-model:value="info.weight" :step="0.1" size="small" />
-            <span style="font-size: 12px; color: #909399">{{ info.description }}</span>
+            <span :style="{ fontSize: '12px', color: colors.textTertiary }">{{ info.description }}</span>
           </div>
         </n-collapse-item>
       </n-collapse>
