@@ -260,7 +260,7 @@ class BacktestEngine:
                         continue
 
                     open_px = info['open']
-                    if open_px <= 0:
+                    if not open_px or pd.isna(open_px) or open_px <= 0:
                         continue
 
                     target_vol = self._round_to_lot(target_w * total_value / open_px)
@@ -390,7 +390,7 @@ class BacktestEngine:
             market_value = 0.0
             for code, shares in positions.items():
                 info = price_cache.get((code, today_str))
-                if info:
+                if info and info['close'] and not pd.isna(info['close']):
                     close_px = info['close']
                     last_close[code] = close_px
                 else:
