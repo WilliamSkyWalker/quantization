@@ -101,6 +101,16 @@ MIN_MARKET_CAP = float(os.environ.get("MIN_MARKET_CAP", "3e9"))  # 最低总市�
 # 换手惩罚系数（0.0 = 关闭）
 TURNOVER_PENALTY_LAMBDA = float(os.environ.get("TURNOVER_PENALTY_LAMBDA", "0.15"))
 
+# 自适应调仓：偏离度触发机制
+# 在半月频基准调仓之间，每隔 CHECK_INTERVAL 个交易日检查一次偏离度
+# 当新旧组合 Top-N 重叠率低于 (1 - DEVIATION_THRESHOLD) 时触发额外调仓
+# 例: THRESHOLD=0.4 表示 Top-N 中有 >=40% 是新股票时触发
+REBALANCE_DEVIATION_THRESHOLD = float(os.environ.get("REBALANCE_DEVIATION_THRESHOLD", "0.4"))
+# 偏离度检查间隔（交易日），0 = 关闭自适应调仓
+REBALANCE_CHECK_INTERVAL = int(os.environ.get("REBALANCE_CHECK_INTERVAL", "5"))
+# 两次调仓之间的最短间隔（交易日），防止过度交易
+REBALANCE_MIN_INTERVAL = int(os.environ.get("REBALANCE_MIN_INTERVAL", "5"))
+
 # 最小有效大类数（有效大类数低于此值时股票得分设为 NaN，被剔除）
 MIN_VALID_CATEGORIES = int(os.environ.get("MIN_VALID_CATEGORIES", "4"))
 

@@ -12,7 +12,7 @@
 |------|---------|------|------|
 | 沪深 A 股列表 | `pro.stock_basic()` | 按需 | 股票池、退市/ST 过滤 |
 | 日线行情 (OHLCV) | `pro.daily()` | 日 | 行情、因子计算 |
-| 每日指标 (换手率等) | `pro.daily_basic()` | 日 | TURN_20D 等技术因子 |
+| 每日指标 (换手率/估值/市值等) | `pro.daily_basic()` | 日 | TURN_20D 技术因子、DIV_YIELD 股息率因子、pe_ttm/pb/ps_ttm 估值、total_mv/circ_mv 市值、turnover_rate_f 自由流通换手率、volume_ratio 量比 |
 | 复权因子 | `pro.adj_factor()` | 日 | 前复权价格计算 |
 | 交易日历 | `pro.trade_cal()` | 按需 | 交易日判断 |
 | 指数日线 | `pro.index_daily()` | 日 | 基准指数 |

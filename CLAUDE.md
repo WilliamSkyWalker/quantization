@@ -36,7 +36,7 @@ curl -X POST http://localhost:8000/api/report/generate \
 Tushare API → backend/services/data/{downloader,updater}.py → MySQL（11 张 ORM 表）
 AKShare API → backend/services/data/akshare_downloader.py → research_report 表
   → services/data/cleaner.py（股票池过滤：退市、ST、上市天数、停牌、流动性、科创板）
-  → services/factors/*.py（29 个因子，7 大类，均继承 FactorBase ABC）
+  → services/factors/*.py（30 个因子，7 大类，均继承 FactorBase ABC）
   → services/factors/processor.py（MAD 去极值 → 按大类中性化 → 标准化(Z-Score/Rank) → 截断 ±3）
   → services/strategy/regime.py（CSI 300 60日MA ±5%渐进式切换 → 牛/熊大类权重插值）
   → services/strategy/multi_factor.py（两层打分 → Regime感知 → Top-N 选股 → Softmax 分配权重）
@@ -70,15 +70,17 @@ start.sh → 一键启动 + crontab 安装（cron 通过 curl 调用 API）
 - **价值陷阱惩罚：** value 大类得分 > 0 且 quality 大类得分 < -0.5 时，压缩 value 得分，避免买入低估值但基本面恶化的股票（如地产链）。
 - **趋势门槛过滤：** MOM_12M < -1.0 的股票最终得分乘以衰减系数，防止买入持续下跌的股票。
 - **关联行业组上限：** `INDUSTRY_GROUPS` 定义关联行业组（地产链/金融/TMT），`MAX_INDUSTRY_GROUP_WEIGHT=30%` 限制同一产业链合计权重。
+- **自适应调仓：** 半月频基准 + 偏离度触发。每隔 `REBALANCE_CHECK_INTERVAL`（默认5日）检查 Top-N 持仓变化，新股占比 ≥ `REBALANCE_DEVIATION_THRESHOLD`（默认40%）时触发额外调仓，`REBALANCE_MIN_INTERVAL`（默认5日）防止过度交易。平静期可能月调一次，剧烈变化时几天就能响应。
 - **T+1 执行模型：** 先卖后买。涨停股排除在买入之外；跌停股加入 `pending_sells` 队列下一交易日重试。
 - **可插拔交易后端：** `BaseTrader` ABC + `main.py::_create_trader()` 工厂方法，目前仅实现 `PaperTrader`。
+- **daily_basic 全量字段：** daily_price 表扩展 8 列（dv_ttm, pe_ttm, pb, ps_ttm, total_mv, circ_mv, turnover_rate_f, volume_ratio），Tushare daily_basic 全量下载并 backfill 历史数据。
 - **回测预加载架构：** `FactorBase.preload_for_backtest()` 一次性加载 financial_data + daily_price + policy_analysis 到内存，因子计算全部从内存过滤（单日 ~2.1s，1 年 25 日 ~68s）。
 
-### 因子体系（29 个因子）
+### 因子体系（30 个因子）
 
 | 大类 | 权重 | 因子 |
 |---|---|---|
-| 价值 | 0.7 | EP, BP |
+| 价值 | 0.7 | EP, BP, DIV_YIELD |
 | 质量 | 1.3 | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND |
 | 成长 | 1.0 | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y |
 | 动量 | 0.9 | MOM_1M, MOM_3M, MOM_12M, REV_5D, IND_MOM, RESIDUAL_MOM, CMDTY_MOM |

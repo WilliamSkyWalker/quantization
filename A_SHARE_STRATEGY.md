@@ -18,12 +18,12 @@
 
 ## 1. 系统概览
 
-月频多因子打分选股策略，核心流程：
+半月频 + 自适应调仓的多因子打分选股策略，核心流程：
 
 ```
-每月末交易日(T日)
+每半月调仓日(T日) + 偏离度触发的额外调仓日
   → 构建可交易股票池（含核心财务准入过滤）
-  → 计算 29 个因子（动量/偏离度使用前复权价格）
+  → 计算 30 个因子（动量/偏离度使用前复权价格）
   → 因子处理（去极值 → 按大类中性化 → 二次去极值 → 标准化(Z-Score/Rank) → Clip ±3）
   → Regime 检测（CSI300 vs MA120 → 牛/熊大类权重切换）
   → 大类合成评分（类内加权平均 → 类间动态分母合成 → 最小有效大类数保护）
@@ -56,7 +56,7 @@
 
 ## 3. 因子体系
 
-共 29 个因子，分 7 大类。
+共 30 个因子，分 7 大类。
 
 ### 3.1 价值因子（value）
 
@@ -64,9 +64,11 @@
 |------|------|------|------|
 | **EP** | 市盈率倒数 | TTM净利润 / (收盘价 × 总股本 × 10000) | 越高越好 |
 | **BP** | 市净率倒数 | 每股净资产(BPS) / 收盘价 | 越高越好 |
+| **DIV_YIELD** | 股息率 | 近12个月股息率（dv_ttm from daily_basic） | 越高越好 |
 
 - EP 使用滚动 4 季度 TTM 净利润，净利润 ≤ 0 返回 NaN
 - BP 使用最新报告期 BPS，BPS ≤ 0 返回 NaN
+- DIV_YIELD 优先使用 daily_price.dv_ttm，缺失时回退 1/pe_ttm × 100，dv_ttm ≤ 0 返回 NaN
 - 数据防未来函数：仅使用 `ann_date ≤ 选股日` 的报告
 
 ### 3.2 质量因子（quality）
@@ -269,7 +271,7 @@ z = clip(z, -3.0, +3.0)
 
 ### 5.1 大类合成评分
 
-29 个因子分为 7 个大类，评分分两层：
+30 个因子分为 7 个大类，评分分两层：
 
 **第一层：类内加权平均（动态分母）**
 
@@ -293,7 +295,7 @@ score = Σ(cat_score × cat_weight) / Σ|有值大类的 cat_weight|
 
 | 大类 | 包含因子 | 大类权重 | 占比 |
 |------|---------|---------|------|
-| **value** | EP, BP | 0.7 | 14.0% |
+| **value** | EP, BP, DIV_YIELD | 0.7 | 14.0% |
 | **quality** | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND | 1.3 | 26.0% |
 | **growth** | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y | 1.0 | 20.0% |
 | **momentum** | MOM_1M, MOM_3M, MOM_12M, REV_5D, IND_MOM, RESIDUAL_MOM, CMDTY_MOM | 0.9 | 18.0% |
@@ -308,6 +310,7 @@ score = Σ(cat_score × cat_weight) / Σ|有值大类的 cat_weight|
 | 因子 | 权重 | 说明 |
 |------|------|------|
 | EP, BP | 1.0 | 价值基准 |
+| DIV_YIELD | 0.8 | 股息率（高分红偏好） |
 | MOM_1M | 0.6 | 1月动量（降权，噪音大） |
 | MOM_3M | 0.8 | 3月动量（适度降权） |
 | MOM_12M | 1.0 | 12-1月动量 |
@@ -524,7 +527,8 @@ deviation ≤ -5%  → strength = 0.0（纯熊）
 
 - **信号产生**: T 日收盘后（每月最后一个交易日）
 - **交易执行**: T+1 日开盘价
-- **调仓频率**: 月频
+- **调仓频率**: 半月频基准（月中+月末）+ 偏离度触发的自适应调仓
+- **自适应调仓**: 每隔 `REBALANCE_CHECK_INTERVAL`（默认5）个交易日检查偏离度，Top-N 中新股票占比 ≥ `REBALANCE_DEVIATION_THRESHOLD`（默认40%）时触发额外调仓，两次调仓最短间隔 `REBALANCE_MIN_INTERVAL`（默认5）个交易日
 - **回溯**: `generate_signals()` 自动回溯 start_date 前 2 个月找最近调仓日，确保首日有持仓
 - **T+1 日常模式**: 取 DB 最新两个交易日，`signal_date = T`（倒数第二日），`exec_date = T+1`（最新日）
 
@@ -645,7 +649,10 @@ preload_for_backtest()（一次性 ~15s）
 |------|--------|---------|
 | MAX_HOLDINGS | 15 | MAX_HOLDINGS |
 | MIN_SELECT_SCORE | 0.0 | MIN_SELECT_SCORE |
-| REBALANCE_FREQ | 月频 | — |
+| REBALANCE_FREQ | 半月频 + 自适应 | — |
+| REBALANCE_DEVIATION_THRESHOLD | 0.4 | REBALANCE_DEVIATION_THRESHOLD |
+| REBALANCE_CHECK_INTERVAL | 5 | REBALANCE_CHECK_INTERVAL |
+| REBALANCE_MIN_INTERVAL | 5 | REBALANCE_MIN_INTERVAL |
 | TURNOVER_PENALTY_LAMBDA | 0.15 | TURNOVER_PENALTY_LAMBDA |
 | NEUTRALIZE_MODE | full | NEUTRALIZE_MODE |
 | NONLINEAR_SIZE | 0（关闭） | NONLINEAR_SIZE |

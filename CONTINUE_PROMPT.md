@@ -26,7 +26,7 @@
 - 回测中涨跌停：当日涨停不可买入，当日跌停不可卖出
 - 代码可直接运行，不留 TODO 占位，有完整异常处理
 
-算法文档：请先阅读 A_SHARE_STRATEGY.md 了解完整算法设计（29 因子、7 大类评分、Z-score clip、中性化模式、Regime 切换等）。
+算法文档：请先阅读 A_SHARE_STRATEGY.md 了解完整算法设计（30 因子、7 大类评分、Z-score clip、中性化模式、Regime 切换、自适应调仓等）。
 请先阅读项目现有代码再动手修改，不要凭空猜测已有实现。
 ```
 
@@ -37,7 +37,7 @@
 | 阶段 | 模块 | 状态 |
 |------|------|------|
 | Phase 1 数据层 | 配置 / ORM / 下载 / 清洗 / 更新 / income 补全 | ✅ 完成 |
-| Phase 2 因子层 | 29 个因子（7 大类）+ 处理流水线 + IC/ICIR 评估 | ✅ 完成 |
+| Phase 2 因子层 | 30 个因子（7 大类）+ 处理流水线 + IC/ICIR 评估 | ✅ 完成 |
 | Phase 3 策略层 | 分类复合评分选股 + 回测引擎（一字板排队） | ✅ 完成 |
 | Phase 4 风控层 | 个股/行业上限 + 回撤降仓 / 波动率目标管理 | ✅ 完成 |
 | Phase 5 执行层 | 本地模拟盘 PaperTrader + BaseTrader 抽象 | ✅ 完成 |
@@ -61,6 +61,7 @@
 | Phase 19 信号增强 | CMDTY_MOM 暴涨检测 + 舆情动态权重 + 市值过滤修复 + analyzer n_articles | ✅ 完成 |
 | Phase 20 性能优化 | 预加载架构 + VOL_PRICE_DIV 向量化 + 舆情缓存/预加载 + 股票池缓存 | ✅ 完成 |
 | Phase 21 回测优化 | 熊市Regime修复 + 行业集中度控制 + 大类权重调整 + 价值陷阱惩罚 + 趋势门槛过滤 | ✅ 完成 |
+| Phase 22 数据扩展+自适应调仓 | daily_basic 全量字段(8列) + DIV_YIELD因子 + 自适应调仓(偏离度触发) | ✅ 完成 |
 | 远期规划 | 行业轮动数据深度接入 | 📋 备忘 |
 
 ---
@@ -70,7 +71,7 @@
 详细算法见 `A_SHARE_STRATEGY.md`，核心改动：
 
 1. **4 个新因子**：NET_PROFIT_YOY、REVENUE_YOY（成长）、RESIDUAL_MOM（残差动量）、VOL_PRICE_DIV（量价背离）
-2. **分类复合评分**：29 因子分 7 大类（价值/质量/成长/动量/技术/宏观/舆情），类内动态分母 + 类间动态分母（权重再分配）
+2. **分类复合评分**：30 因子分 7 大类（价值/质量/成长/动量/技术/宏观/舆情），类内动态分母 + 类间动态分母（权重再分配）
 3. **核心财务准入过滤**：缺失全部 EP/BP/ROE_TTM/GROSS_MARGIN 的股票剔除
 4. **Z-score clip ±3**：防止中性化后残差极端值主导得分
 5. **中性化模式可配**：full（行业+市值）/ size_only（仅市值）/ none
@@ -138,6 +139,7 @@ backend/
 │   ├── factors/
 │   │   ├── base.py                  # 因子基类 ABC + 向量化 TTM/收盘价/总股本 + preload_for_backtest
 │   │   ├── value.py                 # EP, BP
+│   │   ├── dividend.py              # DIV_YIELD（股息率）
 │   │   ├── momentum.py              # MOM_1M, MOM_3M, MOM_12M, REV_5D, IND_MOM, RESIDUAL_MOM
 │   │   ├── quality.py               # ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND（向量化）
 │   │   ├── technical.py             # TURN_20D, VOL_20D, PRICE_DEV_60D, SIZE, VOL_PRICE_DIV（向量化）
@@ -246,6 +248,21 @@ A_SHARE_STRATEGY.md                         # 完整算法设计文档
 - 超额年化：-7.78% → **-1.03%**
 - 最大回撤：-69.03% → **-55.69%**
 - 2023 超额：-14.19% → -3.61%；2024-2026 连续正超额（+6.69%、+11.00%、+16.78%）
+
+---
+
+## Phase 22 数据扩展+自适应调仓（已完成）摘要
+
+1. **daily_basic 全量字段扩展**：DailyPrice 表新增 8 列（dv_ttm, pe_ttm, pb, ps_ttm, total_mv, circ_mv, turnover_rate_f, volume_ratio），Tushare daily_basic API 全量下载。新增 `backfill_daily_basic()` 方法高效补录历史数据（ON DUPLICATE KEY UPDATE）。
+2. **DIV_YIELD 股息率因子**：第 30 个因子，归入 value 大类（权重 0.8）。使用 dv_ttm from daily_price，缺失时回退 1/pe_ttm × 100。
+3. **自适应调仓机制**：半月频基准 + 偏离度触发。每隔 `REBALANCE_CHECK_INTERVAL`（默认5）个交易日检查 Top-N 持仓变化，新股占比 ≥ `REBALANCE_DEVIATION_THRESHOLD`（默认40%）时触发额外调仓，`REBALANCE_MIN_INTERVAL`（默认5日）防止过度交易。
+4. **TURNOVER_PENALTY_LAMBDA 调优**：0.3→0.1（0.3 过于激进，Sharpe 0.60→0.91），λ 是加在 z-score 标准化得分上的加分项，非直接成本百分比。
+
+**回测效果（2018-01-01 ~ 2025-12-31）**：
+- 总收益：+148.10%，年化：+12.49%，Sharpe：0.51
+- 最大回撤：-34.98%，超额年化：+10.50%（vs 沪深300 年化 1.99%）
+- 210 期信号（~170 基准 + ~40 自适应触发）
+- 2025 年 +53.02% vs 基准 +21.19%（自适应在快速轮动市场效果显著）
 
 ---
 
@@ -448,6 +465,7 @@ A股量化系统遇到问题，请帮我排查。
 - [x] Phase 19 信号增强：CMDTY_MOM 暴涨 z-score 放大（1.5x）+ 舆情动态权重（默认禁用）+ 市值过滤 JOIN stock_basic 修复 + analyzer n_articles 列
 - [x] Phase 20 性能优化：预加载架构（financial+daily+policy_analysis）+ VOL_PRICE_DIV 向量化（1.0s→0.05s）+ 舆情因子缓存/预加载（0.97s→0.015s）+ 股票池缓存 + dict 查找优化（单日 5s→2.1s，1 年回测 ~68s）
 - [x] Phase 21 回测优化：熊市Regime修复（value 1.3→0.6, momentum 0.3→0.6）+ 行业集中度（MAX_INDUSTRY_WEIGHT 30→20%, 关联行业组上限 30%）+ 大类权重（value 1.0→0.7, quality 1.2→1.3, momentum 0.8→0.9）+ 价值陷阱惩罚 + 趋势门槛过滤（MOM_12M<-1.0 惩罚），总收益 -39%→+5%
+- [x] Phase 22 数据扩展+自适应调仓：daily_basic 全量字段(8列) + DIV_YIELD 股息率因子(第30个) + 自适应调仓(偏离度触发) + TURNOVER_PENALTY_LAMBDA 调优(0.3→0.1)，2018-2025 总收益 +148%、年化 +12.49%、超额年化 +10.50%
 
 ## 已知待优化项
 

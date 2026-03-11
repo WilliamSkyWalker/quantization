@@ -37,6 +37,9 @@ from backend.services.config import (
     REGIME_BULL_OVERRIDES,
     SENTIMENT_SURGE_MULTIPLIER,
     SENTIMENT_SURGE_ZSCORE,
+    REBALANCE_DEVIATION_THRESHOLD,
+    REBALANCE_CHECK_INTERVAL,
+    REBALANCE_MIN_INTERVAL,
     LOG_LEVEL,
 )
 from backend.services.data.database import DatabaseManager
@@ -937,8 +940,8 @@ class MultiFactorStrategy:
         """
         生成回测区间内所有调仓日的选股信号。
 
-        会自动回溯查找 start_date 之前最近一个调仓日，
-        以确保回测首日即有持仓（T+1 执行）。
+        支持自适应调仓：在半月频基准之间，每隔 REBALANCE_CHECK_INTERVAL 个交易日
+        检查偏离度，若 Top-N 持仓变化超过 REBALANCE_DEVIATION_THRESHOLD 则触发额外调仓。
 
         Args:
             start_date: 回测起始日期。
@@ -961,8 +964,22 @@ class MultiFactorStrategy:
             rebalance_dates = [last_prior] + rebalance_dates
             logger.info(f"回溯前月调仓日: {last_prior}")
 
+        # 自适应调仓：插入偏离度检查日期
+        if REBALANCE_CHECK_INTERVAL > 0 and REBALANCE_DEVIATION_THRESHOLD > 0:
+            check_dates = self._get_adaptive_check_dates(
+                start_date, end_date, set(rebalance_dates)
+            )
+            if check_dates:
+                logger.info(
+                    f"自适应调仓: {len(check_dates)} 个检查日, "
+                    f"偏离度阈值={REBALANCE_DEVIATION_THRESHOLD:.0%}, "
+                    f"检查间隔={REBALANCE_CHECK_INTERVAL}日"
+                )
+        else:
+            check_dates = []
+
         n_dates = len(rebalance_dates)
-        logger.info(f"回测区间: {start_date} ~ {end_date}, {n_dates} 个调仓日")
+        logger.info(f"回测区间: {start_date} ~ {end_date}, {n_dates} 个基准调仓日")
 
         # 初始化缓存（静态数据跨日期复用）
         FactorBase.clear_all_cache()
@@ -970,18 +987,163 @@ class MultiFactorStrategy:
         # 预加载 financial_data + daily_price 到内存（回测模式核心优化）
         FactorBase.preload_for_backtest(self.db, start_date, end_date)
 
-        # 决定并行度
-        if max_workers == 0:
-            import os
-            max_workers = min(8, os.cpu_count() or 4) if n_dates >= 6 else 1
-
-        if max_workers > 1 and n_dates > 1:
-            signals = self._generate_signals_parallel(rebalance_dates, max_workers, cancel_check)
+        # 自适应模式：必须串行（需要实时判断偏离度）
+        if check_dates:
+            signals = self._generate_signals_adaptive(
+                rebalance_dates, check_dates, cancel_check
+            )
         else:
-            signals = self._generate_signals_sequential(rebalance_dates, cancel_check)
+            # 决定并行度
+            if max_workers == 0:
+                import os
+                max_workers = min(8, os.cpu_count() or 4) if n_dates >= 6 else 1
+
+            if max_workers > 1 and n_dates > 1:
+                signals = self._generate_signals_parallel(rebalance_dates, max_workers, cancel_check)
+            else:
+                signals = self._generate_signals_sequential(rebalance_dates, cancel_check)
 
         FactorBase.clear_all_cache()
         logger.info(f"信号生成完成: {len(signals)} 期信号（含空仓）")
+        return signals
+
+    def _get_adaptive_check_dates(
+        self,
+        start_date: str,
+        end_date: str,
+        base_rebalance_set: set[str],
+    ) -> list[str]:
+        """
+        获取自适应调仓的偏离度检查日期（排除已有的基准调仓日）。
+
+        在基准调仓日之间，每隔 REBALANCE_CHECK_INTERVAL 个交易日插入一个检查点。
+        """
+        df = self.db.query(
+            "SELECT DISTINCT trade_date FROM daily_price "
+            "WHERE trade_date >= :start_date "
+            "AND trade_date <= :end_date "
+            "ORDER BY trade_date",
+            params={"start_date": start_date, "end_date": end_date},
+        )
+        if df.empty:
+            return []
+
+        all_trade_dates = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d").tolist()
+
+        check_dates = []
+        for i, dt in enumerate(all_trade_dates):
+            if dt in base_rebalance_set:
+                continue
+            if i % REBALANCE_CHECK_INTERVAL == 0:
+                check_dates.append(dt)
+
+        return check_dates
+
+    def _generate_signals_adaptive(
+        self,
+        rebalance_dates: list[str],
+        check_dates: list[str],
+        cancel_check: Optional[callable] = None,
+    ) -> dict[str, pd.DataFrame]:
+        """
+        自适应调仓信号生成。
+
+        基准调仓日无条件执行选股；检查日仅在偏离度超过阈值时触发额外调仓。
+        偏离度 = 新 Top-N 与当前持仓的非重叠比例。
+        """
+        import time
+        t0 = time.time()
+
+        # 合并所有日期并标记类型
+        all_dates = {}
+        for dt in rebalance_dates:
+            all_dates[dt] = "base"
+        for dt in check_dates:
+            if dt not in all_dates:
+                all_dates[dt] = "check"
+
+        sorted_dates = sorted(all_dates.keys())
+        signals = {}
+        prev_holdings: set[str] = set()
+        last_rebalance_idx = -999  # 上次调仓的交易日索引
+
+        # 为了计算最短间隔，获取全部交易日列表
+        all_trade_df = self.db.query(
+            "SELECT DISTINCT trade_date FROM daily_price "
+            "WHERE trade_date >= :start AND trade_date <= :end ORDER BY trade_date",
+            params={"start": sorted_dates[0] if sorted_dates else "", "end": sorted_dates[-1] if sorted_dates else ""},
+        )
+        trade_date_list = pd.to_datetime(all_trade_df["trade_date"]).dt.strftime("%Y-%m-%d").tolist() if not all_trade_df.empty else []
+        trade_date_to_idx = {d: i for i, d in enumerate(trade_date_list)}
+
+        n_base = 0
+        n_adaptive = 0
+        n_skipped = 0
+
+        for dt in sorted_dates:
+            if cancel_check and cancel_check():
+                raise RuntimeError('回测已取消')
+
+            dtype = all_dates[dt]
+
+            if dtype == "base":
+                # 基准调仓日：无条件执行
+                try:
+                    result = self.select_stocks(dt)
+                    signals[dt] = result
+                    prev_holdings = set(result["ts_code"].tolist()) if len(result) > 0 else set()
+                    last_rebalance_idx = trade_date_to_idx.get(dt, last_rebalance_idx)
+                    n_base += 1
+                except Exception as e:
+                    logger.warning(f"{dt} 基准选股失败: {e}")
+            else:
+                # 检查日：计算偏离度，决定是否触发
+                current_idx = trade_date_to_idx.get(dt, 0)
+                if current_idx - last_rebalance_idx < REBALANCE_MIN_INTERVAL:
+                    continue  # 距上次调仓太近，跳过
+
+                try:
+                    composite = self._compute_scores_for_date(dt)
+                    if composite.empty:
+                        continue
+
+                    # 计算新 Top-N
+                    new_top = self._select_from_scores(composite, prev_holdings)
+                    if new_top.empty:
+                        continue
+
+                    new_codes = set(new_top["ts_code"].tolist())
+
+                    # 偏离度 = 新股票占 Top-N 的比例
+                    if prev_holdings and new_codes:
+                        overlap = len(new_codes & prev_holdings)
+                        deviation = 1.0 - overlap / len(new_codes)
+                    else:
+                        deviation = 1.0
+
+                    if deviation >= REBALANCE_DEVIATION_THRESHOLD:
+                        # 触发额外调仓
+                        signals[dt] = new_top
+                        prev_holdings = new_codes
+                        last_rebalance_idx = current_idx
+                        n_adaptive += 1
+                        logger.info(
+                            f"自适应调仓触发: {dt}, 偏离度={deviation:.0%}, "
+                            f"新股票={len(new_codes - (prev_holdings - new_codes))}/{len(new_codes)}"
+                        )
+                    else:
+                        n_skipped += 1
+
+                except Exception as e:
+                    logger.debug(f"{dt} 偏离度检查失败: {e}")
+
+        self._prev_holdings = prev_holdings
+
+        t1 = time.time()
+        logger.info(
+            f"自适应调仓完成: {t1 - t0:.1f}s, "
+            f"基准={n_base}, 触发={n_adaptive}, 跳过={n_skipped}"
+        )
         return signals
 
     def _generate_signals_sequential(
