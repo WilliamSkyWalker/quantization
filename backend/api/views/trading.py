@@ -49,13 +49,40 @@ def paper_account(request):
             'positions': [],
         })
 
+    # 动态计算总资产 = 现金 + 持仓市值（按最新收盘价）
+    from backend.services.data.database import PaperPosition
+    session2 = db.get_session()
+    positions = session2.query(PaperPosition).filter_by(account_name=PAPER_ACCOUNT_NAME).all()
+    market_value = 0.0
+    if positions:
+        codes = [p.ts_code for p in positions]
+        latest = db.get_latest_trade_date()
+        if latest:
+            codes_str = "','".join(codes)
+            df_px = db.query(
+                f"SELECT ts_code, `close` FROM daily_price "
+                f"WHERE trade_date = '{latest}' AND ts_code IN ('{codes_str}')"
+            )
+            px_map = dict(zip(df_px['ts_code'], df_px['close'])) if not df_px.empty else {}
+        else:
+            px_map = {}
+        for p in positions:
+            px = px_map.get(p.ts_code, p.current_price)
+            market_value += p.volume * float(px)
+    session2.close()
+
+    cash = float(acct.cash)
+    total_assets = cash + market_value
+    initial = float(acct.initial_capital)
+
     return Response({
         'account_name': acct.account_name,
-        'initial_capital': float(acct.initial_capital),
-        'cash': float(acct.cash),
-        'total_assets': float(acct.total_assets),
-        'pnl': float(acct.total_assets - acct.initial_capital),
-        'pnl_pct': round(float(acct.total_assets / acct.initial_capital - 1), 4),
+        'initial_capital': initial,
+        'cash': cash,
+        'total_assets': round(total_assets, 2),
+        'market_value': round(market_value, 2),
+        'pnl': round(total_assets - initial, 2),
+        'pnl_pct': round(total_assets / initial - 1, 4) if initial > 0 else 0,
     })
 
 
@@ -68,19 +95,35 @@ def paper_positions(request):
     session = db.get_session()
     positions = session.query(PaperPosition).filter_by(account_name=PAPER_ACCOUNT_NAME).all()
 
-    # Get stock names
+    # Get stock names + latest prices
     codes = [p.ts_code for p in positions]
     name_map = {}
+    px_map = {}
     if codes:
         codes_str = "','".join(codes)
         df_names = db.query(
             f"SELECT ts_code, name FROM stock_basic WHERE ts_code IN ('{codes_str}')"
         )
         name_map = dict(zip(df_names['ts_code'], df_names['name']))
+        latest = db.get_latest_trade_date()
+        if latest:
+            df_px = db.query(
+                f"SELECT ts_code, `close` FROM daily_price "
+                f"WHERE trade_date = '{latest}' AND ts_code IN ('{codes_str}')"
+            )
+            if not df_px.empty:
+                px_map = dict(zip(df_px['ts_code'], df_px['close']))
+
+    price_date = None
+    if codes:
+        latest = db.get_latest_trade_date()
+        if latest:
+            price_date = str(latest)[:10]
 
     result = []
     for p in positions:
-        market_value = float(p.market_value) if p.market_value else float(p.volume * p.current_price)
+        current_price = float(px_map.get(p.ts_code, p.current_price))
+        market_value = float(p.volume) * current_price
         cost_value = float(p.volume * p.cost_basis)
         pnl = market_value - cost_value
         result.append({
@@ -88,34 +131,55 @@ def paper_positions(request):
             'name': name_map.get(p.ts_code, ''),
             'volume': int(p.volume),
             'cost_basis': round(float(p.cost_basis), 2),
-            'current_price': round(float(p.current_price), 2),
+            'current_price': round(current_price, 2),
             'market_value': round(market_value, 2),
             'pnl': round(pnl, 2),
             'pnl_pct': round(pnl / cost_value, 4) if cost_value > 0 else 0,
         })
     session.close()
 
-    return Response(result)
+    return Response({'price_date': price_date, 'positions': result})
 
 
 @api_view(['GET'])
 def paper_nav(request):
-    """Get NAV history."""
+    """Get NAV history with CSI 300 benchmark."""
     db = _get_db()
     trader = _get_trader(db)
     days = int(request.query_params.get('days', 30))
     df = trader.get_nav_history(last_n=days)
 
     if df.empty:
-        return Response([])
+        return Response({'nav': [], 'benchmark': []})
 
-    result = []
+    # Build nav list (sorted ascending by date)
+    nav_list = []
     for _, row in df.iterrows():
-        result.append({
-            'date': str(row.get('trade_date', row.get('date', ''))),
+        nav_list.append({
+            'date': str(row.get('trade_date', row.get('date', '')))[:10],
             'nav': round(float(row.get('nav', row.get('total_assets', 0))), 4),
         })
-    return Response(result)
+    nav_list.sort(key=lambda x: x['date'])
+
+    # Get CSI 300 benchmark for the same date range
+    benchmark = []
+    if nav_list:
+        first_date = nav_list[0]['date']
+        last_date = nav_list[-1]['date']
+        df_idx = db.query(
+            f"SELECT trade_date, `close` FROM daily_price "
+            f"WHERE ts_code = '000300.SH' AND trade_date >= '{first_date}' "
+            f"AND trade_date <= '{last_date}' ORDER BY trade_date"
+        )
+        if not df_idx.empty:
+            base = float(df_idx['close'].iloc[0])
+            for _, row in df_idx.iterrows():
+                benchmark.append({
+                    'date': str(row['trade_date'])[:10],
+                    'nav': round(float(row['close']) / base, 4),
+                })
+
+    return Response({'nav': nav_list, 'benchmark': benchmark})
 
 
 @api_view(['GET'])

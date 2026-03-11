@@ -30,7 +30,7 @@ from backend.services.config import (
     SELL_COMMISSION,
     STAMP_TAX,
     SLIPPAGE,
-    PAPER_INITIAL_CAPITAL,
+    BACKTEST_INITIAL_CAPITAL,
     LOG_LEVEL,
     PROJECT_ROOT,
     ALLOWED_INDUSTRIES,
@@ -73,7 +73,7 @@ class BacktestEngine:
         sell_commission: float = SELL_COMMISSION,
         stamp_tax: float = STAMP_TAX,
         slippage: float = SLIPPAGE,
-        initial_capital: float = PAPER_INITIAL_CAPITAL,
+        initial_capital: float = BACKTEST_INITIAL_CAPITAL,
         benchmark: str = "000300",
         **kwargs,
     ):

@@ -6,7 +6,7 @@
 加入此因子有助于捕捉高股息行情。
 
 数据来源：daily_price.dv_ttm（已通过 daily_basic 接口下载）。
-回退逻辑：dv_ttm 缺失时，使用 EP（1/PE_TTM）近似（股息 ≈ 盈利 × 派息率）。
+无 dv_ttm 数据的股票因子值为 NaN（不做近似回退）。
 """
 
 import logging
@@ -25,8 +25,8 @@ class DividendYieldFactor(FactorBase):
     """
     股息率因子，dv_ttm 越高表示股息回报越高。
 
-    优先使用 daily_price 中的 dv_ttm（Tushare daily_basic 提供），
-    缺失时回退到 1/pe_ttm 近似。
+    使用 daily_price 中的 dv_ttm（Tushare daily_basic 提供），
+    无分红数据的股票因子值为 NaN。
     """
 
     name = "DIV_YIELD"
@@ -41,7 +41,7 @@ class DividendYieldFactor(FactorBase):
             end_date=date,
             lookback_days=10,
             universe_codes=codes,
-            columns=["dv_ttm", "pe_ttm"],
+            columns=["dv_ttm"],
         )
 
         if df_price.empty:
@@ -55,19 +55,11 @@ class DividendYieldFactor(FactorBase):
             .drop_duplicates(subset=["ts_code"], keep="first")
         )
 
-        # 优先使用 dv_ttm
+        # 使用 dv_ttm，无分红数据的保持 NaN
         if "dv_ttm" in latest.columns:
             latest["factor_value"] = pd.to_numeric(
                 latest["dv_ttm"], errors="coerce"
             )
-
-        # 回退：dv_ttm 缺失时用 1/pe_ttm 近似
-        if "pe_ttm" in latest.columns:
-            mask = latest["factor_value"].isna() | (latest["factor_value"] <= 0)
-            pe = pd.to_numeric(latest["pe_ttm"], errors="coerce")
-            # 只对 PE > 0 的计算（亏损股无股息意义）
-            fallback = np.where((pe > 0) & pe.notna(), 1.0 / pe * 100, np.nan)
-            latest.loc[mask, "factor_value"] = fallback[mask.values]
 
         # 股息率为负或零视为无效
         latest.loc[latest["factor_value"] <= 0, "factor_value"] = np.nan

@@ -19,6 +19,8 @@ import logging
 from datetime import datetime
 from typing import Optional
 
+import math
+
 import pandas as pd
 from sqlalchemy import (
     Column,
@@ -48,6 +50,19 @@ _polymarket_models_loaded = False
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
+
+
+def _sanitize_records(records: list[dict]) -> list[dict]:
+    """将 records 中的 NaN/NaT 替换为 None，避免 pymysql 报错。"""
+    for rec in records:
+        for k, v in rec.items():
+            if v is None:
+                continue
+            if isinstance(v, float) and math.isnan(v):
+                rec[k] = None
+            elif isinstance(v, pd.Timestamp) and pd.isna(v):
+                rec[k] = None
+    return records
 
 
 # ============================================================
@@ -812,7 +827,7 @@ class DatabaseManager:
             logger.warning("upsert_stock_basic: 输入DataFrame为空，跳过")
             return
 
-        records = df.to_dict("records")
+        records = _sanitize_records(df.to_dict("records"))
         with self.get_session() as session:
             for record in records:
                 existing = session.query(StockBasic).filter_by(
@@ -866,7 +881,7 @@ class DatabaseManager:
         if "trade_date" in df.columns:
             df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
 
-        records = df.to_dict("records")
+        records = _sanitize_records(df.to_dict("records"))
 
         with self.get_session() as session:
             batch_size = 500
@@ -957,7 +972,7 @@ class DatabaseManager:
                 f"ON DUPLICATE KEY UPDATE {update_clause}"
             )
 
-            records = df[existing_cols].to_dict("records")
+            records = _sanitize_records(df[existing_cols].to_dict("records"))
             batch_size = 1000
             with self.engine.begin() as conn:
                 for i in range(0, len(records), batch_size):
@@ -1143,7 +1158,7 @@ class DatabaseManager:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col]).dt.date
 
-        records = df.to_dict("records")
+        records = _sanitize_records(df.to_dict("records"))
         # NaN → None（pymysql 不接受 float('nan')，MySQL 需要 NULL）
         for record in records:
             for key, value in record.items():
@@ -1180,7 +1195,7 @@ class DatabaseManager:
             logger.warning("upsert_industry_class: 输入DataFrame为空，跳过")
             return
 
-        records = df.to_dict("records")
+        records = _sanitize_records(df.to_dict("records"))
         # NaN → None（pymysql 不接受 float('nan')，MySQL 需要 NULL）
         for record in records:
             for key, value in record.items():
@@ -1251,7 +1266,7 @@ class DatabaseManager:
                 f"ON DUPLICATE KEY UPDATE {update_clause}"
             )
 
-            records = df[existing_cols].to_dict("records")
+            records = _sanitize_records(df[existing_cols].to_dict("records"))
             batch_size = 1000
             with self.engine.begin() as conn:
                 for i in range(0, len(records), batch_size):
@@ -1260,7 +1275,7 @@ class DatabaseManager:
             logger.info(f"commodity_price: 批量upsert {len(records)} 条记录")
         else:
             # SQLite: 逐条 upsert
-            records = df.to_dict("records")
+            records = _sanitize_records(df.to_dict("records"))
             with self.get_session() as session:
                 for record in records:
                     existing = session.query(CommodityPrice).filter_by(
@@ -1358,7 +1373,7 @@ class DatabaseManager:
                 f"ON DUPLICATE KEY UPDATE {update_clause}"
             )
 
-            records = df[existing_cols].to_dict("records")
+            records = _sanitize_records(df[existing_cols].to_dict("records"))
             batch_size = 1000
             with self.engine.begin() as conn:
                 for i in range(0, len(records), batch_size):
@@ -1367,7 +1382,7 @@ class DatabaseManager:
             logger.info(f"macro_indicator: 批量upsert {len(records)} 条记录")
         else:
             # SQLite: 逐条 upsert
-            records = df.to_dict("records")
+            records = _sanitize_records(df.to_dict("records"))
             with self.get_session() as session:
                 for record in records:
                     existing = session.query(MacroIndicator).filter_by(
@@ -1861,7 +1876,7 @@ class DatabaseManager:
         """批量写入/更新美股基本信息。"""
         if df.empty:
             return
-        records = df.to_dict("records")
+        records = _sanitize_records(df.to_dict("records"))
         for record in records:
             for key, value in record.items():
                 if isinstance(value, float) and pd.isna(value):
@@ -1933,7 +1948,7 @@ class DatabaseManager:
                 f"ON DUPLICATE KEY UPDATE {update_clause}"
             )
 
-            records = df[existing_cols].to_dict("records")
+            records = _sanitize_records(df[existing_cols].to_dict("records"))
             batch_size = 1000
             with self.engine.begin() as conn:
                 for i in range(0, len(records), batch_size):
@@ -1941,7 +1956,7 @@ class DatabaseManager:
                     conn.execute(sql, batch)
             logger.info(f"us_daily_price: 批量upsert {len(records)} 条记录")
         else:
-            records = df.to_dict("records")
+            records = _sanitize_records(df.to_dict("records"))
             with self.get_session() as session:
                 for record in records:
                     existing = session.query(USDailyPrice).filter_by(
@@ -1965,7 +1980,7 @@ class DatabaseManager:
         for col in ["date", "filing_date"]:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
-        records = df.to_dict("records")
+        records = _sanitize_records(df.to_dict("records"))
         for record in records:
             for key, value in record.items():
                 if value is pd.NaT or (isinstance(value, float) and pd.isna(value)):
@@ -1990,7 +2005,7 @@ class DatabaseManager:
         """批量写入/更新美股行业分类。"""
         if df.empty:
             return
-        records = df.to_dict("records")
+        records = _sanitize_records(df.to_dict("records"))
         for record in records:
             for key, value in record.items():
                 if isinstance(value, float) and pd.isna(value):
@@ -2041,7 +2056,7 @@ class DatabaseManager:
                 f"ON DUPLICATE KEY UPDATE {update_clause}"
             )
 
-            records = df[existing_cols].to_dict("records")
+            records = _sanitize_records(df[existing_cols].to_dict("records"))
             batch_size = 1000
             with self.engine.begin() as conn:
                 for i in range(0, len(records), batch_size):
@@ -2049,7 +2064,7 @@ class DatabaseManager:
                     conn.execute(sql, batch)
             logger.info(f"us_index_daily: 批量upsert {len(records)} 条记录")
         else:
-            records = df.to_dict("records")
+            records = _sanitize_records(df.to_dict("records"))
             with self.get_session() as session:
                 for record in records:
                     existing = session.query(USIndexDaily).filter_by(
@@ -2093,7 +2108,7 @@ class DatabaseManager:
                 f"ON DUPLICATE KEY UPDATE {update_clause}"
             )
 
-            records = df[existing_cols].to_dict("records")
+            records = _sanitize_records(df[existing_cols].to_dict("records"))
             batch_size = 1000
             with self.engine.begin() as conn:
                 for i in range(0, len(records), batch_size):
@@ -2101,7 +2116,7 @@ class DatabaseManager:
                     conn.execute(sql, batch)
             logger.info(f"us_macro_indicator: 批量upsert {len(records)} 条记录")
         else:
-            records = df.to_dict("records")
+            records = _sanitize_records(df.to_dict("records"))
             with self.get_session() as session:
                 for record in records:
                     existing = session.query(USMacroIndicator).filter_by(
@@ -2148,7 +2163,7 @@ class DatabaseManager:
                 f"ON DUPLICATE KEY UPDATE {update_clause}"
             )
 
-            records = df[existing_cols].to_dict("records")
+            records = _sanitize_records(df[existing_cols].to_dict("records"))
             batch_size = 1000
             with self.engine.begin() as conn:
                 for i in range(0, len(records), batch_size):
@@ -2156,7 +2171,7 @@ class DatabaseManager:
                     conn.execute(sql, batch)
             logger.info(f"us_commodity_price: 批量upsert {len(records)} 条记录")
         else:
-            records = df.to_dict("records")
+            records = _sanitize_records(df.to_dict("records"))
             with self.get_session() as session:
                 for record in records:
                     existing = session.query(USCommodityPrice).filter_by(
@@ -2180,7 +2195,7 @@ class DatabaseManager:
         if "date" in df.columns:
             df = df.copy()
             df["date"] = pd.to_datetime(df["date"]).dt.date
-        records = df.to_dict("records")
+        records = _sanitize_records(df.to_dict("records"))
         for record in records:
             for key, value in record.items():
                 if isinstance(value, float) and pd.isna(value):
@@ -2210,7 +2225,7 @@ class DatabaseManager:
         if "filing_date" in df.columns:
             df = df.copy()
             df["filing_date"] = pd.to_datetime(df["filing_date"], errors="coerce").dt.date
-        records = df.to_dict("records")
+        records = _sanitize_records(df.to_dict("records"))
         for record in records:
             for key, value in record.items():
                 if value is pd.NaT or (isinstance(value, float) and pd.isna(value)):
@@ -2240,7 +2255,7 @@ class DatabaseManager:
         if "date" in df.columns:
             df = df.copy()
             df["date"] = pd.to_datetime(df["date"]).dt.date
-        records = df.to_dict("records")
+        records = _sanitize_records(df.to_dict("records"))
         for record in records:
             for key, value in record.items():
                 if isinstance(value, float) and pd.isna(value):

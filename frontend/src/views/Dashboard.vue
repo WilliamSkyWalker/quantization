@@ -55,7 +55,7 @@ onMounted(async () => {
     }
 
     if (navRes.status === 'fulfilled') {
-      paperNavData.value = navRes.value.data || []
+      paperNavData.value = navRes.value.data?.nav || navRes.value.data || []
     }
 
     if (sentRes.status === 'fulfilled') {

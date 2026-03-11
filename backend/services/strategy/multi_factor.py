@@ -37,9 +37,12 @@ from backend.services.config import (
     REGIME_BULL_OVERRIDES,
     SENTIMENT_SURGE_MULTIPLIER,
     SENTIMENT_SURGE_ZSCORE,
+    REBALANCE_INTERVAL,
     REBALANCE_DEVIATION_THRESHOLD,
     REBALANCE_CHECK_INTERVAL,
     REBALANCE_MIN_INTERVAL,
+    MISSING_FACTOR_THRESHOLD,
+    MISSING_FACTOR_MAX_PENALTY,
     LOG_LEVEL,
 )
 from backend.services.data.database import DatabaseManager
@@ -117,6 +120,12 @@ class MultiFactorStrategy:
 
     # 核心财务因子 — 全部缺失则剔除出池
     CORE_FINANCIAL_FACTORS = ["EP", "BP", "ROE_TTM", "GROSS_MARGIN"]
+
+    # 依赖 financial_data 表的因子（受财报时效衰减影响）
+    FINANCIAL_DEPENDENT_FACTORS = [
+        "EP", "BP", "ROE_TTM", "GROSS_MARGIN", "PROFIT_STB", "MARGIN_TREND",
+        "NET_PROFIT_YOY", "REVENUE_YOY", "NET_PROFIT_CAGR_3Y",
+    ]
 
     # 因子→大类反向映射（用于按大类覆盖中性化模式）
     FACTOR_TO_CATEGORY = {f: cat for cat, fs in FACTOR_CATEGORIES.items() for f in fs}
@@ -519,6 +528,114 @@ class MultiFactorStrategy:
 
         return cat_scores
 
+    @staticmethod
+    def _apply_missing_factor_penalty(
+        final_score: np.ndarray,
+        composite: pd.DataFrame,
+        factor_cols: list[str],
+    ) -> np.ndarray:
+        """
+        缺失因子惩罚：缺失比例超过阈值时线性衰减得分。
+
+        避免因子覆盖率低的股票（如小盘次新股）因动态分母获得虚高分数。
+        """
+        if MISSING_FACTOR_THRESHOLD >= 1.0 or MISSING_FACTOR_MAX_PENALTY <= 0:
+            return final_score
+
+        n_total = len(factor_cols)
+        if n_total == 0:
+            return final_score
+
+        n_valid = composite[factor_cols].notna().sum(axis=1).values
+        missing_ratio = 1.0 - n_valid / n_total
+
+        # 超过阈值部分线性惩罚
+        excess = np.clip(missing_ratio - MISSING_FACTOR_THRESHOLD, 0, None)
+        max_excess = 1.0 - MISSING_FACTOR_THRESHOLD
+        penalty = 1.0 - (excess / max_excess) * MISSING_FACTOR_MAX_PENALTY
+
+        result = final_score.copy() if isinstance(final_score, np.ndarray) else np.array(final_score)
+        valid_mask = ~np.isnan(result)
+        result[valid_mask] *= penalty[valid_mask] if isinstance(penalty, np.ndarray) else penalty
+
+        n_penalized = (valid_mask & (penalty < 1.0)).sum()
+        if n_penalized > 0:
+            logger.info(f"缺失因子惩罚: {n_penalized} 只股票被降分")
+
+        return result
+
+    def _apply_financial_staleness_decay(
+        self,
+        date: str,
+        composite: pd.DataFrame,
+        factor_cols: list[str],
+    ) -> pd.DataFrame:
+        """
+        财务数据时效衰减：报告期越远，财务因子得分越低。
+
+        衰减规则（按报告期距今月数）：
+            ≤3 个月: 100%
+            3~6 个月: 50%
+            6~9 个月: 25%
+            >9 个月: 负面惩罚（因子值设为 -1.0，延迟/不披露视为负面信号）
+        """
+        fin_cols = [f for f in self.FINANCIAL_DEPENDENT_FACTORS if f in factor_cols]
+        if not fin_cols:
+            return composite
+
+        # 查每只股票最新财报的 end_date（报告期）
+        codes = composite["ts_code"].tolist()
+        codes_str = "','".join(codes)
+        df_latest = self.db.query(
+            f"SELECT ts_code, MAX(end_date) as latest_end_date "
+            f"FROM financial_data "
+            f"WHERE ts_code IN ('{codes_str}') AND ann_date <= '{date}' "
+            f"GROUP BY ts_code"
+        )
+
+        if df_latest.empty:
+            return composite
+
+        composite = composite.copy()
+        ref_date = pd.to_datetime(date)
+        df_latest["latest_end_date"] = pd.to_datetime(df_latest["latest_end_date"])
+        df_latest["months_stale"] = (
+            (ref_date - df_latest["latest_end_date"]).dt.days / 30.44
+        )
+
+        # 合并
+        composite = composite.merge(
+            df_latest[["ts_code", "months_stale"]], on="ts_code", how="left"
+        )
+        # 无财务数据的股票视为极度过时
+        composite["months_stale"] = composite["months_stale"].fillna(99)
+
+        months = composite["months_stale"].values
+        decay = np.where(
+            months <= 3, 1.0,
+            np.where(months <= 6, 0.5,
+                np.where(months <= 9, 0.25, 0.0))
+        )
+
+        # 对财务因子乘以衰减系数；>9个月设为负面惩罚值
+        stale_penalty = -1.0  # 超期未披露 → 负面信号
+        for col in fin_cols:
+            if col in composite.columns:
+                vals = composite[col].values.astype(float)
+                composite[col] = np.where(
+                    decay > 0, vals * decay, stale_penalty
+                )
+
+        n_decayed = ((decay < 1.0) & (decay > 0)).sum()
+        n_penalized = (decay == 0).sum()
+        if n_decayed > 0 or n_penalized > 0:
+            logger.info(
+                f"财报时效衰减: {n_decayed} 只降权, {n_penalized} 只财务因子负面惩罚"
+            )
+
+        composite = composite.drop(columns=["months_stale"])
+        return composite
+
     def _compute_scores_vectorized(
         self,
         composite: pd.DataFrame,
@@ -577,6 +694,11 @@ class MultiFactorStrategy:
             np.nan,
         )
 
+        # 缺失因子惩罚
+        final_score = self._apply_missing_factor_penalty(
+            final_score, composite, factor_cols
+        )
+
         return final_score
 
     def _compute_scores_by_industry(
@@ -631,7 +753,11 @@ class MultiFactorStrategy:
             )
             result.iloc[result.index.get_indexer(idx)] = scores
 
-        return result
+        # 缺失因子惩罚（全局计算）
+        result_arr = self._apply_missing_factor_penalty(
+            result.values, composite, factor_cols
+        )
+        return pd.Series(result_arr, index=result.index)
 
     def _compute_scores_for_date(self, date: str) -> pd.DataFrame:
         """
@@ -693,6 +819,9 @@ class MultiFactorStrategy:
             composite = composite.merge(processed, on="ts_code", how="left")
 
         factor_cols = [c for c in composite.columns if c != "ts_code"]
+
+        # 3.5 财报时效衰减（标准化后、合成前）
+        composite = self._apply_financial_staleness_decay(date, composite, factor_cols)
 
         # 4. 大类合成评分（regime + 舆情动态权重）
         effective_cat_weights = self._get_regime_cat_weights(date)
@@ -869,6 +998,9 @@ class MultiFactorStrategy:
 
         factor_cols = [c for c in composite.columns if c != "ts_code"]
 
+        # 财报时效衰减
+        composite = self._apply_financial_staleness_decay(date, composite, factor_cols)
+
         # 核心财务准入过滤 + 大类合成评分（regime + 舆情动态权重）
         effective_cat_weights = self._get_regime_cat_weights(date)
         effective_cat_weights = self._adjust_sentiment_weight(effective_cat_weights, date)
@@ -893,7 +1025,7 @@ class MultiFactorStrategy:
 
     def get_rebalance_dates(self, start_date: str, end_date: str) -> list[str]:
         """
-        获取调仓日期列表（每月两次：月中 + 月末最后交易日）。
+        获取调仓日期列表（每 10 个交易日调仓一次）。
 
         Args:
             start_date: 起始日期。
@@ -913,24 +1045,8 @@ class MultiFactorStrategy:
         if df.empty:
             return []
 
-        df["trade_date"] = pd.to_datetime(df["trade_date"])
-        df["year_month"] = df["trade_date"].dt.to_period("M")
-
-        dates = []
-        for _, group in df.groupby("year_month"):
-            trading_days = group["trade_date"].sort_values()
-            # 月中：第 15 日当天或之后的第一个交易日
-            month_start = trading_days.iloc[0]
-            mid_target = month_start.replace(day=15)
-            mid_days = trading_days[trading_days >= mid_target]
-            if not mid_days.empty:
-                dates.append(mid_days.iloc[0].strftime("%Y-%m-%d"))
-            # 月末：最后一个交易日
-            dates.append(trading_days.iloc[-1].strftime("%Y-%m-%d"))
-
-        # 去重并排序（月中和月末可能重合于短月）
-        dates = sorted(set(dates))
-        return dates
+        trading_days = sorted(pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d").tolist())
+        return trading_days[::REBALANCE_INTERVAL]
 
     def generate_signals(
         self, start_date: str, end_date: str,
@@ -987,7 +1103,7 @@ class MultiFactorStrategy:
         # 预加载 financial_data + daily_price 到内存（回测模式核心优化）
         FactorBase.preload_for_backtest(self.db, start_date, end_date)
 
-        # 自适应模式：必须串行（需要实时判断偏离度）
+        # 自适应模式：Phase1 并行因子计算 + Phase2 串行偏离度判断
         if check_dates:
             signals = self._generate_signals_adaptive(
                 rebalance_dates, check_dates, cancel_check
@@ -1046,11 +1162,12 @@ class MultiFactorStrategy:
         cancel_check: Optional[callable] = None,
     ) -> dict[str, pd.DataFrame]:
         """
-        自适应调仓信号生成。
+        自适应调仓信号生成（两阶段：并行因子计算 + 串行偏离度判断）。
 
-        基准调仓日无条件执行选股；检查日仅在偏离度超过阈值时触发额外调仓。
-        偏离度 = 新 Top-N 与当前持仓的非重叠比例。
+        Phase 1: 并行计算所有日期（基准+检查日）的因子评分
+        Phase 2: 按时间顺序串行遍历，基准日无条件选股，检查日做偏离度判断
         """
+        import os
         import time
         t0 = time.time()
 
@@ -1063,9 +1180,6 @@ class MultiFactorStrategy:
                 all_dates[dt] = "check"
 
         sorted_dates = sorted(all_dates.keys())
-        signals = {}
-        prev_holdings: set[str] = set()
-        last_rebalance_idx = -999  # 上次调仓的交易日索引
 
         # 为了计算最短间隔，获取全部交易日列表
         all_trade_df = self.db.query(
@@ -1076,72 +1190,98 @@ class MultiFactorStrategy:
         trade_date_list = pd.to_datetime(all_trade_df["trade_date"]).dt.strftime("%Y-%m-%d").tolist() if not all_trade_df.empty else []
         trade_date_to_idx = {d: i for i, d in enumerate(trade_date_list)}
 
+        # ---- Phase 1: 并行计算所有日期的因子评分 ----
+        composites: dict[str, pd.DataFrame] = {}
+        n_workers = min(8, os.cpu_count() or 4) if len(sorted_dates) >= 6 else 1
+
+        if n_workers > 1:
+            logger.info(f"自适应调仓 Phase1: 并行计算 {len(sorted_dates)} 个日期因子, {n_workers} 线程")
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                future_map = {}
+                for dt in sorted_dates:
+                    if cancel_check and cancel_check():
+                        raise RuntimeError('回测已取消')
+                    future = pool.submit(self._compute_scores_for_date, dt)
+                    future_map[future] = dt
+
+                for future in as_completed(future_map):
+                    dt = future_map[future]
+                    try:
+                        composites[dt] = future.result()
+                    except Exception as e:
+                        logger.warning(f"{dt} 因子计算失败: {e}")
+                        composites[dt] = pd.DataFrame(columns=["ts_code", "score"])
+        else:
+            logger.info(f"自适应调仓 Phase1: 串行计算 {len(sorted_dates)} 个日期因子")
+            for dt in sorted_dates:
+                if cancel_check and cancel_check():
+                    raise RuntimeError('回测已取消')
+                try:
+                    composites[dt] = self._compute_scores_for_date(dt)
+                except Exception as e:
+                    logger.warning(f"{dt} 因子计算失败: {e}")
+                    composites[dt] = pd.DataFrame(columns=["ts_code", "score"])
+
+        t1 = time.time()
+        logger.info(f"自适应调仓 Phase1 完成: {t1 - t0:.1f}s")
+
+        # ---- Phase 2: 串行偏离度判断 + 选股 ----
+        signals = {}
+        prev_holdings: set[str] = set()
+        last_rebalance_idx = -999
+
         n_base = 0
         n_adaptive = 0
         n_skipped = 0
 
         for dt in sorted_dates:
-            if cancel_check and cancel_check():
-                raise RuntimeError('回测已取消')
-
+            composite = composites.get(dt, pd.DataFrame())
             dtype = all_dates[dt]
 
             if dtype == "base":
-                # 基准调仓日：无条件执行
-                try:
-                    result = self.select_stocks(dt)
-                    signals[dt] = result
-                    prev_holdings = set(result["ts_code"].tolist()) if len(result) > 0 else set()
-                    last_rebalance_idx = trade_date_to_idx.get(dt, last_rebalance_idx)
-                    n_base += 1
-                except Exception as e:
-                    logger.warning(f"{dt} 基准选股失败: {e}")
+                selected = self._select_from_scores(composite, prev_holdings)
+                signals[dt] = selected
+                prev_holdings = set(selected["ts_code"].tolist()) if len(selected) > 0 else set()
+                last_rebalance_idx = trade_date_to_idx.get(dt, last_rebalance_idx)
+                n_base += 1
             else:
                 # 检查日：计算偏离度，决定是否触发
                 current_idx = trade_date_to_idx.get(dt, 0)
                 if current_idx - last_rebalance_idx < REBALANCE_MIN_INTERVAL:
-                    continue  # 距上次调仓太近，跳过
+                    continue
 
-                try:
-                    composite = self._compute_scores_for_date(dt)
-                    if composite.empty:
-                        continue
+                if composite.empty:
+                    continue
 
-                    # 计算新 Top-N
-                    new_top = self._select_from_scores(composite, prev_holdings)
-                    if new_top.empty:
-                        continue
+                new_top = self._select_from_scores(composite, prev_holdings)
+                if new_top.empty:
+                    continue
 
-                    new_codes = set(new_top["ts_code"].tolist())
+                new_codes = set(new_top["ts_code"].tolist())
 
-                    # 偏离度 = 新股票占 Top-N 的比例
-                    if prev_holdings and new_codes:
-                        overlap = len(new_codes & prev_holdings)
-                        deviation = 1.0 - overlap / len(new_codes)
-                    else:
-                        deviation = 1.0
+                if prev_holdings and new_codes:
+                    overlap = len(new_codes & prev_holdings)
+                    deviation = 1.0 - overlap / len(new_codes)
+                else:
+                    deviation = 1.0
 
-                    if deviation >= REBALANCE_DEVIATION_THRESHOLD:
-                        # 触发额外调仓
-                        signals[dt] = new_top
-                        prev_holdings = new_codes
-                        last_rebalance_idx = current_idx
-                        n_adaptive += 1
-                        logger.info(
-                            f"自适应调仓触发: {dt}, 偏离度={deviation:.0%}, "
-                            f"新股票={len(new_codes - (prev_holdings - new_codes))}/{len(new_codes)}"
-                        )
-                    else:
-                        n_skipped += 1
-
-                except Exception as e:
-                    logger.debug(f"{dt} 偏离度检查失败: {e}")
+                if deviation >= REBALANCE_DEVIATION_THRESHOLD:
+                    signals[dt] = new_top
+                    prev_holdings = new_codes
+                    last_rebalance_idx = current_idx
+                    n_adaptive += 1
+                    logger.info(
+                        f"自适应调仓触发: {dt}, 偏离度={deviation:.0%}, "
+                        f"新股票={len(new_codes - (prev_holdings - new_codes))}/{len(new_codes)}"
+                    )
+                else:
+                    n_skipped += 1
 
         self._prev_holdings = prev_holdings
 
-        t1 = time.time()
+        t2 = time.time()
         logger.info(
-            f"自适应调仓完成: {t1 - t0:.1f}s, "
+            f"自适应调仓完成: {t2 - t0:.1f}s (因子={t1 - t0:.1f}s, 选股={t2 - t1:.1f}s), "
             f"基准={n_base}, 触发={n_adaptive}, 跳过={n_skipped}"
         )
         return signals

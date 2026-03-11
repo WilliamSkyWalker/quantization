@@ -1,16 +1,32 @@
 <script setup lang="ts">
 import { h } from 'vue'
 import type { DataTableColumns } from 'naive-ui'
+import { useMessage } from 'naive-ui'
 import { pnlColor } from '../theme'
 
 const props = defineProps<{
   stocks: any[]
   loading?: boolean
+  showCopy?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'row-click', row: any): void
 }>()
+
+const message = useMessage()
+
+function copyStockList() {
+  const lines = props.stocks.map(s => {
+    const weight = s.weight != null ? (s.weight * 100).toFixed(2) + '%' : ''
+    return `${s.ts_code}\t${s.name || ''}\t${weight}`
+  })
+  navigator.clipboard.writeText(lines.join('\n')).then(() => {
+    message.success('已复制到剪贴板')
+  }).catch(() => {
+    message.error('复制失败')
+  })
+}
 
 const columns: DataTableColumns = [
   { title: '代码', key: 'ts_code', width: 100, sorter: 'default' },
@@ -48,6 +64,8 @@ const rowProps = (row: any) => ({
   style: 'cursor: pointer',
   onClick: () => handleRowClick(row),
 })
+
+defineExpose({ copyStockList })
 </script>
 
 <template>
@@ -58,7 +76,6 @@ const rowProps = (row: any) => ({
     :row-props="rowProps"
     striped
     size="small"
-    :max-height="600"
     style="width: 100%"
   />
 </template>

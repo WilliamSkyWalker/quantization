@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { useMessage } from 'naive-ui'
+import { useMessage, NIcon } from 'naive-ui'
+import { CopyOutline } from '@vicons/ionicons5'
 import { startSelectStocks, getFactorDetail, getSelectHistory, getSelectHistoryDate, getDataStatus } from '../api'
 import { useTaskStore } from '../stores/task'
 import { formatDate, todayStr } from '../utils/format'
@@ -20,6 +21,7 @@ const selectedStock = ref<any>(null)
 const factorLoading = ref(false)
 const factorDetail = ref<any>(null)
 const historyDates = ref<{ date: string; total: number; updated_at: string | null }[]>([])
+const topTableRef = ref<InstanceType<typeof StockTable> | null>(null)
 let taskId = ''
 let taskWatcher: (() => void) | null = null
 
@@ -266,8 +268,18 @@ onMounted(async () => {
 
     <n-grid :cols="24" :x-gap="20" v-if="result">
       <n-gi :span="16">
-        <n-card hoverable title="Top 选股结果">
+        <n-card hoverable>
+          <template #header>
+            <div style="display: flex; justify-content: space-between; align-items: center; width: 100%">
+              <span>Top {{ result?.top_stocks?.length || 0 }} 选股结果</span>
+              <n-button text size="small" @click="topTableRef?.copyStockList()" v-if="result?.top_stocks?.length">
+                <template #icon><n-icon><CopyOutline /></n-icon></template>
+                复制
+              </n-button>
+            </div>
+          </template>
           <StockTable
+            ref="topTableRef"
             :stocks="result?.top_stocks || []"
             @row-click="onRowClick"
           />

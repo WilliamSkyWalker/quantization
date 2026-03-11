@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { useMessage, useDialog, NIcon } from 'naive-ui'
 import { PlayOutline, TrashOutline, RefreshOutline } from '@vicons/ionicons5'
 import { getPaperAccount, getPaperPositions, getPaperNav, getPaperTransactions, startPaperTrade, resetPaper } from '../api'
@@ -16,7 +16,9 @@ const loading = ref(false)
 const tradeLoading = ref(false)
 const account = ref<any>(null)
 const positions = ref<any[]>([])
+const priceDate = ref('')
 const navData = ref<any[]>([])
+const benchmarkData = ref<any[]>([])
 const transactions = ref<any[]>([])
 
 async function loadAll() {
@@ -29,11 +31,26 @@ async function loadAll() {
       getPaperTransactions(30),
     ])
     if (acctRes.status === 'fulfilled') account.value = acctRes.value.data
-    if (posRes.status === 'fulfilled') positions.value = posRes.value.data
-    if (navRes.status === 'fulfilled') navData.value = navRes.value.data
+    if (posRes.status === 'fulfilled') {
+      positions.value = posRes.value.data?.positions || posRes.value.data || []
+      priceDate.value = posRes.value.data?.price_date || ''
+    }
+    if (navRes.status === 'fulfilled') {
+      navData.value = navRes.value.data?.nav || []
+      benchmarkData.value = navRes.value.data?.benchmark || []
+    }
     if (txRes.status === 'fulfilled') transactions.value = txRes.value.data
   } finally {
     loading.value = false
+  }
+}
+
+let tradeTaskWatcher: (() => void) | null = null
+
+function stopTradeWatcher() {
+  if (tradeTaskWatcher) {
+    tradeTaskWatcher()
+    tradeTaskWatcher = null
   }
 }
 
@@ -43,9 +60,28 @@ async function executeTrade() {
     const { data } = await startPaperTrade()
     taskStore.trackTask(data.task_id, '执行交易信号')
     message.success('交易任务已启动')
+
+    // Watch task completion, then refresh
+    stopTradeWatcher()
+    tradeTaskWatcher = watch(
+      () => taskStore.tasks[data.task_id],
+      (task) => {
+        if (!task) return
+        if (task.status === 'completed') {
+          message.success('交易执行完成')
+          tradeLoading.value = false
+          stopTradeWatcher()
+          loadAll()
+        } else if (task.status === 'failed' || task.status === 'cancelled') {
+          message.error(`交易失败: ${task.error || '已取消'}`)
+          tradeLoading.value = false
+          stopTradeWatcher()
+        }
+      },
+      { immediate: true },
+    )
   } catch (e: any) {
     message.error('操作失败')
-  } finally {
     tradeLoading.value = false
   }
 }
@@ -65,6 +101,7 @@ function doReset() {
 }
 
 onMounted(loadAll)
+onUnmounted(stopTradeWatcher)
 </script>
 
 <template>
@@ -123,14 +160,14 @@ onMounted(loadAll)
     </n-grid>
 
     <!-- Positions -->
-    <n-card hoverable style="margin-bottom: 20px" title="当前持仓">
+    <n-card hoverable style="margin-bottom: 20px" :title="`当前持仓${priceDate ? '（' + priceDate + '）' : ''}`">
       <PositionTable :positions="positions" v-if="positions.length" />
       <n-empty v-else description="暂无持仓" />
     </n-card>
 
     <!-- NAV chart -->
     <n-card hoverable style="margin-bottom: 20px" v-if="navData.length" title="净值曲线">
-      <NavChart :nav="navData" height="300px" />
+      <NavChart :nav="navData" :benchmark="benchmarkData" height="300px" />
     </n-card>
 
     <!-- Recent trades -->

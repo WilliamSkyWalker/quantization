@@ -76,7 +76,7 @@ SLIPPAGE = 0.001           # 滑点 0.1%
 
 REBALANCE_FREQ = "M"
 MIN_HOLDINGS = 0                  # 最少持仓数，0 = 允许空仓
-MAX_HOLDINGS = int(os.environ.get("MAX_HOLDINGS", "15"))
+MAX_HOLDINGS = int(os.environ.get("MAX_HOLDINGS", "20"))
 MIN_SELECT_SCORE = float(os.environ.get("MIN_SELECT_SCORE", "0"))  # 选股最低分，低于此分不入选
 MAX_SINGLE_WEIGHT = float(os.environ.get("MAX_SINGLE_WEIGHT", "0.12"))
 MAX_INDUSTRY_WEIGHT = float(os.environ.get("MAX_INDUSTRY_WEIGHT", "0.20"))
@@ -101,8 +101,11 @@ MIN_MARKET_CAP = float(os.environ.get("MIN_MARKET_CAP", "3e9"))  # 最低总市�
 # 换手惩罚系数（0.0 = 关闭）
 TURNOVER_PENALTY_LAMBDA = float(os.environ.get("TURNOVER_PENALTY_LAMBDA", "0.15"))
 
+# 基准调仓频率（每 N 个交易日调仓一次）
+REBALANCE_INTERVAL = int(os.environ.get("REBALANCE_INTERVAL", "10"))
+
 # 自适应调仓：偏离度触发机制
-# 在半月频基准调仓之间，每隔 CHECK_INTERVAL 个交易日检查一次偏离度
+# 在基准调仓之间，每隔 CHECK_INTERVAL 个交易日检查一次偏离度
 # 当新旧组合 Top-N 重叠率低于 (1 - DEVIATION_THRESHOLD) 时触发额外调仓
 # 例: THRESHOLD=0.4 表示 Top-N 中有 >=40% 是新股票时触发
 REBALANCE_DEVIATION_THRESHOLD = float(os.environ.get("REBALANCE_DEVIATION_THRESHOLD", "0.4"))
@@ -113,6 +116,11 @@ REBALANCE_MIN_INTERVAL = int(os.environ.get("REBALANCE_MIN_INTERVAL", "5"))
 
 # 最小有效大类数（有效大类数低于此值时股票得分设为 NaN，被剔除）
 MIN_VALID_CATEGORIES = int(os.environ.get("MIN_VALID_CATEGORIES", "4"))
+
+# 缺失因子惩罚：缺失比例超过阈值时，按线性比例衰减得分
+# 例: 30 个因子缺失 10 个 = 33%，超过 20% 阈值，惩罚 = 1 - (0.33-0.20)/(1-0.20) * 0.5 ≈ 0.92
+MISSING_FACTOR_THRESHOLD = float(os.environ.get("MISSING_FACTOR_THRESHOLD", "0.20"))  # 缺失比例开始惩罚
+MISSING_FACTOR_MAX_PENALTY = float(os.environ.get("MISSING_FACTOR_MAX_PENALTY", "0.5"))  # 最大惩罚力度（1=全部扣光）
 
 # 中性化模式: "full" / "size_only" / "none"
 NEUTRALIZE_MODE = os.environ.get("NEUTRALIZE_MODE", "full")
@@ -194,9 +202,12 @@ for _pair in _raw_index_map.split(","):
 # 模拟盘配置
 # ============================================================
 
-PAPER_INITIAL_CAPITAL = float(os.environ.get("PAPER_INITIAL_CAPITAL", "1000000"))
+PAPER_INITIAL_CAPITAL = float(os.environ.get("PAPER_INITIAL_CAPITAL", "500000"))
 PAPER_ACCOUNT_NAME = os.environ.get("PAPER_ACCOUNT_NAME", "default")
 TRADER_TYPE = os.environ.get("TRADER_TYPE", "paper")  # paper / qmt / ptrade
+
+# 回测初始资金（独立于模拟盘）
+BACKTEST_INITIAL_CAPITAL = float(os.environ.get("BACKTEST_INITIAL_CAPITAL", "500000"))
 
 # ============================================================
 # 券商研报配置

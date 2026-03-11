@@ -20,6 +20,7 @@ const historyList = ref<any[]>([])
 const selectedHistoryId = ref<number | null>(null)
 const resultSource = ref<'live' | 'saved' | null>(null)
 const historyLoading = ref(false)
+const detailLoading = ref(false)
 const { loading, taskId, result, start, stopPolling, taskStore } = useTaskPolling({
   taskLabel: '回测',
 })
@@ -41,7 +42,7 @@ async function loadHistory() {
 
 async function loadSavedResult(id: number) {
   selectedHistoryId.value = id
-  historyLoading.value = true
+  detailLoading.value = true
   try {
     const { data } = await getBacktestResult(id)
     result.value = data
@@ -49,7 +50,7 @@ async function loadSavedResult(id: number) {
   } catch {
     message.error('加载历史回测失败')
   } finally {
-    historyLoading.value = false
+    detailLoading.value = false
   }
 }
 
@@ -61,12 +62,11 @@ onMounted(async () => {
       latestTradeDate.value = statusRes.value.data.latest_trade_date
     }
   } catch { /* ignore */ }
+  historyLoading.value = false
 
-  // Auto-load latest saved result
+  // Auto-load first result detail (non-blocking)
   if (!result.value && historyList.value.length > 0) {
-    await loadSavedResult(historyList.value[0].id)
-  } else {
-    historyLoading.value = false
+    loadSavedResult(historyList.value[0].id)
   }
 })
 
@@ -75,7 +75,7 @@ function setFullBacktest() {
     message.warning('无法获取最新交易日，请先下载数据')
     return
   }
-  dateRange.value = ['2018-06-01', latestTradeDate.value]
+  dateRange.value = ['2021-01-01', latestTradeDate.value]
 }
 
 function setQuickBacktest() {
@@ -165,16 +165,16 @@ const summaryItems = [
           @update:value="handleEndDateUpdate"
           placeholder="结束日期"
         />
-        <n-button type="primary" @click="runBacktest" :loading="loading" :disabled="historyLoading">
+        <n-button type="primary" @click="runBacktest" :loading="loading" :disabled="detailLoading">
           <template #icon><n-icon><PlayOutline /></n-icon></template>
           运行回测
         </n-button>
         <n-divider vertical />
-        <n-button @click="setFullBacktest" :disabled="!latestTradeDate || loading || historyLoading" secondary>
+        <n-button @click="setFullBacktest" :disabled="!latestTradeDate || loading || detailLoading" secondary>
           <template #icon><n-icon><RocketOutline /></n-icon></template>
-          完整回测 (2018~至今)
+          完整回测 (2021~至今)
         </n-button>
-        <n-button @click="setQuickBacktest" :disabled="!latestTradeDate || loading || historyLoading" secondary>
+        <n-button @click="setQuickBacktest" :disabled="!latestTradeDate || loading || detailLoading" secondary>
           <template #icon><n-icon><FlashOutline /></n-icon></template>
           快速回测 (近2年)
         </n-button>
@@ -198,11 +198,11 @@ const summaryItems = [
       </n-space>
     </n-card>
 
-    <!-- History loading hint -->
-    <n-card hoverable style="margin-bottom: 20px" v-if="historyLoading">
+    <!-- Detail loading hint -->
+    <n-card hoverable style="margin-bottom: 20px" v-if="detailLoading">
       <div style="text-align: center; padding: 40px 0">
         <n-spin size="large" />
-        <div :style="{ marginTop: '12px', color: colors.textTertiary }">加载历史回测数据...</div>
+        <div :style="{ marginTop: '12px', color: colors.textTertiary }">加载回测详情...</div>
       </div>
     </n-card>
 
@@ -284,6 +284,6 @@ const summaryItems = [
       </n-card>
     </template>
 
-    <n-empty v-else-if="!loading && !historyLoading" description="选择日期范围并点击运行回测" />
+    <n-empty v-else-if="!loading && !detailLoading" description="选择日期范围并点击运行回测" />
   </div>
 </template>

@@ -785,7 +785,17 @@ class TushareDownloader:
         Returns:
             成功更新的交易日数量。
         """
-        latest_date = self.db.get_latest_trade_date()
+        # 只看个股数据的最新日期（排除指数/行业指数，避免被提前更新的指数数据误导）
+        result = self.db.query(
+            "SELECT MAX(trade_date) as max_date FROM daily_price "
+            "WHERE ts_code NOT LIKE '%.SH' AND ts_code NOT LIKE '%.SI'"
+        )
+        latest_date = result["max_date"].iloc[0]
+        if pd.isna(latest_date):
+            latest_date = None
+        else:
+            latest_date = str(latest_date)
+
         if latest_date is None:
             logger.info("数据库无历史数据，执行全量下载")
             return self.download_daily_prices()

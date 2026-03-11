@@ -870,8 +870,9 @@ class PaperTrader(BaseTrader):
                 account_name=self.account_name
             ).first()
             if account:
-                account.cash = account.initial_capital
-                account.total_assets = account.initial_capital
+                account.initial_capital = PAPER_INITIAL_CAPITAL
+                account.cash = PAPER_INITIAL_CAPITAL
+                account.total_assets = PAPER_INITIAL_CAPITAL
 
             session.commit()
             logger.info(f"模拟账户 [{self.account_name}] 已重置")

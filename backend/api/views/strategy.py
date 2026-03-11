@@ -138,7 +138,7 @@ def _run_select(task_id, date):
         pass
 
     # Compute score-proportional weights for top N stocks
-    top_n_df = scored.head(10).copy()
+    top_n_df = scored.head(20).copy()
     if len(top_n_df) > 0:
         scores = top_n_df['score'].values
         shifted = pd.Series(scores).clip(lower=0).values
@@ -537,23 +537,29 @@ def _run_backtest(task_id, start_date, end_date):
 def backtest_history(request):
     """Return list of saved backtest results, newest first."""
     db = _get_db()
+    # 只取前 200 字符提取 headline，避免加载完整 summary JSON
     rows = db.query(
-        "SELECT id, start_date, end_date, summary, created_at "
+        "SELECT id, start_date, end_date, LEFT(summary, 200) AS summary_head, created_at "
         "FROM backtest_result ORDER BY created_at DESC"
     )
     items = []
     for _, r in rows.iterrows():
-        summary = {}
-        if r['summary']:
+        headline = '-'
+        head = r.get('summary_head') or ''
+        if head:
             try:
-                summary = json.loads(r['summary'])
+                # 尝试从截断的 JSON 中提取总收益
+                import re
+                m = re.search(r'"总收益":\s*"([^"]*)"', head)
+                if m:
+                    headline = m.group(1)
             except Exception:
                 pass
         items.append({
             'id': int(r['id']),
             'start_date': str(r['start_date'])[:10],
             'end_date': str(r['end_date'])[:10],
-            'summary_headline': summary.get('总收益', summary.get('总收益率', '-')),
+            'summary_headline': headline,
             'created_at': str(r['created_at'])[:19] if pd.notna(r['created_at']) else None,
         })
     return Response({'items': items})
