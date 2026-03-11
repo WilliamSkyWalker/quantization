@@ -48,9 +48,10 @@ backend/api/views/ → Django REST Framework API 端点
 backend/core/ → Django 配置（settings, urls, asgi）
 frontend/ → Vue 3 + Naive UI 仪表盘
   数据管理页（/data）三个顶级 Tab：
-    数据操作 — 快捷操作 + 10 类数据下载/更新表 + 舆情数据源概览（来源表+抓取/分析按钮）
+    数据操作 — 快捷操作 + A股/美股/Polymarket 数据下载/更新表 + 舆情数据源概览（来源表+抓取/分析按钮）
     文章列表 — 舆情文章搜索/筛选/分页/详情抽屉
     数据表状态 — 全部 DB 表行数/最新日期
+  注：Polymarket 和美股回测的独立前端页面已移除，Polymarket 仅作为舆情数据源保留在数据管理页中
 start.sh → 一键启动 + crontab 安装（cron 通过 curl 调用 API）
 ```
 
@@ -101,3 +102,6 @@ start.sh → 一键启动 + crontab 安装（cron 通过 curl 调用 API）
 - 数据库层使用 SQLAlchemy ORM（`DeclarativeBase`）
 - 面向 A 股市场（申万行业分类、涨跌停处理、T+1 规则）
 - 在[A_SHARE_STRATEGY.md](A_SHARE_STRATEGY.md) 和[CONTINUE_PROMPT.md](CONTINUE_PROMPT.md)中记录变动
+- 美股回测算法文档：[US_SHARE_STRATEGY.md](US_SHARE_STRATEGY.md)
+- Polymarket 策略文档：[PollyMarket_STRATEGY.md](PollyMarket_STRATEGY.md)
+- Polymarket P&L 分析结论：[POLYMARKET_PNL_ANALYSIS.md](POLYMARKET_PNL_ANALYSIS.md)

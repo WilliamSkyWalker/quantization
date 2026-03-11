@@ -12,7 +12,7 @@ import {
   startSentimentBackfillLLM, getSentimentStatus, getSentimentArticles, getSentimentAnalysisStats,
   startSentimentDownload, browseData,
 } from '../api'
-import { backtestDiscover, backtestDownload, getBacktestMarkets } from '../api/polymarket'
+import { backtestDiscover, backtestDownload } from '../api/polymarket'
 import { formatDate } from '../utils/format'
 import { useTaskStore } from '../stores/task'
 import { colors } from '../theme'

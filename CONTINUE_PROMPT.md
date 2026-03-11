@@ -62,6 +62,7 @@
 | Phase 20 性能优化 | 预加载架构 + VOL_PRICE_DIV 向量化 + 舆情缓存/预加载 + 股票池缓存 | ✅ 完成 |
 | Phase 21 回测优化 | 熊市Regime修复 + 行业集中度控制 + 大类权重调整 + 价值陷阱惩罚 + 趋势门槛过滤 | ✅ 完成 |
 | Phase 22 数据扩展+自适应调仓 | daily_basic 全量字段(8列) + DIV_YIELD因子 + 自适应调仓(偏离度触发) | ✅ 完成 |
+| Phase 23 文档整理+前端清理 | US_SHARE_STRATEGY.md + Polymarket前端移除 + NSDQ→PollyMarket重命名 | ✅ 完成 |
 | 远期规划 | 行业轮动数据深度接入 | 📋 备忘 |
 
 ---
@@ -184,7 +185,10 @@ backend/
 └── .env                             # 本地配置（不入库）
 frontend/                            # Vue 3 + Naive UI 仪表盘（数据操作/文章列表/数据表状态 三个顶级 Tab）
 start.sh                             # 一键启动 + crontab（cron 通过 curl 调用 API）
-A_SHARE_STRATEGY.md                         # 完整算法设计文档
+A_SHARE_STRATEGY.md                  # A股多因子选股算法文档
+US_SHARE_STRATEGY.md                 # 美股事件驱动 P&L 回测算法文档
+PollyMarket_STRATEGY.md              # Polymarket 预测市场策略文档
+POLYMARKET_PNL_ANALYSIS.md           # Polymarket P&L 回测分析结论
 ```
 
 ---
@@ -276,6 +280,14 @@ A_SHARE_STRATEGY.md                         # 完整算法设计文档
 4. **舆情因子 dict 查找**：`sentiment.py` 两个因子的行业→个股映射从 O(n²) DataFrame 过滤改为 O(1) dict 查找。
 5. **股票池缓存**：`multi_factor.py` 中 `get_clean_universe` 结果按日期缓存在 `_date_cache`，避免同日期重复构建。
 6. **ThreadPoolExecutor 无效验证**：Python GIL 限制下，CPU-bound 的 pandas/numpy 因子计算无法受益于多线程（实测 0.90x，反而更慢）。
+
+---
+
+## Phase 23 文档整理+前端清理（已完成）摘要
+
+1. **新增 US_SHARE_STRATEGY.md**：完整记录美股事件驱动 P&L 回测算法（数据源、10 张 ORM 表、UsStockBacktester 入场/出场逻辑、收益计算、汇总统计、API 端点、与 A 股系统对比）。
+2. **移除 Polymarket 独立前端页面**：删除 router 中 `/polymarket` 和 `/us-backtest` 路由，删除导航菜单中 Polymarket 和美股回测入口。Polymarket 仅作为舆情数据源保留在数据管理页（发现市场/下载数据操作）。
+3. **重命名 NSDQ_SHARE_STRATEGY.md → PollyMarket_STRATEGY.md**：git mv 重命名。
 
 ---
 
@@ -466,6 +478,7 @@ A股量化系统遇到问题，请帮我排查。
 - [x] Phase 20 性能优化：预加载架构（financial+daily+policy_analysis）+ VOL_PRICE_DIV 向量化（1.0s→0.05s）+ 舆情因子缓存/预加载（0.97s→0.015s）+ 股票池缓存 + dict 查找优化（单日 5s→2.1s，1 年回测 ~68s）
 - [x] Phase 21 回测优化：熊市Regime修复（value 1.3→0.6, momentum 0.3→0.6）+ 行业集中度（MAX_INDUSTRY_WEIGHT 30→20%, 关联行业组上限 30%）+ 大类权重（value 1.0→0.7, quality 1.2→1.3, momentum 0.8→0.9）+ 价值陷阱惩罚 + 趋势门槛过滤（MOM_12M<-1.0 惩罚），总收益 -39%→+5%
 - [x] Phase 22 数据扩展+自适应调仓：daily_basic 全量字段(8列) + DIV_YIELD 股息率因子(第30个) + 自适应调仓(偏离度触发) + TURNOVER_PENALTY_LAMBDA 调优(0.3→0.1)，2018-2025 总收益 +148%、年化 +12.49%、超额年化 +10.50%
+- [x] Phase 23 文档整理+前端清理：新增 US_SHARE_STRATEGY.md（美股回测算法文档）+ Polymarket 前端页面移除（仅保留数据管理中的舆情数据操作）+ NSDQ_SHARE_STRATEGY.md 重命名为 PollyMarket_STRATEGY.md
 
 ## 已知待优化项
 

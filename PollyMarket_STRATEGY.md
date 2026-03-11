@@ -406,13 +406,9 @@ ws/polymarket/ → PolymarketConsumer
     alert        → {type, data: {id, condition_id, alert_type, price_change, affected_tickers, ...}}
 ```
 
-### 9.3 前端 WebSocket
+### 9.3 前端 WebSocket（已移除）
 
-前端页面 `Polymarket.vue` 在 `onMounted` 时连接 `ws/polymarket/`，监控运行中时保持连接：
-
-- `price_update` → 就地更新市场列表中对应行的 YES 赔率
-- `alert` → 插入告警列表头部 + 全局提示
-- 断线自动重连（3 秒间隔）
+> 注：Polymarket 独立前端页面（`Polymarket.vue`）和美股回测页面（`UsStockBacktest.vue`）已移除。Polymarket 目前仅作为舆情数据源保留在数据管理页中（发现市场/下载数据操作）。后端 WebSocket 推送架构和 API 端点仍完整保留，可随时重新接入前端。
 
 ---
 

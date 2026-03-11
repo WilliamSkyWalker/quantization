@@ -83,7 +83,7 @@
 
 | 数据 | 来源 | 说明 |
 |------|------|------|
-| NASDAQ 100 成分股列表 | Wikipedia 页面解析 + yfinance 补充 | `pd.read_html` 解析 Wikipedia 表格，yfinance `Ticker.info` 补充市值和 IPO 日期 |
+| S&P 500 + NASDAQ 100 成分股列表 | Wikipedia 页面解析 + yfinance 补充 | `pd.read_html` 解析 Wikipedia 表格（S&P 500 ~503 只 + NASDAQ 100 合并去重 ~530 只），yfinance `Ticker.info` 补充市值和 IPO 日期 |
 | 日线行情 | `yf.download()` | OHLCV + 复权收盘价 |
 | 季度财务 | `Ticker.quarterly_income_stmt` / `quarterly_balance_sheet` / `quarterly_cashflow` | 利润表、资产负债表、现金流 |
 | SEC 提交日期 | `Ticker.sec_filings` | 从 10-Q/10-K 的 edgarUrl 匹配报告期末日，获取真实 filing_date；匹配不到时兜底用报告日 |
@@ -243,7 +243,7 @@ LLM 支持两种后端:
 │  Tushare Pro ──→ 商品期货 (15品种主力合约) ──→ MySQL    │
 │  AKShare ────→ 券商研报 (东方财富) ──→ MySQL            │
 ├─ 美股 ──────────────────────────────────────────────────┤
-│  Wikipedia ──→ NASDAQ 100 成分股列表                     │
+│  Wikipedia ──→ S&P 500 + NASDAQ 100 成分股列表（~530只）  │
 │  yfinance ───→ 日线/财务/行业/SEC/分析师/公司行动 ──→ MySQL │
 │  FRED ───────→ 20 项美国宏观指标 ──→ MySQL              │
 ├─ 舆情 ──────────────────────────────────────────────────┤
@@ -251,5 +251,6 @@ LLM 支持两种后端:
 │  关键词+LLM ──→ 行业情感分析 ──→ MySQL                  │
 └─────────────────────────────────────────────────────────┘
           ↓
-   因子计算 → 选股 → 回测/模拟交易
+   A股: 因子计算 → 选股 → 回测/模拟交易（详见 A_SHARE_STRATEGY.md）
+   美股: Polymarket 告警 → 事件驱动 P&L 回测（详见 US_SHARE_STRATEGY.md）
 ```
