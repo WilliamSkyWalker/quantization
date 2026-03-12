@@ -3,7 +3,12 @@ Django settings for backend.
 Reads database config from backend/.env via services/config.py.
 """
 import os
+import time
+import logging
 from pathlib import Path
+
+# 日志时间使用本地时区（Asia/Shanghai）
+logging.Formatter.converter = time.localtime
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -15,6 +20,9 @@ SECRET_KEY = 'django-insecure-quant-local-dev-only-not-for-production'
 DEBUG = True
 
 ALLOWED_HOSTS = ['*']
+
+TIME_ZONE = 'Asia/Shanghai'
+USE_TZ = True
 
 INSTALLED_APPS = [
     'daphne',
@@ -83,6 +91,7 @@ LOGGING = {
         'verbose': {
             'format': '{asctime} {levelname} {name} {message}',
             'style': '{',
+            'datefmt': '%Y-%m-%d %H:%M:%S',
         },
     },
     'handlers': {

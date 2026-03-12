@@ -66,6 +66,71 @@ class FactorBase(ABC):
         cls._date_cache.clear()
 
     @classmethod
+    def _fast_mysql_read(
+        cls,
+        db: "DatabaseManager",
+        columns: list[str],
+        table: str,
+        where: str = "",
+        order_by: str = "",
+    ) -> pd.DataFrame:
+        """
+        高速 MySQL 读取：mysql CLI 导出 TSV → pd.read_csv（C 实现）。
+
+        比 pymysql（纯 Python 逐行解析）快 3-4 倍。
+        若 mysql CLI 不可用则回退到 db.query()。
+        """
+        import subprocess
+        import tempfile
+        import os
+        from backend.services.config import (
+            MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE,
+        )
+
+        sql = f"SELECT {', '.join(columns)} FROM {table}"
+        if where:
+            sql += f" WHERE {where}"
+        if order_by:
+            sql += f" ORDER BY {order_by}"
+
+        try:
+            tmpf = tempfile.NamedTemporaryFile(suffix=".tsv", delete=False)
+            tmpf.close()
+            with open(tmpf.name, "w") as fout:
+                proc = subprocess.run(
+                    [
+                        "mysql",
+                        "-h", str(MYSQL_HOST),
+                        "-P", str(MYSQL_PORT),
+                        "-u", MYSQL_USER,
+                        f"-p{MYSQL_PASSWORD}",
+                        "-N", "-B", "--quick",
+                        MYSQL_DATABASE, "-e", sql,
+                    ],
+                    stdout=fout,
+                    stderr=subprocess.PIPE,
+                    timeout=300,
+                )
+            if proc.returncode != 0:
+                raise RuntimeError(proc.stderr.decode(errors="replace"))
+            df = pd.read_csv(
+                tmpf.name, sep="\t", header=None, names=columns,
+                na_values="NULL", low_memory=False,
+            )
+            os.unlink(tmpf.name)
+            return df
+        except Exception as e:
+            logger.warning(f"mysql CLI 快速读取失败 ({e})，回退到 pymysql")
+            # 回退到常规路径
+            from sqlalchemy import text as sa_text
+            fallback_sql = f"SELECT {', '.join(columns)} FROM {table}"
+            if where:
+                fallback_sql += f" WHERE {where}"
+            if order_by:
+                fallback_sql += f" ORDER BY {order_by}"
+            return db.query(fallback_sql, params={})
+
+    @classmethod
     def preload_for_backtest(cls, db: "DatabaseManager", start_date: str, end_date: str):
         """
         一次性预加载回测区间所需的 financial_data 和 daily_price 到内存。
@@ -82,34 +147,31 @@ class FactorBase(ABC):
 
         # 1. 预加载 financial_data 全量（~200K 行）
         t0 = time.time()
-        fin_sql = (
-            "SELECT ts_code, ann_date, end_date, roe_ttm, gross_margin, bps, "
-            "net_profit, revenue FROM financial_data"
-        )
-        df_fin = db.query(fin_sql, params={})
+        fin_cols = ["ts_code", "ann_date", "end_date", "roe_ttm",
+                    "gross_margin", "bps", "net_profit", "revenue"]
+        df_fin = cls._fast_mysql_read(db, fin_cols, "financial_data")
         if not df_fin.empty:
             df_fin["ann_date"] = pd.to_datetime(df_fin["ann_date"])
             df_fin["end_date"] = pd.to_datetime(df_fin["end_date"])
-            for col in ["roe_ttm", "gross_margin", "bps", "net_profit", "revenue"]:
-                if col in df_fin.columns:
-                    df_fin[col] = pd.to_numeric(df_fin[col], errors="coerce")
         cls._static_cache["_bulk_financial"] = df_fin
         logger.info(f"预加载 financial_data: {len(df_fin)} 行, {time.time()-t0:.1f}s")
 
         # 2. 预加载 daily_price（回测区间 + 400 天前移量，覆盖动量/技术因子回看需求）
+        #    使用 mysql CLI 导出 TSV + pd.read_csv（C 实现）读取，
+        #    比 pymysql（纯 Python）快 3-4 倍
         t0 = time.time()
         price_start = (
             pd.to_datetime(start_date) - pd.Timedelta(days=400)
         ).strftime("%Y-%m-%d")
-        price_sql = (
-            "SELECT ts_code, trade_date, pct_chg, turnover_rate, volume, amount, "
-            "close, adj_factor, dv_ttm, pe_ttm, pb, ps_ttm, "
-            "total_mv, circ_mv, turnover_rate_f, volume_ratio "
-            "FROM daily_price "
-            "WHERE trade_date >= :start_date AND trade_date <= :end_date "
-            "ORDER BY ts_code, trade_date"
+        price_cols = [
+            "ts_code", "trade_date", "pct_chg", "turnover_rate",
+            "volume", "amount", "close", "adj_factor", "dv_ttm",
+        ]
+        df_price = cls._fast_mysql_read(
+            db, price_cols, "daily_price",
+            where=f"trade_date >= '{price_start}' AND trade_date <= '{end_date}'",
+            order_by="ts_code, trade_date",
         )
-        df_price = db.query(price_sql, params={"start_date": price_start, "end_date": end_date})
         if not df_price.empty:
             df_price["trade_date"] = pd.to_datetime(df_price["trade_date"])
         cls._static_cache["_bulk_daily"] = df_price
@@ -136,6 +198,106 @@ class FactorBase(ABC):
             df_pa["publish_date"] = pd.to_datetime(df_pa["publish_date"])
         cls._static_cache["_bulk_policy_analysis"] = df_pa
         logger.info(f"预加载 policy_analysis: {len(df_pa)} 行, {time.time()-t0:.1f}s")
+
+    @classmethod
+    def precompute_rolling_stats(cls):
+        """
+        一次性预计算动量/技术因子所需的 rolling 统计量。
+
+        必须在 preload_for_backtest() 之后调用。预计算后，
+        动量/技术因子的 compute() 从预计算结果中直接取值，
+        跳过逐日 rolling 计算（167 次 → 1 次）。
+        """
+        import time
+        t0 = time.time()
+
+        bulk_daily = cls._static_cache.get("_bulk_daily")
+        if bulk_daily is None or bulk_daily.empty:
+            return
+
+        df = bulk_daily[["ts_code", "trade_date", "close", "adj_factor",
+                         "pct_chg", "turnover_rate", "volume", "amount"]].copy()
+        df = df.sort_values(["ts_code", "trade_date"])
+
+        for col in ["close", "adj_factor", "pct_chg", "turnover_rate", "volume", "amount"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["adj_factor"] = df["adj_factor"].fillna(1.0)
+        df["adj_close"] = df["close"] * df["adj_factor"]
+        df["ret"] = df["pct_chg"] / 100.0
+        df["log_ret"] = np.log1p(df["ret"].clip(-0.99, None))
+
+        g = df.groupby("ts_code", sort=False)
+
+        # 5-day cumulative return (REV_5D)
+        df["cum_ret_5d"] = np.expm1(
+            g["log_ret"].transform(lambda x: x.rolling(5, min_periods=3).sum())
+        )
+        # 20-day cumulative return (IND_MOM, RESIDUAL_MOM)
+        df["cum_ret_20d"] = np.expm1(
+            g["log_ret"].transform(lambda x: x.rolling(20, min_periods=10).sum())
+        )
+        # 20-day rolling mean turnover (TURN_20D)
+        df["turn_20d"] = g["turnover_rate"].transform(
+            lambda x: x.rolling(20, min_periods=10).mean()
+        )
+        # 20-day rolling std of returns (VOL_20D)
+        df["vol_20d"] = g["ret"].transform(
+            lambda x: x.rolling(20, min_periods=10).std()
+        )
+        # 60-day rolling mean adj_close (PRICE_DEV_60D)
+        df["ma60_adj"] = g["adj_close"].transform(
+            lambda x: x.rolling(60, min_periods=30).mean()
+        )
+
+        # 存储为 MultiIndex (trade_date, ts_code) 以便 xs() 快速查找
+        keep_cols = ["adj_close", "cum_ret_5d", "cum_ret_20d",
+                     "turn_20d", "vol_20d", "ma60_adj", "volume"]
+        df_indexed = df[["ts_code", "trade_date"] + keep_cols].copy()
+        df_indexed = df_indexed.set_index(["trade_date", "ts_code"]).sort_index()
+        cls._static_cache["_rolling_indexed"] = df_indexed
+
+        # 预计算月末前复权收盘价（MOM_1M/3M/12M 使用）
+        df_me = df[["ts_code", "trade_date", "adj_close"]].copy()
+        df_me["year_month"] = df_me["trade_date"].dt.to_period("M")
+        idx = df_me.groupby(["ts_code", "year_month"])["trade_date"].idxmax()
+        month_ends = df_me.loc[idx, ["ts_code", "year_month", "adj_close"]].reset_index(drop=True)
+        cls._static_cache["_month_end_prices"] = month_ends
+
+        logger.info(
+            f"预计算 rolling stats + 月末价格: {len(df)} 行, {time.time()-t0:.1f}s"
+        )
+
+    def _get_rolling_for_date(
+        self, date: str, codes: Optional[set[str]] = None,
+    ) -> Optional[pd.DataFrame]:
+        """从预计算的 rolling stats 中提取指定日期的截面数据。"""
+        ri = self._static_cache.get("_rolling_indexed")
+        if ri is None:
+            return None
+        date_ts = pd.to_datetime(date)
+        try:
+            day = ri.xs(date_ts, level="trade_date")
+            if codes:
+                day = day[day.index.isin(codes)]
+            return day
+        except KeyError:
+            return None
+
+    def _get_month_end_adj_close(
+        self, date: str, months_ago: int, codes: Optional[set[str]] = None,
+    ) -> Optional[pd.DataFrame]:
+        """从预计算的月末价格中提取 N 月前月末的前复权价格。"""
+        me = self._static_cache.get("_month_end_prices")
+        if me is None:
+            return None
+        target = pd.to_datetime(date) - pd.DateOffset(months=months_ago)
+        target_period = target.to_period("M")
+        result = me[me["year_month"] == target_period]
+        if codes:
+            result = result[result["ts_code"].isin(codes)]
+        if result.empty:
+            return None
+        return result[["ts_code", "adj_close"]].copy()
 
     def __init__(self, db: DatabaseManager):
         """

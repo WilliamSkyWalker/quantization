@@ -63,6 +63,8 @@
 | Phase 21 回测优化 | 熊市Regime修复 + 行业集中度控制 + 大类权重调整 + 价值陷阱惩罚 + 趋势门槛过滤 | ✅ 完成 |
 | Phase 22 数据扩展+自适应调仓 | daily_basic 全量字段(8列) + DIV_YIELD因子 + 自适应调仓(偏离度触发) | ✅ 完成 |
 | Phase 23 文档整理+前端清理 | US_SHARE_STRATEGY.md + Polymarket前端移除 + NSDQ→PollyMarket重命名 | ✅ 完成 |
+| Phase 24 因子质量增强 | DIV_YIELD PE回退移除 + 财务时效性衰减 + 缺失因子惩罚 + MAX_HOLDINGS=20 + 资金分离 | ✅ 完成 |
+| 远期规划 | 因子计算向量化（VECTORIZE_PLAN.md） | 📋 待实现 |
 | 远期规划 | 行业轮动数据深度接入 | 📋 备忘 |
 
 ---
@@ -258,8 +260,8 @@ POLYMARKET_PNL_ANALYSIS.md           # Polymarket P&L 回测分析结论
 ## Phase 22 数据扩展+自适应调仓（已完成）摘要
 
 1. **daily_basic 全量字段扩展**：DailyPrice 表新增 8 列（dv_ttm, pe_ttm, pb, ps_ttm, total_mv, circ_mv, turnover_rate_f, volume_ratio），Tushare daily_basic API 全量下载。新增 `backfill_daily_basic()` 方法高效补录历史数据（ON DUPLICATE KEY UPDATE）。
-2. **DIV_YIELD 股息率因子**：第 30 个因子，归入 value 大类（权重 0.8）。使用 dv_ttm from daily_price，缺失时回退 1/pe_ttm × 100。
-3. **自适应调仓机制**：半月频基准 + 偏离度触发。每隔 `REBALANCE_CHECK_INTERVAL`（默认5）个交易日检查 Top-N 持仓变化，新股占比 ≥ `REBALANCE_DEVIATION_THRESHOLD`（默认40%）时触发额外调仓，`REBALANCE_MIN_INTERVAL`（默认5日）防止过度交易。
+2. **DIV_YIELD 股息率因子**：第 30 个因子，归入 value 大类（权重 0.8）。仅使用 dv_ttm from daily_price，无数据时返回 NaN。
+3. **自适应调仓机制**：每 10 交易日基准 + 偏离度触发。每隔 `REBALANCE_CHECK_INTERVAL`（默认5）个交易日检查 Top-N 持仓变化，新股占比 ≥ `REBALANCE_DEVIATION_THRESHOLD`（默认40%）时触发额外调仓，`REBALANCE_MIN_INTERVAL`（默认5日）防止过度交易。
 4. **TURNOVER_PENALTY_LAMBDA 调优**：0.3→0.1（0.3 过于激进，Sharpe 0.60→0.91），λ 是加在 z-score 标准化得分上的加分项，非直接成本百分比。
 
 **回测效果（2018-01-01 ~ 2025-12-31）**：
@@ -288,6 +290,16 @@ POLYMARKET_PNL_ANALYSIS.md           # Polymarket P&L 回测分析结论
 1. **新增 US_SHARE_STRATEGY.md**：完整记录美股事件驱动 P&L 回测算法（数据源、10 张 ORM 表、UsStockBacktester 入场/出场逻辑、收益计算、汇总统计、API 端点、与 A 股系统对比）。
 2. **移除 Polymarket 独立前端页面**：删除 router 中 `/polymarket` 和 `/us-backtest` 路由，删除导航菜单中 Polymarket 和美股回测入口。Polymarket 仅作为舆情数据源保留在数据管理页（发现市场/下载数据操作）。
 3. **重命名 NSDQ_SHARE_STRATEGY.md → PollyMarket_STRATEGY.md**：git mv 重命名。
+
+## Phase 24 因子质量增强（已完成）摘要
+
+1. **DIV_YIELD PE 回退移除**：`dividend.py` 不再使用 `1/pe_ttm × 100` 近似股息率，无 `dv_ttm` 数据时直接返回 NaN，避免虚假信号。
+2. **财务数据时效性衰减**：`multi_factor.py` 新增 `_apply_financial_staleness_decay()`，9 个财务因子（EP/BP/DIV_YIELD/ROE_TTM/GROSS_MARGIN/PROFIT_STB/MARGIN_TREND/NET_PROFIT_YOY/REVENUE_YOY）按报告期距今时间衰减（≤3m: 100%, 3-6m: 50%, 6-9m: 25%, >9m: -1.0 负面）。
+3. **缺失因子惩罚**：`multi_factor.py` 新增 `_apply_missing_factor_penalty()`，缺失因子 > 20% 时线性压缩最终得分（最大惩罚 50%），防止动态分母导致得分虚高。
+4. **MAX_HOLDINGS 扩展**：15 → 20，进一步分散持仓。
+5. **回测/模拟盘资金分离**：新增 `BACKTEST_INITIAL_CAPITAL`（独立于 `PAPER_INITIAL_CAPITAL`），两者均设为 500,000 元。避免模拟盘小资金影响回测结果。
+6. **调仓频率调整**：半月频 → 每 10 个交易日（`REBALANCE_INTERVAL=10`）。
+7. **前端增强**：NavChart 支持沪深 300 基准对比、持仓卡片显示数据日期、Top 20 选股结果全量显示+一键复制。
 
 ---
 
@@ -479,6 +491,7 @@ A股量化系统遇到问题，请帮我排查。
 - [x] Phase 21 回测优化：熊市Regime修复（value 1.3→0.6, momentum 0.3→0.6）+ 行业集中度（MAX_INDUSTRY_WEIGHT 30→20%, 关联行业组上限 30%）+ 大类权重（value 1.0→0.7, quality 1.2→1.3, momentum 0.8→0.9）+ 价值陷阱惩罚 + 趋势门槛过滤（MOM_12M<-1.0 惩罚），总收益 -39%→+5%
 - [x] Phase 22 数据扩展+自适应调仓：daily_basic 全量字段(8列) + DIV_YIELD 股息率因子(第30个) + 自适应调仓(偏离度触发) + TURNOVER_PENALTY_LAMBDA 调优(0.3→0.1)，2018-2025 总收益 +148%、年化 +12.49%、超额年化 +10.50%
 - [x] Phase 23 文档整理+前端清理：新增 US_SHARE_STRATEGY.md（美股回测算法文档）+ Polymarket 前端页面移除（仅保留数据管理中的舆情数据操作）+ NSDQ_SHARE_STRATEGY.md 重命名为 PollyMarket_STRATEGY.md
+- [x] Phase 24 因子质量增强：DIV_YIELD PE回退移除 + 财务时效性衰减（≤3m:100%/3-6m:50%/6-9m:25%/>9m:-1.0） + 缺失因子惩罚（>20%线性衰减，最大50%） + MAX_HOLDINGS 15→20 + 资金分离（BACKTEST/PAPER_INITIAL_CAPITAL=500K） + 调仓频率每10交易日 + 前端NavChart基准对比/持仓日期/选股复制
 
 ## 已知待优化项
 

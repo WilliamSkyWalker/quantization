@@ -75,6 +75,8 @@ start.sh → 一键启动 + crontab 安装（cron 通过 curl 调用 API）
 - **T+1 执行模型：** 先卖后买。涨停股排除在买入之外；跌停股加入 `pending_sells` 队列下一交易日重试。
 - **可插拔交易后端：** `BaseTrader` ABC + `main.py::_create_trader()` 工厂方法，目前仅实现 `PaperTrader`。
 - **daily_basic 全量字段：** daily_price 表扩展 8 列（dv_ttm, pe_ttm, pb, ps_ttm, total_mv, circ_mv, turnover_rate_f, volume_ratio），Tushare daily_basic 全量下载并 backfill 历史数据。
+- **财务数据时效性衰减：** 财务因子（EP/BP/ROE_TTM 等 9 个）按报告期距今时间衰减（≤3m: 100%, 3-6m: 50%, 6-9m: 25%, >9m: -1.0 负面信号）。延迟发布季报视为负面。
+- **缺失因子惩罚：** 缺失因子 > 20% 时线性压缩最终得分，最大惩罚 50%，防止动态分母导致得分虚高。
 - **回测预加载架构：** `FactorBase.preload_for_backtest()` 一次性加载 financial_data + daily_price + policy_analysis 到内存，因子计算全部从内存过滤（单日 ~2.1s，1 年 25 日 ~68s）。
 
 ### 因子体系（30 个因子）

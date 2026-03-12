@@ -330,6 +330,154 @@ def get_clean_universe(
 
 
 # ============================================================
+# 批量 Universe 预计算（回测向量化优化 Tier 1）
+# ============================================================
+
+def preload_clean_universes(
+    db: DatabaseManager,
+    dates: list[str],
+    bulk_daily: pd.DataFrame,
+    min_turnover: float = 0,
+) -> dict[str, pd.DataFrame]:
+    """
+    批量预计算所有调仓日的 clean universe，避免逐日 SQL 查询。
+
+    使用预加载的 bulk_daily 内存数据替代逐日 DB 查询，
+    将 167 次 × 3-5 条 SQL 降为 1 次 stock_basic 查询 + 内存过滤。
+
+    Args:
+        db: DatabaseManager 实例。
+        dates: 调仓日期列表。
+        bulk_daily: 预加载的 daily_price DataFrame（含 trade_date, ts_code 等列）。
+
+    Returns:
+        {date_str: universe_df} 字典，格式与 get_clean_universe() 一致。
+    """
+    import time
+    t0 = time.time()
+
+    if bulk_daily is None or bulk_daily.empty:
+        return {}
+
+    # 1. 查 stock_basic 一次
+    df_basic = db.query(
+        "SELECT ts_code, name, market, list_date, delist_date, is_st, total_share "
+        "FROM stock_basic"
+    )
+    if df_basic.empty:
+        return {}
+
+    # 静态过滤（ST、科创板）
+    df_basic = df_basic[df_basic["is_st"] == 0]
+    if EXCLUDE_STAR_MARKET:
+        df_basic = df_basic[~df_basic["ts_code"].str.startswith("68")]
+    df_basic["list_date_ts"] = pd.to_datetime(df_basic["list_date"])
+    df_basic["delist_date_ts"] = pd.to_datetime(df_basic["delist_date"])
+    df_basic["total_share"] = pd.to_numeric(df_basic["total_share"], errors="coerce")
+
+    # 2. 行业映射一次
+    try:
+        df_industry = db.get_industry_map()
+    except Exception:
+        df_industry = pd.DataFrame()
+
+    # 3. 预计算 rolling 20 日均成交额
+    need_cols = ["ts_code", "trade_date", "volume", "amount", "pct_chg", "close"]
+    bd = bulk_daily[[c for c in need_cols if c in bulk_daily.columns]].copy()
+    for col in ["volume", "amount", "close", "pct_chg"]:
+        if col in bd.columns:
+            bd[col] = pd.to_numeric(bd[col], errors="coerce")
+
+    # 涨跌停标记：优先使用预计算列，否则从 pct_chg 推断
+    if "is_limit_up" in bulk_daily.columns:
+        bd["is_limit_up"] = bulk_daily["is_limit_up"]
+        bd["is_limit_down"] = bulk_daily["is_limit_down"]
+    else:
+        pct = bd["pct_chg"]
+        bd["is_limit_up"] = (pct >= 9.8).astype(int)
+        bd["is_limit_down"] = (pct <= -9.8).astype(int)
+    bd = bd.sort_values(["ts_code", "trade_date"])
+
+    if min_turnover > 0:
+        bd["avg_amount_20d"] = bd.groupby("ts_code")["amount"].transform(
+            lambda x: x.rolling(20, min_periods=10).mean()
+        )
+    else:
+        bd["avg_amount_20d"] = 0
+
+    # 4. 按日期建索引加速查找
+    bd["trade_date"] = pd.to_datetime(bd["trade_date"])
+    bd_by_date = {dt: grp for dt, grp in bd.groupby("trade_date")}
+
+    # 5. 逐日期构建 universe
+    result = {}
+    for date_str in dates:
+        date_ts = pd.to_datetime(date_str)
+
+        # IPO 过滤
+        ipo_cutoff = date_ts - pd.Timedelta(days=IPO_FILTER_DAYS)
+        valid = df_basic[
+            ((df_basic["delist_date_ts"].isna()) | (df_basic["delist_date_ts"] > date_ts)) &
+            (df_basic["list_date_ts"].notna()) & (df_basic["list_date_ts"] <= ipo_cutoff)
+        ]
+        valid_codes = set(valid["ts_code"].tolist())
+
+        # 当日行情
+        day = bd_by_date.get(date_ts)
+        if day is None or day.empty:
+            continue
+
+        day = day[day["ts_code"].isin(valid_codes)].copy()
+
+        # 停牌过滤
+        day = day[(day["volume"].notna()) & (day["volume"] > 0)]
+
+        # 流动性过滤
+        if min_turnover > 0:
+            day = day[day["avg_amount_20d"] >= min_turnover]
+
+        # 市值过滤
+        if MIN_MARKET_CAP and MIN_MARKET_CAP > 0:
+            day = day.merge(
+                valid[["ts_code", "total_share"]], on="ts_code", how="left"
+            )
+            day["total_mv"] = day["close"] * day["total_share"] * 10000
+            day = day[day["total_mv"] >= MIN_MARKET_CAP]
+
+        if day.empty:
+            continue
+
+        # 合并基本信息
+        day = day.merge(
+            valid[["ts_code", "name", "market", "list_date"]], on="ts_code", how="left"
+        )
+        if not df_industry.empty:
+            day = day.merge(df_industry, on="ts_code", how="left")
+        else:
+            day["industry_name"] = None
+
+        # 行业白名单
+        if ALLOWED_INDUSTRIES and "industry_name" in day.columns:
+            l1_match = day["industry_name"].isin(ALLOWED_INDUSTRIES)
+            l2_match = day["l2_industry_name"].isin(ALLOWED_INDUSTRIES) if "l2_industry_name" in day.columns else False
+            day = day[l1_match | l2_match]
+
+        output_cols = [
+            "ts_code", "name", "market", "list_date", "industry_name",
+            "l2_industry_name", "is_limit_up", "is_limit_down", "avg_amount_20d",
+        ]
+        day = day[[c for c in output_cols if c in day.columns]]
+        # 重命名 avg_amount_20d → avg_amount 以匹配原函数输出格式
+        if "avg_amount_20d" in day.columns:
+            day = day.rename(columns={"avg_amount_20d": "avg_amount"})
+
+        result[date_str] = day
+
+    logger.info(f"批量预计算 universe: {len(result)}/{len(dates)} 个日期, {time.time()-t0:.1f}s")
+    return result
+
+
+# ============================================================
 # 批量清洗工具
 # ============================================================
 

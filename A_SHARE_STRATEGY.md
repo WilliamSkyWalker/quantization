@@ -18,10 +18,10 @@
 
 ## 1. 系统概览
 
-半月频 + 自适应调仓的多因子打分选股策略，核心流程：
+每 10 个交易日 + 自适应调仓的多因子打分选股策略，核心流程：
 
 ```
-每半月调仓日(T日) + 偏离度触发的额外调仓日
+每 10 个交易日调仓(T日) + 偏离度触发的额外调仓日
   → 构建可交易股票池（含核心财务准入过滤）
   → 计算 30 个因子（动量/偏离度使用前复权价格）
   → 因子处理（去极值 → 按大类中性化 → 二次去极值 → 标准化(Z-Score/Rank) → Clip ±3）
@@ -64,11 +64,11 @@
 |------|------|------|------|
 | **EP** | 市盈率倒数 | TTM净利润 / (收盘价 × 总股本 × 10000) | 越高越好 |
 | **BP** | 市净率倒数 | 每股净资产(BPS) / 收盘价 | 越高越好 |
-| **DIV_YIELD** | 股息率 | 近12个月股息率（dv_ttm from daily_basic） | 越高越好 |
+| **DIV_YIELD** | 股息率 | 近12个月股息率（dv_ttm from daily_price） | 越高越好 |
 
 - EP 使用滚动 4 季度 TTM 净利润，净利润 ≤ 0 返回 NaN
 - BP 使用最新报告期 BPS，BPS ≤ 0 返回 NaN
-- DIV_YIELD 优先使用 daily_price.dv_ttm，缺失时回退 1/pe_ttm × 100，dv_ttm ≤ 0 返回 NaN
+- DIV_YIELD 仅使用 daily_price.dv_ttm，无数据时返回 NaN（不做 PE 回退近似）
 - 数据防未来函数：仅使用 `ann_date ≤ 选股日` 的报告
 
 ### 3.2 质量因子（quality）
@@ -352,10 +352,45 @@ score = Σ(cat_score × cat_weight) / Σ|有值大类的 cat_weight|
 6. 换手惩罚加分（若 `TURNOVER_PENALTY_LAMBDA > 0`，已持仓股 +λ）
 7. 按综合得分降序排列
 8. 过滤 `score < MIN_SELECT_SCORE`（默认 0）
-9. 取前 `MAX_HOLDINGS` 只（默认 15）
+9. 取前 `MAX_HOLDINGS` 只（默认 20）
 10. 允许空仓（无股票达标时持现金）
 
-### 5.5 仓位分配 — Softmax 权重
+### 5.5 财务数据时效性衰减
+
+> 方法: `multi_factor.py::_apply_financial_staleness_decay()`
+
+财务数据发布后随时间推移信息价值递减。对依赖 `financial_data` 的 9 个因子（EP, BP, DIV_YIELD, ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND, NET_PROFIT_YOY, REVENUE_YOY）施加时效性衰减：
+
+| 报告期距今 | 衰减系数 | 说明 |
+|-----------|---------|------|
+| ≤ 3 个月 | 100% | 最新季报，完全信任 |
+| 3-6 个月 | 50% | 一季度前的数据，减半 |
+| 6-9 个月 | 25% | 半年前的数据，大幅衰减 |
+| > 9 个月 | 设为 -1.0 | **负面信号**：延迟发布季报或不发季报视为负面 |
+
+- 以 `financial_data.end_date`（报告期）为基准计算时效（非 `ann_date`），避免早发布的公司被误判
+- 衰减作用于标准化后的因子 Z-score（乘以衰减系数），保持因子间可比性
+- 每只股票独立计算（不同股票可能使用不同季度的财报）
+- NET_PROFIT_CAGR_3Y 不受影响（长期指标本身就是多年数据）
+
+### 5.6 缺失因子惩罚
+
+> 方法: `multi_factor.py::_apply_missing_factor_penalty()`
+
+当股票缺失过多因子时，动态分母机制可能导致得分虚高。缺失因子惩罚机制线性压缩这些股票的最终得分：
+
+```
+missing_ratio = 缺失因子数 / 总因子数
+if missing_ratio > MISSING_FACTOR_THRESHOLD (默认 0.20):
+    penalty = 1.0 - (missing_ratio - threshold) / (1.0 - threshold) × MAX_PENALTY
+    final_score × = penalty
+```
+
+- `MISSING_FACTOR_THRESHOLD = 0.20`：缺失 ≤ 20% 因子不惩罚
+- `MISSING_FACTOR_MAX_PENALTY = 0.5`：最大惩罚 50%（100% 因子缺失时）
+- 惩罚作用于最终综合得分（在大类合成之后）
+
+### 5.7 仓位分配 — Softmax 权重
 
 选中股票按 Softmax 分配权重，温度参数 τ 控制集中度（`WEIGHT_TEMPERATURE`，默认 2.0）：
 
@@ -371,7 +406,7 @@ weight = raw_w / sum(raw_w)                 # 归一化
 - τ=0 退化为等权
 - 优势：比线性比例权重更平滑，头部集中可控
 
-### 5.6 舆情动态权重提升（可选）
+### 5.8 舆情动态权重提升（可选）
 
 > 方法: `multi_factor.py::_adjust_sentiment_weight()`
 
@@ -389,7 +424,7 @@ if z > SENTIMENT_SURGE_ZSCORE:
 - `SENTIMENT_SURGE_MULTIPLIER`（默认 1.0，即禁用；建议开启值 1.3~1.5）
 - `SENTIMENT_SURGE_ZSCORE`（默认 1.5，触发阈值）
 
-### 5.7 换手惩罚（可选）
+### 5.9 换手惩罚（可选）
 
 ```
 score += λ × is_in_portfolio
@@ -527,7 +562,7 @@ deviation ≤ -5%  → strength = 0.0（纯熊）
 
 - **信号产生**: T 日收盘后（每月最后一个交易日）
 - **交易执行**: T+1 日开盘价
-- **调仓频率**: 半月频基准（月中+月末）+ 偏离度触发的自适应调仓
+- **调仓频率**: 每 `REBALANCE_INTERVAL`（默认 10）个交易日 + 偏离度触发的自适应调仓
 - **自适应调仓**: 每隔 `REBALANCE_CHECK_INTERVAL`（默认5）个交易日检查偏离度，Top-N 中新股票占比 ≥ `REBALANCE_DEVIATION_THRESHOLD`（默认40%）时触发额外调仓，两次调仓最短间隔 `REBALANCE_MIN_INTERVAL`（默认5）个交易日
 - **回溯**: `generate_signals()` 自动回溯 start_date 前 2 个月找最近调仓日，确保首日有持仓
 - **T+1 日常模式**: 取 DB 最新两个交易日，`signal_date = T`（倒数第二日），`exec_date = T+1`（最新日）
@@ -647,9 +682,9 @@ preload_for_backtest()（一次性 ~15s）
 
 | 参数 | 默认值 | 环境变量 |
 |------|--------|---------|
-| MAX_HOLDINGS | 15 | MAX_HOLDINGS |
+| MAX_HOLDINGS | 20 | MAX_HOLDINGS |
 | MIN_SELECT_SCORE | 0.0 | MIN_SELECT_SCORE |
-| REBALANCE_FREQ | 半月频 + 自适应 | — |
+| REBALANCE_INTERVAL | 10 交易日 | REBALANCE_INTERVAL |
 | REBALANCE_DEVIATION_THRESHOLD | 0.4 | REBALANCE_DEVIATION_THRESHOLD |
 | REBALANCE_CHECK_INTERVAL | 5 | REBALANCE_CHECK_INTERVAL |
 | REBALANCE_MIN_INTERVAL | 5 | REBALANCE_MIN_INTERVAL |
@@ -659,6 +694,8 @@ preload_for_backtest()（一次性 ~15s）
 | MIN_VALID_CATEGORIES | 4 | MIN_VALID_CATEGORIES |
 | CATEGORY_NEUTRALIZE_OVERRIDES | {"momentum":"size_only","macro":"size_only","sentiment":"size_only"} | CATEGORY_NEUTRALIZE_OVERRIDES |
 | STANDARDIZE_MODE | zscore | STANDARDIZE_MODE |
+| MISSING_FACTOR_THRESHOLD | 0.20 | MISSING_FACTOR_THRESHOLD |
+| MISSING_FACTOR_MAX_PENALTY | 0.5 | MISSING_FACTOR_MAX_PENALTY |
 | WEIGHT_TEMPERATURE | 2.0 | WEIGHT_TEMPERATURE |
 | REGIME_ENABLED | 1（开启） | REGIME_ENABLED |
 | REGIME_MA_WINDOW | 60 | REGIME_MA_WINDOW |
@@ -694,7 +731,8 @@ preload_for_backtest()（一次性 ~15s）
 
 | 参数 | 默认值 | 环境变量 |
 |------|--------|---------|
-| PAPER_INITIAL_CAPITAL | 1,000,000 元 | PAPER_INITIAL_CAPITAL |
+| PAPER_INITIAL_CAPITAL | 500,000 元 | PAPER_INITIAL_CAPITAL |
+| BACKTEST_INITIAL_CAPITAL | 500,000 元 | BACKTEST_INITIAL_CAPITAL |
 | PAPER_ACCOUNT_NAME | default | PAPER_ACCOUNT_NAME |
 | TRADER_TYPE | paper | TRADER_TYPE |
 

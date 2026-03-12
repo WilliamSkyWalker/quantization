@@ -20,6 +20,14 @@ from backend.services.config import LOG_LEVEL
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
 
+# 行业哑变量缓存（同一截面内 industry 组合不变，避免重复 get_dummies）
+_industry_dummies_cache: dict[tuple, pd.DataFrame] = {}
+
+
+def clear_neutralize_cache() -> None:
+    """清除中性化缓存（在日期切换或回测结束时调用）。"""
+    _industry_dummies_cache.clear()
+
 
 # ============================================================
 # 去极值：MAD 法
@@ -115,7 +123,14 @@ def neutralize(
     # 构建回归矩阵 X
     if mode == "full":
         # 行业哑变量 + ln(市值)
-        industry_dummies = pd.get_dummies(df[industry_col], prefix="ind", drop_first=True)
+        # 缓存：同一截面（相同股票集+行业）的哑变量矩阵可复用
+        idx_key = (tuple(df.index), "dummies")
+        cached = _industry_dummies_cache.get(idx_key)
+        if cached is not None:
+            industry_dummies = cached
+        else:
+            industry_dummies = pd.get_dummies(df[industry_col], prefix="ind", drop_first=True)
+            _industry_dummies_cache[idx_key] = industry_dummies
         X = pd.concat([industry_dummies, df[[mktcap_col]]], axis=1).astype(float)
     else:
         # size_only: 仅 ln(市值)

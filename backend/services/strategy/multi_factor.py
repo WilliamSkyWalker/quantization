@@ -46,7 +46,7 @@ from backend.services.config import (
     LOG_LEVEL,
 )
 from backend.services.data.database import DatabaseManager
-from backend.services.data.cleaner import get_clean_universe
+from backend.services.data.cleaner import get_clean_universe, preload_clean_universes
 from backend.services.factors.value import EPFactor, BPFactor
 from backend.services.factors.dividend import DividendYieldFactor
 from backend.services.factors.momentum import MOM1MFactor, MOM3MFactor, MOM12MFactor, ShortReversalFactor, ResidualMomentumFactor
@@ -76,7 +76,7 @@ from backend.services.factors.research import (
     AnalystCoverageFactor,
 )
 from backend.services.factors.base import FactorBase
-from backend.services.factors.processor import process_factor
+from backend.services.factors.processor import process_factor, clear_neutralize_cache
 from backend.services.strategy.regime import RegimeDetector
 
 logger = logging.getLogger(__name__)
@@ -583,15 +583,27 @@ class MultiFactorStrategy:
         if not fin_cols:
             return composite
 
-        # 查每只股票最新财报的 end_date（报告期）
-        codes = composite["ts_code"].tolist()
-        codes_str = "','".join(codes)
-        df_latest = self.db.query(
-            f"SELECT ts_code, MAX(end_date) as latest_end_date "
-            f"FROM financial_data "
-            f"WHERE ts_code IN ('{codes_str}') AND ann_date <= '{date}' "
-            f"GROUP BY ts_code"
-        )
+        # 查每只股票最新财报的 end_date（报告期）— 优先使用预加载数据
+        bulk_fin = FactorBase._static_cache.get("_bulk_financial")
+        if bulk_fin is not None and not bulk_fin.empty:
+            date_ts = pd.to_datetime(date)
+            codes_set = set(composite["ts_code"].tolist())
+            df_fin = bulk_fin[
+                (bulk_fin["ann_date"] <= date_ts) & bulk_fin["ts_code"].isin(codes_set)
+            ]
+            if df_fin.empty:
+                return composite
+            df_latest = df_fin.groupby("ts_code")["end_date"].max().reset_index()
+            df_latest.columns = ["ts_code", "latest_end_date"]
+        else:
+            codes = composite["ts_code"].tolist()
+            codes_str = "','".join(codes)
+            df_latest = self.db.query(
+                f"SELECT ts_code, MAX(end_date) as latest_end_date "
+                f"FROM financial_data "
+                f"WHERE ts_code IN ('{codes_str}') AND ann_date <= '{date}' "
+                f"GROUP BY ts_code"
+            )
 
         if df_latest.empty:
             return composite
@@ -769,6 +781,9 @@ class MultiFactorStrategy:
             全量评分 DataFrame[ts_code, score]，或空 DataFrame。
         """
         logger.info(f"计算因子: {date}")
+
+        # 清除上一日期的中性化缓存
+        clear_neutralize_cache()
 
         # 1. 构建股票池（缓存避免同一日期重复查询）
         cache_key = f"_universe_{date}"
@@ -1102,6 +1117,17 @@ class MultiFactorStrategy:
 
         # 预加载 financial_data + daily_price 到内存（回测模式核心优化）
         FactorBase.preload_for_backtest(self.db, start_date, end_date)
+
+        # 预计算 rolling 统计量（动量/技术因子一次性计算所有日期）
+        FactorBase.precompute_rolling_stats()
+
+        # 批量预计算所有调仓日的 clean universe（避免逐日 SQL 查询）
+        all_dates = sorted(set(rebalance_dates + check_dates))
+        bulk_daily = FactorBase._static_cache.get("_bulk_daily")
+        if bulk_daily is not None and not bulk_daily.empty:
+            preloaded_universes = preload_clean_universes(self.db, all_dates, bulk_daily)
+            for dt, univ_df in preloaded_universes.items():
+                FactorBase._date_cache[f"_universe_{dt}"] = univ_df
 
         # 自适应模式：Phase1 并行因子计算 + Phase2 串行偏离度判断
         if check_dates:
