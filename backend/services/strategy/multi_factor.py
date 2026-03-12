@@ -1112,14 +1112,37 @@ class MultiFactorStrategy:
         n_dates = len(rebalance_dates)
         logger.info(f"回测区间: {start_date} ~ {end_date}, {n_dates} 个基准调仓日")
 
-        # 初始化缓存（静态数据跨日期复用）
-        FactorBase.clear_all_cache()
-
-        # 预加载 financial_data + daily_price 到内存（回测模式核心优化）
-        FactorBase.preload_for_backtest(self.db, start_date, end_date)
-
-        # 预计算 rolling 统计量（动量/技术因子一次性计算所有日期）
-        FactorBase.precompute_rolling_stats()
+        # 检查是否已有预加载的回测数据（数据管理页可提前加载）
+        existing_bulk = FactorBase._static_cache.get("_bulk_daily")
+        if existing_bulk is not None and not existing_bulk.empty:
+            # 验证预加载数据覆盖回测区间
+            price_start_needed = (
+                pd.to_datetime(start_date) - pd.Timedelta(days=400)
+            )
+            cached_min = existing_bulk["trade_date"].min()
+            cached_max = existing_bulk["trade_date"].max()
+            if cached_min <= price_start_needed and cached_max >= pd.to_datetime(end_date):
+                logger.info(
+                    f"使用已缓存的回测数据 ({len(existing_bulk)} 行, "
+                    f"{cached_min.strftime('%Y-%m-%d')}~{cached_max.strftime('%Y-%m-%d')})"
+                )
+                # 仅清除日期相关缓存，保留静态缓存
+                FactorBase._date_cache.clear()
+                # 确保 rolling stats 已预计算
+                if FactorBase._static_cache.get("_rolling_indexed") is None:
+                    FactorBase.precompute_rolling_stats()
+            else:
+                logger.info(
+                    f"缓存数据范围不足 ({cached_min.strftime('%Y-%m-%d')}~{cached_max.strftime('%Y-%m-%d')}), 重新加载"
+                )
+                FactorBase.clear_all_cache()
+                FactorBase.preload_for_backtest(self.db, start_date, end_date)
+                FactorBase.precompute_rolling_stats()
+        else:
+            # 初始化缓存（静态数据跨日期复用）
+            FactorBase.clear_all_cache()
+            FactorBase.preload_for_backtest(self.db, start_date, end_date)
+            FactorBase.precompute_rolling_stats()
 
         # 批量预计算所有调仓日的 clean universe（避免逐日 SQL 查询）
         all_dates = sorted(set(rebalance_dates + check_dates))
@@ -1145,7 +1168,8 @@ class MultiFactorStrategy:
             else:
                 signals = self._generate_signals_sequential(rebalance_dates, cancel_check)
 
-        FactorBase.clear_all_cache()
+        # 仅清除日期相关缓存，保留静态数据（供后续回测复用）
+        FactorBase.clear_date_cache()
         logger.info(f"信号生成完成: {len(signals)} 期信号（含空仓）")
         return signals
 

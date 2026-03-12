@@ -183,6 +183,7 @@ def data_download(request):
         'backfill_commodity': ('补录商品期货', _run_backfill_commodity),
         'backfill_macro': ('补录宏观数据', _run_backfill_macro),
         'backfill_reports': ('补录券商研报', _run_backfill_reports),
+        'preload_backtest': ('预加载回测数据', _run_preload_backtest),
         # --- 美股 ---
         'download_us_all': ('🇺🇸 全量下载', _run_download_us_all),
         'download_us_list': ('🇺🇸 下载股票列表', _run_download_us_list),
@@ -268,8 +269,14 @@ def _run_download_all(task_id):
     task_manager.update_progress(task_id, 30, f'股票列表完成({len(df)}只)，下载日线行情...')
     count = dl.download_daily_prices()
 
-    task_manager.update_progress(task_id, 80, f'日线完成({count}只)，下载沪深300指数...')
+    task_manager.update_progress(task_id, 70, f'日线完成({count}只)，下载沪深300指数...')
     idx = dl.download_index_daily('000300.SH')
+
+    task_manager.update_progress(task_id, 90, '预加载回测数据...')
+    try:
+        _preload_backtest_cache()
+    except Exception as e:
+        logger.warning(f'预加载回测数据跳过 ({type(e).__name__}): {e}')
 
     return {'stocks': len(df), 'daily': count, 'index': idx}
 
@@ -553,7 +560,39 @@ def _run_update_all(task_id):
     except Exception as e:
         logger.warning(f'舆情分析跳过 ({type(e).__name__}): {e}')
 
+    # 数据更新后自动预加载回测数据
+    task_manager.update_progress(task_id, 95, '步骤12/12: 预加载回测数据...')
+    try:
+        _preload_backtest_cache()
+    except Exception as e:
+        logger.warning(f'预加载回测数据跳过 ({type(e).__name__}): {e}')
+
     return {'stocks': len(df), 'daily': daily, 'sentiment_new': sent_new}
+
+
+def _preload_backtest_cache():
+    """预加载回测数据到内存缓存（供回测时跳过 SQL 加载）。"""
+    from backend.services.factors.base import FactorBase
+
+    db = _get_db()
+    # 默认加载最近 5 年数据
+    end_date = pd.Timestamp.now().strftime('%Y-%m-%d')
+    start_date = (pd.Timestamp.now() - pd.DateOffset(years=5)).strftime('%Y-%m-%d')
+
+    FactorBase.clear_all_cache()
+    FactorBase.preload_for_backtest(db, start_date, end_date)
+    FactorBase.precompute_rolling_stats()
+    logger.info('回测数据预加载完成，下次回测将跳过数据加载')
+
+
+def _run_preload_backtest(task_id):
+    """手动触发回测数据预加载。"""
+    task_manager.update_progress(task_id, 10, '加载数据库数据...')
+    _preload_backtest_cache()
+    from backend.services.factors.base import FactorBase
+    bulk = FactorBase._static_cache.get('_bulk_daily')
+    n_rows = len(bulk) if bulk is not None else 0
+    return {'daily_price_rows': n_rows}
 
 
 def _run_backfill_income(task_id):

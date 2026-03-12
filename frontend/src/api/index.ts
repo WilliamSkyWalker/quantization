@@ -19,6 +19,7 @@ export const getDataStatus = () => api.get('/data/status')
 export const startDownload = (action: string) => api.post('/data/download', { action })
 export const startUpdate = () => api.post('/data/update')
 export const startBackfillIncome = () => api.post('/data/backfill-income')
+export const startPreloadBacktest = () => api.post('/data/download', { action: 'preload_backtest' })
 export const browseData = (table: string, params: { page?: number; page_size?: number; keyword?: string } = {}) =>
   api.get('/data/browse', { params: { table, page: 1, ...params } })
 

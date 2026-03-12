@@ -2,12 +2,12 @@
 import { h, ref, onMounted, computed } from 'vue'
 import { useMessage, NTag, NIcon, NButton, NSpace, NDivider, NDataTable as NDataTableComp } from 'naive-ui'
 import {
-  SettingsOutline, DownloadOutline, RefreshOutline,
+  SettingsOutline, DownloadOutline, RefreshOutline, RocketOutline,
   SearchOutline, OpenOutline, EyeOutline,
 } from '@vicons/ionicons5'
 import type { DataTableColumns } from 'naive-ui'
 import {
-  getDataStatus, startDownload, startUpdate, startBackfillIncome, initDatabase,
+  getDataStatus, startDownload, startUpdate, startBackfillIncome, startPreloadBacktest, initDatabase,
   startSentimentDownloadAndAnalyze, startSentimentBackfillAnalyze, startSentimentBackfillContent,
   startSentimentBackfillLLM, getSentimentStatus, getSentimentArticles, getSentimentAnalysisStats,
   startSentimentDownload, browseData,
@@ -434,6 +434,19 @@ async function runUpdate() {
     const { data } = await startUpdate()
     taskStore.trackTask(data.task_id, '一键增量更新')
     message.success('一键增量更新任务已启动')
+  } catch (e: any) {
+    message.error(e.response?.data?.error || '操作失败')
+  } finally {
+    running.value = false
+  }
+}
+
+async function runPreloadBacktest() {
+  running.value = true
+  try {
+    const { data } = await startPreloadBacktest()
+    taskStore.trackTask(data.task_id, '预加载回测数据')
+    message.success('预加载回测数据任务已启动')
   } catch (e: any) {
     message.error(e.response?.data?.error || '操作失败')
   } finally {
@@ -981,6 +994,11 @@ onMounted(() => {
           <n-button size="small" type="warning" @click="runUSUpdate" :disabled="running">
             <template #icon><n-icon><RefreshOutline /></n-icon></template>
             美股增量更新
+          </n-button>
+          <n-divider vertical />
+          <n-button size="small" type="info" @click="runPreloadBacktest" :disabled="running">
+            <template #icon><n-icon><RocketOutline /></n-icon></template>
+            预加载回测数据
           </n-button>
         </n-space>
       </n-card>
