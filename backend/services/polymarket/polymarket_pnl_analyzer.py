@@ -1,8 +1,10 @@
 """
-美股 P&L 回测引擎
+Polymarket P&L 分析器
 
 在 Polymarket 告警触发后，拉取对应美股 ticker 的实际股价，
 模拟建仓并计算持有 N 天的实际收益，汇总胜率/收益率/夏普。
+
+注意：这不是多因子量化回测引擎，而是 Polymarket 事件驱动的 P&L 分析工具。
 """
 
 import json
@@ -27,9 +29,9 @@ ET = pytz.timezone("US/Eastern")
 MARKET_CLOSE_HOUR = 16  # 4:00 PM ET
 
 
-class UsStockBacktester:
+class PolymarketPnlAnalyzer:
     """
-    美股 P&L 回测引擎。
+    Polymarket 事件驱动 P&L 分析器。
 
     两种运行模式:
     - 模式 A: 从已有回测结果的 alerts JSON 运行

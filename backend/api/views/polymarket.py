@@ -8,7 +8,7 @@ from backend.services.polymarket.monitor import get_monitor
 from backend.services.polymarket.alert_manager import AlertManager
 from backend.services.polymarket.history import PolymarketHistoryDownloader
 from backend.services.polymarket.backtester import PolymarketBacktester
-from backend.services.polymarket.us_stock_backtester import UsStockBacktester
+from backend.services.polymarket.polymarket_pnl_analyzer import PolymarketPnlAnalyzer
 from backend.services.polymarket.a_share_backtester import AShareBacktester
 from backend.services.data.database import DatabaseManager
 from backend.services.polymarket.models import PolymarketEvent
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 _alert_manager = AlertManager()
 _history_downloader = PolymarketHistoryDownloader()
 _backtester = PolymarketBacktester()
-_us_backtester = UsStockBacktester()
+_pnl_analyzer = PolymarketPnlAnalyzer()
 _a_share_backtester = AShareBacktester()
 _db = DatabaseManager()
 
@@ -800,7 +800,7 @@ def us_stock_pnl(request):
     min_confidence = float(data.get("min_confidence", 0.0))
 
     def _run(task_id):
-        return _us_backtester.run_from_alerts(
+        return _pnl_analyzer.run_from_alerts(
             task_id=task_id,
             alerts=alerts,
             holding_days=holding_days,
@@ -829,7 +829,7 @@ def us_stock_pnl_from_db(request):
     limit = int(data.get("limit", 0))
 
     def _run(task_id):
-        return _us_backtester.run_from_db(
+        return _pnl_analyzer.run_from_db(
             task_id=task_id,
             holding_days=holding_days,
             min_confidence=min_confidence,

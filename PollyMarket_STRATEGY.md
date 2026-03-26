@@ -408,7 +408,7 @@ ws/polymarket/ → PolymarketConsumer
 
 ### 9.3 前端 WebSocket（已移除）
 
-> 注：Polymarket 独立前端页面（`Polymarket.vue`）和美股回测页面（`UsStockBacktest.vue`）已移除。Polymarket 目前仅作为舆情数据源保留在数据管理页中（发现市场/下载数据操作）。后端 WebSocket 推送架构和 API 端点仍完整保留，可随时重新接入前端。
+> 注：Polymarket 独立前端页面（`Polymarket.vue`）和Polymarket P&L 分析页面（`UsStockBacktest.vue`）已移除。Polymarket 目前仅作为舆情数据源保留在数据管理页中（发现市场/下载数据操作）。后端 WebSocket 推送架构和 API 端点仍完整保留，可随时重新接入前端。
 
 ---
 
@@ -451,7 +451,7 @@ Gamma API → 发现已结算高交易量市场（active=false, closed=true）
 
 ## 11. 美股 P&L 回测引擎
 
-> 文件: `services/polymarket/us_stock_backtester.py`
+> 文件: `services/polymarket/polymarket_pnl_analyzer.py`
 
 将 Polymarket 告警（含 LLM 分析的受影响 ticker + 方向）与实际美股价格联动，计算事件驱动策略的真实收益。
 

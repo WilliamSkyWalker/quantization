@@ -1,7 +1,7 @@
 """API URL configuration."""
 from django.urls import path
 
-from .views import data, strategy, trading, sentiment, config, report, polymarket, stock, watchlist
+from .views import data, strategy, trading, sentiment, config, report, polymarket, stock, watchlist, us_strategy
 
 urlpatterns = [
     # Data management
@@ -101,4 +101,14 @@ urlpatterns = [
 
     # Polymarket - A-Share P&L
     path('polymarket/backtest/a-share-pnl-from-db', polymarket.a_share_pnl_from_db),
+
+    # US Stock Quant Strategy
+    path('us/universe', us_strategy.universe),
+    path('us/select', us_strategy.select_stocks),
+    path('us/backtest/run', us_strategy.backtest_run),
+    path('us/paper/account', us_strategy.paper_account),
+    path('us/paper/positions', us_strategy.paper_positions),
+    path('us/paper/nav', us_strategy.paper_nav),
+    path('us/paper/trade', us_strategy.paper_trade),
+    path('us/paper/reset', us_strategy.paper_reset),
 ]

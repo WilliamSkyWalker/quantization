@@ -18,6 +18,10 @@ const router = createRouter({
         { path: 'sentiment', name: 'sentiment', redirect: '/data' },
         { path: 'report', redirect: '/backtest' },
         { path: 'watchlist', name: 'watchlist', component: () => import('../views/Watchlist.vue') },
+        // US Stock
+        { path: 'us/select', name: 'us-select', component: () => import('../views/USStockSelect.vue') },
+        { path: 'us/backtest', name: 'us-backtest', component: () => import('../views/USBacktest.vue') },
+        { path: 'us/paper', name: 'us-paper', component: () => import('../views/USPaperTrading.vue') },
         { path: 'settings', name: 'settings', component: () => import('../views/Settings.vue') },
       ],
     },

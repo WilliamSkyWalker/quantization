@@ -101,4 +101,15 @@ export const getStockReports = (tsCode: string, page = 1) =>
 export const getStockNews = (tsCode: string, page = 1) =>
   api.get(`/stock/${tsCode}/news`, { params: { page } })
 
+// US Stock Strategy
+export const getUSUniverse = (date?: string) => api.get('/us/universe', { params: { date } })
+export const startUSSelect = (date?: string) => api.post('/us/select', { date })
+export const startUSBacktest = (startDate: string, endDate: string, initialCapital?: number) =>
+  api.post('/us/backtest/run', { start_date: startDate, end_date: endDate, initial_capital: initialCapital })
+export const getUSPaperAccount = () => api.get('/us/paper/account')
+export const getUSPaperPositions = () => api.get('/us/paper/positions')
+export const getUSPaperNav = () => api.get('/us/paper/nav')
+export const startUSPaperTrade = (date?: string) => api.post('/us/paper/trade', { date })
+export const resetUSPaper = () => api.post('/us/paper/reset')
+
 export default api

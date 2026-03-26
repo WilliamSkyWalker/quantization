@@ -501,7 +501,12 @@ FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 US_DATA_START_DATE = os.environ.get("US_DATA_START_DATE", "20150101")
 FMP_RATE_LIMIT = int(os.environ.get("FMP_RATE_LIMIT", "300"))  # 免费版 300 req/min
 
-US_INDEX_SYMBOLS = ["^GSPC", "^IXIC", "^DJI"]  # S&P 500, NASDAQ, Dow Jones
+US_INDEX_SYMBOLS = ["^GSPC", "^IXIC", "^DJI", "^RUI"]  # S&P 500, NASDAQ, Dow, Russell 1000
+US_BENCHMARK_INDEX = os.environ.get("US_BENCHMARK_INDEX", "^RUI")  # 回测基准：Russell 1000
+
+# SimFin (免费历史财报数据)
+SIMFIN_API_KEY = os.environ.get("SIMFIN_API_KEY", "")
+SIMFIN_DATA_DIR = os.environ.get("SIMFIN_DATA_DIR", str(PROJECT_ROOT / "backend" / "output" / "simfin_data"))
 
 US_COMMODITY_SYMBOLS = [
     "GC=F", "SI=F", "CL=F", "BZ=F", "NG=F",  # 金银油气
@@ -564,6 +569,105 @@ POLYMARKET_MAX_MARKETS = int(os.environ.get("POLYMARKET_MAX_MARKETS", "50"))    
 POLYMARKET_SNAPSHOT_INTERVAL = int(os.environ.get("POLYMARKET_SNAPSHOT_INTERVAL", "60"))      # 快照间隔（秒）
 POLYMARKET_DISCOVERY_INTERVAL = int(os.environ.get("POLYMARKET_DISCOVERY_INTERVAL", "3600"))  # 市场发现间隔（秒）
 POLYMARKET_LLM_COOLDOWN = int(os.environ.get("POLYMARKET_LLM_COOLDOWN", "300"))               # 同一事件 LLM 分析冷却（秒）
+
+# ============================================================
+# 美股量化策略参数（US_ 前缀）
+# ============================================================
+
+US_MAX_HOLDINGS = int(os.environ.get("US_MAX_HOLDINGS", "25"))
+US_MIN_SELECT_SCORE = float(os.environ.get("US_MIN_SELECT_SCORE", "0.0"))
+US_WEIGHT_TEMPERATURE = float(os.environ.get("US_WEIGHT_TEMPERATURE", "1.5"))
+US_INITIAL_CAPITAL = float(os.environ.get("US_INITIAL_CAPITAL", "100000"))
+
+# 费用（零佣金时代）
+US_BUY_COMMISSION = float(os.environ.get("US_BUY_COMMISSION", "0.0"))
+US_SELL_COMMISSION = float(os.environ.get("US_SELL_COMMISSION", "0.0"))
+US_STAMP_TAX = 0.0  # 美股无印花税
+US_SLIPPAGE = float(os.environ.get("US_SLIPPAGE", "0.0005"))  # 5bps
+
+# 股票池过滤
+US_MIN_DAILY_VOLUME = float(os.environ.get("US_MIN_DAILY_VOLUME", "1000000"))  # $1M
+US_MIN_MARKET_CAP = float(os.environ.get("US_MIN_MARKET_CAP", "5e8"))  # $500M
+US_MIN_LISTING_DAYS = int(os.environ.get("US_MIN_LISTING_DAYS", "180"))
+
+# 风控
+US_MAX_SINGLE_WEIGHT = float(os.environ.get("US_MAX_SINGLE_WEIGHT", "0.10"))
+US_MAX_SECTOR_WEIGHT = float(os.environ.get("US_MAX_SECTOR_WEIGHT", "0.25"))
+US_DD_START_THRESHOLD = float(os.environ.get("US_DD_START_THRESHOLD", "0.05"))
+US_DD_MAX_THRESHOLD = float(os.environ.get("US_DD_MAX_THRESHOLD", "0.15"))
+US_DD_MIN_POSITION = float(os.environ.get("US_DD_MIN_POSITION", "0.40"))
+
+# Regime
+US_REGIME_ENABLED = os.environ.get("US_REGIME_ENABLED", "1") == "1"
+US_REGIME_INDEX = os.environ.get("US_REGIME_INDEX", "^GSPC")
+US_REGIME_MA_WINDOW = int(os.environ.get("US_REGIME_MA_WINDOW", "60"))
+
+# 波动率目标
+US_USE_VOL_TARGETING = os.environ.get("US_USE_VOL_TARGETING", "1") == "1"
+US_TARGET_VOL = float(os.environ.get("US_TARGET_VOL", "0.16"))
+US_VOL_LOOKBACK_DAYS = int(os.environ.get("US_VOL_LOOKBACK_DAYS", "60"))
+US_VOL_SCALE_MIN = float(os.environ.get("US_VOL_SCALE_MIN", "0.3"))
+US_VOL_SCALE_MAX = float(os.environ.get("US_VOL_SCALE_MAX", "1.5"))
+
+# 调仓
+US_REBALANCE_INTERVAL = int(os.environ.get("US_REBALANCE_INTERVAL", "20"))  # 月频（从10日改为20日）
+US_REBALANCE_MIN_INTERVAL = int(os.environ.get("US_REBALANCE_MIN_INTERVAL", "20"))
+
+# 策略动量过滤
+US_STRATEGY_MOM_WINDOW = int(os.environ.get("US_STRATEGY_MOM_WINDOW", "120"))
+US_STRATEGY_MOM_MIN_SCALE = float(os.environ.get("US_STRATEGY_MOM_MIN_SCALE", "0.6"))
+
+# 熊市持仓比例
+US_BEAR_HOLDINGS_RATIO = float(os.environ.get("US_BEAR_HOLDINGS_RATIO", "0.6"))
+
+# 多空对冲
+US_SHORT_ENABLED = os.environ.get("US_SHORT_ENABLED", "1") == "1"
+US_LONG_N = int(os.environ.get("US_LONG_N", "15"))       # 多头持仓数
+US_SHORT_N = int(os.environ.get("US_SHORT_N", "10"))      # 空头持仓数
+US_SHORT_SCORE_THRESHOLD = float(os.environ.get("US_SHORT_SCORE_THRESHOLD", "-0.8"))  # 收紧：只做空信号非常确定的股票
+US_NET_EXPOSURE = float(os.environ.get("US_NET_EXPOSURE", "0.6"))       # 净敞口（0.6 = 80%多/20%空）
+US_GROSS_EXPOSURE_CAP = float(os.environ.get("US_GROSS_EXPOSURE_CAP", "1.5"))
+US_SHORT_BORROW_FEE = float(os.environ.get("US_SHORT_BORROW_FEE", "0.015"))  # 年化借券费 1.5%（做空高需求股更高）
+
+# ML 因子合成（LightGBM）
+US_ML_SCORING_ENABLED = os.environ.get("US_ML_SCORING_ENABLED", "1") == "1"
+US_ML_LOOKBACK_MONTHS = int(os.environ.get("US_ML_LOOKBACK_MONTHS", "12"))
+US_ML_FORWARD_DAYS = int(os.environ.get("US_ML_FORWARD_DAYS", "10"))
+US_ML_RETRAIN_INTERVAL = int(os.environ.get("US_ML_RETRAIN_INTERVAL", "60"))  # 交易日
+US_ML_BLEND_RATIO = float(os.environ.get("US_ML_BLEND_RATIO", "0.5"))  # ML 权重（0=纯线性，1=纯ML）
+US_ML_MIN_TRAIN_SAMPLES = int(os.environ.get("US_ML_MIN_TRAIN_SAMPLES", "2000"))
+
+# 因子大类权重
+US_CATEGORY_WEIGHTS: dict[str, float] = {
+    "value": 0.8, "quality": 1.3, "growth": 1.1,
+    "momentum": 1.0, "technical": 0.7,
+    "macro": 0.6, "analyst": 0.5, "sentiment": 0.4,
+}
+_raw_us_cw = os.environ.get("US_CATEGORY_WEIGHTS", "")
+if _raw_us_cw.strip():
+    try:
+        US_CATEGORY_WEIGHTS.update(_json.loads(_raw_us_cw))
+    except Exception:
+        pass
+
+# 熊市大类权重覆盖
+US_REGIME_BEAR_OVERRIDES: dict[str, float] = {
+    "momentum": 1.0, "quality": 1.5, "growth": 0.8, "value": 0.6,
+    "technical": 0.8, "macro": 0.6, "analyst": 0.5, "sentiment": 0.6,
+}
+
+# 中性化模式
+US_NEUTRALIZE_MODE = os.environ.get("US_NEUTRALIZE_MODE", "full")
+US_STANDARDIZE_MODE = os.environ.get("US_STANDARDIZE_MODE", "zscore")
+US_CATEGORY_NEUTRALIZE_OVERRIDES: dict[str, str] = {
+    "momentum": "size_only", "macro": "size_only", "analyst": "size_only", "sentiment": "none",
+}
+_raw_us_cno = os.environ.get("US_CATEGORY_NEUTRALIZE_OVERRIDES", "")
+if _raw_us_cno.strip():
+    try:
+        US_CATEGORY_NEUTRALIZE_OVERRIDES.update(_json.loads(_raw_us_cno))
+    except Exception:
+        pass
 
 # ============================================================
 # 日志配置

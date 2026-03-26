@@ -465,6 +465,19 @@ class FMPDownloader:
 
             filing_date = filing_date_map.get(col_date.date(), date_str)
 
+            total_equity = _safe_get(bal, "Stockholders Equity")
+            total_assets = _safe_get(bal, "Total Assets")
+
+            # 自算 ROE = net_income / total_equity (yfinance 不直接提供)
+            roe = None
+            if net_income and total_equity:
+                try:
+                    eq = float(total_equity)
+                    if abs(eq) > 1e-6:
+                        roe = float(net_income) / eq * 100  # 百分比
+                except (TypeError, ValueError, ZeroDivisionError):
+                    pass
+
             records.append({
                 "ticker": ticker,
                 "period": period,
@@ -475,9 +488,9 @@ class FMPDownloader:
                 "eps": eps,
                 "gross_margin": gross_margin,
                 "operating_margin": operating_margin,
-                "roe": None,
-                "total_assets": _safe_get(bal, "Total Assets"),
-                "total_equity": _safe_get(bal, "Stockholders Equity"),
+                "roe": roe,
+                "total_assets": total_assets,
+                "total_equity": total_equity,
                 "total_debt": _safe_get(bal, "Total Debt"),
                 "free_cash_flow": _safe_get(cf, "Free Cash Flow"),
                 "pe_ratio": None,

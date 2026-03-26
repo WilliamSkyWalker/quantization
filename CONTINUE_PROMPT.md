@@ -180,7 +180,7 @@ backend/
 │       ├── event_analyzer.py        # LLM 事件分析（受影响 ticker/方向/置信度）
 │       ├── backtester.py            # Polymarket 回测引擎
 │       ├── history.py               # 历史数据下载
-│       └── us_stock_backtester.py   # 美股 P&L 回测（告警 → 股价 → 收益统计）
+│       └── polymarket_pnl_analyzer.py  # Polymarket P&L 分析（告警 → 股价 → 收益统计）
 ├── tests/
 ├── manage.py                        # Django CLI 入口
 ├── requirements.txt
@@ -287,7 +287,7 @@ POLYMARKET_PNL_ANALYSIS.md           # Polymarket P&L 回测分析结论
 
 ## Phase 23 文档整理+前端清理（已完成）摘要
 
-1. **新增 US_SHARE_STRATEGY.md**：完整记录美股事件驱动 P&L 回测算法（数据源、10 张 ORM 表、UsStockBacktester 入场/出场逻辑、收益计算、汇总统计、API 端点、与 A 股系统对比）。
+1. **新增 US_SHARE_STRATEGY.md**：完整记录美股事件驱动 P&L 回测算法（数据源、10 张 ORM 表、PolymarketPnlAnalyzer 入场/出场逻辑、收益计算、汇总统计、API 端点、与 A 股系统对比）。
 2. **移除 Polymarket 独立前端页面**：删除 router 中 `/polymarket` 和 `/us-backtest` 路由，删除导航菜单中 Polymarket 和美股回测入口。Polymarket 仅作为舆情数据源保留在数据管理页（发现市场/下载数据操作）。
 3. **重命名 NSDQ_SHARE_STRATEGY.md → PollyMarket_STRATEGY.md**：git mv 重命名。
 

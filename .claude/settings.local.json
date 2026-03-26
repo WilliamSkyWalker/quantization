@@ -85,7 +85,13 @@
       "Bash(find /Users/daweilun/Documents/quantization -type f \\\\\\( -name \"*.log\" -o -name \"*sentiment*\" -type f \\\\\\) -mtime -90 2>/dev/null | head -20)",
       "WebFetch(domain:www.csrc.gov.cn)",
       "WebFetch(domain:www.mofcom.gov.cn)",
-      "Bash(pip show:*)"
+      "Bash(pip show:*)",
+      "WebFetch(domain:www.simfin.com)",
+      "WebFetch(domain:simfin.readthedocs.io)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:app.simfin.com)",
+      "Bash(git stash:*)",
+      "Bash(git rm:*)"
     ]
   }
 }

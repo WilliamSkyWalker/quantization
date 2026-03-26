@@ -31,14 +31,19 @@ const menuOptions: MenuOption[] = [
   { label: '仪表盘', key: '/', icon: renderIcon(SpeedometerOutline) },
   { label: '数据管理', key: '/data', icon: renderIcon(DownloadOutline) },
   { label: '自选股', key: '/watchlist', icon: renderIcon(StarOutline) },
-  { label: '今日选股', key: '/select', icon: renderIcon(TrendingUpOutline) },
-  { label: '回测', key: '/backtest', icon: renderIcon(AnalyticsOutline) },
-  { label: '模拟交易', key: '/paper', icon: renderIcon(WalletOutline) },
+  { label: 'A股选股', key: '/select', icon: renderIcon(TrendingUpOutline) },
+  { label: 'A股回测', key: '/backtest', icon: renderIcon(AnalyticsOutline) },
+  { label: 'A股交易', key: '/paper', icon: renderIcon(WalletOutline) },
+  { type: 'divider', key: 'us-divider' } as any,
+  { label: '美股选股', key: '/us/select', icon: renderIcon(TrendingUpOutline) },
+  { label: '美股回测', key: '/us/backtest', icon: renderIcon(AnalyticsOutline) },
+  { label: '美股交易', key: '/us/paper', icon: renderIcon(WalletOutline) },
+  { type: 'divider', key: 'settings-divider' } as any,
   { label: '系统设置', key: '/settings', icon: renderIcon(SettingsOutline) },
 ]
 
 const breadcrumbLabel = computed(() => {
-  const item = menuOptions.find(m => m.key === route.path)
+  const item = menuOptions.find(m => m.key === route.path && m.type !== 'divider')
   return (item?.label as string) || '仪表盘'
 })
 

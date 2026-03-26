@@ -660,6 +660,79 @@ class Watchlist(Base):
 
 
 # ============================================================
+# US Paper Trading Tables
+# ============================================================
+
+class USPaperAccount(Base):
+    """US stock paper trading account"""
+    __tablename__ = "us_paper_account"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_name = Column(String(50), default="default")
+    initial_capital = Column(Float, nullable=False)
+    cash = Column(Float, nullable=False)
+    total_assets = Column(Float)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("account_name", name="uq_us_paper_account_name"),
+    )
+
+
+class USPaperPosition(Base):
+    """US stock paper trading position"""
+    __tablename__ = "us_paper_position"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(Integer, nullable=False)
+    ticker = Column(String(20), nullable=False)
+    volume = Column(Integer, default=0)
+    cost_basis = Column(Float, default=0)
+    market_value = Column(Float, default=0)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("account_id", "ticker", name="uq_us_paper_pos_account_ticker"),
+    )
+
+
+class USPaperTransaction(Base):
+    """US stock paper trading transaction"""
+    __tablename__ = "us_paper_transaction"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(Integer, nullable=False)
+    ticker = Column(String(20), nullable=False)
+    direction = Column(String(10), comment="BUY/SELL")
+    volume = Column(Integer)
+    price = Column(Float)
+    amount = Column(Float)
+    fees = Column(Float, default=0)
+    trade_date = Column(Date)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        Index("idx_us_paper_tx_account", "account_id"),
+    )
+
+
+class USPaperNav(Base):
+    """US stock paper trading daily NAV"""
+    __tablename__ = "us_paper_nav"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(Integer, nullable=False)
+    nav_date = Column(Date, nullable=False)
+    nav = Column(Float)
+    total_assets = Column(Float)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("account_id", "nav_date", name="uq_us_paper_nav_date"),
+    )
+
+
+# ============================================================
 # 数据库管理类
 # ============================================================
 
