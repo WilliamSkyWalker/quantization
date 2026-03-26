@@ -4,15 +4,16 @@ import { useRoute, useRouter } from 'vue-router'
 import { NIcon } from 'naive-ui'
 import type { MenuOption } from 'naive-ui'
 import { useAppStore } from '../stores/app'
+import { useResponsive } from '../composables/useResponsive'
 import TaskProgress from '../components/TaskProgress.vue'
 import { colors, sidebarMenuOverrides } from '../theme'
 import {
   SpeedometerOutline,
   DownloadOutline,
-  SearchOutline,
   TrendingUpOutline,
   AnalyticsOutline,
   WalletOutline,
+  StarOutline,
   SettingsOutline,
   MenuOutline,
 } from '@vicons/ionicons5'
@@ -20,6 +21,7 @@ import {
 const route = useRoute()
 const router = useRouter()
 const appStore = useAppStore()
+const { isMobile } = useResponsive()
 
 function renderIcon(icon: any) {
   return () => h(NIcon, null, { default: () => h(icon) })
@@ -28,7 +30,7 @@ function renderIcon(icon: any) {
 const menuOptions: MenuOption[] = [
   { label: '仪表盘', key: '/', icon: renderIcon(SpeedometerOutline) },
   { label: '数据管理', key: '/data', icon: renderIcon(DownloadOutline) },
-  { label: '个股详情', key: '/universe', icon: renderIcon(SearchOutline) },
+  { label: '自选股', key: '/watchlist', icon: renderIcon(StarOutline) },
   { label: '今日选股', key: '/select', icon: renderIcon(TrendingUpOutline) },
   { label: '回测', key: '/backtest', icon: renderIcon(AnalyticsOutline) },
   { label: '模拟交易', key: '/paper', icon: renderIcon(WalletOutline) },
@@ -42,13 +44,40 @@ const breadcrumbLabel = computed(() => {
 
 function handleMenuUpdate(key: string) {
   router.push(key)
+  if (isMobile.value) appStore.sidebarCollapsed = true
 }
 </script>
 
 <template>
-  <n-layout has-sider style="height: 100vh">
-    <!-- Sidebar -->
+  <!-- Mobile: drawer-based sidebar -->
+  <n-drawer
+    v-if="isMobile"
+    :show="!appStore.sidebarCollapsed"
+    placement="left"
+    :width="220"
+    @update:show="(v: boolean) => appStore.sidebarCollapsed = !v"
+  >
+    <n-drawer-content body-content-style="padding: 0;">
+      <template #header>
+        <div class="logo" style="border: none; height: auto; padding: 0">
+          <n-icon size="24" :color="colors.primary"><TrendingUpOutline /></n-icon>
+          <span class="logo-text">量化系统</span>
+        </div>
+      </template>
+      <n-menu
+        :options="menuOptions"
+        :value="route.path"
+        @update:value="handleMenuUpdate"
+        :root-indent="18"
+        :indent="18"
+      />
+    </n-drawer-content>
+  </n-drawer>
+
+  <n-layout :has-sider="!isMobile" style="height: 100vh">
+    <!-- Desktop: persistent sidebar -->
     <n-layout-sider
+      v-if="!isMobile"
       bordered
       :collapsed="appStore.sidebarCollapsed"
       collapse-mode="width"
@@ -85,14 +114,15 @@ function handleMenuUpdate(key: string) {
           <n-icon class="collapse-btn" size="20" @click="appStore.toggleSidebar">
             <MenuOutline />
           </n-icon>
-          <n-breadcrumb>
+          <n-breadcrumb v-if="!isMobile">
             <n-breadcrumb-item @click="router.push('/')">首页</n-breadcrumb-item>
             <n-breadcrumb-item v-if="route.path !== '/'">{{ breadcrumbLabel }}</n-breadcrumb-item>
           </n-breadcrumb>
+          <span v-else class="mobile-title">{{ breadcrumbLabel }}</span>
         </div>
       </n-layout-header>
 
-      <n-layout-content content-style="padding: 20px;" class="main-content">
+      <n-layout-content :content-style="isMobile ? 'padding: 12px;' : 'padding: 20px;'" class="main-content">
         <router-view />
       </n-layout-content>
     </n-layout>
@@ -131,6 +161,12 @@ function handleMenuUpdate(key: string) {
   display: flex;
   align-items: center;
   gap: 16px;
+}
+
+.mobile-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: v-bind('colors.textPrimary');
 }
 
 .collapse-btn {

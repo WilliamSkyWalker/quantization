@@ -1,20 +1,22 @@
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useMessage } from 'naive-ui'
+import { useResponsive } from '../composables/useResponsive'
 import type { DataTableColumns } from 'naive-ui'
-import { searchStocks, getStockProfile, getStockKline, getStockReports, getStockNews } from '../api'
-import { formatDate } from '../utils/format'
+import { searchStocks, getStockProfile, getStockKline, getStockReports, getStockNews, checkWatchlist, addToWatchlist, removeFromWatchlist } from '../api'
+import { useMessage } from 'naive-ui'
 import KlineChart from '../components/KlineChart.vue'
 
 const route = useRoute()
 const router = useRouter()
-const message = useMessage()
+const { isMobile } = useResponsive()
 
 const searchQuery = ref('')
 const searchOptions = ref<{ label: string; value: string }[]>([])
 const selectedCode = ref('')
 const loading = ref(false)
+const message = useMessage()
+const inWatchlist = ref(false)
 
 const profile = ref<any>(null)
 const klineData = ref<any[]>([])
@@ -65,11 +67,12 @@ async function loadStockData(code: string) {
   const startDate = start.toISOString().slice(0, 10)
   const endDate = end.toISOString().slice(0, 10)
 
-  const [profileRes, klineRes, reportsRes, newsRes] = await Promise.allSettled([
+  const [profileRes, klineRes, reportsRes, newsRes, wlRes] = await Promise.allSettled([
     getStockProfile(code),
     getStockKline(code, startDate, endDate),
     getStockReports(code, 1),
     getStockNews(code, 1),
+    checkWatchlist(code),
   ])
 
   profile.value = profileRes.status === 'fulfilled' ? profileRes.value.data : null
@@ -89,7 +92,26 @@ async function loadStockData(code: string) {
     newsTotal.value = 0
   }
 
+  inWatchlist.value = wlRes.status === 'fulfilled' ? wlRes.value.data.in_watchlist : false
+
   loading.value = false
+}
+
+async function toggleWatchlist() {
+  if (!selectedCode.value) return
+  try {
+    if (inWatchlist.value) {
+      await removeFromWatchlist(selectedCode.value)
+      inWatchlist.value = false
+      message.success('已从自选股移除')
+    } else {
+      await addToWatchlist(selectedCode.value)
+      inWatchlist.value = true
+      message.success('已添加到自选股')
+    }
+  } catch (e: any) {
+    message.error(e.response?.data?.error || '操作失败')
+  }
 }
 
 async function loadReportsPage(page: number) {
@@ -136,6 +158,14 @@ function fmtMv(val: any) {
   return n.toFixed(2) + ' 万'
 }
 
+/** 元 → 万/亿 显示 */
+function fmtYuan(val: any) {
+  if (val == null) return '-'
+  const wan = Number(val) / 10000
+  if (wan >= 10000) return (wan / 10000).toFixed(2) + ' 亿'
+  return wan.toFixed(2) + ' 万'
+}
+
 function fmtPct(val: any) {
   if (val == null) return '-'
   return Number(val).toFixed(2) + '%'
@@ -166,7 +196,7 @@ onMounted(() => {
           :options="searchOptions"
           placeholder="输入股票代码或名称搜索..."
           :loading="false"
-          style="width: 400px"
+          :style="{ width: isMobile ? '100%' : '400px' }"
           @update:value="handleSearch"
           @select="handleSelect"
           clearable
@@ -176,11 +206,23 @@ onMounted(() => {
 
     <n-spin :show="loading">
       <template v-if="selectedCode">
-        <n-grid :cols="24" :x-gap="20">
+        <n-grid :cols="isMobile ? 1 : 24" :x-gap="isMobile ? 0 : 20">
           <!-- Left column -->
-          <n-gi :span="16">
+          <n-gi :span="isMobile ? 1 : 16">
             <!-- K-line -->
-            <n-card hoverable style="margin-bottom: 20px" :title="profile ? `${profile.name} (${selectedCode})` : selectedCode">
+            <n-card hoverable style="margin-bottom: 20px">
+              <template #header>
+                <n-space align="center" :size="12">
+                  <span>{{ profile ? `${profile.name} (${selectedCode})` : selectedCode }}</span>
+                  <n-button
+                    :type="inWatchlist ? 'warning' : 'default'"
+                    size="small"
+                    @click="toggleWatchlist"
+                  >
+                    {{ inWatchlist ? '已自选' : '+ 自选' }}
+                  </n-button>
+                </n-space>
+              </template>
               <KlineChart :data="klineData" />
             </n-card>
 
@@ -212,7 +254,7 @@ onMounted(() => {
           </n-gi>
 
           <!-- Right column -->
-          <n-gi :span="8">
+          <n-gi :span="isMobile ? 1 : 8">
             <!-- Basic Info -->
             <n-card hoverable style="margin-bottom: 20px" title="基本信息" v-if="profile">
               <n-descriptions :column="1" label-placement="left" size="small" bordered>
@@ -235,8 +277,8 @@ onMounted(() => {
                 <n-descriptions-item label="PB">{{ fmtNum(profile.pb) }}</n-descriptions-item>
                 <n-descriptions-item label="ROE(TTM)">{{ fmtPct(profile.roe_ttm) }}</n-descriptions-item>
                 <n-descriptions-item label="毛利率">{{ fmtPct(profile.gross_margin) }}</n-descriptions-item>
-                <n-descriptions-item label="营收">{{ fmtMv(profile.revenue) }}</n-descriptions-item>
-                <n-descriptions-item label="净利润">{{ fmtMv(profile.net_profit) }}</n-descriptions-item>
+                <n-descriptions-item label="营收">{{ fmtYuan(profile.revenue) }}</n-descriptions-item>
+                <n-descriptions-item label="净利润">{{ fmtYuan(profile.net_profit) }}</n-descriptions-item>
                 <n-descriptions-item label="总市值">{{ fmtMv(profile.total_mv) }}</n-descriptions-item>
               </n-descriptions>
             </n-card>

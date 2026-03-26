@@ -111,6 +111,9 @@ def kline(request, ts_code):
         for col in ['open', 'high', 'low', 'close']:
             df[col] = (df[col] * df['adj_factor'] / latest_adj).round(2)
 
+    # Drop rows with NaN in price columns
+    df = df.dropna(subset=['open', 'high', 'low', 'close'])
+
     records = []
     for _, row in df.iterrows():
         records.append({
@@ -119,7 +122,7 @@ def kline(request, ts_code):
             'high': float(row['high']),
             'low': float(row['low']),
             'close': float(row['close']),
-            'volume': float(row['volume']),
+            'volume': float(row['volume']) if pd.notna(row['volume']) else 0,
             'amount': float(row['amount']) if pd.notna(row['amount']) else 0,
         })
 

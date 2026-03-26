@@ -5,6 +5,7 @@ import type { DataTableColumns } from 'naive-ui'
 import { PlayOutline, RocketOutline, FlashOutline } from '@vicons/ionicons5'
 import { startBacktest, getDataStatus, getBacktestHistory, getBacktestResult } from '../api'
 import { useTaskPolling } from '../composables/useTaskPolling'
+import { useResponsive } from '../composables/useResponsive'
 import { formatDate } from '../utils/format'
 import NavChart from '../components/NavChart.vue'
 import DrawdownChart from '../components/DrawdownChart.vue'
@@ -14,7 +15,8 @@ import TradeLog from '../components/TradeLog.vue'
 import { colors } from '../theme'
 
 const message = useMessage()
-const dateRange = ref<[string, string]>(['2020-01-01', '2024-12-31'])
+const { isMobile } = useResponsive()
+const dateRange = ref<[string, string]>(['2020-01-01', '2025-12-31'])
 const latestTradeDate = ref('')
 const historyList = ref<any[]>([])
 const selectedHistoryId = ref<number | null>(null)
@@ -75,7 +77,7 @@ function setFullBacktest() {
     message.warning('无法获取最新交易日，请先下载数据')
     return
   }
-  dateRange.value = ['2021-01-01', latestTradeDate.value]
+  dateRange.value = ['2020-01-01', latestTradeDate.value]
 }
 
 function setQuickBacktest() {
@@ -151,7 +153,7 @@ const summaryItems = [
   <div>
     <!-- Controls -->
     <n-card hoverable style="margin-bottom: 20px">
-      <n-space align="center">
+      <n-space align="center" wrap :vertical="isMobile">
         <n-date-picker
           type="date"
           :value="dateRange[0] ? new Date(dateRange[0]).getTime() : null"
@@ -172,7 +174,7 @@ const summaryItems = [
         <n-divider vertical />
         <n-button @click="setFullBacktest" :disabled="!latestTradeDate || loading || detailLoading" secondary>
           <template #icon><n-icon><RocketOutline /></n-icon></template>
-          完整回测 (2021~至今)
+          完整回测 (2020~至今)
         </n-button>
         <n-button @click="setQuickBacktest" :disabled="!latestTradeDate || loading || detailLoading" secondary>
           <template #icon><n-icon><FlashOutline /></n-icon></template>
@@ -183,14 +185,14 @@ const summaryItems = [
 
     <!-- History selector -->
     <n-card hoverable style="margin-bottom: 20px" v-if="historyList.length">
-      <n-space align="center">
+      <n-space align="center" wrap>
         <span :style="{ fontSize: '14px', color: colors.textSecondary }">历史回测:</span>
         <n-select
           :value="selectedHistoryId"
           @update:value="loadSavedResult"
           :options="historyList.map((h: any) => ({ label: `#${h.id}  ${h.start_date} ~ ${h.end_date}  (${h.summary_headline})  ${h.created_at || ''}`, value: h.id }))"
           placeholder="选择历史回测"
-          style="min-width: 420px"
+          :style="{ minWidth: isMobile ? '100%' : '420px' }"
           clearable
         />
         <n-tag v-if="resultSource === 'saved'" type="info" size="small">已存结果</n-tag>
@@ -226,7 +228,7 @@ const summaryItems = [
     <!-- Results -->
     <template v-if="result">
       <!-- Summary cards -->
-      <n-grid :cols="4" :x-gap="16" style="margin-bottom: 20px">
+      <n-grid :cols="isMobile ? 2 : 4" :x-gap="16" style="margin-bottom: 20px">
         <n-gi v-for="item in summaryItems" :key="item.key">
           <n-card hoverable>
             <div style="display: flex; align-items: center; gap: 12px">
@@ -241,7 +243,7 @@ const summaryItems = [
 
       <!-- All summary metrics -->
       <n-card hoverable style="margin-bottom: 20px" v-if="result.summary" title="绩效指标">
-        <n-descriptions :column="4" bordered label-placement="left" size="small">
+        <n-descriptions :column="isMobile ? 1 : 4" bordered label-placement="left" size="small">
           <n-descriptions-item
             v-for="(value, key) in result.summary"
             :key="key"

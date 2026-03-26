@@ -1,7 +1,7 @@
 """API URL configuration."""
 from django.urls import path
 
-from .views import data, strategy, trading, sentiment, config, report, polymarket, stock
+from .views import data, strategy, trading, sentiment, config, report, polymarket, stock, watchlist
 
 urlpatterns = [
     # Data management
@@ -57,6 +57,12 @@ urlpatterns = [
     path('config/industry-factors/update', config.update_industry_factors),
     path('config/industries', config.get_all_industries),
     path('config/init', config.init_database),
+
+    # Watchlist
+    path('watchlist', watchlist.get_list),
+    path('watchlist/add', watchlist.add),
+    path('watchlist/<str:ts_code>/remove', watchlist.remove),
+    path('watchlist/<str:ts_code>/check', watchlist.check),
 
     # Stock detail
     path('stock/search', stock.search),

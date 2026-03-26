@@ -24,7 +24,7 @@ const option = computed(() => {
 
   const dates = d.map(i => i.date)
   const ohlc = d.map(i => [i.open, i.close, i.low, i.high])
-  const volumes = d.map((i, idx) => ({
+  const volumes = d.map((i, _idx) => ({
     value: i.volume,
     itemStyle: { color: i.close >= i.open ? colors.klineUp : colors.klineDown },
   }))

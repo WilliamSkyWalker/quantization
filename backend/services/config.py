@@ -91,9 +91,9 @@ INDUSTRY_GROUPS: dict[str, list[str]] = {
 }
 MAX_DRAWDOWN_THRESHOLD = 0.25
 DRAWDOWN_REDUCE_POSITION = 0.70
-# 线性回撤响应参数
-DD_START_THRESHOLD = float(os.environ.get("DD_START_THRESHOLD", "0.07"))
-DD_MAX_THRESHOLD = float(os.environ.get("DD_MAX_THRESHOLD", "0.20"))
+# 线性回撤响应参数（5% 介入，15% 达到最大降仓）
+DD_START_THRESHOLD = float(os.environ.get("DD_START_THRESHOLD", "0.05"))
+DD_MAX_THRESHOLD = float(os.environ.get("DD_MAX_THRESHOLD", "0.15"))
 DD_MIN_POSITION = float(os.environ.get("DD_MIN_POSITION", "0.40"))
 MIN_DAILY_TURNOVER = 50_000_000
 MIN_MARKET_CAP = float(os.environ.get("MIN_MARKET_CAP", "3e9"))  # 最低总市值（元），默认 30 亿
@@ -154,10 +154,18 @@ WEIGHT_TEMPERATURE = float(os.environ.get("WEIGHT_TEMPERATURE", "2.0"))
 REGIME_ENABLED = os.environ.get("REGIME_ENABLED", "1") == "1"
 REGIME_MA_WINDOW = int(os.environ.get("REGIME_MA_WINDOW", "60"))
 REGIME_INDEX_CODE = os.environ.get("REGIME_INDEX_CODE", "000300.SH")
+# 熊市持仓数比例（基于 MAX_HOLDINGS 缩减，熊市更集中持仓、多留现金）
+BEAR_HOLDINGS_RATIO = float(os.environ.get("BEAR_HOLDINGS_RATIO", "0.6"))
+
+# 策略自身动量过滤（净值低于 N 日均线时降低仓位）
+STRATEGY_MOM_WINDOW = int(os.environ.get("STRATEGY_MOM_WINDOW", "120"))
+STRATEGY_MOM_MIN_SCALE = float(os.environ.get("STRATEGY_MOM_MIN_SCALE", "0.6"))
+
 # 熊市大类权重覆盖
+# 核心改动：熊市不砍动量（相对强度是熊市最佳选股信号）
 _raw_regime_bear = os.environ.get("REGIME_BEAR_OVERRIDES", "")
 REGIME_BEAR_OVERRIDES: dict[str, float] = {
-    "momentum": 0.6, "quality": 1.5, "growth": 0.8, "value": 0.6, "technical": 1.0,
+    "momentum": 1.0, "quality": 1.5, "growth": 0.8, "value": 0.6, "technical": 0.8,
 }
 if _raw_regime_bear.strip():
     try:

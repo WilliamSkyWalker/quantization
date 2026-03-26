@@ -8,6 +8,9 @@ import NavChart from '../components/NavChart.vue'
 import PositionTable from '../components/PositionTable.vue'
 import TradeLog from '../components/TradeLog.vue'
 import { colors, pnlColor } from '../theme'
+import { useResponsive } from '../composables/useResponsive'
+
+const { isMobile } = useResponsive()
 
 const message = useMessage()
 const dialogCtrl = useDialog()
@@ -107,8 +110,8 @@ onUnmounted(stopTradeWatcher)
 <template>
   <n-spin :show="loading">
     <!-- Account overview -->
-    <n-grid :cols="24" :x-gap="16" style="margin-bottom: 20px" v-if="account">
-      <n-gi :span="5">
+    <n-grid :cols="isMobile ? 2 : 24" :x-gap="isMobile ? 8 : 16" style="margin-bottom: 20px" v-if="account">
+      <n-gi :span="isMobile ? 1 : 5">
         <n-card hoverable>
           <div class="metric">
             <div class="metric-label">初始资金</div>
@@ -116,7 +119,7 @@ onUnmounted(stopTradeWatcher)
           </div>
         </n-card>
       </n-gi>
-      <n-gi :span="5">
+      <n-gi :span="isMobile ? 1 : 5">
         <n-card hoverable>
           <div class="metric">
             <div class="metric-label">现金</div>
@@ -124,7 +127,7 @@ onUnmounted(stopTradeWatcher)
           </div>
         </n-card>
       </n-gi>
-      <n-gi :span="5">
+      <n-gi :span="isMobile ? 1 : 5">
         <n-card hoverable>
           <div class="metric">
             <div class="metric-label">总资产</div>
@@ -132,7 +135,7 @@ onUnmounted(stopTradeWatcher)
           </div>
         </n-card>
       </n-gi>
-      <n-gi :span="5">
+      <n-gi :span="isMobile ? 1 : 5">
         <n-card hoverable>
           <div class="metric">
             <div class="metric-label">盈亏</div>
@@ -143,7 +146,7 @@ onUnmounted(stopTradeWatcher)
           </div>
         </n-card>
       </n-gi>
-      <n-gi :span="4">
+      <n-gi :span="isMobile ? 2 : 4">
         <n-card hoverable>
           <n-space vertical>
             <n-button type="primary" @click="executeTrade" :loading="tradeLoading" :disabled="tradeLoading" style="width: 100%">

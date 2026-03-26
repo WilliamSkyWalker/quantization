@@ -40,6 +40,11 @@ from backend.services.config import (
     VOL_LOOKBACK_DAYS,
     VOL_SCALE_MIN,
     VOL_SCALE_MAX,
+    DD_START_THRESHOLD,
+    DD_MAX_THRESHOLD,
+    DD_MIN_POSITION,
+    STRATEGY_MOM_WINDOW,
+    STRATEGY_MOM_MIN_SCALE,
 )
 from backend.services.data.database import DatabaseManager
 
@@ -137,6 +142,7 @@ class BacktestEngine:
         for df_sig in signals.values():
             ensure_not_cancelled()
             all_codes.update(df_sig["ts_code"].tolist())
+        all_codes.add('511010.SH')  # 国债 ETF — 空闲现金理财
         price_cache = self._load_prices(list(all_codes), start_date, extended_end)
 
         # 初始化持仓状态
@@ -146,6 +152,7 @@ class BacktestEngine:
         pending_signal = None
         pending_sells = {}   # {ts_code: int_shares} 一字板排队卖单
         prev_adj_factors = {}  # {ts_code: float} 前日复权因子，用于检测除权除息
+        prev_bond_close = 0.0  # 国债 ETF 前日收盘价
         signal_idx = 0
 
         nav = pd.Series(dtype=float)
@@ -366,7 +373,7 @@ class BacktestEngine:
                     zip(new_signal["ts_code"], new_signal["weight"])
                 )
 
-                # 波动率目标管理：根据已实现波动率缩放仓位
+                # --- 风控1: 波动率目标管理 ---
                 if USE_VOL_TARGETING and len(nav) >= VOL_LOOKBACK_DAYS + 1:
                     nav_arr = nav.values
                     recent_rets = np.diff(nav_arr[-VOL_LOOKBACK_DAYS - 1:]) / nav_arr[-VOL_LOOKBACK_DAYS - 1:-1]
@@ -383,8 +390,52 @@ class BacktestEngine:
                                 f"scale={vol_scale:.2f}"
                             )
 
+                # --- 风控2: 线性回撤响应 ---
+                if len(nav) >= 5:
+                    nav_arr = nav.values
+                    peak = np.maximum.accumulate(nav_arr)
+                    dd = abs((nav_arr[-1] - peak[-1]) / peak[-1]) if peak[-1] > 0 else 0
+                    if dd >= DD_START_THRESHOLD:
+                        if dd >= DD_MAX_THRESHOLD:
+                            dd_scale = DD_MIN_POSITION
+                        else:
+                            dd_scale = 1.0 - (dd - DD_START_THRESHOLD) / (DD_MAX_THRESHOLD - DD_START_THRESHOLD) * (1.0 - DD_MIN_POSITION)
+                        raw_weights = {k: v * dd_scale for k, v in raw_weights.items()}
+                        logger.info(f"回测回撤响应: dd={dd:.2%}, scale={dd_scale:.2f}")
+
+                # --- 风控3: 非对称策略动量过滤 ---
+                # NAV < MA 且近期仍在下跌 → 降仓（熊市保护）
+                # NAV < MA 但近期在回升 → 不惩罚（牛市快速恢复）
+                if STRATEGY_MOM_WINDOW > 0 and len(nav) >= STRATEGY_MOM_WINDOW:
+                    nav_arr = nav.values
+                    nav_ma = np.mean(nav_arr[-STRATEGY_MOM_WINDOW:])
+                    current_nav = nav_arr[-1]
+                    if current_nav < nav_ma and nav_ma > 0:
+                        # 检查近 20 日趋势：正 = 回升中，不惩罚
+                        short_window = min(20, len(nav_arr) - 1)
+                        recent_ret = (nav_arr[-1] / nav_arr[-1 - short_window] - 1) if nav_arr[-1 - short_window] > 0 else 0
+                        if recent_ret < 0:
+                            # 仍在下跌，降仓
+                            deviation = (nav_ma - current_nav) / nav_ma
+                            mom_scale = max(STRATEGY_MOM_MIN_SCALE, 1.0 - deviation * 2.5)
+                            raw_weights = {k: v * mom_scale for k, v in raw_weights.items()}
+                            logger.info(
+                                f"策略动量过滤: NAV={current_nav:.3f}, "
+                                f"MA{STRATEGY_MOM_WINDOW}={nav_ma:.3f}, "
+                                f"20d_ret={recent_ret:+.2%}, scale={mom_scale:.2f}"
+                            )
+
                 pending_signal = raw_weights
                 signal_idx += 1
+
+            # === 空闲现金理财（国债 ETF 511010 真实日收益）===
+            bond_info = price_cache.get(('511010.SH', today_str))
+            if bond_info and prev_bond_close > 0 and bond_info['close'] and not pd.isna(bond_info['close']):
+                bond_daily_ret = (bond_info['close'] - prev_bond_close) / prev_bond_close
+                cash += cash * bond_daily_ret
+                prev_bond_close = bond_info['close']
+            elif bond_info and bond_info['close'] and not pd.isna(bond_info['close']):
+                prev_bond_close = bond_info['close']
 
             # === 每日净值 = (现金 + 持仓市值) / 初始资金 ===
             market_value = 0.0

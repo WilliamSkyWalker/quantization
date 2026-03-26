@@ -1,3 +1,5 @@
 /quant_system/.env
 twitter_cookies.json
 /logs/backend.log
+__pycache__/
+backend/output/

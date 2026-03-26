@@ -147,14 +147,14 @@ class AKShareDownloader:
             logger.warning("券商研报数据为空")
             return 0
 
-        # 增量更新：从最后一页（最新数据）往前翻，遇到旧数据提前终止
+        # API 第 1 页 = 最新数据，最后一页 = 最老数据
+        # 增量模式：从第 1 页（最新）正序下载，遇到连续旧数据提前终止
         # force 模式：从第 1 页正序下载全部
+        page_range = range(1, total_page + 1)
         if force:
-            page_range = range(1, total_page + 1)
             logger.info(f"研报 API: 共 {total_page} 页，正序全量下载...")
         else:
-            page_range = range(total_page, 0, -1)
-            logger.info(f"研报 API: 共 {total_page} 页，从最后一页倒序增量下载...")
+            logger.info(f"研报 API: 共 {total_page} 页，从第1页正序增量下载...")
 
         total_new = 0
         no_change_streak = 0

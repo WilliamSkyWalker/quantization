@@ -39,10 +39,12 @@ MIDDLEWARE = [
 
 ROOT_URLCONF = 'backend.core.urls'
 
+FRONTEND_DIST = BASE_DIR.parent / 'frontend' / 'dist'
+
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [FRONTEND_DIST],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [

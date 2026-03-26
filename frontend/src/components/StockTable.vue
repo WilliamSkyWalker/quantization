@@ -3,6 +3,7 @@ import { h } from 'vue'
 import type { DataTableColumns } from 'naive-ui'
 import { useMessage } from 'naive-ui'
 import { pnlColor } from '../theme'
+import { useResponsive } from '../composables/useResponsive'
 
 const props = defineProps<{
   stocks: any[]
@@ -15,6 +16,7 @@ const emit = defineEmits<{
 }>()
 
 const message = useMessage()
+const { isMobile } = useResponsive()
 
 function copyStockList() {
   const lines = props.stocks.map(s => {
@@ -69,7 +71,30 @@ defineExpose({ copyStockList })
 </script>
 
 <template>
+  <!-- Mobile: card list -->
+  <div v-if="isMobile" class="card-list">
+    <div v-for="s in stocks" :key="s.ts_code" class="stock-card" @click="handleRowClick(s)">
+      <div class="stock-header">
+        <div>
+          <span class="stock-code">{{ s.ts_code }}</span>
+          <span class="stock-name">{{ s.name }}</span>
+        </div>
+        <span class="stock-chg" :style="{ color: pnlColor(s.pct_chg) }">
+          {{ s.pct_chg != null ? s.pct_chg.toFixed(2) + '%' : '-' }}
+        </span>
+      </div>
+      <div class="stock-body">
+        <div class="stock-item"><span class="stock-label">得分</span><span>{{ s.score?.toFixed(3) || '-' }}</span></div>
+        <div class="stock-item"><span class="stock-label">权重</span><span>{{ s.weight != null ? (s.weight * 100).toFixed(1) + '%' : '-' }}</span></div>
+        <div class="stock-item"><span class="stock-label">行业</span><span>{{ s.industry_name || '-' }}</span></div>
+        <div class="stock-item"><span class="stock-label">收盘</span><span>{{ s.close?.toFixed(2) || '-' }}</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Desktop: table -->
   <n-data-table
+    v-else
     :columns="columns"
     :data="stocks"
     :loading="loading"
@@ -79,3 +104,57 @@ defineExpose({ copyStockList })
     style="width: 100%"
   />
 </template>
+
+<style scoped>
+.card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.stock-card {
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fff;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.stock-card:active {
+  background: #f5f5f5;
+}
+.stock-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.stock-code {
+  font-weight: 600;
+  font-size: 13px;
+  margin-right: 6px;
+}
+.stock-name {
+  font-size: 13px;
+  color: #666;
+}
+.stock-chg {
+  font-weight: 700;
+  font-size: 15px;
+}
+.stock-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+  gap: 4px;
+  font-size: 12px;
+}
+.stock-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.stock-label {
+  color: #999;
+  font-size: 11px;
+  margin-bottom: 2px;
+}
+</style>

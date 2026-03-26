@@ -1015,7 +1015,7 @@ function handleTabChange(tab: string) {
             <n-data-table
               :columns="btAlertColumns"
               :data="btResult.alerts || []"
-              :row-key="(row: any, idx: number) => idx"
+              :row-key="(_row: any, idx: number) => idx"
               size="small"
               :max-height="400"
               :scroll-x="900"
@@ -1293,7 +1293,7 @@ function handleTabChange(tab: string) {
             <n-data-table
               :columns="pnlTradeColumns"
               :data="pnlResult.trades || []"
-              :row-key="(row: any, idx: number) => idx"
+              :row-key="(_row: any, idx: number) => idx"
               size="small"
               :max-height="400"
               :scroll-x="1000"
@@ -1565,7 +1565,7 @@ function handleTabChange(tab: string) {
             <n-data-table
               :columns="cnPnlTradeColumns"
               :data="cnPnlResult.trades || []"
-              :row-key="(row: any, idx: number) => idx"
+              :row-key="(_row: any, idx: number) => idx"
               size="small"
               :max-height="400"
               :scroll-x="1100"

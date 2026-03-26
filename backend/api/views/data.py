@@ -497,39 +497,45 @@ def _run_update_all(task_id):
     dl = TushareDownloader(db)
     updater = FinancialUpdater(db)
 
-    task_manager.update_progress(task_id, 5, '步骤1/10: 刷新股票列表...')
+    task_manager.update_progress(task_id, 5, '步骤1/12: 刷新股票列表...')
     df = dl.download_stock_list()
 
-    task_manager.update_progress(task_id, 12, '步骤2/10: 增量更新日线行情...')
+    task_manager.update_progress(task_id, 12, '步骤2/12: 增量更新日线行情...')
     daily = dl.update_daily_prices()
 
-    task_manager.update_progress(task_id, 24, '步骤3/10: 更新沪深300指数...')
+    task_manager.update_progress(task_id, 24, '步骤3/12: 更新沪深300指数...')
     dl.update_index_daily('000300.SH')
     if INDUSTRY_INDEX_MAP:
         for name, code in INDUSTRY_INDEX_MAP.items():
             dl.update_index_daily(code)
 
-    task_manager.update_progress(task_id, 33, '步骤4/10: 更新商品期货...')
+    # 国债 ETF（空闲现金理财基准）
+    try:
+        dl.update_fund_daily('511010.SH')
+    except Exception as e:
+        logger.warning(f'国债ETF跳过 ({type(e).__name__}): {e}')
+
+    task_manager.update_progress(task_id, 33, '步骤4/12: 更新商品期货...')
     try:
         from backend.services.data.commodity_downloader import CommodityDownloader
         CommodityDownloader(db).update_commodity_prices()
     except Exception as e:
         logger.warning(f'商品期货跳过 ({type(e).__name__}): {e}')
 
-    task_manager.update_progress(task_id, 42, '步骤5/10: 更新宏观数据...')
+    task_manager.update_progress(task_id, 42, '步骤5/12: 更新宏观数据...')
     try:
         from backend.services.data.macro_downloader import MacroDownloader
         MacroDownloader(db).update()
     except Exception as e:
         logger.warning(f'宏观数据跳过 ({type(e).__name__}): {e}')
 
-    task_manager.update_progress(task_id, 52, '步骤6/10: 更新财务数据...')
+    task_manager.update_progress(task_id, 52, '步骤6/12: 更新财务数据...')
     updater.update_financial_data()
 
-    task_manager.update_progress(task_id, 62, '步骤7/10: 刷新估值快照...')
+    task_manager.update_progress(task_id, 62, '步骤7/12: 刷新估值快照...')
     updater.download_valuation_snapshot()
 
-    task_manager.update_progress(task_id, 72, '步骤8/10: 刷新行业分类...')
+    task_manager.update_progress(task_id, 72, '步骤8/12: 刷新行业分类...')
     updater.download_industry_classification()
 
     task_manager.update_progress(task_id, 78, '步骤9/12: 下载券商研报...')

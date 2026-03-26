@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useMessage, NTag, NIcon } from 'naive-ui'
-import { CheckmarkOutline, CloseOutline, AddOutline } from '@vicons/ionicons5'
+import { CheckmarkOutline, AddOutline } from '@vicons/ionicons5'
 import { getSettings, updateSettings, getIndustryFactors, getAllIndustries } from '../api'
 import { colors } from '../theme'
+import { useResponsive } from '../composables/useResponsive'
+
+const { isMobile } = useResponsive()
 
 const message = useMessage()
 const loading = ref(false)
@@ -112,7 +115,7 @@ onMounted(loadSettings)
   <n-spin :show="loading">
     <!-- Sensitive settings -->
     <n-card hoverable style="margin-bottom: 20px" title="凭证配置 (显示状态)">
-      <n-descriptions :column="3" bordered label-placement="left" size="small">
+      <n-descriptions :column="isMobile ? 1 : 3" bordered label-placement="left" size="small">
         <n-descriptions-item v-for="(val, key) in sensitive" :key="key" :label="String(key)">
           <n-tag :type="val ? 'success' : 'default'" size="small">{{ val || '未配置' }}</n-tag>
         </n-descriptions-item>
@@ -121,7 +124,7 @@ onMounted(loadSettings)
 
     <!-- Editable settings -->
     <n-card hoverable style="margin-bottom: 20px" v-for="group in settingGroups" :key="group.label" :title="group.label">
-      <n-form label-width="200" size="small" label-placement="left">
+      <n-form :label-width="isMobile ? 120 : 200" size="small" :label-placement="isMobile ? 'top' : 'left'">
         <n-form-item v-for="key in group.keys" :key="key" :label="key">
           <n-input
             v-if="typeof settings[key] === 'string'"

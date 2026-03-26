@@ -50,6 +50,7 @@ const columns: DataTableColumns = [
     striped
     size="small"
     :max-height="500"
+    :scroll-x="700"
     style="width: 100%"
   />
 </template>

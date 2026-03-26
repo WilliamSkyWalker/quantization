@@ -16,9 +16,11 @@ import { backtestDiscover, backtestDownload } from '../api/polymarket'
 import { formatDate } from '../utils/format'
 import { useTaskStore } from '../stores/task'
 import { colors } from '../theme'
+import { useResponsive } from '../composables/useResponsive'
 
 const message = useMessage()
 const taskStore = useTaskStore()
+const { isMobile } = useResponsive()
 const loading = ref(false)
 const running = ref(false)
 const tables = ref<any[]>([])
@@ -237,18 +239,6 @@ const tableInfoMap = computed(() => {
 // Mapping for browsable tables
 const _BROWSE_MAP: Record<string, string> = {}
 dataTypes.forEach(d => { if (d.browseTable) _BROWSE_MAP[d.key] = d.browseTable })
-// Also add non-dataType tables
-const _ALL_BROWSE = [
-  'stock_basic', 'daily_price', 'financial_data', 'industry_class',
-  'commodity_price', 'macro_indicator', 'policy_article', 'policy_analysis',
-  'research_report', 'paper_account', 'paper_position', 'paper_transaction', 'paper_nav',
-  // 美股
-  'us_stock_basic', 'us_daily_price', 'us_financial_data', 'us_industry_class',
-  'us_index_daily', 'us_macro_indicator', 'us_commodity_price',
-  'us_analyst_recommendation', 'us_sec_filing', 'us_corporate_action',
-  // Polymarket
-  'polymarket_event', 'polymarket_price_snapshot', 'polymarket_alert',
-]
 
 const opColumns: DataTableColumns = [
   {
@@ -814,45 +804,6 @@ async function scrapeSourceBackfill(source: string) {
   }
 }
 
-async function scrapeAll() {
-  scraping.value = true
-  try {
-    const { data } = await startSentimentDownloadAndAnalyze()
-    taskStore.trackTask(data.task_id, '全量抓取+分析')
-    message.success('全量抓取+分析任务已启动')
-  } catch (e: any) {
-    message.error(e.response?.data?.error || '操作失败')
-  } finally {
-    scraping.value = false
-  }
-}
-
-async function backfillAnalyze() {
-  scraping.value = true
-  try {
-    const { data } = await startSentimentBackfillAnalyze()
-    taskStore.trackTask(data.task_id, '补录分析')
-    message.success('补录分析任务已启动')
-  } catch (e: any) {
-    message.error(e.response?.data?.error || '操作失败')
-  } finally {
-    scraping.value = false
-  }
-}
-
-async function backfillContent() {
-  scraping.value = true
-  try {
-    const { data } = await startSentimentBackfillContent()
-    taskStore.trackTask(data.task_id, '补录全文')
-    message.success('补录全文任务已启动')
-  } catch (e: any) {
-    message.error(e.response?.data?.error || '操作失败')
-  } finally {
-    scraping.value = false
-  }
-}
-
 function filterBySource(source: string) {
   currentSource.value = currentSource.value === source ? '' : source
   mainTab.value = 'articles'
@@ -973,7 +924,7 @@ onMounted(() => {
     <div v-show="mainTab === 'operations'">
       <!-- Quick actions -->
       <n-card hoverable style="margin-bottom: 20px" title="快捷操作">
-        <n-space size="small">
+        <n-space size="small" wrap>
           <n-button size="small" type="primary" @click="runInit" :disabled="running">
             <template #icon><n-icon><SettingsOutline /></n-icon></template>
             初始化数据库
@@ -1005,7 +956,7 @@ onMounted(() => {
 
       <!-- Data operations table -->
       <n-card hoverable title="数据操作">
-        <n-data-table :columns="opColumns" :data="dataTypes" :row-key="(r: any) => r.key" size="small" :bordered="false" :default-expanded-row-keys="['sentiment']" />
+        <n-data-table :columns="opColumns" :data="dataTypes" :row-key="(r: any) => r.key" size="small" :bordered="false" :default-expanded-row-keys="['sentiment']" :scroll-x="900" />
       </n-card>
 
     </div>
@@ -1013,12 +964,12 @@ onMounted(() => {
     <!-- ========== Tab: 文章列表 ========== -->
     <div v-show="mainTab === 'articles'">
       <n-card hoverable style="margin-bottom: 20px">
-        <n-space>
+        <n-space wrap>
           <n-input
             v-model:value="keyword"
             placeholder="搜索标题关键词"
             clearable
-            style="width: 220px"
+            :style="{ width: isMobile ? '100%' : '220px' }"
             @keyup.enter="onArticleSearch"
             @clear="onArticleSearch"
           >
@@ -1029,7 +980,7 @@ onMounted(() => {
             :options="categories.map(c => ({ label: c, value: c }))"
             placeholder="栏目分类"
             clearable
-            style="width: 160px"
+            :style="{ width: isMobile ? '100%' : '160px' }"
             @update:value="onArticleSearch"
           />
           <n-date-picker
@@ -1037,7 +988,7 @@ onMounted(() => {
             v-model:value="dateRange"
             clearable
             @update:value="onArticleSearch"
-            style="width: 280px"
+            :style="{ width: isMobile ? '100%' : '280px' }"
           />
           <n-button type="primary" @click="onArticleSearch">查询</n-button>
           <n-button @click="clearFilters">重置</n-button>
@@ -1081,6 +1032,7 @@ onMounted(() => {
           :row-props="articleRowProps"
           striped
           size="small"
+          :scroll-x="700"
           :row-key="(row: any) => row.url || row.title"
         />
 
@@ -1108,12 +1060,12 @@ onMounted(() => {
             </n-button>
           </div>
         </template>
-        <n-data-table :columns="statusColumns" :data="tables" :loading="loading" striped size="small" />
+        <n-data-table :columns="statusColumns" :data="tables" :loading="loading" striped size="small" :scroll-x="700" />
       </n-card>
     </div>
 
     <!-- ========== Article detail drawer ========== -->
-    <n-drawer v-model:show="drawerVisible" :width="520" placement="right">
+    <n-drawer v-model:show="drawerVisible" :width="isMobile ? '100%' : 520" placement="right">
       <n-drawer-content v-if="selectedArticle" closable>
         <template #header>文章详情</template>
 
@@ -1166,7 +1118,7 @@ onMounted(() => {
     </n-drawer>
 
     <!-- ========== Generic data browser drawer ========== -->
-    <n-drawer v-model:show="browserVisible" :width="900" placement="right">
+    <n-drawer v-model:show="browserVisible" :width="isMobile ? '100%' : 900" placement="right">
       <n-drawer-content closable>
         <template #header>
           {{ browserLabel }}

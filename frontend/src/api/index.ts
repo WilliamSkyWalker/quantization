@@ -84,6 +84,13 @@ export const updateIndustryFactors = (data: Record<string, any>) =>
   api.put('/config/industry-factors/update', data)
 export const initDatabase = () => api.post('/config/init')
 
+// Watchlist
+export const getWatchlist = () => api.get('/watchlist')
+export const addToWatchlist = (tsCode: string, notes?: string) =>
+  api.post('/watchlist/add', { ts_code: tsCode, notes })
+export const removeFromWatchlist = (tsCode: string) => api.delete(`/watchlist/${tsCode}/remove`)
+export const checkWatchlist = (tsCode: string) => api.get(`/watchlist/${tsCode}/check`)
+
 // Stock detail
 export const searchStocks = (q: string) => api.get('/stock/search', { params: { q } })
 export const getStockProfile = (tsCode: string) => api.get(`/stock/${tsCode}/profile`)

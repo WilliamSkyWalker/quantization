@@ -7,6 +7,9 @@ import { useTaskStore } from '../stores/task'
 import { formatDate, todayStr } from '../utils/format'
 import StockTable from '../components/StockTable.vue'
 import { colors, pnlColor } from '../theme'
+import { useResponsive } from '../composables/useResponsive'
+
+const { isMobile } = useResponsive()
 
 const message = useMessage()
 const taskStore = useTaskStore()
@@ -22,7 +25,6 @@ const factorLoading = ref(false)
 const factorDetail = ref<any>(null)
 const historyDates = ref<{ date: string; total: number; updated_at: string | null }[]>([])
 const topTableRef = ref<InstanceType<typeof StockTable> | null>(null)
-let taskId = ''
 let taskWatcher: (() => void) | null = null
 
 function stopWatchingTask() {
@@ -111,7 +113,6 @@ async function runSelect() {
   stopWatchingTask()
   try {
     const { data } = await startSelectStocks(date.value || undefined)
-    taskId = data.task_id
     if (data.fallback && data.date !== data.requested_date) {
       fallbackNotice.value = `${data.requested_date} 暂无行情数据，已使用最近交易日 ${data.date}`
       date.value = data.date
@@ -266,8 +267,8 @@ onMounted(async () => {
       </div>
     </n-card>
 
-    <n-grid :cols="24" :x-gap="20" v-if="result">
-      <n-gi :span="16">
+    <n-grid :cols="isMobile ? 1 : 24" :x-gap="isMobile ? 0 : 20" v-if="result">
+      <n-gi :span="isMobile ? 1 : 16">
         <n-card hoverable>
           <template #header>
             <div style="display: flex; justify-content: space-between; align-items: center; width: 100%">
@@ -300,7 +301,7 @@ onMounted(async () => {
         </n-card>
       </n-gi>
 
-      <n-gi :span="8">
+      <n-gi :span="isMobile ? 1 : 8">
         <n-spin :show="factorLoading">
           <n-card hoverable>
             <template #header>

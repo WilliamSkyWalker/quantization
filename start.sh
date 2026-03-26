@@ -31,7 +31,6 @@ PNPM="${PNPM:-pnpm}"
 
 # 端口
 BACKEND_PORT=8000
-FRONTEND_PORT=5173
 
 # ============================================================
 # 辅助函数
@@ -72,10 +71,8 @@ wait_for_port() {
 stop_services() {
     log "=== 停止已有服务 ==="
     kill_by_port $BACKEND_PORT
-    kill_by_port $FRONTEND_PORT
-    # 也杀掉残留的 daphne / vite 进程
     pkill -f "daphne.*core.asgi" 2>/dev/null || true
-    pkill -f "vite.*--port.*$FRONTEND_PORT" 2>/dev/null || true
+    pkill -f "manage.py runserver" 2>/dev/null || true
     log "服务已停止"
 }
 
@@ -83,28 +80,23 @@ stop_services() {
 # 启动后端
 # ============================================================
 start_backend() {
-    log "=== 启动后端 (daphne :$BACKEND_PORT) ==="
-    cd "$BACKEND_DIR"
+    log "=== 启动后端 (runserver :$BACKEND_PORT) ==="
     cd "$PROJECT_DIR"
-    nohup "$PYTHON" -m daphne \
-        -b 0.0.0.0 \
-        -p "$BACKEND_PORT" \
-        backend.core.asgi:application \
+    DJANGO_SETTINGS_MODULE=backend.core.settings \
+    nohup "$PYTHON" backend/manage.py runserver 0.0.0.0:"$BACKEND_PORT" \
         >> "$LOG_DIR/backend.log" 2>&1 &
     log "后端 PID: $!"
     wait_for_port $BACKEND_PORT "后端"
 }
 
 # ============================================================
-# 启动前端
+# 构建前端
 # ============================================================
-start_frontend() {
-    log "=== 启动前端 (vite :$FRONTEND_PORT) ==="
+build_frontend() {
+    log "=== 构建前端 ==="
     cd "$FRONTEND_DIR"
-    nohup "$PNPM" dev --host 0.0.0.0 \
-        >> "$LOG_DIR/frontend.log" 2>&1 &
-    log "前端 PID: $!"
-    wait_for_port $FRONTEND_PORT "前端"
+    "$PNPM" build
+    log "前端构建完成 → $FRONTEND_DIR/dist/"
 }
 
 # ============================================================
@@ -159,8 +151,8 @@ case "${1:-}" in
         ;;
     *)
         stop_services
+        build_frontend
         start_backend
-        start_frontend
         install_cron
 
         # 自动启动 Polymarket 监控
@@ -171,8 +163,7 @@ case "${1:-}" in
             || log "WARNING: Polymarket 监控启动失败，请手动启动"
 
         log "=== 全部就绪 ==="
-        log "前端: http://0.0.0.0:$FRONTEND_PORT"
-        log "后端: http://0.0.0.0:$BACKEND_PORT/api/"
+        log "服务: http://0.0.0.0:$BACKEND_PORT"
         log "日志: $LOG_DIR/"
         ;;
 esac

@@ -643,6 +643,22 @@ class USCorporateAction(Base):
     )
 
 
+class Watchlist(Base):
+    """自选股表"""
+    __tablename__ = "watchlist"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts_code = Column(String(20), nullable=False, comment="股票代码")
+    name = Column(String(50), comment="股票名称（冗余，方便列表展示）")
+    notes = Column(String(500), comment="用户备注")
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", name="uq_watchlist_ts_code"),
+    )
+
+
 # ============================================================
 # 数据库管理类
 # ============================================================

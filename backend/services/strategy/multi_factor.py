@@ -35,6 +35,7 @@ from backend.services.config import (
     REGIME_ENABLED,
     REGIME_BEAR_OVERRIDES,
     REGIME_BULL_OVERRIDES,
+    BEAR_HOLDINGS_RATIO,
     SENTIMENT_SURGE_MULTIPLIER,
     SENTIMENT_SURGE_ZSCORE,
     REBALANCE_INTERVAL,
@@ -256,6 +257,7 @@ class MultiFactorStrategy:
 
         # Regime 检测器
         self._regime_detector = RegimeDetector(db) if REGIME_ENABLED else None
+        self._last_regime_strength: float = 1.0  # 上次 regime 强度，用于动态持仓数
 
         # 从 DB 加载行业因子权重配置
         self._industry_weights = self._load_industry_weights()
@@ -353,6 +355,7 @@ class MultiFactorStrategy:
             return self.CATEGORY_WEIGHTS
 
         strength = self._regime_detector.detect_strength(date)
+        self._last_regime_strength = strength
 
         # strength=1.0 → 纯牛市权重；strength=0.0 → 纯熊市权重
         if strength >= 1.0:
@@ -920,7 +923,16 @@ class MultiFactorStrategy:
 
         composite = composite.sort_values("score", ascending=False)
         qualified = composite[composite["score"] >= self.min_select_score]
-        selected = qualified.head(self.n_holdings).copy()
+
+        # Regime 联动持仓数：牛市满仓，熊市缩减（多留现金）
+        strength = self._last_regime_strength
+        bear_n = max(3, int(self.n_holdings * BEAR_HOLDINGS_RATIO))
+        effective_n = int(bear_n + (self.n_holdings - bear_n) * strength)
+        effective_n = max(bear_n, min(effective_n, self.n_holdings))
+        if effective_n < self.n_holdings:
+            logger.info(f"Regime 联动持仓: {self.n_holdings} -> {effective_n} (strength={strength:.2f})")
+
+        selected = qualified.head(effective_n).copy()
 
         # Softmax 权重分配
         if len(selected) > 0:

@@ -771,6 +771,44 @@ class TushareDownloader:
 
         return self.download_index_daily(index_code, start_date=start, end_date=today)
 
+    def update_fund_daily(self, ts_code: str = "511010.SH") -> int:
+        """
+        增量更新基金/ETF 日线（通过 tushare fund_daily）。
+
+        Args:
+            ts_code: 基金代码（如 511010.SH 国债ETF）。
+
+        Returns:
+            更新的记录数。
+        """
+        latest = self.db.get_latest_trade_date(ts_code=ts_code)
+        today = pd.Timestamp.now(tz="Asia/Shanghai").normalize().tz_localize(None).strftime("%Y%m%d")
+
+        if latest:
+            start = (pd.to_datetime(latest) + pd.Timedelta(days=1)).strftime("%Y%m%d")
+            if start > today:
+                logger.info(f"基金 {ts_code} 数据已是最新")
+                return 0
+        else:
+            start = "20150101"
+
+        self.limiter.acquire()
+        df = self.pro.fund_daily(
+            ts_code=ts_code,
+            start_date=start, end_date=today,
+        )
+        if df is None or df.empty:
+            return 0
+
+        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
+        df = df.rename(columns={"vol": "volume"})
+        keep = ["ts_code", "trade_date", "open", "high", "low", "close", "volume"]
+        df = df[[c for c in keep if c in df.columns]]
+
+        self.db.upsert_daily_price(df)
+        logger.info(f"基金 {ts_code}: 更新 {len(df)} 条日线")
+        return len(df)
+
     # ----------------------------------------------------------
     # 增量更新
     # ----------------------------------------------------------

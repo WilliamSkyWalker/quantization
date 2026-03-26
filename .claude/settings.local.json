@@ -76,7 +76,16 @@
       "Bash(brew services:*)",
       "Bash(kill:*)",
       "Bash(/tmp/color_findings.txt:*)",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(sort -t, -k3 -rn)",
+      "Bash(mysql:*)",
+      "Bash(git mv:*)",
+      "WebFetch(domain:www.perplexity.ai)",
+      "WebFetch(domain:docs.perplexity.ai)",
+      "Bash(find /Users/daweilun/Documents/quantization -type f \\\\\\( -name \"*.log\" -o -name \"*sentiment*\" -type f \\\\\\) -mtime -90 2>/dev/null | head -20)",
+      "WebFetch(domain:www.csrc.gov.cn)",
+      "WebFetch(domain:www.mofcom.gov.cn)",
+      "Bash(pip show:*)"
     ]
   }
 }

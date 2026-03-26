@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { useResponsive } from '../composables/useResponsive'
 import { NIcon } from 'naive-ui'
 import {
   ListOutline,
@@ -11,6 +12,7 @@ import { getDataStatus, getPaperAccount, getPaperNav, getSentimentStatus } from 
 import { colors } from '../theme'
 import NavChart from '../components/NavChart.vue'
 
+const { isMobile } = useResponsive()
 const loading = ref(true)
 const error = ref(false)
 const stats = ref({
@@ -88,7 +90,7 @@ function formatStat(key: string) {
     </n-alert>
 
     <!-- Stats cards -->
-    <n-grid :cols="4" :x-gap="16" style="margin-bottom: 20px">
+    <n-grid :cols="isMobile ? 1 : 4" :x-gap="16" style="margin-bottom: 20px">
       <n-gi v-for="card in statCards" :key="card.key">
         <n-card hoverable>
           <div class="stat-card">

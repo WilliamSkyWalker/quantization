@@ -330,8 +330,9 @@ class FMPDownloader:
             logger.warning("无美股代码，请先下载股票列表")
             return 0
 
-        today = datetime.now().strftime("%Y-%m-%d")
-        total = self._download_prices_for(tickers, self._start_date, today, "美股日线下载")
+        # yfinance end 参数是排他的，需 +1 天才能包含 today
+        end_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        total = self._download_prices_for(tickers, self._start_date, end_date, "美股日线下载")
         logger.info(f"美股日线下载完成: {total} 条")
         return total
 
@@ -352,7 +353,9 @@ class FMPDownloader:
             logger.info("美股日线已是最新")
             return 0
 
-        total = self._download_prices_for(tickers, from_date, today, "美股日线增量更新")
+        # yfinance end 参数是排他的，需 +1 天才能包含 today
+        end_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        total = self._download_prices_for(tickers, from_date, end_date, "美股日线增量更新")
         logger.info(f"美股日线增量更新完成: {total} 条")
         return total
 
