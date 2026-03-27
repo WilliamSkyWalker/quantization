@@ -27,6 +27,7 @@ python3 backend/cli.py select --market us --date 2025-01-15    # 美股选股
 python3 backend/cli.py select --market cn --date 2025-01-15    # A股选股
 python3 backend/cli.py backtest --market us --start 2020-01-01 # 美股回测 (Alpha, 默认)
 python3 backend/cli.py backtest --market us --strategy-type beta # 美股回测 (Beta)
+python3 backend/cli.py backtest --market us --strategy-type baseline --start 2015-01-01 # 美股回测 (Baseline VQM L/S)
 python3 backend/cli.py factor calc MOM_1M --market us          # 计算单因子
 python3 backend/cli.py factor list --market us                 # 列出所有因子
 python3 backend/cli.py score AAPL --date 2025-01-15            # 单只股票得分
@@ -62,17 +63,18 @@ A股管道:
   → strategy/regime.py → strategy/multi_factor.py → risk/risk_manager.py
   → strategy/backtest.py | execution/paper_trader.py
 
-美股管道（双策略：Alpha 多空对冲 + Beta Regime 控制）:
+美股管道（三策略：Alpha 多空对冲 + Beta Regime 控制 + Baseline VQM 验证）:
   yfinance → data/fmp_downloader.py → MySQL (us_* 表)
   SEC EDGAR → data/edgar_downloader.py → us_financial_data (2010起全量历史财报)
   SimFin → data/simfin_downloader.py → us_financial_data (补充)
   FRED → data/fred_downloader.py → us_macro_indicator 表
   FF5 → strategy/ff5.py → Fama-French 五因子回归分析
-  → data/us_cleaner.py → us_factors/*.py (4因子) → us_factors/processor.py
+  → data/us_cleaner.py → us_factors/*.py (23因子×7大类) → us_factors/processor.py
   → strategy/us_regime.py (四维复合 + credit veto)
-    → Alpha: strategy/us_multi_factor.py (多空) → risk/us_risk_manager.py
-    → Beta:  strategy/us_beta_strategy.py (Regime→仓位, 质量筛选等权)
-  → strategy/us_backtest.py (T+0,借券费) | execution/us_paper_trader.py
+    → Alpha:    strategy/us_multi_factor.py (多空) → risk/us_risk_manager.py
+    → Beta:     strategy/us_beta_strategy.py (Regime→仓位, 质量筛选等权)
+    → Baseline: strategy/us_baseline_strategy.py (VQM 3因子, 纯静态 dollar-neutral)
+  → strategy/us_backtest.py (T+0,借券费,risk_controls开关) | execution/us_paper_trader.py
 ```
 
 **前端页面:**
@@ -116,31 +118,55 @@ A股管道:
 | 宏观 | 0.6 | MACRO_CYCLE, MACRO_LIQD, MACRO_INFL, MACRO_EXTR |
 | 舆情 | 0.6 | POLICY_SENT, POLICY_INTENSITY, ANALYST_RATING, ANALYST_COVERAGE |
 
-### 美股因子体系（4 个核心因子，美股专属，`services/us_factors/`）
+### 美股因子体系（23 因子 × 7 大类，`services/us_factors/`）
 
-| 因子 | 类别 | 学术来源 | 10年ICIR |
-|------|------|---------|---------|
-| MOM_12_1 | 动量 | Jegadeesh 1993 | +0.229 |
-| Shareholder Yield | 估值 | DIV+BUYBACK 合并 | +0.209 |
-| IVOL（取反） | 技术 | Ang 2006 | +0.172 |
-| Gross Profitability | 质量 | Novy-Marx 2013 | +0.114 |
+| 大类 | 权重 | 因子 |
+|------|------|------|
+| value | 1.0 | EP, BP, DIV_YIELD, BUYBACK_YIELD |
+| quality | 1.0 | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND, ACCRUALS |
+| growth | 1.0 | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y |
+| momentum | 1.0 | MOM_1M, MOM_3M, MOM_12M, REV_5D |
+| technical | 1.0 | TURN_20D, VOL_20D, IVOL, SIZE |
+| analyst | 1.0 | US_ANALYST_RATING, US_ANALYST_COVERAGE |
+| sentiment | 1.0 | POLYMARKET_SENT |
 
-等权合成，不做 IC 引导权重优化（样本外验证已证明 IC 权重是数据窥探）。
-29 个 A 股移植因子中 25 个被删除（IC 接近零/高相关/美股无效）。
+等权合成，两层类别打分（类内动态分母 + 类间加权），不做 IC 引导权重优化。
+
+**剪枝记录**（leave-one-out alpha 分析，2015-2023）：
+- ~~RESIDUAL_MOM~~: Δα=-3.46%（与 MOM_1M/3M/12M 冗余，信号更嘈杂）
+- ~~VOL_PRICE_DIV~~: Δα=-4.30%（美股大盘股无量价背离信号）
+- ~~4×MACRO~~: Δα=-0.25%（截面同值，无个股区分力，macro 大类整体移除）
 
 ### 美股回测绩效（2015-2025，含幸存者偏差修正，基准 Russell 1000）
 
-| 指标 | Alpha 策略 | Beta 策略 | Russell 1000 |
-|------|-----------|----------|-------------|
-| 年化收益 | **12.8%** | 6.9% | 11.4% |
-| 最大回撤 | -16.3% | **-16.5%** | — |
-| Sharpe | **0.68** | 0.33 | — |
-| FF5 Alpha | **+6.69%** (t=2.26) | +0.88% (t=0.54) | — |
-| 下行捕获 | — | **37.3%** | — |
-| 换手率 | 324% | **156%** | — |
+| 指标 | Alpha v2 (23因子) | Alpha v1 (29因子) | Beta | Russell 1000 |
+|------|-------------------|-------------------|------|-------------|
+| 年化收益 | **17.2%** | 12.8% | 6.9% | 11.4% |
+| 最大回撤 | -29.8% | **-16.3%** | -16.5% | — |
+| Sharpe | **0.72** | 0.68 | 0.33 | — |
+| FF5 Alpha | **+6.73%** (t=2.20) | +6.69% (t=2.26) | +0.88% | — |
+| Market Beta | 0.82 | 0.40 | — | — |
+| 超额年化 | **+7.53%** | +1.41% | -4.5% | — |
 
-> Alpha: 4 因子等权多空对冲，追求超额。Beta: Regime 择时 + 质量筛选，追求稳健。
+> **Alpha v2**: 23 因子（纯线性，剪掉 6 个有害因子）+ 月频调仓。α=6.73%(t=2.20 显著)，回撤 -29.8% 待优化。ML(LightGBM) 代码已集成但 train() 未调用，当前结果为纯线性。
+> **Alpha v1**: 29 因子多空对冲（net exposure 60%），20 日调仓，风控完善（剪枝前版本）。
+> **Beta**: Regime 择时 + 质量筛选，追求稳健。
+> **Baseline**: EP+ROE+MOM_12_1 三因子 dollar-neutral（top/bottom 10%），纯静态无风控覆盖。2016-2023 价值因子历史最差十年，baseline 年化 -12% 符合 AQR 公开因子数据，已验证引擎和数据管道正确。
 > 含幸存者偏差修正（227 只历史 S&P 500 成分股）。
+
+### Alpha v2 开发路线（当前）
+
+阶梯式重构：每一步对比 FF5 alpha 增量，确保改进可量化。
+
+| 阶段 | 内容 | 结果 |
+|------|------|------|
+| Step 1 | 4 因子 dollar-neutral baseline | ✅ 失败：alpha=-15%，dollar-neutral 在 2016-2023 不可行 |
+| Step 2 | +Regime 动态净敞口（4因子） | ✅ alpha 转正但仅 +1%（t=0.31），4 因子选股力不足 |
+| Step 3 | 29 因子 + v1 选股逻辑 | ✅ alpha=+3.62%（t=0.71） |
+| Step 3.5 | Leave-one-out 因子剪枝（29→23因子） | ✅ **alpha=+6.73%（t=2.20 显著），年化 17.2%** |
+| Step 4 | 截面风控（GICS 行业中性 + beta 约束），替代时序风控 | 📋 |
+| Step 4.5 | 2024-2025 样本外验证 | 📋 |
+| Step 5 | 盈利预期修正因子 + LLM 舆情增强 | 📋 |
 
 ## 配置
 
@@ -207,4 +233,8 @@ A股管道:
 | Phase 15-20 | 性能优化 + 信号增强 + 预加载架构 | ✅ |
 | Phase 21-24 | 回测优化 + 自适应调仓 + 因子质量增强 | ✅ |
 | 美股量化 | 29 因子多空对冲 + FF5 回归 + 幸存者偏差修正 | ✅ |
+| 美股 Alpha v1 | 29 因子多空对冲 + Regime 动态净敞口（剪枝前） | ✅ |
+| 美股 Baseline | VQM 3 因子 dollar-neutral 验证（引擎+数据管道已验证） | ✅ |
+| 数据清洗 | eps/roe 脏数据修复 + EDGAR/SimFin 单位统一 + ROE 重算 | ✅ |
+| **美股 Alpha v2** | **阶梯式重构：clean baseline → Regime → 风控 → LLM 因子** | **🔨** |
 | 待办 | 券商实盘对接 (QMT/Ptrade) / Insider 因子 | 📋 |

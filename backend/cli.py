@@ -371,7 +371,7 @@ def backtest(
     start: str = typer.Option("2020-01-01", help="开始日期"),
     end: str = typer.Option("2025-12-31", help="结束日期"),
     capital: float = typer.Option(0, help="初始资金 (0=默认)"),
-    strategy_type: str = typer.Option("alpha", help="策略类型: alpha 或 beta (仅美股)"),
+    strategy_type: str = typer.Option("alpha", help="策略类型: alpha, beta, baseline (仅美股)"),
 ):
     """运行回测"""
     db = _get_db()
@@ -382,6 +382,9 @@ def backtest(
         if strategy_type == "beta":
             from backend.services.strategy.us_beta_strategy import USBetaStrategy
             strategy = USBetaStrategy(db)
+        elif strategy_type == "baseline":
+            from backend.services.strategy.us_baseline_strategy import USBaselineStrategy
+            strategy = USBaselineStrategy(db)
         else:
             from backend.services.strategy.us_multi_factor import USMultiFactorStrategy
             strategy = USMultiFactorStrategy(db)
@@ -401,7 +404,10 @@ def backtest(
 
     console.print("  运行回测...")
     if market == "us":
-        engine = USBacktestEngine(db=db, initial_capital=cap)
+        engine = USBacktestEngine(
+            db=db, initial_capital=cap,
+            risk_controls=(strategy_type != "baseline"),
+        )
     else:
         engine = BacktestEngine(initial_capital=cap)
     result = engine.run(signals, start, end)

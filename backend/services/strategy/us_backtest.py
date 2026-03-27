@@ -77,6 +77,7 @@ class USBacktestEngine:
         slippage: float = US_SLIPPAGE,
         initial_capital: float = None,
         benchmark: str = US_BENCHMARK_INDEX,
+        risk_controls: bool = True,
     ):
         self.db = db
         self.benchmark = benchmark
@@ -86,6 +87,7 @@ class USBacktestEngine:
         self.sell_commission = sell_commission
         self.stamp_tax = stamp_tax
         self.slippage = slippage
+        self.risk_controls = risk_controls
 
     def run(
         self,
@@ -167,7 +169,7 @@ class USBacktestEngine:
                 )
 
                 # --- Risk control 1: Volatility targeting ---
-                if US_USE_VOL_TARGETING and len(nav) >= US_VOL_LOOKBACK_DAYS + 1:
+                if self.risk_controls and US_USE_VOL_TARGETING and len(nav) >= US_VOL_LOOKBACK_DAYS + 1:
                     nav_arr = nav.values
                     recent_rets = (
                         np.diff(nav_arr[-US_VOL_LOOKBACK_DAYS - 1:])
@@ -190,7 +192,7 @@ class USBacktestEngine:
                             )
 
                 # --- Risk control 2: Linear drawdown response ---
-                if len(nav) >= 5:
+                if self.risk_controls and len(nav) >= 5:
                     nav_arr = nav.values
                     peak = np.maximum.accumulate(nav_arr)
                     dd = (
@@ -215,7 +217,7 @@ class USBacktestEngine:
                         )
 
                 # --- Risk control 3: Asymmetric strategy momentum filter ---
-                if US_STRATEGY_MOM_WINDOW > 0 and len(nav) >= US_STRATEGY_MOM_WINDOW:
+                if self.risk_controls and US_STRATEGY_MOM_WINDOW > 0 and len(nav) >= US_STRATEGY_MOM_WINDOW:
                     nav_arr = nav.values
                     nav_ma = np.mean(nav_arr[-US_STRATEGY_MOM_WINDOW:])
                     current_nav = nav_arr[-1]

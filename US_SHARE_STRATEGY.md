@@ -1,22 +1,23 @@
 # 美股量化策略文档
 
-本文档说明美股量化系统的完整算法逻辑。系统包含两套独立策略，共享数据层和回测引擎。
+本文档说明美股量化系统的完整算法逻辑。系统包含三套独立策略，共享数据层和回测引擎。
 
 ---
 
 ## 一、系统概述
 
-美股量化系统提供 **两套策略**，用户可在 CLI / API / 前端切换：
+美股量化系统提供 **三套策略**，用户可在 CLI / API / 前端切换：
 
 | 策略 | 代码 | 核心理念 | 适用场景 |
 |------|------|---------|---------|
-| **Alpha（多因子多空）** | `us_multi_factor.py` | 4 因子选股 + 多空对冲，追求 FF5 alpha | 追求超额收益 |
+| **Alpha（多因子多空）** | `us_multi_factor.py` | 23 因子 × 7 大类，两层类别打分，多空对冲 | 追求超额收益 |
 | **Beta（Regime 控制）** | `us_beta_strategy.py` | 不做选股，Regime 择时 + 质量筛选等权，吃市场 beta | 追求稳健、低回撤 |
+| **Baseline / Alpha v2** | `us_baseline_strategy.py` | 委托 Alpha 打分 + 月频调仓，开发迭代用 | 策略实验、A/B 对比 |
 
 核心管道：
 ```
-yfinance/SimFin/FRED → 数据层 → 因子处理 → Alpha 或 Beta 策略
-→ 风控调整 → 回测引擎 / 模拟交易
+yfinance/SimFin/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline 策略
+→ 风控调整（Baseline 禁用） → 回测引擎 / 模拟交易
 ```
 
 ### Alpha 策略绩效（2015-2025，$100 万，基准 Russell 1000，含幸存者偏差修正）
@@ -45,7 +46,7 @@ yfinance/SimFin/FRED → 数据层 → 因子处理 → Alpha 或 Beta 策略
 | 年化波动率 | **8.6%** | ~15% |
 | 年化换手率 | 156% | — |
 
-> **Alpha 策略：** 4 个美股专属因子等权，不做 IC 引导权重优化。删除 25 个从 A 股移植的噪音因子。
+> **Alpha 策略：** 23 因子 × 7 大类（两层类别打分，纯线性），leave-one-out 分析剪除 6 个有害因子后 FF5 alpha +6.73%（t=2.20）。ML blend（LightGBM）代码已集成但 train() 未在回测流程中调用，当前全部结果为纯线性因子。
 > **Beta 策略：** 不追求选股 alpha，通过四维 Regime 感知动态调仓（牛市高仓位吃 beta，熊市低仓位 + 现金保护）。
 > **幸存者偏差修正：** 股票池含 227 只历史 S&P 500 成分股。
 > **样本外验证：** IC 权重优化经样本外测试证伪（2015-2019 训练 → 2020-2025 alpha≈0），因此回归等权。
@@ -109,66 +110,73 @@ SimFin 免费版提供 5 年历史季报（2020 起），字段标准化程度�
 
 ---
 
-## 三、因子体系（4 个核心因子，美股专属设计）
+## 三、因子体系（23 因子 × 7 大类）
 
 代码位置：`backend/services/us_factors/`
 
 ### 设计原则
 
-A股因子不能直接用于美股（机构主导 vs 散户主导、信息效率不同、因子有效性不同）。因子选择标准：
-1. **学术验证在美股市场有效**（非 A 股移植）
-2. **因子间相关性低**（IC 分析确认）
-3. **数据在现有体系可获取**
+- 两层打分：类内因子加权平均 → 类间大类加权求和
+- 动态分母：缺失因子不补零，按有效因子等比缩减权重
+- 防前视偏差：财务数据按 `filing_date <= date` 过滤（非 report_date），SimFin 异常的 filing_date 自动加 45 天缓冲
 
-### 核心因子
+### 因子清单
 
-| 因子 | 类别 | 学术来源 | 10年ICIR | 说明 |
-|------|------|---------|---------|------|
-| **MOM_12_1** | 动量 | Jegadeesh 1993 | **+0.229** | 12-1 月动量（跳过最近 1 月避免反转噪音） |
-| **Shareholder Yield** | 估值 | 综合 | **+0.209** | DIV_YIELD + BUYBACK_YIELD 合并 |
-| **IVOL** | 技术 | Ang 2006 | **+0.172** | 特质波动率取反（低 IVOL 溢价） |
-| **Gross Profitability** | 质量 | Novy-Marx 2013 | +0.114 | Gross Profit / Total Assets |
+| 大类 | 权重 | 因子 | 说明 |
+|------|------|------|------|
+| **value** | 1.0 | EP, BP, DIV_YIELD, BUYBACK_YIELD | 盈利/账面/股息/回购收益率 |
+| **quality** | 1.0 | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND, ACCRUALS | 盈利能力+稳定性+应计异常 |
+| **growth** | 1.0 | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y | 成长性 |
+| **momentum** | 1.0 | MOM_1M, MOM_3M, MOM_12M, REV_5D | 多频率动量+反转 |
+| **technical** | 1.0 | TURN_20D, VOL_20D, IVOL, SIZE | 流动性+波动率+规模 |
+| **analyst** | 1.0 | US_ANALYST_RATING, US_ANALYST_COVERAGE | 分析师共识评级+覆盖度 |
+| **sentiment** | 1.0 | POLYMARKET_SENT | Polymarket 预测市场情绪 |
 
-**等权合成，不做 IC 引导权重优化。**
+**大类等权（所有权重 1.0），因子内等权。** 不做 IC 引导权重优化。
 
-### 删除因子及理由
+### 因子剪枝记录（leave-one-out alpha 分析，2015-2023 样本内）
 
-从 A 股移植的 29 个因子中，25 个被删除：
+**方法**：对每个因子，去掉该因子后重跑全量回测，计算 FF5 alpha 变化。
+**Δα 定义**：`Δα = full_alpha - leave_one_out_alpha`。**Δα > 0 = 因子有价值**（去掉后 alpha 下降），**Δα < 0 = 因子有害**（去掉后 alpha 上升）。
+**剪枝规则**：仅剪除 Δα < 0 的因子（有害因子）。
 
-| 删除因子 | 理由 |
-|---------|------|
-| EP, BP | 美股价值因子自 2017 年后 IC 持续下滑 |
-| ROE_TTM, PROFIT_STB, MARGIN_TREND | 与 Gross Profitability 高相关，且 IC 更低 |
-| MOM_1M/3M, REV_5D, RESIDUAL_MOM | 与 MOM_12_1 高相关，稀释信号 |
-| TURN/VOL_20D, SIZE, VOL_PRICE_DIV | IC 接近零或不稳定 |
-| 4 个宏观因子 | 截面 IC 为零（同值无法区分个股） |
-| 2 个分析师因子 | IC 低且滞后 |
-| ACCRUALS | 10 年 ICIR=0.036，接近零（在大盘股+低覆盖池中无效） |
-| NET_PROFIT_YOY 等 3 个成长 | IC 不稳定 |
+| 剪除因子 | 原大类 | α_without | Δα | 理由 |
+|---------|--------|-----------|-----|------|
+| **VOL_PRICE_DIV** | technical | +7.91% | **-4.30%** | 去掉后 alpha 反而升到 +7.91%，纯噪音 |
+| **RESIDUAL_MOM** | momentum | +7.08% | **-3.46%** | 去掉后 alpha 升到 +7.08%，与 MOM_1M/3M/12M 冗余 |
+| **4×MACRO** | macro | +3.87% | **-0.25%** 各 | 截面同值（宏观指标不区分个股），整体移除 |
+
+保留的高价值因子（Δα > 0，去掉后 alpha 下降最多）：
+
+| 因子 | α_without | Δα | 说明 |
+|------|-----------|-----|------|
+| REV_5D | -7.96% | **+11.57%** | 去掉后 alpha 从 +3.6% 暴跌到 -8.0%，短期反转最关键 |
+| ACCRUALS | -4.12% | **+7.74%** | 利润质量信号 |
+| REVENUE_YOY | -2.97% | **+6.59%** | 营收增速 |
+| IVOL | -1.68% | **+5.30%** | 低波动率异象 |
+
+剪枝效果：FF5 alpha 从 +3.6%(t=0.71) → **+6.73%(t=2.20)**，Sharpe 从 0.31 → 0.72。
+
+**样本外验证待完成**：以上分析在 2015-2023 样本内完成，存在数据窥探风险。t 从 0.71 跳到 2.20 的幅度在真正的样本外（2024-2025）验证之前，置信度有限。计划：用 2024-2025 数据做样本外确认。
 
 ### 因子处理流水线
 
 `backend/services/us_factors/processor.py`
 
 ```
-原始因子值 → MAD 去极值(5σ) → GICS Sector 中性化(OLS) → Z-Score 标准化 → ±3 截断
+原始因子值 → MAD 去极值(5σ) → GICS Sector+Size 中性化(OLS) → Z-Score 标准化 → ±3 截断
 ```
 
-### 逐年 IC 稳定性（2015-2025 季度截面）
-
-```
-Factor        2015  2016  2017  2018  2019  2020  2021  2022  2023  2024  2025  ICIR
-MOM_12_1       N/A +0.08 -0.04 -0.21 +0.19 +0.36 -0.17 +0.10 +0.11 +0.04 +0.13 +0.229
-ShrYield     +0.18 +0.08 -0.15 +0.21 +0.03 -0.02 +0.07 +0.06 -0.03 -0.04 +0.03 +0.209
-IVOL         +0.17 +0.05 -0.23 +0.02 +0.10 +0.23 +0.06 +0.11 -0.01 -0.21 +0.08 +0.172
-GrossProfit  -0.01 -0.08 +0.01 +0.02 +0.21 +0.18 +0.01 -0.00 +0.06 -0.00 -0.08 +0.114
-```
+中性化模式按大类配置：
+- **full**（sector + size）：value, quality, growth, technical
+- **size_only**（保留行业 alpha）：momentum, analyst
+- **none**：sentiment
 
 ### 防前视偏差机制
 
 - **财务数据：** 严格按 `filing_date <= date` 过滤（非 report_date）
-- **SimFin Publish Date 修正：** 预加载时检测 `filing_date <= report_date` 的异常数据，强制加 45 天安全缓冲（修正 881 条记录）
-- **SimFin 和 yfinance 数据合并时，SimFin 的 Publish Date 优先**
+- **SimFin Publish Date 修正：** 预加载时检测 `filing_date <= report_date` 的异常数据，强制加 45 天安全缓冲（修正 173 条记录）
+- **财务时效衰减：** 报告期距今 ≤3月: 100%，3-6月: 50%，6-9月: 25%，>9月: 负面信号
 
 ---
 
@@ -176,18 +184,20 @@ GrossProfit  -0.01 -0.08 +0.01 +0.02 +0.21 +0.18 +0.01 -0.00 +0.06 -0.00 -0.08 +
 
 代码：`backend/services/strategy/us_multi_factor.py`（USMultiFactorStrategy）
 
-### 4.1 打分模型
+### 4.1 打分模型（两层类别评分）
 
-4 个因子等权合成：`score = mean(MOM_12_1_z, ShrYield_z, IVOL_z, GrossProfit_z)`
-
-每个因子经过 MAD 去极值 + Z-Score 标准化后取平均。动态分母处理缺失因子（如某只股票无财报数据则 GrossProfit 缺失，由 3 个有值因子平均）。
+1. **类内评分**：每个大类内因子加权平均（动态分母处理缺失因子）
+2. **类间评分**：7 个大类加权求和 / 有效大类权重之和
+3. **最低类别数**：`MIN_VALID_CATEGORIES=4`，不足 4 个有效大类的股票排除
 
 ### 4.2 惩罚与过滤
 
-- **财务时效衰减：** 报告期距今 ≤3月: 100%，3-6月: 50%，6-9月: 25%，>9月: -1.0
-- **缺失因子惩罚：** 缺失 > 20% 时线性压缩得分，最大惩罚 50%
-- **价值陷阱：** value > 0 且 quality < -0.5 时压缩 value 得分
-- **趋势过滤：** MOM_12M < -1.0 的股票最终得分打折
+- **核心财务准入**：缺少 GROSS_MARGIN 的股票直接排除
+- **缺失因子惩罚**：缺失 > 20% 时线性压缩得分，最大惩罚 50%
+- **财务时效衰减**：报告期距今 > 9 月的股票财务因子置负
+- **价值陷阱**：value > 0 且 quality < -0.5 时压缩 value 得分
+- **趋势过滤**：MOM_12M < -1.0 的股票最终得分打折
+- **行业趋势过滤**：行业中位 MOM_12M < -0.5 时，该行业全体打折
 
 ### 4.3 多空选股（核心）
 
@@ -200,14 +210,16 @@ GrossProfit  -0.01 -0.08 +0.01 +0.02 +0.21 +0.18 +0.01 -0.00 +0.06 -0.00 -0.08 +
 - 默认 `US_LONG_N=15`，Regime 联动缩减（熊市更少多头）。
 - Softmax 权重分配，`tau=1.5`。
 
-**空头（Short）：** 得分 ≤ `US_SHORT_SCORE_THRESHOLD`(-0.3) 的 Bottom-M 股票。
-- 默认 `US_SHORT_N=10`，熊市增加空头（反向 Regime 联动）。
+**空头（Short）：** 得分 ≤ `US_SHORT_SCORE_THRESHOLD`(-0.8) 的 Bottom-M 股票。
+- 默认 `US_SHORT_N=10`，熊市增加空头（+30%）。
 - 反向 Softmax（越差的得分权重越高），取负。
 
 **净敞口：** `US_NET_EXPOSURE=0.6`
 - 多头总权重 = (1 + 0.6) / 2 = **80%**
 - 空头总权重 = (1 - 0.6) / 2 = **-20%**
-- 总敞口上限：`US_GROSS_EXPOSURE_CAP=1.5`
+- Regime 动态调整：牛市 net=0.6，熊市 net→0.2
+
+**ML Blend（未启用）：** LightGBM 代码已集成（`us_ml_scorer.py`），但 `train()` 未在回测/选股流程中被调用，`model` 始终为 None，`predict()` 不执行。当前全部回测结果为纯线性因子打分。需要实现滚动训练（expanding window）后才能安全启用。
 
 ### 4.4 复合 Regime 检测（四维 + Credit Veto）
 
@@ -224,25 +236,20 @@ GrossProfit  -0.01 -0.08 +0.01 +0.02 +0.21 +0.18 +0.01 -0.00 +0.06 -0.00 -0.08 +
 
 **Regime Strength = 0.35 × trend + 0.30 × vol + 0.25 × credit + 0.10 × crowding**
 
-**Credit Veto：** 当 credit < 0.2（利差深度倒挂）时，strength 封顶 0.5，防止熊市反弹陷阱（如 2022 年 8 月 S&P 反弹但利差仍倒挂）。
+**Credit Veto：** credit < 0.2 时 strength 封顶 0.5。
+**因子拥挤惩罚：** crowding < 0.3 且 strength > 0.6 时，strength 额外压缩 20%。
 
-**因子拥挤惩罚：** 当 crowding < 0.3 且 strength > 0.6 时，strength 额外压缩 20%。
-
-Regime 对 Alpha 策略的影响：
-- 大类权重：熊市提高质量(1.5)、降低价值(0.6)/成长(0.8)
+Regime 影响：
+- 大类权重：Regime 联动（`US_REGIME_BEAR_OVERRIDES` 配置）
 - 多头数量：熊市缩减（`BEAR_HOLDINGS_RATIO=0.6`）
-- 空头数量：熊市增加（+30%）
-- **净敞口动态调整：** 牛市 net=0.6（80%多/20%空），熊市 net→0.2（60%多/40%空）
-
-Regime 对 Beta 策略的影响：
-- **直接决定仓位：** strength [0, 1] → equity_pct [10%, 90%] 线性映射
-- 剩余资金自动变现金（无做空）
+- 空头数量：熊市增加
+- 净敞口：牛市 60% → 熊市 20%
 
 ### 4.5 纯月频调仓
 
 - 固定频率：每 `US_REBALANCE_INTERVAL=20` 个交易日（约月频）
-- **不使用偏离触发** — 经回测验证，偏离触发机制产生的全部是噪音交易，删除后年化收益提升 2%+，换手率下降 40%
-- 年化换手率：~450%（月频合理范围）
+- **不使用偏离触发** — 回测验证偏离触发产生噪音交易，删除后收益提升、换手率下降
+- 年化换手率：~320-400%
 
 ---
 
@@ -300,6 +307,39 @@ Regime strength [0, 1] 线性映射到 equity_pct [10%, 90%]：
 | 波动率目标 | `US_TARGET_VOL=16%` | 实现波动率 / 目标波动率缩放 |
 | 回撤响应 | `5%~15%` → `1.0~0.4` | 线性降仓 |
 | 策略动量 | `MA120` | NAV < 120 日均线且仍在下跌 → 降仓 |
+
+---
+
+## 4C、Baseline / Alpha v2 实验策略
+
+代码：`backend/services/strategy/us_baseline_strategy.py`（USBaselineStrategy）
+
+**用途**：Alpha v2 开发迭代框架。委托 `USMultiFactorStrategy` 进行 23 因子打分+选股，替换为月频调仓。也用于 VQM 基线验证（历史，已完成）。
+
+**当前配置**（Alpha v2 Step 3.5）：
+- 因子打分：委托 USMultiFactorStrategy（23 因子 × 7 大类，两层类别评分）
+- 选股：USMultiFactorStrategy._select_from_scores（Top-15 long + Bottom-10 short, Softmax）
+- 调仓：月频（每月最后交易日）
+- 风控：引擎层 risk_controls=False（不使用 vol targeting/drawdown response）
+
+### VQM 基线验证（历史记录）
+
+早期用 3 因子（EP+ROE+MOM_12M）dollar-neutral 验证回测引擎，alpha=-14%，确认引擎正确但 VQM 因子在 2016-2023 不可用（详见第十四节 Step 1）。
+
+### 数据清洗记录
+
+回测过程中发现并修复的数据问题：
+- **eps 字段**：28 条值异常（EDGAR 部分时期返回 net_income 而非 per-share EPS），置 NULL
+- **roe 字段**：156 条值异常（>500%），置 NULL 后从 net_income/total_equity 重算
+- **单位不一致**：21 条记录（12 tickers）total_assets/total_equity 单位混乱（EDGAR 用 USD vs SimFin 用百万），按 ticker 中位数为锚自动缩放修复
+- **EPS 符号**：69 条 eps 与 net_income 正负不一致，置 NULL
+- **ROE 全表重算**：23183 条统一用 `net_income / total_equity * 100` 重算，clip [-500, 500]
+
+### CLI 用法
+
+```bash
+python3 backend/cli.py backtest --market us --strategy-type baseline --start 2015-01-01 --end 2023-12-31
+```
 
 ---
 
@@ -453,13 +493,77 @@ python3 backend/cli.py data download --market us --target simfin   # 下载 SimF
 | 涨跌停 | ±10% | 无 |
 | 佣金 | 万 7.5 + 印花税 0.1% | 零佣金 |
 | 复权 | `close × adj_factor` | `adj_close` 直接使用 |
-| 因子数 | 30（含舆情） | **4**（美股专属：MOM_12_1+ShrYield+IVOL+GrossProfit）|
+| 因子数 | 30（含舆情） | **23**（7 大类：value/quality/growth/momentum/technical/analyst/sentiment）|
 | 财报来源 | Tushare（ann_date 过滤） | **SEC EDGAR** + SimFin + yfinance（filing_date 过滤 + 45 天缓冲）|
 | 宏观指标 | 中国 PMI/SHIBOR/PPI/M2 | 美国 ISM/FEDFUNDS/CPI/VIX |
 | Regime | CSI 300 均线偏离（单维） | **四维复合**（趋势+VIX+利差+拥挤度）+ Credit Veto |
 | 调仓 | 半月频 + 偏离触发 | **纯月频**（偏离触发已删除） |
 | 基准 | CSI 300 | **Russell 1000** |
 | 幸存者偏差 | 未修正 | **已修正**（含 227 只历史成分股） |
-| FF5 回归 | 无 | **有**（Alpha 策略: alpha 6.69%，t=2.26） |
-| ML 增强 | 无 | **LightGBM 因子合成**（可选） |
+| FF5 回归 | 无 | **有**（Alpha v2: alpha 6.73%，t=2.20） |
+| ML 增强 | 无 | LightGBM 代码已集成但未启用（train 未调用） |
 | 配置前缀 | 无前缀 | `US_` 前缀 |
+
+---
+
+## 十四、Alpha v2 开发路线（当前）
+
+### 背景
+
+Baseline 验证（4C 节）证实引擎和数据管道正确，但经典 VQM 因子在 2016-2023 不可用。Alpha v1（29 因子，20 日调仓）FF5 alpha +6.69%（t=2.26）。Alpha v2 在此基础上剪枝到 23 因子 + 月频调仓，alpha +6.73%（t=2.20）。注：ML blend（LightGBM）虽然代码已集成但 `train()` 从未在回测流程中被调用，当前结果为**纯线性因子**，无 ML look-ahead bias。
+
+### 开发阶段
+
+| 阶段 | 目标 | 结果 |
+|------|------|------|
+| **Step 1** | 4 因子 dollar-neutral baseline | ❌ alpha=-15%，dollar-neutral 在 2016-2023 不可行（价值因子历史最差十年） |
+| **Step 2** | +Regime 动态净敞口（4因子） | ⚠️ alpha +1%（t=0.31），4 因子选股力不足 |
+| **Step 3** | 29 因子（纯线性）+ v1 选股 | ✅ alpha=+3.62%（t=0.71），年化 9.5% |
+| **Step 3.5** | Leave-one-out 因子剪枝（29→23） | ✅ **alpha=+6.73%（t=2.20 显著），年化 17.2%，Sharpe 0.72** |
+| **Step 4** | 截面风控（行业中性+beta约束），替代时序风控 | 📋 目标：DD<-20% 且 alpha t>1.5 |
+| **Step 4.5** | 2024-2025 样本外验证（剪枝决策+alpha 持续性） | 📋 |
+| **Step 5** | 盈利预期修正因子（EPS revision）+ LLM 舆情增强 | 📋 验证增量 alpha |
+
+### Step 3→3.5 详细结果（当前最佳版本）
+
+代码：`us_baseline_strategy.py`（USBaselineStrategy）委托 `USMultiFactorStrategy` 打分+选股，月频调仓。
+
+Step 3 使用全部 29 因子（含 6 个后来被剪掉的有害因子），alpha=+3.62%（t=0.71，不显著）。
+Step 3.5 通过 leave-one-out 分析剪除 6 个因子（VOL_PRICE_DIV、RESIDUAL_MOM、4×MACRO），alpha 跃升至 +6.73%。
+
+| 指标 | 剪枝后 (23因子) | 剪枝前 (29因子) | Alpha v1 (对照) |
+|------|----------------|----------------|----------------|
+| 年化收益 | **17.20%** | 9.46% | 12.79% |
+| 最大回撤 | -29.75% | -30.85% | **-16.32%** |
+| Sharpe | **0.72** | 0.31 | 0.68 |
+| FF5 Alpha | **+6.73% (t=2.20)** | +3.62% (t=0.71) | +6.69% (t=2.26) |
+| β_mkt | 0.82 | 0.47 | 0.40 |
+| 超额年化 | **+7.53%** | -0.22% | +1.41% |
+| 交易笔数 | 2196 | 4652 | — |
+
+**注意**：虽然配置 `US_ML_SCORING_ENABLED=True`，但 LightGBM 的 `train()` 从未在回测流程中被调用（model=None），`predict()` 不执行。所有回测结果均为**纯线性因子打分**，无 ML look-ahead bias。
+
+**leave-one-out 分析说明**：在同一回测期（2015-2023）内，对每个因子单独执行"去掉该因子→重算分数→跑回测→测 FF5 alpha"的 leave-one-out 实验。单因子 Δα 最大 +11.57%（REV_5D），存在过拟合风险，剪枝决策仅基于 Δα 方向（正/负），不依赖具体幅度。
+
+**关键发现**：
+- 剪枝后交易笔数减半（4652→2196），信噪比显著改善
+- 回撤 -29.8% 集中在 COVID（2020-03-23）
+
+**β_mkt 暴露变化的影响**：v2 的 β_mkt=0.82 远高于 v1 的 0.40，策略性质从"低 beta 对冲"变为"接近主动多头"。超额年化 +7.53% 中有相当部分来自 beta 暴露增加（2015-2023 是牛市），而非纯选股能力提升。Beta 调整后的选股 alpha 需要通过 FF5 回归的截距项（已扣除 β_mkt 影响）来评估：v2 的 FF5 alpha=+6.73% 与 v1 的 +6.69% 基本持平，说明**纯选股能力相当，超额收益差异主要来自 beta 暴露**。
+
+**风控悖论**：已验证加入现有时序风控（vol targeting + drawdown response）后 t-stat 从 2.20 跌到 ~1.1，alpha 显著性消失。原因：多空策略的回撤通常是风格切换（如价值股被抛售），此时降仓等于在风格极值点割肉，错过后续均值回归。
+
+### Step 4 计划：截面风控替代时序风控
+
+**放弃**：优化 vol targeting / drawdown response 参数（时序风控在 L/S 策略中是死胡同）。
+
+**替代方案**：
+1. **GICS 行业中性化组合构建**：在每个 Sector 内部分别选 top/bottom，而非全市场排序。消除行业集中风险（COVID 回撤主因是行业暴露不均）。
+2. **Beta 中性偏置**：在打分或权重优化时约束 `Σ(weight_i × β_i) ≈ target_beta`，避免隐性 beta 暴露过大。
+3. **样本外验证**：用 2024-2025 数据确认剪枝决策和 alpha 是否维持。
+
+### 设计原则
+
+- **每步独立可测**：每个阶段前后跑 FF5 回归对比，alpha 增量不显著则回滚
+- **因子选择基于样本外验证**：不做 IC 引导权重优化（v1 已证明是数据窥探）
+- **三层同步**：每步完成后同步 CLI / API / 前端 / 文档

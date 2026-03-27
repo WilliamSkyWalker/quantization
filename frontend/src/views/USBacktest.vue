@@ -20,6 +20,7 @@ const strategyType = ref('alpha')
 const strategyOptions = [
   { label: 'Alpha (Multi-Factor)', value: 'alpha' },
   { label: 'Beta (Regime Control)', value: 'beta' },
+  { label: 'Baseline (VQM L/S)', value: 'baseline' },
 ]
 
 const { loading, taskId, result, start, stopPolling, taskStore } = useTaskPolling({

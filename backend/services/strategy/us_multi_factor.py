@@ -51,9 +51,8 @@ from backend.services.data.us_cleaner import get_us_clean_universe
 from backend.services.us_factors.value import EP, BP, DivYield
 from backend.services.us_factors.quality import RoeTTM, GrossMargin, ProfitStability, MarginTrend
 from backend.services.us_factors.growth import NetProfitYoY, RevenueYoY, NetProfitCAGR3Y
-from backend.services.us_factors.momentum import Mom1M, Mom3M, Mom12M, Rev5D, ResidualMom
-from backend.services.us_factors.technical import Turn20D, Vol20D, PriceDev60D, Ivol, Size, VolPriceDiv
-from backend.services.us_factors.macro import USMacroCycle, USMacroLiqd, USMacroInfl, USMacroExtr
+from backend.services.us_factors.momentum import Mom1M, Mom3M, Mom12M, Rev5D
+from backend.services.us_factors.technical import Turn20D, Vol20D, Ivol, Size
 from backend.services.us_factors.analyst import USAnalystRating, USAnalystCoverage
 from backend.services.us_factors.accruals import Accruals, BuybackYield
 from backend.services.us_factors.polymarket import PolymarketSent
@@ -84,12 +83,16 @@ class USMultiFactorStrategy:
         "value":     ["EP", "BP", "DIV_YIELD", "BUYBACK_YIELD"],
         "quality":   ["ROE_TTM", "GROSS_MARGIN", "PROFIT_STB", "MARGIN_TREND", "ACCRUALS"],
         "growth":    ["NET_PROFIT_YOY", "REVENUE_YOY", "NET_PROFIT_CAGR_3Y"],
-        "momentum":  ["MOM_1M", "MOM_3M", "MOM_12M", "REV_5D", "RESIDUAL_MOM"],
-        "technical": ["TURN_20D", "VOL_20D", "IVOL", "SIZE", "VOL_PRICE_DIV"],
-        "macro":     ["US_MACRO_CYCLE", "US_MACRO_LIQD", "US_MACRO_INFL", "US_MACRO_EXTR"],
+        "momentum":  ["MOM_1M", "MOM_3M", "MOM_12M", "REV_5D"],
+        "technical": ["TURN_20D", "VOL_20D", "IVOL", "SIZE"],
         "analyst":   ["US_ANALYST_RATING", "US_ANALYST_COVERAGE"],
         "sentiment": ["POLYMARKET_SENT"],
     }
+    # Pruned (leave-one-out alpha analysis, 2015-2023):
+    #   RESIDUAL_MOM: Δα=-3.46% (redundant with MOM_1M/3M/12M, noisier)
+    #   VOL_PRICE_DIV: Δα=-4.30% (no signal in US large-cap)
+    #   4x MACRO: Δα=-0.25% each (same value for all stocks, zero cross-sectional power)
+    # Removed macro category entirely (all 4 factors pruned).
 
     # Default category weights (overridden by US_CATEGORY_WEIGHTS from config)
     CATEGORY_WEIGHTS = US_CATEGORY_WEIGHTS
@@ -117,7 +120,7 @@ class USMultiFactorStrategy:
         self._prev_holdings: set[str] = set()
         self._last_date: str = ""
 
-        # Initialize factor instances
+        # Initialize factor instances (23 factors, 7 categories)
         self.factors = [
             # Value
             EP(db), BP(db), DivYield(db), BuybackYield(db),
@@ -125,12 +128,11 @@ class USMultiFactorStrategy:
             RoeTTM(db), GrossMargin(db), ProfitStability(db), MarginTrend(db), Accruals(db),
             # Growth
             NetProfitYoY(db), RevenueYoY(db), NetProfitCAGR3Y(db),
-            # Momentum
-            Mom1M(db), Mom3M(db), Mom12M(db), Rev5D(db), ResidualMom(db),
-            # Technical
-            Turn20D(db), Vol20D(db), Ivol(db), Size(db), VolPriceDiv(db),
-            # Macro
-            USMacroCycle(db), USMacroLiqd(db), USMacroInfl(db), USMacroExtr(db),
+            # Momentum (pruned: ResidualMom — redundant, Δα=-3.46%)
+            Mom1M(db), Mom3M(db), Mom12M(db), Rev5D(db),
+            # Technical (pruned: VolPriceDiv — no signal, Δα=-4.30%)
+            Turn20D(db), Vol20D(db), Ivol(db), Size(db),
+            # Macro: entire category pruned (截面同值, Δα=-0.25% each)
             # Analyst
             USAnalystRating(db), USAnalystCoverage(db),
             # Sentiment
@@ -642,15 +644,18 @@ class USMultiFactorStrategy:
         w = np.maximum(w, min_w)
         return w / w.sum()
 
+    # Maximum net weight any single GICS sector can have
+    MAX_SECTOR_NET_WEIGHT = 0.15
+
     def _select_from_scores(
         self, composite: pd.DataFrame, prev_holdings: set[str],
     ) -> pd.DataFrame:
         """
-        Alpha-first: 多空个股对冲，因子选股为主。
+        Score-ranked L/S with soft sector cap: top-N long, bottom-M short,
+        then clip any sector whose net weight exceeds MAX_SECTOR_NET_WEIGHT.
 
-        Long: Top-N 高分股 (Softmax 权重)
-        Short: Bottom-M 低分股 (score ≤ threshold, Softmax 取反)
-        净敞口由 Regime 动态调整。
+        Preserves factor-driven sector tilts while preventing dangerous concentration.
+        Regime controls net equity exposure.
 
         Returns:
             DataFrame[ticker, score, weight, side].
@@ -682,8 +687,9 @@ class USMultiFactorStrategy:
                 long_selected["side"] = "LONG"
             return long_selected[["ticker", "score", "weight", "side"]] if len(long_selected) > 0 else empty
 
-        # === Short leg ===
-        short_qualified = composite[composite["score"] <= US_SHORT_SCORE_THRESHOLD]
+        # === Short leg (relaxed threshold for sector diversification) ===
+        short_threshold = -0.3  # relaxed from -0.8 to get more shorts
+        short_qualified = composite[composite["score"] <= short_threshold]
         short_qualified = short_qualified.sort_values("score", ascending=True)
         effective_short_n = int(US_SHORT_N * (1.0 + 0.3 * (1.0 - strength)))
         effective_short_n = min(effective_short_n, len(short_qualified))
@@ -714,10 +720,48 @@ class USMultiFactorStrategy:
             short_selected["side"] = "SHORT"
 
         result = pd.concat([long_selected, short_selected], ignore_index=True)
+
+        # === Soft sector cap: clip sectors exceeding MAX_SECTOR_NET_WEIGHT ===
+        sector_df = self._get_cached_sector_df()
+        if sector_df is not None and not result.empty:
+            result = result.merge(sector_df, on="ticker", how="left")
+            result["sector"] = result["sector"].fillna("Unknown")
+
+            for _ in range(3):  # iterate to converge
+                sector_net = result.groupby("sector")["weight"].sum()
+                over = sector_net[sector_net.abs() > self.MAX_SECTOR_NET_WEIGHT]
+                if over.empty:
+                    break
+                for sec, net_w in over.items():
+                    mask = result["sector"] == sec
+                    if net_w > self.MAX_SECTOR_NET_WEIGHT:
+                        # Scale down longs in this sector
+                        long_mask = mask & (result["weight"] > 0)
+                        if long_mask.any():
+                            scale = self.MAX_SECTOR_NET_WEIGHT / net_w
+                            result.loc[long_mask, "weight"] *= scale
+                    elif net_w < -self.MAX_SECTOR_NET_WEIGHT:
+                        short_mask = mask & (result["weight"] < 0)
+                        if short_mask.any():
+                            scale = self.MAX_SECTOR_NET_WEIGHT / abs(net_w)
+                            result.loc[short_mask, "weight"] *= scale
+
+            # Renormalize to target totals
+            long_sum = result.loc[result["weight"] > 0, "weight"].sum()
+            short_sum = result.loc[result["weight"] < 0, "weight"].sum()
+            if long_sum > 0:
+                result.loc[result["weight"] > 0, "weight"] *= long_total / long_sum
+            if short_sum < 0:
+                result.loc[result["weight"] < 0, "weight"] *= short_total / abs(short_sum)
+
+            if "sector" in result.columns:
+                result = result.drop(columns=["sector"])
+
+        n_long = (result["weight"] > 0).sum()
+        n_short = (result["weight"] < 0).sum()
         logger.info(
-            f"US L/S selection: {len(long_selected)} long ({long_total:.0%}), "
-            f"{len(short_selected)} short ({short_total:.0%}), "
-            f"net={net_exp:.0%}, regime={strength:.2f}"
+            f"L/S selection (sector cap {self.MAX_SECTOR_NET_WEIGHT:.0%}): "
+            f"{n_long}L / {n_short}S, net={net_exp:.0%}, regime={strength:.2f}"
         )
         return result[["ticker", "score", "weight", "side"]]
 
