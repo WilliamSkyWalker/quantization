@@ -18,22 +18,19 @@ yfinance/SimFin/FRED → 数据层 → 26因子 → 因子处理 → 两层打�
 
 | 指标 | 多空策略 | Russell 1000 |
 |------|---------|-------------|
-| 总收益 | **+490%** | +226% |
-| 最终净值 | **$590 万** | $326 万 |
-| 年化收益 | **17.57%** | 11.38% |
-| 超额年化 | **+6.19%** | — |
-| 夏普比率 | **0.89** | — |
-| 最大回撤 | -21.9% (2016-02-11) | — |
-| 年化波动率 | 15.3% | — |
-| 胜率 | 54.2% | — |
-| FF5 Alpha (年化) | **+10.49%** | — |
-| FF5 Alpha t-stat | **3.05** (p<0.01) | — |
-| β_Mkt | 0.49 | — |
-| 年化换手率 | 428% | — |
+| 年化收益 | **12.79%** | 11.38% |
+| 超额年化 | **+1.41%** | — |
+| 夏普比率 | **0.68** | — |
+| 最大回撤 | **-16.3%** | — |
+| FF5 Alpha (年化) | **+6.69%** | — |
+| FF5 Alpha t-stat | **2.26** (统计显著) | — |
+| β_Mkt | 0.40 | — |
+| 年化换手率 | 324% | — |
 
-> **关键优化：** IC 引导因子权重（高 IC 因子升权 1.0-1.2，低 IC 因子降权 0.2-0.4）+ 低覆盖度股票池（剔除分析师覆盖最高的股票，保留 450 只定价效率低的）。
+> **核心设计：** 4 个美股专属因子（MOM_12_1 + Shareholder Yield + IVOL + Gross Profitability），等权，不做 IC 引导权重优化。
+> **设计原则：** 学术验证在美股有效 + 因子间低相关 + 数据可得。删除 25 个从 A 股移植的噪音因子。
 > **幸存者偏差修正：** 股票池含 227 只历史 S&P 500 成分股。
-> **分段验证：** 2015-2019 alpha +3.2%（t=0.83），2020-2025 alpha +11.0%（t=2.18），两段均改善。
+> **样本外验证：** IC 权重优化经样本外测试证伪（2015-2019 训练 → 2020-2025 alpha≈0），因此回归等权。
 
 ---
 
@@ -94,20 +91,42 @@ SimFin 免费版提供 5 年历史季报（2020 起），字段标准化程度�
 
 ---
 
-## 三、因子体系（29 个因子，8 大类）
+## 三、因子体系（4 个核心因子，美股专属设计）
 
 代码位置：`backend/services/us_factors/`
 
-| 大类 | 权重 | 因子 | 数据来源 |
-|------|------|------|----------|
-| 价值 | 0.8 | EP, BP, DIV_YIELD, **BUYBACK_YIELD** | us_financial_data, us_corporate_action |
-| 质量 | 1.3 | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND, **ACCRUALS** | us_financial_data |
-| 成长 | 1.1 | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y | us_financial_data (TTM) |
-| 动量 | 1.0 | MOM_1M, MOM_3M, MOM_12M, REV_5D, RESIDUAL_MOM | us_daily_price (adj_close) |
-| 技术 | 0.7 | TURN_20D, VOL_20D, **IVOL**, SIZE, VOL_PRICE_DIV | us_daily_price |
-| 宏观 | 0.6 | US_MACRO_CYCLE, US_MACRO_LIQD, US_MACRO_INFL, US_MACRO_EXTR | us_macro_indicator (FRED) |
-| 分析师 | 0.5 | US_ANALYST_RATING, US_ANALYST_COVERAGE | us_analyst_recommendation |
-| **情感** | **0.4** | **POLYMARKET_SENT** | **polymarket_alert (LLM 分析)** |
+### 设计原则
+
+A股因子不能直接用于美股（机构主导 vs 散户主导、信息效率不同、因子有效性不同）。因子选择标准：
+1. **学术验证在美股市场有效**（非 A 股移植）
+2. **因子间相关性低**（IC 分析确认）
+3. **数据在现有体系可获取**
+
+### 核心因子
+
+| 因子 | 类别 | 学术来源 | 10年ICIR | 说明 |
+|------|------|---------|---------|------|
+| **MOM_12_1** | 动量 | Jegadeesh 1993 | **+0.229** | 12-1 月动量（跳过最近 1 月避免反转噪音） |
+| **Shareholder Yield** | 估值 | 综合 | **+0.209** | DIV_YIELD + BUYBACK_YIELD 合并 |
+| **IVOL** | 技术 | Ang 2006 | **+0.172** | 特质波动率取反（低 IVOL 溢价） |
+| **Gross Profitability** | 质量 | Novy-Marx 2013 | +0.114 | Gross Profit / Total Assets |
+
+**等权合成，不做 IC 引导权重优化。**
+
+### 删除因子及理由
+
+从 A 股移植的 29 个因子中，25 个被删除：
+
+| 删除因子 | 理由 |
+|---------|------|
+| EP, BP | 美股价值因子自 2017 年后 IC 持续下滑 |
+| ROE_TTM, PROFIT_STB, MARGIN_TREND | 与 Gross Profitability 高相关，且 IC 更低 |
+| MOM_1M/3M, REV_5D, RESIDUAL_MOM | 与 MOM_12_1 高相关，稀释信号 |
+| TURN/VOL_20D, SIZE, VOL_PRICE_DIV | IC 接近零或不稳定 |
+| 4 个宏观因子 | 截面 IC 为零（同值无法区分个股） |
+| 2 个分析师因子 | IC 低且滞后 |
+| ACCRUALS | 10 年 ICIR=0.036，接近零（在大盘股+低覆盖池中无效） |
+| NET_PROFIT_YOY 等 3 个成长 | IC 不稳定 |
 
 ### 因子处理流水线
 
@@ -117,21 +136,15 @@ SimFin 免费版提供 5 年历史季报（2020 起），字段标准化程度�
 原始因子值 → MAD 去极值(5σ) → GICS Sector 中性化(OLS) → Z-Score 标准化 → ±3 截断
 ```
 
-中性化模式按大类配置：
-- `full`（行业+市值）：value, quality, growth, technical
-- `size_only`（仅市值）：momentum, macro, analyst（保留行业 alpha）
-- `none`（不中性化）：sentiment（Polymarket 信号稀疏，不适合截面中性化）
+### 逐年 IC 稳定性（2015-2025 季度截面）
 
-### 关键因子说明
-
-- **EP（Earnings-to-Price）：** TTM EPS / adj_close。SimFin 提供 Publish Date 用于防前视偏差。
-- **IVOL（特质波动率）：** 对 S&P 500 回归后取残差波动率（60 日窗口），取反。低 IVOL 股票有风险溢价。替换了原 PRICE_DEV_60D（与动量高度相关）。
-- **RESIDUAL_MOM：** 个股 20 日收益 - S&P 500 20 日收益，剔除 beta 后的纯 alpha 动量。
-- **US_MACRO_CYCLE：** z(制造业就业) × 0.6 + z(工业生产) × 0.4 → GICS 行业敏感度映射。
-- **收益率计算：** 从 adj_close 的 pct_change 自行计算（yfinance 的 change_pct 字段经常为 NULL）。
-- **ACCRUALS（应计异常）：** (Net Income - Free Cash Flow) / Total Assets，取反。应计项目越高利润质量越差（Sloan 1996）。SEC EDGAR 提供完整历史 CF 数据。归入 quality 大类。
-- **BUYBACK_YIELD（回购收益率）：** 从 equity 变化推算的近 12 月回购金额 / 市值。补充 DIV_YIELD 对科技股股东回报的低估。归入 value 大类。
-- **POLYMARKET_SENT（Polymarket 情感）：** 从 `polymarket_alert` 表提取个股级信号。每条 alert 的 `affected_tickers` JSON 包含 `{ticker, direction, confidence}`，与 `llm_confidence` 和指数时间衰减（14 天窗口，λ=0.3）加权求和。覆盖率 ~15%（仅 Polymarket 关注的股票有信号），缺失值由动态分母处理。对地缘政治、能源、国防类股票信号最强。
+```
+Factor        2015  2016  2017  2018  2019  2020  2021  2022  2023  2024  2025  ICIR
+MOM_12_1       N/A +0.08 -0.04 -0.21 +0.19 +0.36 -0.17 +0.10 +0.11 +0.04 +0.13 +0.229
+ShrYield     +0.18 +0.08 -0.15 +0.21 +0.03 -0.02 +0.07 +0.06 -0.03 -0.04 +0.03 +0.209
+IVOL         +0.17 +0.05 -0.23 +0.02 +0.10 +0.23 +0.06 +0.11 -0.01 -0.21 +0.08 +0.172
+GrossProfit  -0.01 -0.08 +0.01 +0.02 +0.21 +0.18 +0.01 -0.00 +0.06 -0.00 -0.08 +0.114
+```
 
 ### 防前视偏差机制
 
@@ -145,11 +158,11 @@ SimFin 免费版提供 5 年历史季报（2020 起），字段标准化程度�
 
 代码：`backend/services/strategy/us_multi_factor.py`（USMultiFactorStrategy）
 
-### 4.1 两层打分模型
+### 4.1 打分模型
 
-**第一层（类内加权平均）：** 同一大类内因子的加权平均，动态分母处理缺失因子。
+4 个因子等权合成：`score = mean(MOM_12_1_z, ShrYield_z, IVOL_z, GrossProfit_z)`
 
-**第二层（类间加权合成）：** 7 个大类的加权合成，缺失大类权重按比例分配给有值大类。`MIN_VALID_CATEGORIES=4` 限制最大膨胀。
+每个因子经过 MAD 去极值 + Z-Score 标准化后取平均。动态分母处理缺失因子（如某只股票无财报数据则 GrossProfit 缺失，由 3 个有值因子平均）。
 
 ### 4.2 惩罚与过滤
 
@@ -345,9 +358,7 @@ python3 backend/cli.py data download --market us --target simfin # 下载 SimFin
 | `US_MAX_SECTOR_WEIGHT` | `0.25` | 行业权重上限 ±25% |
 | `US_BENCHMARK_INDEX` | `^RUI` | 回测基准（Russell 1000） |
 | `US_REGIME_INDEX` | `^GSPC` | Regime 检测基准（S&P 500） |
-| `US_CATEGORY_WEIGHTS` | 见因子表 | 大类权重 |
-| `US_ML_SCORING_ENABLED` | `1` | LightGBM 因子合成开关 |
-| `US_ML_BLEND_RATIO` | `0.5` | ML 混合比例 |
+| `US_CATEGORY_WEIGHTS` | 全等权 1.0 | 大类权重（等权，不做 IC 引导优化） |
 | `SIMFIN_API_KEY` | — | SimFin API Key |
 | `FRED_API_KEY` | — | FRED API Key |
 
@@ -372,7 +383,7 @@ python3 backend/cli.py data download --market us --target simfin # 下载 SimFin
 | 涨跌停 | ±10% | 无 |
 | 佣金 | 万 7.5 + 印花税 0.1% | 零佣金 |
 | 复权 | `close × adj_factor` | `adj_close` 直接使用 |
-| 因子数 | 30（含舆情） | **29**（含ACCRUALS+BUYBACK+IVOL+Polymarket）|
+| 因子数 | 30（含舆情） | **4**（美股专属：MOM_12_1+ShrYield+IVOL+GrossProfit）|
 | 财报来源 | Tushare（ann_date 过滤） | **SEC EDGAR** + SimFin + yfinance（filing_date 过滤 + 45 天缓冲）|
 | 宏观指标 | 中国 PMI/SHIBOR/PPI/M2 | 美国 ISM/FEDFUNDS/CPI/VIX |
 | Regime | S&P 300 均线偏离（单维） | **三维复合**（趋势+VIX+利差） |

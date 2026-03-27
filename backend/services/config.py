@@ -639,9 +639,9 @@ US_ML_MIN_TRAIN_SAMPLES = int(os.environ.get("US_ML_MIN_TRAIN_SAMPLES", "2000"))
 
 # 因子大类权重
 US_CATEGORY_WEIGHTS: dict[str, float] = {
-    "value": 0.8, "quality": 1.3, "growth": 0.8,
-    "momentum": 1.0, "technical": 0.6,
-    "macro": 0.4, "analyst": 0.3, "sentiment": 0.5,
+    "value": 1.0, "quality": 1.0, "growth": 1.0,
+    "momentum": 1.0, "technical": 1.0,
+    "macro": 1.0, "analyst": 1.0, "sentiment": 1.0,
 }
 _raw_us_cw = os.environ.get("US_CATEGORY_WEIGHTS", "")
 if _raw_us_cw.strip():

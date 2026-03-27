@@ -139,28 +139,9 @@ class USMultiFactorStrategy:
             PolymarketSent(db),
         ]
 
-        # Factor weights — IC 引导的差异化权重
+        # 等权（不做 IC 引导权重优化——样本外验证已证明 IC 权重是数据窥探）
         if factor_weights is None:
             self.factor_weights = {f.name: 1.0 for f in self.factors}
-            self.factor_weights.update({
-                # 高 IC 因子升权
-                "ACCRUALS": 1.2, "EP": 1.0, "MOM_12M": 1.0, "IVOL": 1.0,
-                "BUYBACK_YIELD": 0.9, "POLYMARKET_SENT": 0.8,
-                # 中等 IC
-                "GROSS_MARGIN": 0.8, "DIV_YIELD": 0.7, "REV_5D": 0.7,
-                "ROE_TTM": 0.7, "RESIDUAL_MOM": 0.7,
-                # 低 IC / 高相关降权
-                "MOM_1M": 0.4, "MOM_3M": 0.5,
-                "PROFIT_STB": 0.4, "MARGIN_TREND": 0.3,
-                "TURN_20D": 0.4, "VOL_20D": 0.5, "SIZE": 0.3, "VOL_PRICE_DIV": 0.3,
-                # 宏观（截面 IC 低但择时有用）
-                "US_MACRO_CYCLE": 0.5, "US_MACRO_LIQD": 0.4, "US_MACRO_INFL": 0.3, "US_MACRO_EXTR": 0.2,
-                # 分析师（滞后）
-                "US_ANALYST_RATING": 0.4, "US_ANALYST_COVERAGE": 0.2,
-                # 成长
-                "NET_PROFIT_YOY": 0.7, "REVENUE_YOY": 0.5, "NET_PROFIT_CAGR_3Y": 0.5,
-                "BP": 0.6,
-            })
         else:
             self.factor_weights = factor_weights
 

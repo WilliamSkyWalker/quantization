@@ -85,23 +85,7 @@ def get_us_clean_universe(db: DatabaseManager, date: str) -> pd.DataFrame:
         if not traded.empty:
             df = df[df["ticker"].isin(traded["ticker"])]
 
-    # 温和的低覆盖度偏好：剔除覆盖度最高的（机构定价最充分的）股票
-    if not df.empty and len(df) > 450:
-        try:
-            cov_start = (date_dt - pd.Timedelta(days=365)).strftime("%Y-%m-%d")
-            cov_df = db.query(
-                "SELECT ticker, COUNT(DISTINCT analyst_company) as n_analysts "
-                "FROM us_analyst_recommendation "
-                "WHERE date >= :start AND date <= :end GROUP BY ticker",
-                params={"start": cov_start, "end": date},
-            )
-            if not cov_df.empty:
-                df = df.merge(cov_df, on="ticker", how="left")
-                df["n_analysts"] = df["n_analysts"].fillna(0)
-                df = df.nsmallest(450, "n_analysts")
-                df = df.drop(columns=["n_analysts"])
-        except Exception:
-            pass
+    # 注意：低覆盖度股票池筛选已移除（样本外验证显示可能有前视偏差）
 
     logger.info(f"US 股票池: {initial} → {len(df)} (date={date})")
     return df[["ticker", "name", "sector", "industry", "market_cap"]].reset_index(drop=True)

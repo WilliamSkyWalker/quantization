@@ -57,8 +57,15 @@ _TAG_MAP = {
         "GrossProfit",
     ],
     "operating_cashflow": [
+        "NetCashProvidedByUsedInOperatingActivities",
         "NetCashProvidedByOperatingActivities",
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
         "NetCashProvidedByOperatingActivitiesContinuingOperations",
+    ],
+    "capex": [
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsToAcquireProductiveAssets",
+        "CapitalExpenditureDiscontinuedOperations",
     ],
     "eps": [
         "EarningsPerShareDiluted",
@@ -265,10 +272,13 @@ class EdgarDownloader:
             if net_income is not None and total_equity and abs(total_equity) > 1e-6:
                 roe = net_income / total_equity * 100
 
+            capex = _get_val(field_data, "capex", end_date)
             fcf = None
             if op_cf is not None:
-                # 简化：FCF ≈ Operating CF（无 CapEx 拆分）
-                fcf = op_cf
+                if capex is not None:
+                    fcf = op_cf - abs(capex)  # FCF = Operating CF - CapEx
+                else:
+                    fcf = op_cf  # fallback: FCF ≈ Operating CF
 
             records.append({
                 "ticker": ticker,

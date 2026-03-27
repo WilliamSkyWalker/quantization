@@ -113,35 +113,32 @@ A股管道:
 | 宏观 | 0.6 | MACRO_CYCLE, MACRO_LIQD, MACRO_INFL, MACRO_EXTR |
 | 舆情 | 0.6 | POLICY_SENT, POLICY_INTENSITY, ANALYST_RATING, ANALYST_COVERAGE |
 
-### 美股因子体系（29 个因子，`services/us_factors/`）
+### 美股因子体系（4 个核心因子，美股专属，`services/us_factors/`）
 
-| 大类 | 权重 | 因子 |
-|---|---|---|
-| 价值 | 0.8 | EP, BP, DIV_YIELD, BUYBACK_YIELD |
-| 质量 | 1.3 | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND, ACCRUALS |
-| 成长 | 1.1 | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y |
-| 动量 | 1.0 | MOM_1M, MOM_3M, MOM_12M, REV_5D, RESIDUAL_MOM |
-| 技术 | 0.7 | TURN_20D, VOL_20D, IVOL, SIZE, VOL_PRICE_DIV |
-| 宏观 | 0.6 | US_MACRO_CYCLE, US_MACRO_LIQD, US_MACRO_INFL, US_MACRO_EXTR |
-| 分析师 | 0.5 | US_ANALYST_RATING, US_ANALYST_COVERAGE |
-| 情感 | 0.4 | POLYMARKET_SENT |
+| 因子 | 类别 | 学术来源 | 10年ICIR |
+|------|------|---------|---------|
+| MOM_12_1 | 动量 | Jegadeesh 1993 | +0.229 |
+| Shareholder Yield | 估值 | DIV+BUYBACK 合并 | +0.209 |
+| IVOL（取反） | 技术 | Ang 2006 | +0.172 |
+| Gross Profitability | 质量 | Novy-Marx 2013 | +0.114 |
+
+等权合成，不做 IC 引导权重优化（样本外验证已证明 IC 权重是数据窥探）。
+29 个 A 股移植因子中 25 个被删除（IC 接近零/高相关/美股无效）。
 
 ### 美股回测绩效（2015-2025，含幸存者偏差修正，基准 Russell 1000）
 
 | 指标 | 策略 | Russell 1000 |
 |------|------|-------------|
-| 总收益 | **+490%** | +226% |
-| 年化收益 | **17.6%** | 11.4% |
-| 超额年化 | **+6.19%** | — |
-| 夏普比率 | **0.89** | — |
-| 最大回撤 | -21.9% | — |
-| FF5 Alpha (年化) | **+10.49%** | — |
-| FF5 t-stat | **3.05** (p<0.01) | — |
-| β_Mkt | 0.49 | — |
-| 年化换手率 | 428% | — |
+| 年化收益 | **12.8%** | 11.4% |
+| 超额年化 | **+1.4%** | — |
+| 夏普比率 | **0.68** | — |
+| 最大回撤 | **-16.3%** | — |
+| FF5 Alpha (年化) | **+6.69%** | — |
+| FF5 t-stat | **2.26** (统计显著) | — |
+| β_Mkt | 0.40 | — |
+| 年化换手率 | 324% | — |
 
-> IC 引导因子权重（ACCRUALS/EP/MOM_12M/IVOL 升权，宏观/分析师/低 IC 因子降权）。
-> 股票池 450 只（剔除分析师覆盖最高的高关注度股票，保留定价效率低的）。
+> 4 因子等权，无 IC 权重优化，无股票池筛选偏差。
 > 含幸存者偏差修正（227 只历史 S&P 500 成分股）。
 
 ## 配置
