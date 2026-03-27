@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-A股+美股多因子量化系统，覆盖数据采集、因子计算、组合构建、风控、回测、模拟交易、舆情爬取和报告生成。美股采用多空对冲策略（Long-Short Equity），10 年回测（2015-2025，含幸存者偏差修正）FF5 alpha 5.4%/年（t=1.69），年化 12.1% 跑赢 Russell 1000 0.8%/年。
+A股+美股多因子量化系统，覆盖数据采集、因子计算、组合构建、风控、回测、模拟交易、舆情爬取和报告生成。美股采用多空对冲策略（Long-Short Equity，IC 引导因子权重 + 低覆盖度股票池 450 只），10 年回测（2015-2025，含幸存者偏差修正）FF5 alpha 10.5%/年（t=3.05，p<0.01），年化 17.6% 跑赢 Russell 1000 6.2%/年。
 
 三层架构：核心业务逻辑在 `backend/services/`，上层有三个入口调用同一套 service：
 - **Django API** (`backend/api/views/`) — 前端 HTTP 调用
@@ -130,18 +130,19 @@ A股管道:
 
 | 指标 | 策略 | Russell 1000 |
 |------|------|-------------|
-| 总收益 | +252% | +226% |
-| 年化收益 | 12.1% | 11.4% |
-| 超额年化 | +0.77% | — |
-| 夏普比率 | 0.58 | — |
-| 最大回撤 | -22.7% | — |
-| FF5 Alpha (年化) | +5.42% | — |
-| FF5 t-stat | 1.69 (接近显著) | — |
-| β_Mkt | 0.46 | — |
-| 年化换手率 | 426% | — |
+| 总收益 | **+490%** | +226% |
+| 年化收益 | **17.6%** | 11.4% |
+| 超额年化 | **+6.19%** | — |
+| 夏普比率 | **0.89** | — |
+| 最大回撤 | -21.9% | — |
+| FF5 Alpha (年化) | **+10.49%** | — |
+| FF5 t-stat | **3.05** (p<0.01) | — |
+| β_Mkt | 0.49 | — |
+| 年化换手率 | 428% | — |
 
-> 注：股票池含 S&P 500 历史成分股（227 只已移除公司），消除幸存者偏差。
-> 数据源：yfinance 行情 + SEC EDGAR 财报 + SimFin + FRED 宏观。
+> IC 引导因子权重（ACCRUALS/EP/MOM_12M/IVOL 升权，宏观/分析师/低 IC 因子降权）。
+> 股票池 450 只（剔除分析师覆盖最高的高关注度股票，保留定价效率低的）。
+> 含幸存者偏差修正（227 只历史 S&P 500 成分股）。
 
 ## 配置
 
@@ -186,7 +187,26 @@ A股管道:
 
 ### 文档
 
-- 在[A_SHARE_STRATEGY.md](A_SHARE_STRATEGY.md) 和[CONTINUE_PROMPT.md](CONTINUE_PROMPT.md)中记录变动
-- 美股回测算法文档：[US_SHARE_STRATEGY.md](US_SHARE_STRATEGY.md)
-- Polymarket 策略文档：[PollyMarket_STRATEGY.md](PollyMarket_STRATEGY.md)
-- Polymarket P&L 分析结论：[POLYMARKET_PNL_ANALYSIS.md](POLYMARKET_PNL_ANALYSIS.md)
+- A股策略算法：[A_SHARE_STRATEGY.md](A_SHARE_STRATEGY.md)
+- 美股策略算法：[US_SHARE_STRATEGY.md](US_SHARE_STRATEGY.md)
+- Polymarket 策略：[PollyMarket_STRATEGY.md](PollyMarket_STRATEGY.md)
+- Polymarket P&L 分析：[POLYMARKET_PNL_ANALYSIS.md](POLYMARKET_PNL_ANALYSIS.md)
+
+### A股开发历史
+
+| 阶段 | 模块 | 状态 |
+|------|------|------|
+| Phase 1 | 数据层（配置/ORM/下载/清洗/更新） | ✅ |
+| Phase 2 | 因子层（30 因子 + 处理流水线 + IC 评估） | ✅ |
+| Phase 3 | 策略层（分类复合评分 + 回测引擎） | ✅ |
+| Phase 4 | 风控层（个股/行业上限 + 回撤/波动率） | ✅ |
+| Phase 5 | 执行层（PaperTrader + BaseTrader） | ✅ |
+| Phase 6 | 监控层（绩效追踪 + HTML 报告） | ✅ |
+| Phase 7-8 | 因子增强 + 算法升级（4 新因子 + Z-score clip） | ✅ |
+| Phase 8 | 舆情层（16 源爬虫 + LLM 分析 + 舆情因子化） | ✅ |
+| Phase 9-12 | 参数调优 + 商品/宏观因子 + Regime 切换 + Softmax | ✅ |
+| Phase 13-14 | Polymarket + 美股数据接入 | ✅ |
+| Phase 15-20 | 性能优化 + 信号增强 + 预加载架构 | ✅ |
+| Phase 21-24 | 回测优化 + 自适应调仓 + 因子质量增强 | ✅ |
+| 美股量化 | 29 因子多空对冲 + FF5 回归 + 幸存者偏差修正 | ✅ |
+| 待办 | 券商实盘对接 (QMT/Ptrade) / Insider 因子 | 📋 |

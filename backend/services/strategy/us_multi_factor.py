@@ -57,6 +57,7 @@ from backend.services.us_factors.macro import USMacroCycle, USMacroLiqd, USMacro
 from backend.services.us_factors.analyst import USAnalystRating, USAnalystCoverage
 from backend.services.us_factors.accruals import Accruals, BuybackYield
 from backend.services.us_factors.polymarket import PolymarketSent
+from backend.services.us_factors.insider import InsiderNetBuy
 from backend.services.us_factors.base import USFactorBase
 from backend.services.us_factors.processor import process_factor, clear_neutralize_cache
 from backend.services.strategy.us_regime import USRegimeDetector
@@ -96,7 +97,6 @@ class USMultiFactorStrategy:
     # Core financial factors — stocks missing ALL of these are excluded
     CORE_FINANCIAL_FACTORS = ["EP", "BP", "ROE_TTM", "GROSS_MARGIN"]
 
-    # Financial-dependent factors (affected by staleness decay)
     FINANCIAL_DEPENDENT_FACTORS = [
         "EP", "BP", "ROE_TTM", "GROSS_MARGIN", "PROFIT_STB", "MARGIN_TREND",
         "NET_PROFIT_YOY", "REVENUE_YOY", "NET_PROFIT_CAGR_3Y",
@@ -122,49 +122,49 @@ class USMultiFactorStrategy:
         # Initialize factor instances
         self.factors = [
             # Value
-            EP(db), BP(db), DivYield(db),
+            EP(db), BP(db), DivYield(db), BuybackYield(db),
             # Quality
-            RoeTTM(db), GrossMargin(db), ProfitStability(db), MarginTrend(db),
+            RoeTTM(db), GrossMargin(db), ProfitStability(db), MarginTrend(db), Accruals(db),
             # Growth
             NetProfitYoY(db), RevenueYoY(db), NetProfitCAGR3Y(db),
             # Momentum
             Mom1M(db), Mom3M(db), Mom12M(db), Rev5D(db), ResidualMom(db),
-            # Technical (新增 IVOL 替换 PRICE_DEV_60D)
+            # Technical
             Turn20D(db), Vol20D(db), Ivol(db), Size(db), VolPriceDiv(db),
             # Macro
             USMacroCycle(db), USMacroLiqd(db), USMacroInfl(db), USMacroExtr(db),
-            # Quality (新增)
-            Accruals(db),
-            # Value (新增)
-            BuybackYield(db),
             # Analyst
             USAnalystRating(db), USAnalystCoverage(db),
-            # Sentiment (Polymarket)
+            # Sentiment
             PolymarketSent(db),
         ]
 
-        # Factor weights
+        # Factor weights — IC 引导的差异化权重
         if factor_weights is None:
             self.factor_weights = {f.name: 1.0 for f in self.factors}
             self.factor_weights.update({
-                "DIV_YIELD": 0.8,
-                "PROFIT_STB": 0.5, "MARGIN_TREND": 0.4,
-                "REVENUE_YOY": 0.8, "NET_PROFIT_CAGR_3Y": 0.8,
-                "MOM_1M": 0.6, "MOM_3M": 0.8, "REV_5D": 0.7, "RESIDUAL_MOM": 0.7,
-                "TURN_20D": 0.5, "VOL_20D": 0.6, "IVOL": 0.7, "SIZE": 0.3, "VOL_PRICE_DIV": 0.4,
-                "US_MACRO_CYCLE": 0.8, "US_MACRO_LIQD": 0.7, "US_MACRO_INFL": 0.5, "US_MACRO_EXTR": 0.4,
-                "ACCRUALS": 0.8, "BUYBACK_YIELD": 0.7,
-                "US_ANALYST_RATING": 0.6, "US_ANALYST_COVERAGE": 0.3,
-                "POLYMARKET_SENT": 1.0,
+                # 高 IC 因子升权
+                "ACCRUALS": 1.2, "EP": 1.0, "MOM_12M": 1.0, "IVOL": 1.0,
+                "BUYBACK_YIELD": 0.9, "POLYMARKET_SENT": 0.8,
+                # 中等 IC
+                "GROSS_MARGIN": 0.8, "DIV_YIELD": 0.7, "REV_5D": 0.7,
+                "ROE_TTM": 0.7, "RESIDUAL_MOM": 0.7,
+                # 低 IC / 高相关降权
+                "MOM_1M": 0.4, "MOM_3M": 0.5,
+                "PROFIT_STB": 0.4, "MARGIN_TREND": 0.3,
+                "TURN_20D": 0.4, "VOL_20D": 0.5, "SIZE": 0.3, "VOL_PRICE_DIV": 0.3,
+                # 宏观（截面 IC 低但择时有用）
+                "US_MACRO_CYCLE": 0.5, "US_MACRO_LIQD": 0.4, "US_MACRO_INFL": 0.3, "US_MACRO_EXTR": 0.2,
+                # 分析师（滞后）
+                "US_ANALYST_RATING": 0.4, "US_ANALYST_COVERAGE": 0.2,
+                # 成长
+                "NET_PROFIT_YOY": 0.7, "REVENUE_YOY": 0.5, "NET_PROFIT_CAGR_3Y": 0.5,
+                "BP": 0.6,
             })
         else:
             self.factor_weights = factor_weights
 
-        # Reverse factors (lower is better → negate weight)
-        # Reverse factors (lower is better → negate weight)
-        # 注意：IC 分析（12 个月窗口）曾建议翻转 ROE_TTM 和 MOM_1M，
-        # 但长期回测验证显示翻转后 alpha 显著恶化，说明短期 IC 信号不可靠。
-        # 保持原始方向，仅翻转学术共识的反向因子。
+        # 反向因子
         self._reverse_factors = ["TURN_20D", "VOL_20D", "IVOL", "PROFIT_STB"]
         for fname in self._reverse_factors:
             if fname in self.factor_weights:
