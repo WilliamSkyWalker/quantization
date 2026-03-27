@@ -25,7 +25,8 @@ python3 backend/cli.py db status                               # 查看全表数
 python3 backend/cli.py data update --market us                 # 增量更新美股数据
 python3 backend/cli.py select --market us --date 2025-01-15    # 美股选股
 python3 backend/cli.py select --market cn --date 2025-01-15    # A股选股
-python3 backend/cli.py backtest --market us --start 2020-01-01 # 美股回测
+python3 backend/cli.py backtest --market us --start 2020-01-01 # 美股回测 (Alpha, 默认)
+python3 backend/cli.py backtest --market us --strategy-type beta # 美股回测 (Beta)
 python3 backend/cli.py factor calc MOM_1M --market us          # 计算单因子
 python3 backend/cli.py factor list --market us                 # 列出所有因子
 python3 backend/cli.py score AAPL --date 2025-01-15            # 单只股票得分
@@ -61,14 +62,16 @@ A股管道:
   → strategy/regime.py → strategy/multi_factor.py → risk/risk_manager.py
   → strategy/backtest.py | execution/paper_trader.py
 
-美股管道（多空对冲，FF5 alpha 5.4%/年，t=1.69，含幸存者偏差修正）:
+美股管道（双策略：Alpha 多空对冲 + Beta Regime 控制）:
   yfinance → data/fmp_downloader.py → MySQL (us_* 表)
   SEC EDGAR → data/edgar_downloader.py → us_financial_data (2010起全量历史财报)
   SimFin → data/simfin_downloader.py → us_financial_data (补充)
   FRED → data/fred_downloader.py → us_macro_indicator 表
   FF5 → strategy/ff5.py → Fama-French 五因子回归分析
-  → data/us_cleaner.py → us_factors/*.py (29因子) → us_factors/processor.py
-  → strategy/us_regime.py (三维复合) → strategy/us_multi_factor.py (多空) → risk/us_risk_manager.py
+  → data/us_cleaner.py → us_factors/*.py (4因子) → us_factors/processor.py
+  → strategy/us_regime.py (四维复合 + credit veto)
+    → Alpha: strategy/us_multi_factor.py (多空) → risk/us_risk_manager.py
+    → Beta:  strategy/us_beta_strategy.py (Regime→仓位, 质量筛选等权)
   → strategy/us_backtest.py (T+0,借券费) | execution/us_paper_trader.py
 ```
 
@@ -127,18 +130,16 @@ A股管道:
 
 ### 美股回测绩效（2015-2025，含幸存者偏差修正，基准 Russell 1000）
 
-| 指标 | 策略 | Russell 1000 |
-|------|------|-------------|
-| 年化收益 | **12.8%** | 11.4% |
-| 超额年化 | **+1.4%** | — |
-| 夏普比率 | **0.68** | — |
-| 最大回撤 | **-16.3%** | — |
-| FF5 Alpha (年化) | **+6.69%** | — |
-| FF5 t-stat | **2.26** (统计显著) | — |
-| β_Mkt | 0.40 | — |
-| 年化换手率 | 324% | — |
+| 指标 | Alpha 策略 | Beta 策略 | Russell 1000 |
+|------|-----------|----------|-------------|
+| 年化收益 | **12.8%** | 6.9% | 11.4% |
+| 最大回撤 | -16.3% | **-16.5%** | — |
+| Sharpe | **0.68** | 0.33 | — |
+| FF5 Alpha | **+6.69%** (t=2.26) | +0.88% (t=0.54) | — |
+| 下行捕获 | — | **37.3%** | — |
+| 换手率 | 324% | **156%** | — |
 
-> 4 因子等权，无 IC 权重优化，无股票池筛选偏差。
+> Alpha: 4 因子等权多空对冲，追求超额。Beta: Regime 择时 + 质量筛选，追求稳健。
 > 含幸存者偏差修正（227 只历史 S&P 500 成分股）。
 
 ## 配置

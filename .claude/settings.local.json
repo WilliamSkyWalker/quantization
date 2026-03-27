@@ -91,7 +91,8 @@
       "WebFetch(domain:pypi.org)",
       "WebFetch(domain:app.simfin.com)",
       "Bash(git stash:*)",
-      "Bash(git rm:*)"
+      "Bash(git rm:*)",
+      "Bash(find /Users/daweilun/Documents/quantization/frontend -type f \\\\\\(-name *backtest* -o -name *strategy* \\\\\\))"
     ]
   }
 }

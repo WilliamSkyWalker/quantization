@@ -64,13 +64,18 @@ class USRegimeDetector:
         credit = self._credit_score(date)
         crowding = self._crowding_score(date)
 
-        # 加权合成（拥挤度信号可以单独压制 strength）
-        base_strength = 0.4 * trend + 0.3 * vol + 0.2 * credit + 0.1 * crowding
+        # 加权合成
+        base_strength = 0.35 * trend + 0.30 * vol + 0.25 * credit + 0.10 * crowding
         strength = max(0.0, min(1.0, base_strength))
 
-        # 因子拥挤时额外惩罚：即使趋势/波动率看牛，拥挤度低也要降权
+        # Credit veto：利差倒挂时封顶，防止熊市反弹陷阱
+        if credit < 0.2 and strength > 0.5:
+            logger.debug(f"Credit veto: credit={credit:.2f}, strength {strength:.2f} → 0.50")
+            strength = 0.5
+
+        # 因子拥挤时额外惩罚
         if crowding < 0.3 and strength > 0.6:
-            strength = strength * 0.8  # 压制 20%
+            strength = strength * 0.8
             logger.debug(f"Factor crowding penalty: crowding={crowding:.2f}, strength compressed")
 
         # Beta 目标映射（alpha-first 模式仅用 strength，beta target 保留接口）
@@ -132,7 +137,7 @@ class USRegimeDetector:
         """VIX 历史百分位 → [0, 1]"""
         df = self._db.query(
             "SELECT value FROM us_macro_indicator "
-            "WHERE indicator_code = 'VIXCLS' AND report_date <= :date "
+            "WHERE indicator_code = 'US_VIX' AND report_date <= :date "
             "ORDER BY report_date DESC LIMIT :limit",
             params={"date": date, "limit": _VIX_LOOKBACK_DAYS + 10},
         )
@@ -152,7 +157,7 @@ class USRegimeDetector:
         """10Y-2Y 利差 → [0, 1]"""
         df = self._db.query(
             "SELECT value FROM us_macro_indicator "
-            "WHERE indicator_code = 'T10Y2Y' AND report_date <= :date "
+            "WHERE indicator_code = 'US_2Y10Y' AND report_date <= :date "
             "ORDER BY report_date DESC LIMIT 5",
             params={"date": date},
         )

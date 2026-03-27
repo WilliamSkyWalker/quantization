@@ -76,16 +76,21 @@ def backtest_run(request):
     start_date = request.data.get('start_date')
     end_date = request.data.get('end_date')
     initial_capital = float(request.data.get('initial_capital', 100000))
+    strategy_type = request.data.get('strategy', 'alpha')  # alpha | beta
 
     if not start_date or not end_date:
         return Response({'error': 'start_date 和 end_date 为必填项'}, status=400)
 
     def _run(task_id):
         task_manager.update_progress(task_id, 5, '初始化策略...')
-        strategy = USMultiFactorStrategy(_db)
+        if strategy_type == 'beta':
+            from backend.services.strategy.us_beta_strategy import USBetaStrategy
+            strategy = USBetaStrategy(_db)
+        else:
+            strategy = USMultiFactorStrategy(_db)
 
         task_manager.update_progress(task_id, 10, '生成信号...')
-        signals = strategy.generate_signals(start_date, end_date, task_id=task_id)
+        signals = strategy.generate_signals(start_date, end_date)
 
         task_manager.update_progress(task_id, 70, '运行回测...')
         engine = USBacktestEngine(initial_capital=initial_capital)

@@ -1,23 +1,28 @@
-# 美股多因子量化策略文档
+# 美股量化策略文档
 
-本文档说明美股多因子多空对冲量化系统的完整算法逻辑。
+本文档说明美股量化系统的完整算法逻辑。系统包含两套独立策略，共享数据层和回测引擎。
 
 ---
 
 ## 一、系统概述
 
-美股多因子策略采用 **多空对冲模型**（Long-Short Equity），做多高分股 + 做空低分股，降低市场 beta 暴露，追求 alpha 收益。
+美股量化系统提供 **两套策略**，用户可在 CLI / API / 前端切换：
+
+| 策略 | 代码 | 核心理念 | 适用场景 |
+|------|------|---------|---------|
+| **Alpha（多因子多空）** | `us_multi_factor.py` | 4 因子选股 + 多空对冲，追求 FF5 alpha | 追求超额收益 |
+| **Beta（Regime 控制）** | `us_beta_strategy.py` | 不做选股，Regime 择时 + 质量筛选等权，吃市场 beta | 追求稳健、低回撤 |
 
 核心管道：
 ```
-yfinance/SimFin/FRED → 数据层 → 26因子 → 因子处理 → 两层打分 → 多空选股
+yfinance/SimFin/FRED → 数据层 → 因子处理 → Alpha 或 Beta 策略
 → 风控调整 → 回测引擎 / 模拟交易
 ```
 
-**回测绩效（2015-2025，$100 万，基准 Russell 1000，含幸存者偏差修正）：**
+### Alpha 策略绩效（2015-2025，$100 万，基准 Russell 1000，含幸存者偏差修正）
 
-| 指标 | 多空策略 | Russell 1000 |
-|------|---------|-------------|
+| 指标 | Alpha 多空策略 | Russell 1000 |
+|------|---------------|-------------|
 | 年化收益 | **12.79%** | 11.38% |
 | 超额年化 | **+1.41%** | — |
 | 夏普比率 | **0.68** | — |
@@ -27,8 +32,21 @@ yfinance/SimFin/FRED → 数据层 → 26因子 → 因子处理 → 两层打�
 | β_Mkt | 0.40 | — |
 | 年化换手率 | 324% | — |
 
-> **核心设计：** 4 个美股专属因子（MOM_12_1 + Shareholder Yield + IVOL + Gross Profitability），等权，不做 IC 引导权重优化。
-> **设计原则：** 学术验证在美股有效 + 因子间低相关 + 数据可得。删除 25 个从 A 股移植的噪音因子。
+### Beta 策略绩效（2015-2025，$100 万，基准 Russell 1000）
+
+| 指标 | Beta 策略 | Russell 1000 |
+|------|----------|-------------|
+| 年化收益 | **6.9%** | 11.38% |
+| 最大回撤 | **-16.5%** | — |
+| Calmar 比率 | **0.42** | — |
+| Sharpe 比率 | **0.33** | — |
+| 下行捕获率 | **37.3%** | — |
+| 上行捕获率 | **46.3%** | — |
+| 年化波动率 | **8.6%** | ~15% |
+| 年化换手率 | 156% | — |
+
+> **Alpha 策略：** 4 个美股专属因子等权，不做 IC 引导权重优化。删除 25 个从 A 股移植的噪音因子。
+> **Beta 策略：** 不追求选股 alpha，通过四维 Regime 感知动态调仓（牛市高仓位吃 beta，熊市低仓位 + 现金保护）。
 > **幸存者偏差修正：** 股票池含 227 只历史 S&P 500 成分股。
 > **样本外验证：** IC 权重优化经样本外测试证伪（2015-2019 训练 → 2020-2025 alpha≈0），因此回归等权。
 
@@ -191,31 +209,81 @@ GrossProfit  -0.01 -0.08 +0.01 +0.02 +0.21 +0.18 +0.01 -0.00 +0.06 -0.00 -0.08 +
 - 空头总权重 = (1 - 0.6) / 2 = **-20%**
 - 总敞口上限：`US_GROSS_EXPOSURE_CAP=1.5`
 
-### 4.4 复合 Regime 检测（三维）
+### 4.4 复合 Regime 检测（四维 + Credit Veto）
 
 `backend/services/strategy/us_regime.py`（USRegimeDetector）
 
-三维复合指标投票决定牛/熊：
+四维复合指标投票决定牛/熊：
 
 | 维度 | 数据源 | 牛市信号 | 熊市信号 | 权重 |
 |------|--------|---------|---------|------|
-| 趋势 | S&P 500 vs 60日MA | 偏离 ≥ +5% | 偏离 ≤ -5% | 50% |
-| 波动率 | VIX 历史百分位 | < 20th percentile | > 80th percentile | 30% |
-| 信用 | 10Y-2Y 国债利差 | 正利差 > 0.5% | 倒挂 < -0.5% | 20% |
+| 趋势 | S&P 500 vs 60日MA | 偏离 ≥ +5% | 偏离 ≤ -5% | 35% |
+| 波动率 | VIX 252日历史百分位 | < 20th percentile | > 80th percentile | 30% |
+| 信用 | 10Y-2Y 国债利差 | 正利差 > 0.5% | 倒挂 < -0.5% | 25% |
+| 拥挤度 | 动量因子截面分散度 | 高分散（因子有效） | 低分散（因子拥挤） | 10% |
 
-**Regime Strength = 0.5 × trend + 0.3 × vol + 0.2 × credit**
+**Regime Strength = 0.35 × trend + 0.30 × vol + 0.25 × credit + 0.10 × crowding**
 
-Regime 影响：
+**Credit Veto：** 当 credit < 0.2（利差深度倒挂）时，strength 封顶 0.5，防止熊市反弹陷阱（如 2022 年 8 月 S&P 反弹但利差仍倒挂）。
+
+**因子拥挤惩罚：** 当 crowding < 0.3 且 strength > 0.6 时，strength 额外压缩 20%。
+
+Regime 对 Alpha 策略的影响：
 - 大类权重：熊市提高质量(1.5)、降低价值(0.6)/成长(0.8)
 - 多头数量：熊市缩减（`BEAR_HOLDINGS_RATIO=0.6`）
 - 空头数量：熊市增加（+30%）
 - **净敞口动态调整：** 牛市 net=0.6（80%多/20%空），熊市 net→0.2（60%多/40%空）
+
+Regime 对 Beta 策略的影响：
+- **直接决定仓位：** strength [0, 1] → equity_pct [10%, 90%] 线性映射
+- 剩余资金自动变现金（无做空）
 
 ### 4.5 纯月频调仓
 
 - 固定频率：每 `US_REBALANCE_INTERVAL=20` 个交易日（约月频）
 - **不使用偏离触发** — 经回测验证，偏离触发机制产生的全部是噪音交易，删除后年化收益提升 2%+，换手率下降 40%
 - 年化换手率：~450%（月频合理范围）
+
+---
+
+## 4B、Beta 策略（Regime 驱动仓位控制）
+
+代码：`backend/services/strategy/us_beta_strategy.py`（USBetaStrategy）
+
+### 设计理念
+
+不做选股 alpha，收益来自市场 beta，价值来自少亏（熊市保护）。
+评价标准：Calmar 比率、最大回撤、下行/上行捕获率（不追求 FF5 alpha）。
+
+### 核心流程
+
+```
+Regime 检测（四维） → 目标仓位 (10%~90%) → 质量筛选等权持仓 → 现金管理
+```
+
+### 仓位决定
+
+Regime strength [0, 1] 线性映射到 equity_pct [10%, 90%]：
+- 强牛（strength ≥ 0.8）：equity ~75-90%
+- 震荡（0.3~0.8）：equity ~34-75%
+- 强熊（strength ≤ 0.2）：equity ~10-26%
+
+### 选股逻辑（质量筛选，非 alpha 追求）
+
+1. 获取清洗后的股票池（~550 只）
+2. 计算简化版 Gross Profitability = revenue × gross_margin / total_assets
+3. 保留 GP 前 50%（过滤掉最差的一半）
+4. 从中等权选 30 只（`_N_HOLDINGS=30`）
+5. 每只权重 = (1/30) × equity_pct
+
+### 核心特征
+
+| 特征 | 说明 |
+|------|------|
+| 下行保护 | 下行捕获率 37%（市场跌 10% 只跟跌 3.7%） |
+| 低波动 | 年化 8.6%（市场 ~15%） |
+| 低换手 | 156%/年（月频调仓 + 持仓稳定） |
+| 无做空 | 纯多头 + 现金，无借券费 |
 
 ---
 
@@ -317,7 +385,7 @@ NAV = (cash + Σ(shares × price)) / initial_capital
 |------|------|------|
 | `/api/us/universe` | GET | 可交易股票池 |
 | `/api/us/select` | POST | 运行多空选股 |
-| `/api/us/backtest/run` | POST | 运行回测 |
+| `/api/us/backtest/run` | POST | 运行回测（参数 `strategy`: `alpha`\|`beta`） |
 | `/api/us/paper/account` | GET | 模拟账户信息 |
 | `/api/us/paper/positions` | GET | 模拟持仓 |
 | `/api/us/paper/nav` | GET | NAV 历史 |
@@ -329,14 +397,16 @@ NAV = (cash + Σ(shares × price)) / initial_capital
 ## 十、CLI 命令
 
 ```bash
-python3 backend/cli.py select --market us --date 2025-01-15    # 多空选股
-python3 backend/cli.py backtest --market us --start 2020-01-01  # 回测
-python3 backend/cli.py factor calc EP --market us               # 单因子计算
-python3 backend/cli.py factor list --market us                  # 因子列表
-python3 backend/cli.py score AAPL --date 2025-01-15             # 单股得分
-python3 backend/cli.py paper status --market us                 # 模拟账户
-python3 backend/cli.py paper trade --market us                  # 执行交易
-python3 backend/cli.py data download --market us --target simfin # 下载 SimFin 财报
+python3 backend/cli.py backtest --market us --strategy-type alpha  # Alpha 策略回测（默认）
+python3 backend/cli.py backtest --market us --strategy-type beta   # Beta 策略回测
+python3 backend/cli.py backtest --market us --start 2015-01-01     # 指定起始日期
+python3 backend/cli.py select --market us --date 2025-01-15        # 多空选股
+python3 backend/cli.py factor calc EP --market us                  # 单因子计算
+python3 backend/cli.py factor list --market us                     # 因子列表
+python3 backend/cli.py score AAPL --date 2025-01-15                # 单股得分
+python3 backend/cli.py paper status --market us                    # 模拟账户
+python3 backend/cli.py paper trade --market us                     # 执行交易
+python3 backend/cli.py data download --market us --target simfin   # 下载 SimFin 财报
 ```
 
 ---
@@ -386,10 +456,10 @@ python3 backend/cli.py data download --market us --target simfin # 下载 SimFin
 | 因子数 | 30（含舆情） | **4**（美股专属：MOM_12_1+ShrYield+IVOL+GrossProfit）|
 | 财报来源 | Tushare（ann_date 过滤） | **SEC EDGAR** + SimFin + yfinance（filing_date 过滤 + 45 天缓冲）|
 | 宏观指标 | 中国 PMI/SHIBOR/PPI/M2 | 美国 ISM/FEDFUNDS/CPI/VIX |
-| Regime | S&P 300 均线偏离（单维） | **三维复合**（趋势+VIX+利差） |
+| Regime | CSI 300 均线偏离（单维） | **四维复合**（趋势+VIX+利差+拥挤度）+ Credit Veto |
 | 调仓 | 半月频 + 偏离触发 | **纯月频**（偏离触发已删除） |
 | 基准 | CSI 300 | **Russell 1000** |
 | 幸存者偏差 | 未修正 | **已修正**（含 227 只历史成分股） |
-| FF5 回归 | 无 | **有**（alpha 5.42%，t=1.69） |
+| FF5 回归 | 无 | **有**（Alpha 策略: alpha 6.69%，t=2.26） |
 | ML 增强 | 无 | **LightGBM 因子合成**（可选） |
 | 配置前缀 | 无前缀 | `US_` 前缀 |

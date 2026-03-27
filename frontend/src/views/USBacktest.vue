@@ -16,6 +16,11 @@ const { isMobile } = useResponsive()
 const today = new Date().toISOString().slice(0, 10)
 const dateRange = ref<[string, string]>(['2020-01-01', today])
 const initialCapital = ref(100000)
+const strategyType = ref('alpha')
+const strategyOptions = [
+  { label: 'Alpha (Multi-Factor)', value: 'alpha' },
+  { label: 'Beta (Regime Control)', value: 'beta' },
+]
 
 const { loading, taskId, result, start, stopPolling, taskStore } = useTaskPolling({
   taskLabel: 'US Backtest',
@@ -51,8 +56,8 @@ async function runBacktest() {
   }
   stopPolling()
   try {
-    const { data } = await startUSBacktest(dateRange.value[0], dateRange.value[1], initialCapital.value)
-    taskStore.trackTask(data.task_id, `US Backtest ${dateRange.value[0]}~${dateRange.value[1]}`)
+    const { data } = await startUSBacktest(dateRange.value[0], dateRange.value[1], initialCapital.value, strategyType.value)
+    taskStore.trackTask(data.task_id, `US Backtest (${strategyType.value}) ${dateRange.value[0]}~${dateRange.value[1]}`)
     message.success('US Backtest task started')
     start(data.task_id)
   } catch (e: any) {
@@ -109,6 +114,11 @@ const statsEntries = computed(() => {
           :value="dateRange[1] ? new Date(dateRange[1]).getTime() : null"
           @update:value="handleEndDateUpdate"
           placeholder="End Date"
+        />
+        <n-select
+          v-model:value="strategyType"
+          :options="strategyOptions"
+          :style="{ width: '220px' }"
         />
         <n-input-number
           v-model:value="initialCapital"

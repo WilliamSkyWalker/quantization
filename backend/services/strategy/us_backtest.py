@@ -695,7 +695,7 @@ class USBacktestEngine:
             "trade_days": n_days,
         }
 
-        # Benchmark comparison
+        # Benchmark comparison + capture ratios
         if benchmark_nav is not None and not benchmark_nav.empty:
             bm_ret = benchmark_nav.iloc[-1] / benchmark_nav.iloc[0] - 1
             bm_annual = (1 + bm_ret) ** (1 / max(n_years, 0.01)) - 1
@@ -703,6 +703,26 @@ class USBacktestEngine:
             stats["benchmark_total_return"] = bm_ret
             stats["benchmark_annual_return"] = bm_annual
             stats["excess_annual_return"] = excess
+
+            # 月度下行/上行捕获率
+            bm_monthly = benchmark_nav.resample("ME").last().pct_change().dropna()
+            strat_monthly = nav.resample("ME").last().pct_change().dropna()
+            common_idx = bm_monthly.index.intersection(strat_monthly.index)
+            if len(common_idx) > 3:
+                bm_m = bm_monthly.loc[common_idx]
+                st_m = strat_monthly.loc[common_idx]
+
+                # 下行捕获率：市场下跌月份，策略跌了多少
+                down_months = bm_m < 0
+                if down_months.sum() > 0:
+                    down_capture = st_m[down_months].mean() / bm_m[down_months].mean()
+                    stats["downside_capture"] = float(down_capture)
+
+                # 上行捕获率：市场上涨月份，策略涨了多少
+                up_months = bm_m > 0
+                if up_months.sum() > 0:
+                    up_capture = st_m[up_months].mean() / bm_m[up_months].mean()
+                    stats["upside_capture"] = float(up_capture)
 
         return stats
 
