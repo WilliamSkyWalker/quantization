@@ -95,12 +95,10 @@ class USMultiFactorStrategy:
     CATEGORY_WEIGHTS = US_CATEGORY_WEIGHTS
 
     # Core financial factors — stocks missing ALL of these are excluded
-    CORE_FINANCIAL_FACTORS = ["EP", "BP", "ROE_TTM", "GROSS_MARGIN"]
+    CORE_FINANCIAL_FACTORS = ["GROSS_MARGIN"]  # GrossProfit 依赖财报
 
     FINANCIAL_DEPENDENT_FACTORS = [
-        "EP", "BP", "ROE_TTM", "GROSS_MARGIN", "PROFIT_STB", "MARGIN_TREND",
-        "NET_PROFIT_YOY", "REVENUE_YOY", "NET_PROFIT_CAGR_3Y",
-        "ACCRUALS", "BUYBACK_YIELD",
+        "GROSS_MARGIN", "DIV_YIELD", "BUYBACK_YIELD",  # 依赖财报/公司行动
     ]
 
     # Reverse lookup: factor → category

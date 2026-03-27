@@ -3,3 +3,4 @@ twitter_cookies.json
 /logs/backend.log
 __pycache__/
 backend/output/
+backend/backend/

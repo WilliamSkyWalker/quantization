@@ -651,10 +651,8 @@ if _raw_us_cw.strip():
         pass
 
 # 熊市大类权重覆盖
-US_REGIME_BEAR_OVERRIDES: dict[str, float] = {
-    "momentum": 1.0, "quality": 1.5, "growth": 0.8, "value": 0.6,
-    "technical": 0.8, "macro": 0.6, "analyst": 0.5, "sentiment": 0.6,
-}
+# 4因子体系：等权，Regime 不改变类间权重（因子太少无法差异化）
+US_REGIME_BEAR_OVERRIDES: dict[str, float] = {}
 
 # 中性化模式
 US_NEUTRALIZE_MODE = os.environ.get("US_NEUTRALIZE_MODE", "full")
