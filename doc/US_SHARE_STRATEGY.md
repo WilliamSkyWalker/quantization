@@ -57,7 +57,7 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 
 三家付费 API 为主数据源（旧源 yfinance/EDGAR/SimFin 保留，CLI `--old-source` 可回退）。
 
-统一下载器：`backend/services/data/bulk_downloader.py`
+统一下载器：`services/data/bulk_downloader.py`
 
 ### 2.1 FMP (Financial Modeling Prep) — 主力数据源
 
@@ -101,27 +101,27 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 
 ### 2.4 Fama-French 五因子
 
-下载器：`backend/services/strategy/ff5.py`
+下载器：`services/strategy/ff5.py`
 
 从 Kenneth French Data Library 自动下载 FF5 日度因子收益（Mkt-RF, SMB, HML, RMW, CMA, RF），本地 CSV 缓存 30 天。
 
 ### 2.5 FRED 宏观（补充）
 
-下载器：`backend/services/data/fred_downloader.py`
+下载器：`services/data/fred_downloader.py`
 
 20 项 FRED 宏观指标（GDP、CPI、PPI、VIX 等）。FMP 宏观端点已可覆盖大部分，FRED 作为补充/备用。
 
 ### 2.6 旧数据源（保留，`--old-source` 回退）
 
-- yfinance → `backend/services/data/fmp_downloader.py`（类名保留兼容）
-- SEC EDGAR → `backend/services/data/edgar_downloader.py`
-- SimFin → `backend/services/data/simfin_downloader.py`
+- yfinance → `services/data/fmp_downloader.py`（类名保留兼容）
+- SEC EDGAR → `services/data/edgar_downloader.py`
+- SimFin → `services/data/simfin_downloader.py`
 
 ---
 
 ## 三、因子体系（25 因子 × 7 大类）
 
-代码位置：`backend/services/us_factors/`
+代码位置：`services/us_factors/`
 
 ### 设计原则
 
@@ -170,7 +170,7 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 
 ### 因子处理流水线
 
-`backend/services/us_factors/processor.py`
+`services/us_factors/processor.py`
 
 ```
 原始因子值 → MAD 去极值(5σ) → GICS Sector+Size 中性化(OLS) → Z-Score 标准化 → ±3 截断
@@ -191,7 +191,7 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 
 ## 四、多空选股策略
 
-代码：`backend/services/strategy/us_multi_factor.py`（USMultiFactorStrategy）
+代码：`services/strategy/us_multi_factor.py`（USMultiFactorStrategy）
 
 ### 4.1 打分模型（两层类别评分）
 
@@ -232,7 +232,7 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 
 ### 4.4 复合 Regime 检测（四维 + Credit Veto）
 
-`backend/services/strategy/us_regime.py`（USRegimeDetector）
+`services/strategy/us_regime.py`（USRegimeDetector）
 
 四维复合指标投票决定牛/熊：
 
@@ -264,7 +264,7 @@ Regime 影响：
 
 ## 4B、Beta 策略（Regime 驱动仓位控制）
 
-代码：`backend/services/strategy/us_beta_strategy.py`（USBetaStrategy）
+代码：`services/strategy/us_beta_strategy.py`（USBetaStrategy）
 
 ### 设计理念
 
@@ -305,7 +305,7 @@ Regime strength [0, 1] 线性映射到 equity_pct [10%, 90%]：
 
 ## 五、风控
 
-代码：`backend/services/risk/us_risk_manager.py`（USRiskManager）
+代码：`services/risk/us_risk_manager.py`（USRiskManager）
 
 | 控制 | 参数 | 说明 |
 |------|------|------|
@@ -321,7 +321,7 @@ Regime strength [0, 1] 线性映射到 equity_pct [10%, 90%]：
 
 ## 4C、Baseline / Alpha v2 实验策略
 
-代码：`backend/services/strategy/us_baseline_strategy.py`（USBaselineStrategy）
+代码：`services/strategy/us_baseline_strategy.py`（USBaselineStrategy）
 
 **用途**：Alpha v2 开发迭代框架。委托 `USMultiFactorStrategy` 进行 25 因子打分+选股，月频调仓。也用于 VQM 基线验证（历史，已完成）。
 
@@ -347,14 +347,14 @@ Regime strength [0, 1] 线性映射到 equity_pct [10%, 90%]：
 ### CLI 用法
 
 ```bash
-python3 backend/cli.py backtest --market us --strategy-type baseline --start 2015-01-01 --end 2023-12-31
+python3 cli.py backtest --market us --strategy-type baseline --start 2015-01-01 --end 2023-12-31
 ```
 
 ---
 
 ## 六、回测引擎
 
-代码：`backend/services/strategy/us_backtest.py`（USBacktestEngine）
+代码：`services/strategy/us_backtest.py`（USBacktestEngine）
 
 ### 执行规则
 
@@ -395,7 +395,7 @@ NAV = (cash + Σ(shares × price)) / initial_capital
 
 ## 七、模拟交易
 
-代码：`backend/services/execution/us_paper_trader.py`（USPaperTrader）
+代码：`services/execution/us_paper_trader.py`（USPaperTrader）
 
 4 张 DB 表：`us_paper_account`, `us_paper_position`, `us_paper_transaction`, `us_paper_nav`
 
@@ -407,7 +407,7 @@ NAV = (cash + Σ(shares × price)) / initial_capital
 
 ## 八、数据库表
 
-14 张美股相关表（`backend/services/data/database.py`）：
+14 张美股相关表（`services/data/database.py`）：
 
 | 表 | 说明 |
 |----|------|
@@ -446,18 +446,18 @@ NAV = (cash + Σ(shares × price)) / initial_capital
 ## 十、CLI 命令
 
 ```bash
-python3 backend/cli.py backtest --market us --strategy-type alpha  # Alpha 策略回测（默认）
-python3 backend/cli.py backtest --market us --strategy-type beta   # Beta 策略回测
-python3 backend/cli.py backtest --market us --start 2015-01-01     # 指定起始日期
-python3 backend/cli.py select --market us --date 2025-01-15        # 多空选股
-python3 backend/cli.py factor calc EP --market us                  # 单因子计算
-python3 backend/cli.py factor list --market us                     # 因子列表
-python3 backend/cli.py score AAPL --date 2025-01-15                # 单股得分
-python3 backend/cli.py paper status --market us                    # 模拟账户
-python3 backend/cli.py paper trade --market us                     # 执行交易
-python3 backend/cli.py data bulk-import --source fmp --target all --start-year 1995  # FMP 全量导入
-python3 backend/cli.py data bulk-import --source uw --target all   # Unusual Whales 全量
-python3 backend/cli.py data download --market us --target simfin --old-source  # SimFin 旧源
+python3 cli.py backtest --market us --strategy-type alpha  # Alpha 策略回测（默认）
+python3 cli.py backtest --market us --strategy-type beta   # Beta 策略回测
+python3 cli.py backtest --market us --start 2015-01-01     # 指定起始日期
+python3 cli.py select --market us --date 2025-01-15        # 多空选股
+python3 cli.py factor calc EP --market us                  # 单因子计算
+python3 cli.py factor list --market us                     # 因子列表
+python3 cli.py score AAPL --date 2025-01-15                # 单股得分
+python3 cli.py paper status --market us                    # 模拟账户
+python3 cli.py paper trade --market us                     # 执行交易
+python3 cli.py data bulk-import --source fmp --target all --start-year 1995  # FMP 全量导入
+python3 cli.py data bulk-import --source uw --target all   # Unusual Whales 全量
+python3 cli.py data download --market us --target simfin --old-source  # SimFin 旧源
 ```
 
 ---
@@ -490,7 +490,7 @@ python3 backend/cli.py data download --market us --target simfin --old-source  #
 
 ## 十二、Polymarket P&L 分析器（独立模块）
 
-代码：`backend/services/polymarket/polymarket_pnl_analyzer.py`
+代码：`services/polymarket/polymarket_pnl_analyzer.py`
 
 这是一个独立的事件驱动 P&L 分析工具（非多因子策略），基于 Polymarket 预测市场告警触发美股建仓，计算持有 N 天的收益。与上述多因子系统独立运行。
 

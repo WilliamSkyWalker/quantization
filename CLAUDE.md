@@ -19,11 +19,11 @@ Claude Code 编码规范。所有代码变更必须遵守。
 
 ### 三层同步规则
 
-系统有三个入口层调用同一套 service：**CLI** (`backend/cli.py`)、**API** (`backend/api/views/`)、**前端** (`frontend/src/`)。
+系统有三个入口层调用同一套 service：**CLI** (`cli.py`)、**API** (`api/views/`)、**前端** (`frontend/src/`)。
 
 - **新增/修改 service 方法** → 同步更新 CLI 命令 + API view + 前端页面
 - **新增 API 端点** → 同步在 CLI 中添加对应命令、在前端 `api/index.ts` 中添加函数
-- **业务逻辑只写在 `backend/services/`** — CLI 和 API views 只做参数解析 + 调用 service + 格式化输出
+- **业务逻辑只写在 `services/`** — CLI 和 API views 只做参数解析 + 调用 service + 格式化输出
 - **前端修改后必须 `pnpm build`** — Django 只提供 dist 静态文件
 
 ### 通用规范

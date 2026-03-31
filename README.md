@@ -7,13 +7,12 @@
 ```
 ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
 │   CLI       │   │ Django API  │   │  Frontend   │
-│ backend/    │   │ backend/api/│   │ frontend/   │
-│ cli.py      │   │ views/      │   │ src/        │
+│ cli.py      │   │ api/views/  │   │ frontend/   │
 └──────┬──────┘   └──────┬──────┘   └──────┬──────┘
        │                 │                 │
        └────────┬────────┘                 │
                 ▼                          │
-    backend/services/  ◄───────────────────┘ (via HTTP)
+    services/  ◄───────────────────────────┘ (via HTTP)
     （唯一业务逻辑层）
 
 A股管道:
@@ -48,33 +47,33 @@ A股管道:
 
 ```bash
 # 安装后端依赖
-cd backend && pip install -r requirements.txt
+pip install -r requirements.txt
 
 # 启动服务（开发）
 ./start.sh                                        # 启动后端 + 前端 + 安装 cron
 
 # 数据导入（新源 FMP/UW/Fiscal.ai）
-python3 backend/cli.py data bulk-import --source fmp --target all --clean --start-year 1995
-python3 backend/cli.py data bulk-import --source uw --target all --clean
-python3 backend/cli.py data bulk-import --source fiscal --target all
+python3 cli.py data bulk-import --source fmp --target all --clean --start-year 1995
+python3 cli.py data bulk-import --source uw --target all --clean
+python3 cli.py data bulk-import --source fiscal --target all
 
 # 增量更新
-python3 backend/cli.py data update --market us                 # 新源 (FMP+UW+Fiscal)
-python3 backend/cli.py data update --market us --old-source    # 旧源 (yfinance)
+python3 cli.py data update --market us                 # 新源 (FMP+UW+Fiscal)
+python3 cli.py data update --market us --old-source    # 旧源 (yfinance)
 
 # CLI 调试
-python3 backend/cli.py db status                               # 查看全表数据状态
-python3 backend/cli.py select --market us --date 2025-01-15    # 美股选股
-python3 backend/cli.py backtest --market us --start 2020-01-01 # 美股回测
-python3 backend/cli.py factor list --market us                 # 列出所有因子
-python3 backend/cli.py score AAPL --date 2025-01-15            # 单只股票得分
-python3 backend/cli.py paper status --market us                # 模拟账户状态
-python3 backend/cli.py paper trade --market us                 # 执行模拟交易
+python3 cli.py db status                               # 查看全表数据状态
+python3 cli.py select --market us --date 2025-01-15    # 美股选股
+python3 cli.py backtest --market us --start 2020-01-01 # 美股回测
+python3 cli.py factor list --market us                 # 列出所有因子
+python3 cli.py score AAPL --date 2025-01-15            # 单只股票得分
+python3 cli.py paper status --market us                # 模拟账户状态
+python3 cli.py paper trade --market us                 # 执行模拟交易
 ```
 
 ## 配置
 
-环境变量在 `backend/.env`（参考 `backend/.env.example`）。所有配置在 `backend/services/config.py` 中有默认值。
+环境变量在 `.env`（参考 `.env.example`）。所有配置在 `services/config.py` 中有默认值。
 
 - **A股**: `TUSHARE_TOKEN`、`MAX_HOLDINGS`、`NEUTRALIZE_MODE`、`USE_VOL_TARGETING`、风控参数
 - **美股**: `US_MAX_HOLDINGS`、`US_SLIPPAGE`、`US_REGIME_INDEX`、`US_CATEGORY_WEIGHTS` 等（均带 `US_` 前缀）

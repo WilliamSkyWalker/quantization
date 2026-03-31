@@ -33,8 +33,8 @@
 - 返回 `dict[date_str, DataFrame]`
 
 **改动文件：**
-- `backend/services/data/cleaner.py` — 新增 `preload_clean_universes()`
-- `backend/services/strategy/multi_factor.py` — `generate_signals()` 中调用，`_compute_scores_for_date()` 优先使用缓存
+- `services/data/cleaner.py` — 新增 `preload_clean_universes()`
+- `services/strategy/multi_factor.py` — `generate_signals()` 中调用，`_compute_scores_for_date()` 优先使用缓存
 
 **风险：** 低。现有 `get_clean_universe()` 不变，实时选股路径不受影响。
 
@@ -51,7 +51,7 @@
 - `get_latest_financial()` / `get_ttm_net_profit()` / `get_ttm_revenue()` 优先查快照缓存
 
 **改动文件：**
-- `backend/services/factors/base.py` — 新增 `precompute_financial_snapshots(dates)`，修改缓存查找方法
+- `services/factors/base.py` — 新增 `precompute_financial_snapshots(dates)`，修改缓存查找方法
 - 各财务因子文件无需改动（透明使用缓存）
 
 **风险：** 中。需正确处理不同股票的 `ann_date` 不同的情况（快照以调仓日为 key，每只股票取各自的最新公告数据）。
@@ -78,10 +78,10 @@ def compute_batch(self, dates, universes):
 - **VOL_PRICE_DIV：** 预计算 rolling 价格趋势和成交量斜率
 
 **改动文件：**
-- `backend/services/factors/base.py` — 新增 `compute_batch()` 默认方法
-- `backend/services/factors/momentum.py` — override 6 个动量因子
-- `backend/services/factors/technical.py` — override 5 个技术因子
-- `backend/services/strategy/multi_factor.py` — 新增 `_compute_all_factors_batch()` 集成
+- `services/factors/base.py` — 新增 `compute_batch()` 默认方法
+- `services/factors/momentum.py` — override 6 个动量因子
+- `services/factors/technical.py` — override 5 个技术因子
+- `services/strategy/multi_factor.py` — 新增 `_compute_all_factors_batch()` 集成
 
 **风险：** 高。Rolling window 边界处理（新股不足 lookback 天数产生 NaN）需与逐日计算结果严格一致。内存增加约 ~500MB。
 
@@ -96,8 +96,8 @@ def compute_batch(self, dates, universes):
 - 预计算所有调仓日的市值 DataFrame
 
 **改动文件：**
-- `backend/services/factors/processor.py` — 缓存 dummy matrix
-- `backend/services/strategy/multi_factor.py` — 预计算市值
+- `services/factors/processor.py` — 缓存 dummy matrix
+- `services/strategy/multi_factor.py` — 预计算市值
 
 **风险：** 低。纯内部优化。
 

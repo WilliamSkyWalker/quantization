@@ -19,7 +19,6 @@ set -euo pipefail
 # 路径配置（按实际部署修改）
 # ============================================================
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BACKEND_DIR="$PROJECT_DIR/backend"
 FRONTEND_DIR="$PROJECT_DIR/frontend"
 LOG_DIR="$PROJECT_DIR/logs"
 
@@ -82,8 +81,8 @@ stop_services() {
 start_backend() {
     log "=== 启动后端 (runserver :$BACKEND_PORT) ==="
     cd "$PROJECT_DIR"
-    DJANGO_SETTINGS_MODULE=backend.core.settings \
-    nohup "$PYTHON" backend/manage.py runserver 0.0.0.0:"$BACKEND_PORT" \
+    DJANGO_SETTINGS_MODULE=core.settings \
+    nohup "$PYTHON" manage.py runserver 0.0.0.0:"$BACKEND_PORT" \
         >> "$LOG_DIR/backend.log" 2>&1 &
     log "后端 PID: $!"
     wait_for_port $BACKEND_PORT "后端"

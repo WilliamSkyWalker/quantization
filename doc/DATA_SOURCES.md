@@ -6,7 +6,7 @@
 
 ## 一、A股市场数据
 
-### Tushare Pro (`backend/services/data/downloader.py`)
+### Tushare Pro (`services/data/downloader.py`)
 
 | 数据 | API 调用 | 频率 | 用途 |
 |------|---------|------|------|
@@ -22,7 +22,7 @@
 - **限速**: 180 req/min（可配置 `TUSHARE_RATE_LIMIT`）
 - **起始日期**: `DATA_START_DATE`，默认 `20150101`
 
-### Tushare 财务数据 (`backend/services/data/downloader.py`)
+### Tushare 财务数据 (`services/data/downloader.py`)
 
 | 数据 | API 调用 | 用途 |
 |------|---------|------|
@@ -35,7 +35,7 @@
 
 ## 二、A股宏观数据
 
-### Tushare 宏观指标 (`backend/services/data/macro_downloader.py`)
+### Tushare 宏观指标 (`services/data/macro_downloader.py`)
 
 | 指标 | API 调用 | 频率 |
 |------|---------|------|
@@ -55,7 +55,7 @@
 
 ## 三、A股商品期货
 
-### Tushare 期货 (`backend/services/data/commodity_downloader.py`)
+### Tushare 期货 (`services/data/commodity_downloader.py`)
 
 | API 调用 | 说明 |
 |---------|------|
@@ -79,7 +79,7 @@
 
 ## 四、美股市场数据
 
-统一下载器：`backend/services/data/bulk_downloader.py`（旧源 yfinance 保留在 `fmp_downloader.py`，CLI `--old-source` 可回退）
+统一下载器：`services/data/bulk_downloader.py`（旧源 yfinance 保留在 `fmp_downloader.py`，CLI `--old-source` 可回退）
 
 ### 4.1 FMP (Financial Modeling Prep) — 主力数据源
 
@@ -131,7 +131,7 @@ FMP `/api/v4/economic` 和 `/api/v4/treasury` 提供 GDP、CPI、失业率、国
 
 ### FRED（补充）
 
-`backend/services/data/fred_downloader.py`，通过 `fredapi` 库补充 FMP 未覆盖的指标（VIX、TED 利差、DXY 等）。
+`services/data/fred_downloader.py`，通过 `fredapi` 库补充 FMP 未覆盖的指标（VIX、TED 利差、DXY 等）。
 
 | 指标代码 | FRED Series | 说明 | 频率 |
 |----------|-------------|------|------|
@@ -158,7 +158,7 @@ FMP `/api/v4/economic` 和 `/api/v4/treasury` 提供 GDP、CPI、失业率、国
 
 ## 六、券商研报
 
-### AKShare / 东方财富 (`backend/services/data/akshare_downloader.py`)
+### AKShare / 东方财富 (`services/data/akshare_downloader.py`)
 
 | 数据 | API 调用 | 说明 |
 |------|---------|------|
@@ -173,7 +173,7 @@ FMP `/api/v4/economic` 和 `/api/v4/treasury` 提供 GDP、CPI、失业率、国
 
 ## 七、舆情数据
 
-### 政策新闻爬虫 (`backend/services/sentiment/scrapers/`)
+### 政策新闻爬虫 (`services/sentiment/scrapers/`)
 
 16 个爬虫分 5 个层级，由 `SentimentDownloader` 统一调度。
 
@@ -222,7 +222,7 @@ FMP `/api/v4/economic` 和 `/api/v4/treasury` 提供 GDP、CPI、失业率、国
 - **限速**: Twitter 90 req/min，其他网站 600 req/min/域名
 - **存储表**: `policy_article`
 
-### 舆情分析 (`backend/services/sentiment/analyzer.py`)
+### 舆情分析 (`services/sentiment/analyzer.py`)
 
 两层分析管道：
 
