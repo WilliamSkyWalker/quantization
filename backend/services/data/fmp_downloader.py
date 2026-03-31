@@ -923,6 +923,167 @@ class FMPDownloader:
         return self.download_corporate_actions(tickers=tickers)
 
     # ----------------------------------------------------------
+    # EPS Consensus & Earnings Surprise (FMP API)
+    # ----------------------------------------------------------
+
+    def _fmp_api_get(self, endpoint: str, params: dict = None) -> list[dict]:
+        """调用 FMP API，返回 JSON 列表。需要 FMP_API_KEY。"""
+        import requests
+        from backend.services.config import FMP_API_KEY, FMP_RATE_LIMIT
+        if not FMP_API_KEY:
+            logger.warning("FMP_API_KEY 未设置，跳过 FMP API 调用")
+            return []
+        base_url = "https://financialmodelingprep.com/api/v3"
+        url = f"{base_url}/{endpoint}"
+        p = {"apikey": FMP_API_KEY}
+        if params:
+            p.update(params)
+        try:
+            resp = requests.get(url, params=p, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict) and "Error Message" in data:
+                logger.warning(f"FMP API 错误: {data['Error Message']}")
+                return []
+            return []
+        except Exception as e:
+            logger.warning(f"FMP API 请求失败 {endpoint}: {e}")
+            return []
+
+    def download_earnings_surprises(self, tickers: list[str] = None) -> int:
+        """下载盈利惊喜数据（FMP API: actual vs estimated EPS），多线程。"""
+        import time as _time
+        from backend.services.config import FMP_API_KEY
+        if not FMP_API_KEY:
+            logger.info("FMP_API_KEY 未设置，跳过 earnings surprises 下载")
+            return 0
+        if tickers is None:
+            tickers = self.db.get_us_tickers()
+        if not tickers:
+            return 0
+
+        total = 0
+        batch_size = 5  # FMP rate limit friendly
+
+        for i in tqdm(range(0, len(tickers), batch_size), desc="FMP Earnings Surprises"):
+            batch = tickers[i:i + batch_size]
+            with ThreadPoolExecutor(max_workers=batch_size) as pool:
+                futures = {pool.submit(self._download_earnings_surprise_single, t): t for t in batch}
+                for future in as_completed(futures):
+                    try:
+                        total += future.result()
+                    except Exception as e:
+                        logger.warning(f"Earnings surprise 失败 {futures[future]}: {e}")
+            _time.sleep(0.5)  # rate limit buffer
+
+        logger.info(f"FMP earnings surprises 下载完成: {total} 条")
+        return total
+
+    def _download_earnings_surprise_single(self, ticker: str) -> int:
+        """下载单只股票的盈利惊喜历史。"""
+        data = self._fmp_api_get(f"earnings-surprises/{ticker}")
+        if not data:
+            return 0
+
+        records = []
+        for item in data:
+            actual = item.get("actualEarningResult")
+            estimated = item.get("estimatedEarning")
+            if actual is None or estimated is None:
+                continue
+            surprise = actual - estimated
+            surprise_pct = surprise / abs(estimated) if estimated != 0 else None
+            records.append({
+                "ticker": ticker,
+                "date": item["date"],
+                "actual_eps": actual,
+                "estimated_eps": estimated,
+                "surprise": surprise,
+                "surprise_pct": surprise_pct,
+            })
+
+        if records:
+            df = pd.DataFrame(records)
+            self.db.upsert_us_earnings_surprise(df)
+        return len(records)
+
+    def download_eps_estimates(self, tickers: list[str] = None) -> int:
+        """下载分析师 EPS 共识预期（FMP API: forward estimates），多线程。"""
+        import time as _time
+        from backend.services.config import FMP_API_KEY
+        if not FMP_API_KEY:
+            logger.info("FMP_API_KEY 未设置，跳过 EPS estimates 下载")
+            return 0
+        if tickers is None:
+            tickers = self.db.get_us_tickers()
+        if not tickers:
+            return 0
+
+        total = 0
+        batch_size = 5
+
+        for i in tqdm(range(0, len(tickers), batch_size), desc="FMP EPS Estimates"):
+            batch = tickers[i:i + batch_size]
+            with ThreadPoolExecutor(max_workers=batch_size) as pool:
+                futures = {pool.submit(self._download_eps_estimate_single, t): t for t in batch}
+                for future in as_completed(futures):
+                    try:
+                        total += future.result()
+                    except Exception as e:
+                        logger.warning(f"EPS estimate 失败 {futures[future]}: {e}")
+            _time.sleep(0.5)
+
+        logger.info(f"FMP EPS estimates 下载完成: {total} 条")
+        return total
+
+    def _download_eps_estimate_single(self, ticker: str) -> int:
+        """下载单只股票的分析师共识预期（季度）。"""
+        data = self._fmp_api_get(f"analyst-estimates/{ticker}", params={"period": "quarter", "limit": 200})
+        if not data:
+            return 0
+
+        records = []
+        for item in data:
+            eps_avg = item.get("estimatedEpsAvg")
+            if eps_avg is None:
+                continue
+            records.append({
+                "ticker": ticker,
+                "date": item["date"],
+                "eps_avg": eps_avg,
+                "eps_low": item.get("estimatedEpsLow"),
+                "eps_high": item.get("estimatedEpsHigh"),
+                "num_analysts": item.get("numberAnalystsEstimatedEps"),
+                "revenue_avg": item.get("estimatedRevenueAvg"),
+                "net_income_avg": item.get("estimatedNetIncomeAvg"),
+            })
+
+        if records:
+            df = pd.DataFrame(records)
+            self.db.upsert_us_eps_estimate(df)
+        return len(records)
+
+    def update_earnings_surprises(self) -> int:
+        """增量更新 earnings surprises（跳过近 30 天已更新的 ticker）。"""
+        tickers = self._stale_tickers("us_earnings_surprise", days=30)
+        if not tickers:
+            logger.info("FMP earnings surprises 已是最新")
+            return 0
+        logger.info(f"FMP earnings surprises 增量更新: {len(tickers)} 只待更新")
+        return self.download_earnings_surprises(tickers=tickers)
+
+    def update_eps_estimates(self) -> int:
+        """增量更新 EPS estimates（跳过近 7 天已更新的 ticker）。"""
+        tickers = self._stale_tickers("us_eps_estimate", days=7)
+        if not tickers:
+            logger.info("FMP EPS estimates 已是最新")
+            return 0
+        logger.info(f"FMP EPS estimates 增量更新: {len(tickers)} 只待更新")
+        return self.download_eps_estimates(tickers=tickers)
+
+    # ----------------------------------------------------------
     # 全量下载
     # ----------------------------------------------------------
 
@@ -938,6 +1099,8 @@ class FMPDownloader:
         results["analyst"] = self.download_analyst_recommendations()
         results["sec_filings"] = self.download_sec_filings()
         results["corporate_actions"] = self.download_corporate_actions()
+        results["earnings_surprises"] = self.download_earnings_surprises()
+        results["eps_estimates"] = self.download_eps_estimates()
         return results
 
 

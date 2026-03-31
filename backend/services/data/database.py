@@ -52,14 +52,18 @@ logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
 
 
+_FLOAT_MAX = 3.4e38  # MySQL FLOAT upper bound
+
+
 def _sanitize_records(records: list[dict]) -> list[dict]:
-    """将 records 中的 NaN/NaT 替换为 None，避免 pymysql 报错。"""
+    """将 records 中的 NaN/NaT/inf/溢出值替换为 None，避免 pymysql 报错。"""
     for rec in records:
         for k, v in rec.items():
             if v is None:
                 continue
-            if isinstance(v, float) and math.isnan(v):
-                rec[k] = None
+            if isinstance(v, float):
+                if math.isnan(v) or math.isinf(v) or abs(v) > _FLOAT_MAX:
+                    rec[k] = None
             elif isinstance(v, pd.Timestamp) and pd.isna(v):
                 rec[k] = None
     return records
@@ -467,6 +471,8 @@ class USDailyPrice(Base):
     adj_close = Column(Float, comment="复权收盘价")
     volume = Column(Float, comment="成交量")
     change_pct = Column(Float, comment="涨跌幅 %")
+    vwap = Column(Float, comment="VWAP 成交量加权均价")
+    unadjusted_volume = Column(Float, comment="未调整成交量")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     __table_args__ = (
@@ -477,7 +483,7 @@ class USDailyPrice(Base):
 
 
 class USFinancialData(Base):
-    """美股财务数据表（季报）"""
+    """美股财务数据表（季报，含利润表/资产负债表/现金流关键字段）"""
     __tablename__ = "us_financial_data"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -485,16 +491,40 @@ class USFinancialData(Base):
     period = Column(String(10), nullable=False, comment="报告期 (2024-Q3)")
     date = Column(Date, comment="报告期末日")
     filing_date = Column(Date, comment="提交日（防前视偏差）")
+    # --- Income Statement ---
     revenue = Column(Float, comment="营收")
+    cost_of_revenue = Column(Float, comment="营业成本")
+    gross_profit = Column(Float, comment="毛利润")
+    operating_income = Column(Float, comment="营业利润")
     net_income = Column(Float, comment="净利润")
     eps = Column(Float, comment="每股收益")
+    eps_diluted = Column(Float, comment="稀释每股收益")
+    ebitda = Column(Float, comment="EBITDA")
     gross_margin = Column(Float, comment="毛利率")
     operating_margin = Column(Float, comment="营业利润率")
-    roe = Column(Float, comment="ROE")
+    net_margin = Column(Float, comment="净利率")
+    rd_expenses = Column(Float, comment="研发费用")
+    sga_expenses = Column(Float, comment="销售管理费用")
+    weighted_avg_shares = Column(Float, comment="加权平均股数")
+    # --- Balance Sheet ---
     total_assets = Column(Float, comment="总资产")
     total_equity = Column(Float, comment="股东权益")
     total_debt = Column(Float, comment="总负债")
+    total_current_assets = Column(Float, comment="流动资产")
+    total_current_liabilities = Column(Float, comment="流动负债")
+    cash_and_equivalents = Column(Float, comment="现金及等价物")
+    net_receivables = Column(Float, comment="应收账款")
+    inventory = Column(Float, comment="存货")
+    long_term_debt = Column(Float, comment="长期负债")
+    retained_earnings = Column(Float, comment="留存收益")
+    # --- Cash Flow ---
+    operating_cash_flow = Column(Float, comment="经营活动现金流")
+    capital_expenditure = Column(Float, comment="资本支出")
     free_cash_flow = Column(Float, comment="自由现金流")
+    dividends_paid = Column(Float, comment="已付股息")
+    share_repurchased = Column(Float, comment="股票回购金额")
+    # --- Ratios ---
+    roe = Column(Float, comment="ROE")
     pe_ratio = Column(Float, comment="PE")
     pb_ratio = Column(Float, comment="PB")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -643,6 +673,258 @@ class USCorporateAction(Base):
     )
 
 
+class USEarningsSurprise(Base):
+    """美股盈利惊喜表（FMP API: actual vs estimated EPS）"""
+    __tablename__ = "us_earnings_surprise"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="财报公布日")
+    actual_eps = Column(Float, comment="实际 EPS")
+    estimated_eps = Column(Float, comment="市场预期 EPS")
+    surprise = Column(Float, comment="惊喜 = actual - estimated")
+    surprise_pct = Column(Float, comment="惊喜百分比 = surprise / |estimated|")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", name="uq_us_earnings_surprise_ticker_date"),
+        Index("idx_us_earnings_surprise_ticker", "ticker"),
+        Index("idx_us_earnings_surprise_date", "date"),
+    )
+
+
+class USEpsEstimate(Base):
+    """美股 EPS 共识预期表（FMP API: analyst estimates forward）"""
+    __tablename__ = "us_eps_estimate"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="预期对应的财报期末日")
+    eps_avg = Column(Float, comment="EPS 共识均值")
+    eps_low = Column(Float, comment="EPS 最低预期")
+    eps_high = Column(Float, comment="EPS 最高预期")
+    num_analysts = Column(Integer, comment="覆盖分析师数")
+    revenue_avg = Column(Float, comment="Revenue 共识均值")
+    net_income_avg = Column(Float, comment="Net Income 共识均值")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", name="uq_us_eps_estimate_ticker_date"),
+        Index("idx_us_eps_estimate_ticker", "ticker"),
+        Index("idx_us_eps_estimate_date", "date"),
+    )
+
+
+class USInsiderTrade(Base):
+    """美股内部人交易表（FMP API: SEC Form 4）"""
+    __tablename__ = "us_insider_trade"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    filing_date = Column(DateTime, comment="SEC 提交日期")
+    transaction_date = Column(Date, nullable=False, comment="交易日期")
+    reporting_name = Column(String(200), comment="报告人姓名")
+    type_of_owner = Column(String(100), comment="officer/director/10% owner")
+    transaction_type = Column(String(20), comment="P-Purchase/S-Sale/M-Exempt 等")
+    acquisition_or_disposition = Column(String(5), comment="A=买入/D=卖出")
+    securities_transacted = Column(Float, comment="交易股数")
+    price = Column(Float, comment="交易价格")
+    securities_owned = Column(Float, comment="交易后持有股数")
+    security_name = Column(String(200), comment="证券名称 (Common Stock / RSU 等)")
+    form_type = Column(String(10), comment="表格类型 (4/4A)")
+    link = Column(String(500), comment="SEC 文件链接")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "transaction_date", "reporting_name", "transaction_type",
+                         name="uq_us_insider_ticker_date_name_type"),
+        Index("idx_us_insider_ticker", "ticker"),
+        Index("idx_us_insider_date", "transaction_date"),
+    )
+
+
+class USKeyMetric(Base):
+    """美股季度关键指标表（FMP bulk: key-metrics + ratios）"""
+    __tablename__ = "us_key_metric"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="报告期末日")
+    period = Column(String(10), comment="Q1/Q2/Q3/Q4/FY")
+    # --- Valuation ---
+    market_cap = Column(Float, comment="市值")
+    enterprise_value = Column(Float, comment="企业价值")
+    pe_ratio = Column(Float, comment="PE")
+    pb_ratio = Column(Float, comment="PB")
+    ps_ratio = Column(Float, comment="PS")
+    ev_to_ebitda = Column(Float, comment="EV/EBITDA")
+    ev_to_sales = Column(Float, comment="EV/Sales")
+    earnings_yield = Column(Float, comment="盈利收益率")
+    fcf_yield = Column(Float, comment="自由现金流收益率")
+    dividend_yield = Column(Float, comment="股息率")
+    payout_ratio = Column(Float, comment="分红比例")
+    # --- Profitability ---
+    roe = Column(Float, comment="ROE")
+    roa = Column(Float, comment="ROA")
+    roic = Column(Float, comment="ROIC")
+    gross_profit_margin = Column(Float, comment="毛利率")
+    operating_profit_margin = Column(Float, comment="营业利润率")
+    net_profit_margin = Column(Float, comment="净利率")
+    # --- Per Share ---
+    revenue_per_share = Column(Float, comment="每股营收")
+    net_income_per_share = Column(Float, comment="每股净利润")
+    free_cash_flow_per_share = Column(Float, comment="每股自由现金流")
+    book_value_per_share = Column(Float, comment="每股净资产")
+    cash_per_share = Column(Float, comment="每股现金")
+    # --- Leverage & Liquidity ---
+    current_ratio = Column(Float, comment="流动比率")
+    debt_to_equity = Column(Float, comment="负债/股东权益")
+    debt_to_assets = Column(Float, comment="负债/总资产")
+    interest_coverage = Column(Float, comment="利息覆盖率")
+    net_debt_to_ebitda = Column(Float, comment="净负债/EBITDA")
+    # --- Efficiency ---
+    inventory_turnover = Column(Float, comment="存货周转率")
+    receivables_turnover = Column(Float, comment="应收周转率")
+    capex_to_revenue = Column(Float, comment="Capex/Revenue")
+    sbc_to_revenue = Column(Float, comment="股权激励/Revenue")
+    # --- Quality ---
+    income_quality = Column(Float, comment="收入质量 (OCF/NI)")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", name="uq_us_key_metric_ticker_date"),
+        Index("idx_us_key_metric_ticker", "ticker"),
+        Index("idx_us_key_metric_date", "date"),
+    )
+
+
+class USOptionsFlow(Base):
+    """美股期权异常活动表（Unusual Whales: flow-alerts）"""
+    __tablename__ = "us_options_flow"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    alert_id = Column(String(50), comment="UW alert ID")
+    date = Column(DateTime, nullable=False, comment="时间戳")
+    contract_type = Column(String(10), comment="call/put")
+    strike = Column(Float, comment="行权价")
+    expiry = Column(Date, comment="到期日")
+    premium = Column(Float, comment="权利金总额")
+    volume = Column(Integer, comment="成交量")
+    open_interest = Column(Integer, comment="未平仓合约")
+    sentiment = Column(String(20), comment="bullish/bearish/neutral")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("alert_id", name="uq_us_options_flow_alert_id"),
+        Index("idx_us_options_flow_ticker", "ticker"),
+        Index("idx_us_options_flow_date", "date"),
+    )
+
+
+class USDarkPool(Base):
+    """美股暗池交易表（Unusual Whales: darkpool）"""
+    __tablename__ = "us_dark_pool"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(DateTime, nullable=False, comment="时间戳")
+    price = Column(Float, comment="成交价")
+    size = Column(Float, comment="成交量（股）")
+    notional = Column(Float, comment="名义金额")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        Index("idx_us_dark_pool_ticker", "ticker"),
+        Index("idx_us_dark_pool_date", "date"),
+    )
+
+
+class USCongressTrade(Base):
+    """美股国会交易表（Unusual Whales: congress）"""
+    __tablename__ = "us_congress_trade"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), comment="股票代码")
+    politician = Column(String(200), comment="议员姓名")
+    office = Column(String(100), comment="职位")
+    transaction_date = Column(Date, comment="交易日期")
+    disclosure_date = Column(Date, comment="披露日期")
+    trade_type = Column(String(50), comment="purchase/sale")
+    amount = Column(String(50), comment="金额区间")
+    asset_description = Column(String(500), comment="资产描述")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "politician", "transaction_date", "trade_type",
+                         name="uq_us_congress_trade"),
+        Index("idx_us_congress_ticker", "ticker"),
+        Index("idx_us_congress_date", "transaction_date"),
+    )
+
+
+class USNews(Base):
+    """美股新闻表（Massive + Unusual Whales）"""
+    __tablename__ = "us_news"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String(20), nullable=False, comment="massive/uw")
+    title = Column(String(1000), comment="标题")
+    url = Column(String(500), comment="链接")
+    published_at = Column(DateTime, comment="发布时间")
+    tickers = Column(String(500), comment="相关 ticker（逗号分隔）")
+    summary = Column(Text, comment="摘要")
+    sentiment = Column(String(20), comment="positive/negative/neutral")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("source", "url", name="uq_us_news_source_url"),
+        Index("idx_us_news_published", "published_at"),
+    )
+
+
+class USDailyRatio(Base):
+    """美股日频估值比率表（Fiscal.ai: daily-ratios）"""
+    __tablename__ = "us_daily_ratio"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="日期")
+    pe_ratio = Column(Float, comment="PE")
+    pb_ratio = Column(Float, comment="PB")
+    ps_ratio = Column(Float, comment="PS")
+    ev_to_ebitda = Column(Float, comment="EV/EBITDA")
+    dividend_yield = Column(Float, comment="股息率")
+    market_cap = Column(Float, comment="市值")
+    enterprise_value = Column(Float, comment="企业价值")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", name="uq_us_daily_ratio_ticker_date"),
+        Index("idx_us_daily_ratio_ticker", "ticker"),
+        Index("idx_us_daily_ratio_date", "date"),
+    )
+
+
+class USShortInterest(Base):
+    """美股空头数据表（Massive: short-interest）"""
+    __tablename__ = "us_short_interest"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="日期")
+    short_interest = Column(Float, comment="做空股数")
+    short_interest_ratio = Column(Float, comment="做空比例（days to cover）")
+    short_percent_of_float = Column(Float, comment="做空占流通比例")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", name="uq_us_short_interest_ticker_date"),
+        Index("idx_us_short_interest_ticker", "ticker"),
+        Index("idx_us_short_interest_date", "date"),
+    )
+
+
 class Watchlist(Base):
     """自选股表"""
     __tablename__ = "watchlist"
@@ -770,6 +1052,29 @@ class DatabaseManager:
         # 日志中隐藏密码
         safe_url = db_url.split("@")[-1] if "@" in db_url else db_url
         logger.info(f"数据库连接已建立: ...@{safe_url}")
+
+        # PostgreSQL 外部数据源（只读，延迟初始化）
+        self._pg_engine = None
+
+    @property
+    def pg_engine(self):
+        """PostgreSQL 只读连接（延迟初始化）。"""
+        if self._pg_engine is None:
+            from backend.services.config import PG_URL
+            if not PG_URL:
+                raise RuntimeError("PG_URL 未配置，请在 .env 中设置 PG_HOST 等参数")
+            self._pg_engine = create_engine(
+                PG_URL, echo=False, pool_size=5, max_overflow=5, pool_recycle=3600,
+            )
+            safe = PG_URL.split("@")[-1] if "@" in PG_URL else PG_URL
+            logger.info(f"PostgreSQL 连接已建立: ...@{safe}")
+        return self._pg_engine
+
+    def pg_query(self, sql: str, params: dict = None) -> "pd.DataFrame":
+        """从 PostgreSQL 外部数据源执行只读查询。"""
+        import pandas as pd
+        with self.pg_engine.connect() as conn:
+            return pd.read_sql(text(sql), conn, params=params)
 
     def init_tables(self):
         """
@@ -1962,29 +2267,8 @@ class DatabaseManager:
     # ----------------------------------------------------------
 
     def upsert_us_stock_basic(self, df: pd.DataFrame):
-        """批量写入/更新美股基本信息。"""
-        if df.empty:
-            return
-        records = _sanitize_records(df.to_dict("records"))
-        for record in records:
-            for key, value in record.items():
-                if isinstance(value, float) and pd.isna(value):
-                    record[key] = None
-        with self.get_session() as session:
-            for record in records:
-                existing = session.query(USStockBasic).filter_by(
-                    ticker=record["ticker"]
-                ).first()
-                if existing:
-                    for key, value in record.items():
-                        if key != "ticker" and hasattr(existing, key):
-                            setattr(existing, key, value)
-                else:
-                    session.add(USStockBasic(**{
-                        k: v for k, v in record.items() if hasattr(USStockBasic, k)
-                    }))
-            session.commit()
-        logger.info(f"us_stock_basic: 写入/更新 {len(records)} 条记录")
+        """批量写入/更新美股基本信息（快速 raw SQL）。"""
+        self._fast_bulk_upsert("us_stock_basic", df, ["ticker"])
 
     def get_us_tickers(self, active_only: bool = True) -> list[str]:
         """获取美股代码列表。"""
@@ -2008,364 +2292,208 @@ class DatabaseManager:
                 logger.info(f"us_stock_basic: 标记 {len(rows)} 只非 NASDAQ 100 股票为 inactive")
 
     def bulk_upsert_us_daily_price(self, df: pd.DataFrame):
-        """批量 upsert 美股日线行情（MySQL ON DUPLICATE KEY UPDATE）。"""
-        if df.empty:
-            return
-
-        if "trade_date" in df.columns:
-            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
-
-        df = df.copy()
-        df["updated_at"] = datetime.now()
-
-        is_mysql = not str(self.engine.url).startswith("sqlite")
-
-        if is_mysql:
-            cols = [
-                "ticker", "trade_date", "open", "high", "low", "close",
-                "adj_close", "volume", "change_pct", "updated_at",
-            ]
-            existing_cols = [c for c in cols if c in df.columns]
-            update_cols = [c for c in existing_cols if c not in ("ticker", "trade_date")]
-
-            placeholders = ", ".join([f":{c}" for c in existing_cols])
-            col_names = ", ".join([f"`{c}`" for c in existing_cols])
-            update_clause = ", ".join([f"`{c}` = VALUES(`{c}`)" for c in update_cols])
-
-            sql = text(
-                f"INSERT INTO us_daily_price ({col_names}) VALUES ({placeholders}) "
-                f"ON DUPLICATE KEY UPDATE {update_clause}"
-            )
-
-            records = _sanitize_records(df[existing_cols].to_dict("records"))
-            batch_size = 1000
-            with self.engine.begin() as conn:
-                for i in range(0, len(records), batch_size):
-                    batch = records[i:i + batch_size]
-                    conn.execute(sql, batch)
-            logger.info(f"us_daily_price: 批量upsert {len(records)} 条记录")
-        else:
-            records = _sanitize_records(df.to_dict("records"))
-            with self.get_session() as session:
-                for record in records:
-                    existing = session.query(USDailyPrice).filter_by(
-                        ticker=record["ticker"], trade_date=record["trade_date"],
-                    ).first()
-                    if existing:
-                        for key, value in record.items():
-                            if key not in ("ticker", "trade_date") and hasattr(existing, key):
-                                setattr(existing, key, value)
-                    else:
-                        session.add(USDailyPrice(**{
-                            k: v for k, v in record.items() if hasattr(USDailyPrice, k)
-                        }))
-                session.commit()
-            logger.info(f"us_daily_price: 写入/更新 {len(records)} 条记录")
+        """批量 upsert 美股日线行情（快速 raw SQL）。"""
+        self._fast_bulk_upsert("us_daily_price", df, ["ticker", "trade_date"],
+                               date_cols=["trade_date"])
 
     def upsert_us_financial_data(self, df: pd.DataFrame):
-        """批量写入/更新美股财务数据。"""
-        if df.empty:
-            return
-        for col in ["date", "filing_date"]:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
-        records = _sanitize_records(df.to_dict("records"))
-        for record in records:
-            for key, value in record.items():
-                if value is pd.NaT or (isinstance(value, float) and pd.isna(value)):
-                    record[key] = None
-        with self.get_session() as session:
-            for record in records:
-                existing = session.query(USFinancialData).filter_by(
-                    ticker=record["ticker"], period=record["period"],
-                ).first()
-                if existing:
-                    for key, value in record.items():
-                        if key not in ("ticker", "period") and hasattr(existing, key):
-                            setattr(existing, key, value)
-                else:
-                    session.add(USFinancialData(**{
-                        k: v for k, v in record.items() if hasattr(USFinancialData, k)
-                    }))
-            session.commit()
-        logger.info(f"us_financial_data: 写入/更新 {len(records)} 条记录")
+        """批量写入/更新美股财务数据（快速 raw SQL）。"""
+        self._fast_bulk_upsert("us_financial_data", df, ["ticker", "period"],
+                               date_cols=["date", "filing_date"])
 
     def upsert_us_industry_class(self, df: pd.DataFrame):
-        """批量写入/更新美股行业分类。"""
-        if df.empty:
-            return
-        records = _sanitize_records(df.to_dict("records"))
-        for record in records:
-            for key, value in record.items():
-                if isinstance(value, float) and pd.isna(value):
-                    record[key] = None
-        with self.get_session() as session:
-            for record in records:
-                existing = session.query(USIndustryClass).filter_by(
-                    ticker=record["ticker"]
-                ).first()
-                if existing:
-                    for key, value in record.items():
-                        if key != "ticker" and hasattr(existing, key):
-                            setattr(existing, key, value)
-                else:
-                    session.add(USIndustryClass(**{
-                        k: v for k, v in record.items() if hasattr(USIndustryClass, k)
-                    }))
-            session.commit()
-        logger.info(f"us_industry_class: 写入/更新 {len(records)} 条记录")
+        """批量写入/更新美股行业分类（快速 raw SQL）。"""
+        self._fast_bulk_upsert("us_industry_class", df, ["ticker"])
 
     def bulk_upsert_us_index_daily(self, df: pd.DataFrame):
-        """批量 upsert 美股指数日线。"""
-        if df.empty:
-            return
-
-        if "trade_date" in df.columns:
-            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
-
-        df = df.copy()
-        df["updated_at"] = datetime.now()
-
-        is_mysql = not str(self.engine.url).startswith("sqlite")
-
-        if is_mysql:
-            cols = [
-                "index_code", "trade_date", "open", "high", "low", "close",
-                "volume", "updated_at",
-            ]
-            existing_cols = [c for c in cols if c in df.columns]
-            update_cols = [c for c in existing_cols if c not in ("index_code", "trade_date")]
-
-            placeholders = ", ".join([f":{c}" for c in existing_cols])
-            col_names = ", ".join([f"`{c}`" for c in existing_cols])
-            update_clause = ", ".join([f"`{c}` = VALUES(`{c}`)" for c in update_cols])
-
-            sql = text(
-                f"INSERT INTO us_index_daily ({col_names}) VALUES ({placeholders}) "
-                f"ON DUPLICATE KEY UPDATE {update_clause}"
-            )
-
-            records = _sanitize_records(df[existing_cols].to_dict("records"))
-            batch_size = 1000
-            with self.engine.begin() as conn:
-                for i in range(0, len(records), batch_size):
-                    batch = records[i:i + batch_size]
-                    conn.execute(sql, batch)
-            logger.info(f"us_index_daily: 批量upsert {len(records)} 条记录")
-        else:
-            records = _sanitize_records(df.to_dict("records"))
-            with self.get_session() as session:
-                for record in records:
-                    existing = session.query(USIndexDaily).filter_by(
-                        index_code=record["index_code"], trade_date=record["trade_date"],
-                    ).first()
-                    if existing:
-                        for key, value in record.items():
-                            if key not in ("index_code", "trade_date") and hasattr(existing, key):
-                                setattr(existing, key, value)
-                    else:
-                        session.add(USIndexDaily(**{
-                            k: v for k, v in record.items() if hasattr(USIndexDaily, k)
-                        }))
-                session.commit()
-            logger.info(f"us_index_daily: 写入/更新 {len(records)} 条记录")
+        """批量 upsert 美股指数日线（快速 raw SQL）。"""
+        self._fast_bulk_upsert("us_index_daily", df, ["index_code", "trade_date"],
+                               date_cols=["trade_date"])
 
     def upsert_us_macro_indicator(self, df: pd.DataFrame):
-        """批量 upsert 美股宏观经济指标。"""
-        if df.empty:
-            return
-
-        if "report_date" in df.columns:
-            df = df.copy()
-            df["report_date"] = pd.to_datetime(df["report_date"]).dt.date
-
-        is_mysql = not str(self.engine.url).startswith("sqlite")
-
-        if is_mysql:
-            cols = ["indicator_code", "report_date", "value", "updated_at"]
-            df = df.copy()
-            df["updated_at"] = datetime.now()
-            existing_cols = [c for c in cols if c in df.columns]
-            update_cols = [c for c in existing_cols if c not in ("indicator_code", "report_date")]
-
-            placeholders = ", ".join([f":{c}" for c in existing_cols])
-            col_names = ", ".join([f"`{c}`" for c in existing_cols])
-            update_clause = ", ".join([f"`{c}` = VALUES(`{c}`)" for c in update_cols])
-
-            sql = text(
-                f"INSERT INTO us_macro_indicator ({col_names}) VALUES ({placeholders}) "
-                f"ON DUPLICATE KEY UPDATE {update_clause}"
-            )
-
-            records = _sanitize_records(df[existing_cols].to_dict("records"))
-            batch_size = 1000
-            with self.engine.begin() as conn:
-                for i in range(0, len(records), batch_size):
-                    batch = records[i:i + batch_size]
-                    conn.execute(sql, batch)
-            logger.info(f"us_macro_indicator: 批量upsert {len(records)} 条记录")
-        else:
-            records = _sanitize_records(df.to_dict("records"))
-            with self.get_session() as session:
-                for record in records:
-                    existing = session.query(USMacroIndicator).filter_by(
-                        indicator_code=record["indicator_code"],
-                        report_date=record["report_date"],
-                    ).first()
-                    if existing:
-                        if "value" in record:
-                            existing.value = record["value"]
-                    else:
-                        session.add(USMacroIndicator(**{
-                            k: v for k, v in record.items() if hasattr(USMacroIndicator, k)
-                        }))
-                session.commit()
-            logger.info(f"us_macro_indicator: 写入/更新 {len(records)} 条记录")
+        """批量 upsert 美股宏观经济指标（快速 raw SQL）。"""
+        self._fast_bulk_upsert("us_macro_indicator", df,
+                               ["indicator_code", "report_date"], date_cols=["report_date"])
 
     def bulk_upsert_us_commodity_price(self, df: pd.DataFrame):
-        """批量 upsert 美股商品期货。"""
-        if df.empty:
-            return
-
-        if "trade_date" in df.columns:
-            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
-
-        df = df.copy()
-        df["updated_at"] = datetime.now()
-
-        is_mysql = not str(self.engine.url).startswith("sqlite")
-
-        if is_mysql:
-            cols = [
-                "symbol", "trade_date", "open", "high", "low", "close",
-                "volume", "updated_at",
-            ]
-            existing_cols = [c for c in cols if c in df.columns]
-            update_cols = [c for c in existing_cols if c not in ("symbol", "trade_date")]
-
-            placeholders = ", ".join([f":{c}" for c in existing_cols])
-            col_names = ", ".join([f"`{c}`" for c in existing_cols])
-            update_clause = ", ".join([f"`{c}` = VALUES(`{c}`)" for c in update_cols])
-
-            sql = text(
-                f"INSERT INTO us_commodity_price ({col_names}) VALUES ({placeholders}) "
-                f"ON DUPLICATE KEY UPDATE {update_clause}"
-            )
-
-            records = _sanitize_records(df[existing_cols].to_dict("records"))
-            batch_size = 1000
-            with self.engine.begin() as conn:
-                for i in range(0, len(records), batch_size):
-                    batch = records[i:i + batch_size]
-                    conn.execute(sql, batch)
-            logger.info(f"us_commodity_price: 批量upsert {len(records)} 条记录")
-        else:
-            records = _sanitize_records(df.to_dict("records"))
-            with self.get_session() as session:
-                for record in records:
-                    existing = session.query(USCommodityPrice).filter_by(
-                        symbol=record["symbol"], trade_date=record["trade_date"],
-                    ).first()
-                    if existing:
-                        for key, value in record.items():
-                            if key not in ("symbol", "trade_date") and hasattr(existing, key):
-                                setattr(existing, key, value)
-                    else:
-                        session.add(USCommodityPrice(**{
-                            k: v for k, v in record.items() if hasattr(USCommodityPrice, k)
-                        }))
-                session.commit()
-            logger.info(f"us_commodity_price: 写入/更新 {len(records)} 条记录")
+        """批量 upsert 美股商品期货（快速 raw SQL）。"""
+        self._fast_bulk_upsert("us_commodity_price", df,
+                               ["symbol", "trade_date"], date_cols=["trade_date"])
 
     def upsert_us_analyst_recommendation(self, df: pd.DataFrame):
-        """批量写入/更新美股分析师评级。"""
-        if df.empty:
-            return
-        if "date" in df.columns:
-            df = df.copy()
-            df["date"] = pd.to_datetime(df["date"]).dt.date
-        records = _sanitize_records(df.to_dict("records"))
-        for record in records:
-            for key, value in record.items():
-                if isinstance(value, float) and pd.isna(value):
-                    record[key] = None
-        with self.get_session() as session:
-            for record in records:
-                existing = session.query(USAnalystRecommendation).filter_by(
-                    ticker=record["ticker"],
-                    date=record["date"],
-                    analyst_company=record.get("analyst_company"),
-                ).first()
-                if existing:
-                    for key, value in record.items():
-                        if key not in ("ticker", "date", "analyst_company") and hasattr(existing, key):
-                            setattr(existing, key, value)
-                else:
-                    session.add(USAnalystRecommendation(**{
-                        k: v for k, v in record.items() if hasattr(USAnalystRecommendation, k)
-                    }))
-            session.commit()
-        logger.info(f"us_analyst_recommendation: 写入/更新 {len(records)} 条记录")
+        """批量写入/更新美股分析师评级（快速 raw SQL）。"""
+        self._fast_bulk_upsert("us_analyst_recommendation", df,
+                               ["ticker", "date", "analyst_company"], date_cols=["date"])
 
     def upsert_us_sec_filing(self, df: pd.DataFrame):
-        """批量写入/更新美股 SEC 公告。"""
-        if df.empty:
-            return
-        if "filing_date" in df.columns:
-            df = df.copy()
-            df["filing_date"] = pd.to_datetime(df["filing_date"], errors="coerce").dt.date
-        records = _sanitize_records(df.to_dict("records"))
-        for record in records:
-            for key, value in record.items():
-                if value is pd.NaT or (isinstance(value, float) and pd.isna(value)):
-                    record[key] = None
-        with self.get_session() as session:
-            for record in records:
-                existing = session.query(USSecFiling).filter_by(
-                    ticker=record["ticker"],
-                    filing_date=record["filing_date"],
-                    type=record.get("type"),
-                ).first()
-                if existing:
-                    for key, value in record.items():
-                        if key not in ("ticker", "filing_date", "type") and hasattr(existing, key):
-                            setattr(existing, key, value)
-                else:
-                    session.add(USSecFiling(**{
-                        k: v for k, v in record.items() if hasattr(USSecFiling, k)
-                    }))
-            session.commit()
-        logger.info(f"us_sec_filing: 写入/更新 {len(records)} 条记录")
+        """批量写入/更新美股 SEC 公告（快速 raw SQL）。"""
+        self._fast_bulk_upsert("us_sec_filing", df,
+                               ["ticker", "filing_date", "type"], date_cols=["filing_date"])
 
     def upsert_us_corporate_action(self, df: pd.DataFrame):
-        """批量写入/更新美股公司行动（分红/拆股）。"""
+        """批量写入/更新美股公司行动（快速 raw SQL）。"""
+        self._fast_bulk_upsert("us_corporate_action", df,
+                               ["ticker", "date", "action_type"], date_cols=["date"])
+
+    def upsert_us_earnings_surprise(self, df: pd.DataFrame):
+        """批量写入/更新美股盈利惊喜数据（快速 raw SQL）。"""
+        self._fast_bulk_upsert("us_earnings_surprise", df, ["ticker", "date"], date_cols=["date"])
+
+    def upsert_us_eps_estimate(self, df: pd.DataFrame):
+        """批量写入/更新美股 EPS 共识预期数据（快速 raw SQL）。"""
+        self._fast_bulk_upsert("us_eps_estimate", df, ["ticker", "date"], date_cols=["date"])
+
+    def _fast_bulk_upsert(self, table_name: str, df: pd.DataFrame,
+                          unique_keys: list[str], date_cols: list[str] = None,
+                          datetime_cols: list[str] = None,
+                          batch_size: int = 2000):
+        """通用快速 bulk upsert — MySQL INSERT ... ON DUPLICATE KEY UPDATE。"""
         if df.empty:
+            logger.debug(f"{table_name}: DataFrame 为空，跳过写入")
             return
-        if "date" in df.columns:
-            df = df.copy()
-            df["date"] = pd.to_datetime(df["date"]).dt.date
-        records = _sanitize_records(df.to_dict("records"))
+        df = df.copy()
+        # Date columns → date only, NaT → None
+        for col in (date_cols or []):
+            if col in df.columns:
+                converted = pd.to_datetime(df[col], errors="coerce")
+                df[col] = converted.apply(lambda x: x.date() if pd.notna(x) else None)
+        # Datetime columns → MySQL compatible format (strip T/Z from ISO 8601)
+        for col in (datetime_cols or []):
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+                # Convert to Python datetime (MySQL compatible)
+                df[col] = df[col].apply(lambda x: x.to_pydatetime() if pd.notna(x) else None)
+        # Auto-detect: any remaining string columns with ISO datetime patterns
+        for col in df.columns:
+            if str(df[col].dtype) in ("object", "string", "str") and col not in (date_cols or []):
+                sample = df[col].dropna().head(5)
+                if not sample.empty and sample.astype(str).str.match(r"\d{4}-\d{2}-\d{2}T").any():
+                    df[col] = pd.to_datetime(df[col], errors="coerce")
+                    df[col] = df[col].apply(lambda x: x.to_pydatetime() if pd.notna(x) else None)
+        df["updated_at"] = datetime.now()
+
+        # Only keep columns that exist in the table
+        try:
+            table_cols_df = self.query(f"SHOW COLUMNS FROM `{table_name}`")
+            valid_cols = set(table_cols_df["Field"].tolist())
+        except Exception:
+            valid_cols = set(df.columns)
+        cols = [c for c in df.columns if c in valid_cols and c != "id"]
+        if not cols:
+            logger.warning(f"{table_name}: DataFrame 列 {list(df.columns)} 与表列 {valid_cols} 无交集，跳过")
+            return
+
+        records = _sanitize_records(df[cols].to_dict("records"))
+
+        update_cols = [c for c in cols if c not in unique_keys and c != "id"]
+        placeholders = ", ".join([f":{c}" for c in cols])
+        col_names = ", ".join([f"`{c}`" for c in cols])
+        update_clause = ", ".join([f"`{c}` = VALUES(`{c}`)" for c in update_cols])
+
+        sql = text(
+            f"INSERT INTO `{table_name}` ({col_names}) VALUES ({placeholders}) "
+            f"ON DUPLICATE KEY UPDATE {update_clause}"
+        )
+
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i + batch_size]
+            for attempt in range(3):
+                try:
+                    with self.engine.begin() as conn:
+                        conn.execute(sql, batch)
+                    break
+                except Exception as e:
+                    if "Deadlock" in str(e) and attempt < 2:
+                        import time as _time
+                        _time.sleep(0.5 * (attempt + 1))
+                        continue
+                    raise
+        logger.info(f"{table_name}: 批量upsert {len(records)} 条记录")
+
+    def _bulk_upsert_generic(self, model_class, df: pd.DataFrame, unique_keys: list[str],
+                                date_cols: list[str] = None):
+        """通用批量 upsert — 使用快速 raw SQL。"""
+        self._fast_bulk_upsert(model_class.__tablename__, df, unique_keys, date_cols)
+
+    def upsert_us_insider_trade(self, df: pd.DataFrame):
+        self._bulk_upsert_generic(
+            USInsiderTrade, df,
+            ["ticker", "transaction_date", "reporting_name", "transaction_type"],
+            date_cols=["transaction_date"],
+        )
+
+    def upsert_us_key_metric(self, df: pd.DataFrame):
+        self._bulk_upsert_generic(USKeyMetric, df, ["ticker", "date"], date_cols=["date"])
+
+    def upsert_us_options_flow(self, df: pd.DataFrame):
+        self._fast_bulk_upsert("us_options_flow", df, ["alert_id"],
+                               date_cols=["expiry"], datetime_cols=["date"])
+
+    def upsert_us_dark_pool(self, df: pd.DataFrame):
+        """暗池数据 — bulk insert（append only, 无唯一键）。"""
+        if df.empty:
+            logger.debug("us_dark_pool: DataFrame 为空，跳过写入")
+            return
+        df = df.copy()
+        # Auto-detect ISO datetime strings
+        for col in df.columns:
+            if str(df[col].dtype) in ("object", "string", "str"):
+                sample = df[col].dropna().head(5)
+                if not sample.empty and sample.astype(str).str.match(r"\d{4}-\d{2}-\d{2}T").any():
+                    df[col] = pd.to_datetime(df[col], errors="coerce")
+                    df[col] = df[col].apply(lambda x: x.to_pydatetime() if pd.notna(x) else None)
+        # String numeric fields → float
+        for col in ["price", "size", "notional"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["updated_at"] = datetime.now()
+        # Get valid columns
+        try:
+            table_cols_df = self.query("SHOW COLUMNS FROM us_dark_pool")
+            valid_cols = set(table_cols_df["Field"].tolist())
+        except Exception:
+            valid_cols = set(df.columns)
+        cols = [c for c in df.columns if c in valid_cols and c != "id"]
+        records = _sanitize_records(df[cols].to_dict("records"))
         for record in records:
             for key, value in record.items():
-                if isinstance(value, float) and pd.isna(value):
+                if value is pd.NaT:
                     record[key] = None
-        with self.get_session() as session:
-            for record in records:
-                existing = session.query(USCorporateAction).filter_by(
-                    ticker=record["ticker"],
-                    date=record["date"],
-                    action_type=record.get("action_type"),
-                ).first()
-                if existing:
-                    for key, value in record.items():
-                        if key not in ("ticker", "date", "action_type") and hasattr(existing, key):
-                            setattr(existing, key, value)
-                else:
-                    session.add(USCorporateAction(**{
-                        k: v for k, v in record.items() if hasattr(USCorporateAction, k)
-                    }))
-            session.commit()
-        logger.info(f"us_corporate_action: 写入/更新 {len(records)} 条记录")
+                elif isinstance(value, float) and (pd.isna(value) or value == float('inf') or value == float('-inf')):
+                    record[key] = None
+        placeholders = ", ".join([f":{c}" for c in cols])
+        col_names = ", ".join([f"`{c}`" for c in cols])
+        sql = text(f"INSERT INTO us_dark_pool ({col_names}) VALUES ({placeholders})")
+        for i in range(0, len(records), 2000):
+            batch = records[i:i + 2000]
+            for attempt in range(3):
+                try:
+                    with self.engine.begin() as conn:
+                        conn.execute(sql, batch)
+                    break
+                except Exception as e:
+                    if "Deadlock" in str(e) and attempt < 2:
+                        import time as _time
+                        _time.sleep(0.5)
+                        continue
+                    raise
+        logger.info(f"us_dark_pool: 插入 {len(records)} 条记录")
+
+    def upsert_us_congress_trade(self, df: pd.DataFrame):
+        self._bulk_upsert_generic(
+            USCongressTrade, df,
+            ["ticker", "politician", "transaction_date", "trade_type"],
+            date_cols=["transaction_date", "disclosure_date"],
+        )
+
+    def upsert_us_news(self, df: pd.DataFrame):
+        self._bulk_upsert_generic(USNews, df, ["source", "url"])
+
+    def upsert_us_daily_ratio(self, df: pd.DataFrame):
+        self._bulk_upsert_generic(USDailyRatio, df, ["ticker", "date"], date_cols=["date"])
+
+    def upsert_us_short_interest(self, df: pd.DataFrame):
+        self._bulk_upsert_generic(USShortInterest, df, ["ticker", "date"], date_cols=["date"])
 
     def get_latest_us_trade_date(self, ticker: Optional[str] = None) -> Optional[str]:
         """获取美股日线最新交易日期。"""

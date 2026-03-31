@@ -246,7 +246,7 @@ for ticker in llm_output["affected_tickers"]:
         过滤掉  # LLM 幻觉的非成分股 ticker
 ```
 
-这确保只有实际可交易的成分股才会出现在告警中。验证列表来自 `config.py::US_FALLBACK_TICKERS`（可通过 `.env` 覆盖）。成分股列表通过 `fmp_downloader.py` 从 Wikipedia 抓取 S&P 500 和 NASDAQ 100 页面获取，合并去重后约 530 只。
+这确保只有实际可交易的成分股才会出现在告警中。验证列表来自 `config.py::US_FALLBACK_TICKERS`（可通过 `.env` 覆盖）。成分股列表通过 `bulk_downloader.py` 从 FMP stock-screener API 获取全市场 NYSE+NASDAQ+AMEX 约 13,700 只，含 SP500 + NASDAQ 100 成分及历史变更。
 
 ### 6.4 Prompt 设计
 
@@ -467,7 +467,7 @@ Gamma API → 发现已结算高交易量市场（active=false, closed=true）
 ```
 告警列表 → 提取交易信号 (ticker, direction, confidence, alert_time)
   → 过滤: confidence >= min_confidence
-  → 批量下载股价 (yfinance, batch_size=20)
+  → 批量下载股价 (FMP API / 本地 us_daily_price 表)
   → 逐笔计算:
     1. 入场日期: 告警时间 < 16:00 ET → 当天; ≥ 16:00 ET → 下一交易日
     2. 出场日期: 入场后第 N 个交易日（默认 5 天）
@@ -516,30 +516,21 @@ Gamma API → 发现已结算高交易量市场（active=false, closed=true）
 
 ## 12. 美股数据接入
 
-> 文件: `services/data/fmp_downloader.py`
+> 文件: `services/data/bulk_downloader.py`（新），旧源 `services/data/fmp_downloader.py` 保留
 
 ### 12.1 股票池
 
-**S&P 500 + NASDAQ 100** 合并去重，约 530 只美股：
-
-```
-Wikipedia "List of S&P 500 companies" → ~503 只（NYSE）
-Wikipedia "Nasdaq-100" → 合并新增 ~30 只（NASDAQ）
-去重: S&P 500 已有的 ticker 不重复添加
-兜底: 两页面均失败时使用 US_FALLBACK_TICKERS
-→ Upsert 到 us_stock_basic 表
-→ 不在列表中的旧股票标记为 is_active=0
-```
+**全市场** NYSE+NASDAQ+AMEX 约 13,700 只美股（FMP stock-screener），含 SP500 + NASDAQ 100 成分股及历史变更（幸存者偏差修正）。
 
 ### 12.2 日线行情
 
-通过 yfinance 批量下载日线数据（OHLCV + 复权价），存入 `us_daily_price` 表。
+FMP `historical-price-full` per-ticker 下载（OHLCV + adjClose），存入 `us_daily_price` 表。
 
 ### 12.3 指数与商品
 
 | 类别 | 代码 |
 |------|------|
-| 指数 | ^GSPC (S&P 500), ^IXIC (NASDAQ), ^DJI (Dow Jones) |
+| 指数 | ^GSPC (S&P 500), ^IXIC (NASDAQ), ^DJI (Dow Jones), ^RUI (Russell 1000) |
 | 商品 | GC=F (金), SI=F (银), CL=F (WTI油), BZ=F (布油), NG=F (天然气), HG=F (铜), ZC=F (玉米), ZS=F (大豆), ZW=F (小麦) |
 
 ---
@@ -598,4 +589,4 @@ Wikipedia "Nasdaq-100" → 合并新增 ~30 只（NASDAQ）
 | `websockets` | >=12.0 | CLOB WebSocket 连接 |
 | `requests` | >=2.31.0 | Gamma API HTTP 调用（已有） |
 | `channels` | >=4.0 | Django WebSocket 推送（已有） |
-| `yfinance` | >=0.2.31 | 美股价格数据下载（US Stock P&L 回测） |
+| `yfinance` | >=0.2.31 | 美股价格数据下载（旧源，`--old-source` 回退用） |

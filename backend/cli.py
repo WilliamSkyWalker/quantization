@@ -116,15 +116,153 @@ data_app = typer.Typer(help="数据下载和更新")
 app.add_typer(data_app, name="data")
 
 
+def _clean_tables_for_import(db, source: str, target: str):
+    """导入前清空对应表。"""
+    table_map = {
+        ("fmp", "all"): [
+            "us_stock_basic", "us_industry_class", "us_earnings_surprise",
+            "us_eps_estimate", "us_financial_data", "us_key_metric",
+            "us_daily_price", "us_insider_trade", "us_corporate_action",
+            "us_index_daily", "us_commodity_price", "us_macro_indicator",
+        ],
+        ("fmp", "stock-list"): ["us_stock_basic", "us_industry_class"],
+        ("fmp", "earnings"): ["us_earnings_surprise"],
+        ("fmp", "estimates"): ["us_eps_estimate"],
+        ("fmp", "income"): ["us_financial_data"],
+        ("fmp", "metrics"): ["us_key_metric"],
+        ("fmp", "ratios"): ["us_key_metric"],
+        ("fmp", "prices"): ["us_daily_price"],
+        ("fmp", "profiles"): ["us_industry_class"],
+        ("fmp", "insider"): ["us_insider_trade"],
+        ("fmp", "dividends"): ["us_corporate_action"],
+        ("fmp", "index"): ["us_index_daily"],
+        ("fmp", "commodity"): ["us_commodity_price"],
+        ("fmp", "macro"): ["us_macro_indicator"],
+        ("fmp", "all-ticker"): [
+            "us_daily_price", "us_industry_class", "us_insider_trade", "us_corporate_action",
+            "us_index_daily", "us_commodity_price", "us_macro_indicator",
+        ],
+        ("uw", "all"): ["us_options_flow", "us_dark_pool", "us_congress_trade"],
+        ("uw", "options"): ["us_options_flow"],
+        ("uw", "darkpool"): ["us_dark_pool"],
+        ("uw", "congress"): ["us_congress_trade"],
+        ("uw", "news"): [],  # us_news 按 source 过滤，不全清
+        ("fiscal", "all"): ["us_daily_ratio"],
+        ("fiscal", "ratios"): ["us_daily_ratio"],
+        ("all", "all"): [
+            "us_stock_basic", "us_industry_class", "us_earnings_surprise",
+            "us_eps_estimate", "us_financial_data", "us_key_metric",
+            "us_daily_price", "us_insider_trade", "us_corporate_action",
+            "us_index_daily", "us_commodity_price", "us_macro_indicator",
+            "us_options_flow", "us_dark_pool", "us_congress_trade",
+            "us_daily_ratio",
+        ],
+    }
+    tables = table_map.get((source, target), [])
+    if not tables:
+        return
+
+    console.print(f"[yellow]清空表: {', '.join(tables)}[/yellow]")
+    from sqlalchemy import text as sa_text
+    with db.get_session() as session:
+        for table in tables:
+            try:
+                session.execute(sa_text(f"TRUNCATE TABLE `{table}`"))
+                console.print(f"  [dim]✓ {table} 已清空[/dim]")
+            except Exception as e:
+                console.print(f"  [red]✗ {table} 清空失败: {e}[/red]")
+        # 清 news 按 source 过滤
+        if source == "uw" and target in ("all", "news"):
+            try:
+                session.execute(sa_text("DELETE FROM us_news WHERE source = 'uw'"))
+                console.print("  [dim]✓ us_news (source=uw) 已清空[/dim]")
+            except Exception:
+                pass
+        session.commit()
+
+
+@data_app.command("bulk-import")
+def data_bulk_import(
+    source: str = typer.Option("fmp", help="数据源: fmp, uw, fiscal, all"),
+    target: str = typer.Option("all", help="下载目标 (fmp: all/stock-list/earnings/estimates/income/metrics/ratios/prices/profiles/insider/dividends; uw: all/options/darkpool/congress/news; fiscal: all/ratios)"),
+    start_year: int = typer.Option(1995, help="起始年份 (FMP bulk)"),
+    clean: bool = typer.Option(False, "--clean", help="导入前清空对应表（全量替换旧数据）"),
+):
+    """三家 API 批量导入（FMP/UW/Fiscal.ai）"""
+    db = _get_db()
+    from backend.services.data.bulk_downloader import BulkDownloader
+    dl = BulkDownloader(db)
+
+    if clean:
+        _clean_tables_for_import(db, source, target)
+
+    dispatch = {
+        # FMP
+        ("fmp", "all"): lambda: dl.download_fmp_all_bulk(start_year),
+        ("fmp", "all-ticker"): lambda: dl.download_fmp_all_per_ticker(start_year),
+        ("fmp", "stock-list"): dl.download_fmp_stock_list,
+        ("fmp", "sp500"): dl.download_fmp_index_constituents,
+        ("fmp", "earnings"): lambda: dl.download_fmp_earnings_surprises_bulk(start_year),
+        ("fmp", "estimates"): lambda: dl.download_fmp_eps_estimates_bulk(start_year),
+        ("fmp", "income"): lambda: dl.download_fmp_income_statement_bulk(start_year),
+        ("fmp", "metrics"): lambda: dl.download_fmp_key_metrics_bulk(start_year),
+        ("fmp", "ratios"): lambda: dl.download_fmp_ratios_bulk(start_year),
+        ("fmp", "prices"): lambda: dl._download_fmp_prices_per_ticker(start_year, 2026),
+        ("fmp", "profiles"): dl.download_fmp_profiles,
+        ("fmp", "insider"): dl.download_fmp_insider_trading,
+        ("fmp", "dividends"): dl.download_fmp_dividends_splits,
+        ("fmp", "index"): lambda: dl.download_fmp_index_daily(start_year),
+        ("fmp", "commodity"): lambda: dl.download_fmp_commodity_prices(start_year),
+        ("fmp", "macro"): dl.download_fmp_macro,
+        # Unusual Whales
+        ("uw", "all"): dl.download_uw_all,
+        ("uw", "options"): dl.download_uw_options_flow,
+        ("uw", "darkpool"): dl.download_uw_dark_pool,
+        ("uw", "congress"): dl.download_uw_congress_trades,
+        ("uw", "news"): dl.download_uw_news,
+        # Fiscal.ai
+        ("fiscal", "all"): dl.download_fiscal_all,
+        ("fiscal", "ratios"): dl.download_fiscal_daily_ratios,
+        # 全部
+        ("all", "all"): lambda: dl.download_all(start_year),
+    }
+
+    key = (source, target)
+    if key not in dispatch:
+        console.print(f"[red]未知组合: --source={source} --target={target}[/red]")
+        console.print(f"可选 source: fmp, uw, fiscal, all")
+        raise typer.Exit(1)
+
+    console.print(f"[cyan]批量导入 {source.upper()} {target}...[/cyan]")
+    t0 = time.time()
+    result = dispatch[key]()
+    elapsed = time.time() - t0
+    console.print(f"[green]完成[/green]，耗时 {elapsed:.1f}s，结果: {result}")
+
+
 @data_app.command("download")
 def data_download(
     market: str = typer.Option("cn", help="市场: cn (A股) 或 us (美股)"),
     target: str = typer.Option("all", help="下载目标: all, list, daily, financial, industry, index, macro, analyst, commodity, research"),
+    old_source: bool = typer.Option(False, "--old-source", help="使用旧数据源 (yfinance)"),
 ):
-    """下载数据"""
+    """下载数据（默认使用新 FMP API，--old-source 回退到 yfinance）"""
     db = _get_db()
 
-    if market == "us":
+    if market == "us" and not old_source:
+        from backend.services.data.bulk_downloader import BulkDownloader
+        dl = BulkDownloader(db)
+        dispatch = {
+            "all": lambda: dl.download_fmp_all_bulk(1995),
+            "list": dl.download_fmp_stock_list,
+            "daily": lambda: dl._download_fmp_prices_per_ticker(2015, 2026),
+            "financial": lambda: dl.download_fmp_income_statement_bulk(1995),
+            "industry": dl.download_fmp_profiles,
+            "analyst": lambda: dl.download_fmp_eps_estimates_bulk(1995),
+            "earnings": lambda: dl.download_fmp_earnings_surprises_bulk(1995),
+            "insider": dl.download_fmp_insider_trading,
+        }
+    elif market == "us":
         from backend.services.data.fmp_downloader import FMPDownloader
         dl = FMPDownloader(db)
         dispatch = {
@@ -137,6 +275,8 @@ def data_download(
             "analyst": dl.download_analyst_recommendations,
             "commodity": lambda: dl.download_commodity_prices(),
             "corporate": dl.download_corporate_actions,
+            "earnings": dl.download_earnings_surprises,
+            "estimates": dl.download_eps_estimates,
             "simfin": lambda: _download_simfin(db),
             "edgar": lambda: _download_edgar(db),
             "historical": lambda: _download_historical(db),
@@ -186,20 +326,59 @@ def data_download(
 @data_app.command("update")
 def data_update(
     market: str = typer.Option("cn", help="市场: cn 或 us"),
+    old_source: bool = typer.Option(False, "--old-source", help="使用旧数据源 (yfinance)"),
 ):
     """增量更新数据"""
     db = _get_db()
 
-    if market == "us":
+    if market == "us" and not old_source:
+        # 新数据源：FMP bulk + UW + Fiscal
+        from backend.services.data.bulk_downloader import BulkDownloader
+        from backend.services.data.fred_downloader import FREDDownloader
+        dl = BulkDownloader(db)
+        console.print("[cyan]增量更新美股数据 (FMP + UW + Fiscal)...[/cyan]")
+        t0 = time.time()
+        current_year = time.localtime().tm_year
+        results = {}
+        # FMP bulk: only current year + last year
+        results["earnings"] = dl.download_fmp_earnings_surprises_bulk(current_year - 1, current_year)
+        results["estimates"] = dl.download_fmp_eps_estimates_bulk(current_year - 1, current_year + 3)
+        results["income"] = dl.download_fmp_income_statement_bulk(current_year - 1, current_year)
+        results["metrics"] = dl.download_fmp_key_metrics_bulk(current_year - 1, current_year)
+        # UW: latest flow
+        try:
+            results["uw"] = dl.download_uw_all()
+        except Exception as e:
+            console.print(f"[yellow]UW 更新跳过: {e}[/yellow]")
+        # FRED
+        try:
+            fred = FREDDownloader(db)
+            results["macro"] = fred.update()
+        except Exception as e:
+            console.print(f"[yellow]FRED 更新跳过: {e}[/yellow]")
+        elapsed = time.time() - t0
+        console.print(f"[green]完成[/green] {elapsed:.1f}s — {results}")
+    elif market == "us":
+        # 老数据源 (yfinance)
         from backend.services.data.fmp_downloader import FMPDownloader
         from backend.services.data.fred_downloader import FREDDownloader
         dl = FMPDownloader(db)
-        console.print("[cyan]增量更新美股数据...[/cyan]")
+        console.print("[cyan]增量更新美股数据 (yfinance, old-source)...[/cyan]")
         t0 = time.time()
         n1 = dl.update_daily_prices()
         n2 = dl.update_financial_data()
         n3 = dl.update_index_daily()
         n4 = dl.update_analyst_recommendations()
+        try:
+            n6 = dl.update_earnings_surprises()
+        except Exception as e:
+            console.print(f"[yellow]Earnings surprises 更新跳过: {e}[/yellow]")
+            n6 = 0
+        try:
+            n7 = dl.update_eps_estimates()
+        except Exception as e:
+            console.print(f"[yellow]EPS estimates 更新跳过: {e}[/yellow]")
+            n7 = 0
         try:
             fred = FREDDownloader(db)
             n5 = fred.update()
@@ -207,7 +386,7 @@ def data_update(
             console.print(f"[yellow]FRED 更新跳过: {e}[/yellow]")
             n5 = 0
         elapsed = time.time() - t0
-        console.print(f"[green]完成[/green] {elapsed:.1f}s — daily:{n1}, fin:{n2}, idx:{n3}, analyst:{n4}, macro:{n5}")
+        console.print(f"[green]完成[/green] {elapsed:.1f}s — daily:{n1}, fin:{n2}, idx:{n3}, analyst:{n4}, earnings:{n6}, estimates:{n7}, macro:{n5}")
     else:
         from backend.services.data.downloader import TushareDownloader
         from backend.services.data.updater import FinancialUpdater

@@ -38,6 +38,17 @@ DB_URL = (
     f"?charset=utf8mb4"
 )
 
+# PostgreSQL 外部数据源（只读）
+PG_HOST = os.environ.get("PG_HOST", "")
+PG_PORT = int(os.environ.get("PG_PORT", "5432"))
+PG_USER = os.environ.get("PG_USER", "")
+PG_PASSWORD = os.environ.get("PG_PASSWORD", "")
+PG_DATABASE = os.environ.get("PG_DATABASE", "")
+PG_URL = (
+    f"postgresql+psycopg2://{PG_USER}:{PG_PASSWORD}"
+    f"@{PG_HOST}:{PG_PORT}/{PG_DATABASE}"
+) if PG_HOST else ""
+
 # ============================================================
 # API 配置
 # ============================================================
@@ -493,13 +504,21 @@ TIER_WEIGHTS = {1: 1.0, 2: 0.8, 3: 0.7, 4: 0.5, 5: 0.0, 6: 0.6, 8: 0.8}  # Tier 
 SKIP_ANALYSIS_SOURCES = {"polymarket"}
 
 # ============================================================
-# 美股数据配置（FMP + FRED）
+# 美股数据配置（FMP + Unusual Whales + Fiscal.ai + FRED）
 # ============================================================
 
 FMP_API_KEY = os.environ.get("FMP_API_KEY", "")
+FMP_RATE_LIMIT = int(os.environ.get("FMP_RATE_LIMIT", "700"))  # Premium: 750/min, 留余量
+FMP_BULK_INTERVAL = int(os.environ.get("FMP_BULK_INTERVAL", "15"))  # bulk 端点间隔秒数
+
+UW_API_KEY = os.environ.get("UW_API_KEY", "")  # Unusual Whales
+UW_RATE_LIMIT = int(os.environ.get("UW_RATE_LIMIT", "120"))
+
+FISCAL_API_KEY = os.environ.get("FISCAL_API_KEY", "")
+FISCAL_RATE_LIMIT = int(os.environ.get("FISCAL_RATE_LIMIT", "60"))
+
 FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 US_DATA_START_DATE = os.environ.get("US_DATA_START_DATE", "20150101")
-FMP_RATE_LIMIT = int(os.environ.get("FMP_RATE_LIMIT", "300"))  # 免费版 300 req/min
 
 US_INDEX_SYMBOLS = ["^GSPC", "^IXIC", "^DJI", "^RUI"]  # S&P 500, NASDAQ, Dow, Russell 1000
 US_BENCHMARK_INDEX = os.environ.get("US_BENCHMARK_INDEX", "^RUI")  # 回测基准：Russell 1000

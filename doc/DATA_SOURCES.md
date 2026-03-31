@@ -79,57 +79,76 @@
 
 ## 四、美股市场数据
 
-### yfinance (`backend/services/data/fmp_downloader.py`)
+统一下载器：`backend/services/data/bulk_downloader.py`（旧源 yfinance 保留在 `fmp_downloader.py`，CLI `--old-source` 可回退）
 
-| 数据 | 来源 | 说明 |
-|------|------|------|
-| S&P 500 + NASDAQ 100 成分股列表 | Wikipedia 页面解析 + yfinance 补充 | `pd.read_html` 解析 Wikipedia 表格（S&P 500 ~503 只 + NASDAQ 100 合并去重 ~530 只），yfinance `Ticker.info` 补充市值和 IPO 日期 |
-| 日线行情 | `yf.download()` | OHLCV + 复权收盘价 |
-| 季度财务 | `Ticker.quarterly_income_stmt` / `quarterly_balance_sheet` / `quarterly_cashflow` | 利润表、资产负债表、现金流 |
-| SEC 提交日期 | `Ticker.sec_filings` | 从 10-Q/10-K 的 edgarUrl 匹配报告期末日，获取真实 filing_date；匹配不到时兜底用报告日 |
-| GICS 行业分类 | `Ticker.info` | sector / industry |
-| 分析师评级 | `Ticker.upgrades_downgrades` | 券商升降级 |
-| 公司行动 | `Ticker.dividends` / `Ticker.splits` | 分红、拆股 |
+### 4.1 FMP (Financial Modeling Prep) — 主力数据源
 
-**美股指数** (`config.py: US_INDEX_SYMBOLS`):
-- `^GSPC` (S&P 500)、`^IXIC` (NASDAQ)、`^DJI` (Dow Jones)
+配置：`FMP_API_KEY`（Ultimate $149/月，3000 req/min，bulk 按年独立限流）
 
-**美股商品期货** (`config.py: US_COMMODITY_SYMBOLS`):
-- `GC=F` (黄金)、`SI=F` (白银)、`CL=F` (WTI 原油)、`BZ=F` (布伦特原油)、`NG=F` (天然气)
-- `HG=F` (铜)、`ZC=F` (玉米)、`ZS=F` (大豆)、`ZW=F` (小麦)
+| 数据 | 端点 | 方式 | 表 |
+|------|------|------|-----|
+| 全市场股票列表 | stock-screener | per-ticker | us_stock_basic |
+| SP500 + NASDAQ 100 成分 + 历史变更 | sp500_constituent, nasdaq_constituent + historical | per-ticker | us_stock_basic |
+| 日线行情 | historical-price-full | per-ticker 5/批 | us_daily_price |
+| 季度财报 (IS) | income-statement-bulk | **bulk 按年** 1995+ | us_financial_data |
+| Key Metrics | key-metrics-bulk | **bulk 按年** | us_key_metric |
+| Financial Ratios | ratios-bulk | **bulk 按年** | us_key_metric |
+| Earnings Surprise | earnings-surprises-bulk | **bulk 按年** | us_earnings_surprise |
+| EPS Consensus | analyst-estimates-bulk | **bulk 按年** | us_eps_estimate |
+| Insider Trading (Form 4) | insider-trading (v4) | per-ticker 分页 2003+ | us_insider_trade |
+| GICS 行业 | profile | per-ticker 50/批 | us_industry_class |
+| 分红/拆股 | stock_dividend, stock_split | per-ticker | us_corporate_action |
+| 指数日线 | historical-price-full | per-ticker | us_index_daily |
+| 商品日线 | historical-price-full | per-ticker (GC=F→GCUSD) | us_commodity_price |
+| 宏观经济 | economic (v4), treasury (v4) | per-ticker | us_macro_indicator |
 
-- **起始日期**: `US_DATA_START_DATE`，默认 `20150101`
-- **兜底机制**: Wikipedia 不可用时使用 `US_FALLBACK_TICKERS` 硬编码列表
+### 4.2 Unusual Whales — 替代数据
+
+配置：`UW_API_KEY`（$150/月，100+ 端点）
+
+| 数据 | 端点 | 表 |
+|------|------|-----|
+| 期权异常活动 | /api/option-trades/flow-alerts | us_options_flow |
+| 暗池交易 | /api/darkpool/recent | us_dark_pool |
+| 国会交易 | /api/congress/recent-trades | us_congress_trade |
+| 新闻 | /api/news/headlines | us_news |
+
+### 4.3 Fiscal.ai — 日频估值
+
+配置：`FISCAL_API_KEY`（$99/月）
+
+| 数据 | 端点 | 表 |
+|------|------|-----|
+| 日频 PE/PB/EV | /v1/daily-ratios | us_daily_ratio |
 
 ---
 
 ## 五、美国宏观数据
 
-### FRED (`backend/services/data/fred_downloader.py`)
+### FMP 宏观端点（主力）
 
-通过 `fredapi` 库访问美联储经济数据 (Federal Reserve Economic Data)。
+FMP `/api/v4/economic` 和 `/api/v4/treasury` 提供 GDP、CPI、失业率、国债收益率等主要宏观指标。
+
+### FRED（补充）
+
+`backend/services/data/fred_downloader.py`，通过 `fredapi` 库补充 FMP 未覆盖的指标（VIX、TED 利差、DXY 等）。
 
 | 指标代码 | FRED Series | 说明 | 频率 |
 |----------|-------------|------|------|
 | US_GDP | GDP | 美国 GDP | 季 |
-| US_CPI_YOY | CPIAUCSL | CPI（全城市消费者） | 月 |
-| US_CORE_CPI | CPILFESL | 核心 CPI（剔除食品能源） | 月 |
-| US_PPI | PPIACO | PPI（生产者价格指数） | 月 |
+| US_CPI_YOY | CPIAUCSL | CPI | 月 |
+| US_CORE_CPI | CPILFESL | 核心 CPI | 月 |
+| US_PPI | PPIACO | PPI | 月 |
 | US_UNEMP | UNRATE | 失业率 | 月 |
 | US_NONFARM | PAYEMS | 非农就业人数 | 月 |
 | US_FED_RATE | FEDFUNDS | 联邦基金利率 | 日 |
 | US_M2 | M2SL | M2 货币供应量 | 月 |
-| US_PMI_MFG | MANEMP | 制造业就业（PMI 代理） | 月 |
-| US_RETAIL | RSAFS | 零售销售 | 月 |
-| US_IND_PROD | INDPRO | 工业生产指数 | 月 |
-| US_HOUSING | HOUST | 新屋开工 | 月 |
 | US_10Y | DGS10 | 10 年期美债收益率 | 日 |
 | US_2Y | DGS2 | 2 年期美债收益率 | 日 |
 | US_2Y10Y | T10Y2Y | 10Y-2Y 利差 | 日 |
-| US_TED | TEDRATE | TED 利差 | 日 |
 | US_VIX | VIXCLS | VIX 波动率指数 | 日 |
-| US_DXY | DTWEXBGS | 美元指数（贸易加权） | 日 |
-| US_INIT_CLAIMS | ICSA | 首次申领失业金人数 | 周 |
+| US_DXY | DTWEXBGS | 美元指数 | 日 |
+| US_INIT_CLAIMS | ICSA | 首次申领失业金 | 周 |
 | US_PCE | PCEPI | PCE 价格指数 | 月 |
 
 - **依赖**: `FRED_API_KEY` 环境变量
@@ -224,7 +243,10 @@ LLM 支持两种后端:
 | 变量 | 必需 | 说明 |
 |------|------|------|
 | `TUSHARE_TOKEN` | A 股必需 | Tushare Pro API token |
-| `FRED_API_KEY` | 美股宏观必需 | FRED API key |
+| `FMP_API_KEY` | 美股必需 | FMP Ultimate ($149/月) |
+| `UW_API_KEY` | 美股可选 | Unusual Whales ($150/月) |
+| `FISCAL_API_KEY` | 美股可选 | Fiscal.ai ($99/月) |
+| `FRED_API_KEY` | 美股宏观补充 | FRED API key |
 | `TWITTER_USERNAME` / `TWITTER_EMAIL` / `TWITTER_PASSWORD` | 可选 | Twitter 爬虫登录凭证 |
 | `LLM_PROVIDER` | 可选 | `anthropic` 或 `openai` |
 | `LLM_API_KEY` | 可选 | LLM API key |
@@ -243,14 +265,17 @@ LLM 支持两种后端:
 │  Tushare Pro ──→ 商品期货 (15品种主力合约) ──→ MySQL    │
 │  AKShare ────→ 券商研报 (东方财富) ──→ MySQL            │
 ├─ 美股 ──────────────────────────────────────────────────┤
-│  Wikipedia ──→ S&P 500 + NASDAQ 100 成分股列表（~530只）  │
-│  yfinance ───→ 日线/财务/行业/SEC/分析师/公司行动 ──→ MySQL │
-│  FRED ───────→ 20 项美国宏观指标 ──→ MySQL              │
+│  FMP bulk ───→ 财报/metrics/earnings/estimates (按年 1995+) │
+│  FMP ticker ─→ 行情/行业/insider/分红拆股/指数/商品/宏观  │
+│  FMP ticker ─→ SP500+NASDAQ100 成分 + 历史变更 (~13700只) │
+│  UW ─────────→ 期权flow/暗池/国会交易/新闻 ──→ MySQL    │
+│  Fiscal.ai ──→ 日频 PE/PB/EV ──→ MySQL                 │
+│  FRED ───────→ 宏观指标补充 ──→ MySQL                   │
 ├─ 舆情 ──────────────────────────────────────────────────┤
 │  16 个爬虫 ──→ 政策文章 ──→ MySQL                       │
 │  关键词+LLM ──→ 行业情感分析 ──→ MySQL                  │
 └─────────────────────────────────────────────────────────┘
           ↓
    A股: 因子计算 → 选股 → 回测/模拟交易（详见 A_SHARE_STRATEGY.md）
-   美股: Polymarket 告警 → 事件驱动 P&L 回测（详见 US_SHARE_STRATEGY.md）
+   美股: 25因子多空对冲 + FF5 回归（详见 US_SHARE_STRATEGY.md）
 ```

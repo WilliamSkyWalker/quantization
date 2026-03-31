@@ -1,4 +1,18 @@
 {
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[CLAUDE.md 规范检查] 你刚修改了文件。必须执行：1) grep 检查所有受影响位置，确认零遗漏 2) 用真实数据测试验证，不能只检查语法 3) 立即更新受影响的文档（CLAUDE.md/US_SHARE_STRATEGY.md/DATA_SOURCES.md等） 4) 确认所有 return/continue/break 分支都有日志，禁止静默失败\"}}'",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
   "permissions": {
     "allow": [
       "Bash(touch:*)",
@@ -92,7 +106,8 @@
       "WebFetch(domain:app.simfin.com)",
       "Bash(git stash:*)",
       "Bash(git rm:*)",
-      "Bash(find /Users/daweilun/Documents/quantization/frontend -type f \\\\\\(-name *backtest* -o -name *strategy* \\\\\\))"
+      "Bash(find /Users/daweilun/Documents/quantization/frontend -type f \\\\\\(-name *backtest* -o -name *strategy* \\\\\\))",
+      "Bash(xargs cat:*)"
     ]
   }
 }

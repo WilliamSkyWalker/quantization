@@ -251,7 +251,7 @@ Alpha 依然为负。缩短持仓确实降低了 Beta 幅度，但 Alpha 没有�
 ## 六、数据附录
 
 - P&L 分析：`backend/services/polymarket/polymarket_pnl_analyzer.py`、`a_share_backtester.py`
-- 美股价格来源：本地 `us_daily_price` 表（yfinance 同步）
+- 美股价格来源：本地 `us_daily_price` 表（FMP API 同步）
 - A 股价格来源：本地 `daily_price` 表（Tushare 同步）
 - LLM 分析：`backend/services/polymarket/event_analyzer.py`（支持 Claude / OpenAI）
 - 前端展示：已移除独立页面，Polymarket 仅作为舆情数据源保留在数据管理页

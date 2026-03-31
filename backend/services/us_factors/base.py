@@ -199,7 +199,35 @@ class USFactorBase(ABC):
         cls._static_cache["_bulk_analyst"] = df_ar
         logger.info(f"US 预加载 us_analyst_recommendation: {len(df_ar)} 行, {time.time()-t0:.1f}s")
 
-        # 4. 预加载 us_corporate_action (dividend)
+        # 4. 预加载 us_earnings_surprise
+        t0 = time.time()
+        es_cols = ["ticker", "date", "actual_eps", "estimated_eps", "surprise", "surprise_pct"]
+        es_start = (
+            pd.to_datetime(start_date) - pd.Timedelta(days=180)
+        ).strftime("%Y-%m-%d")
+        df_es = cls._fast_mysql_read(
+            db, es_cols, "us_earnings_surprise",
+            where=f"date >= '{es_start}' AND date <= '{end_date}'",
+            order_by="ticker, date",
+        )
+        if not df_es.empty:
+            df_es["date"] = pd.to_datetime(df_es["date"])
+        cls._static_cache["_bulk_earnings_surprise"] = df_es
+        logger.info(f"US 预加载 us_earnings_surprise: {len(df_es)} 行, {time.time()-t0:.1f}s")
+
+        # 5. 预加载 us_eps_estimate
+        t0 = time.time()
+        ee_cols = ["ticker", "date", "eps_avg", "eps_low", "eps_high", "num_analysts"]
+        df_ee = cls._fast_mysql_read(
+            db, ee_cols, "us_eps_estimate",
+            order_by="ticker, date",
+        )
+        if not df_ee.empty:
+            df_ee["date"] = pd.to_datetime(df_ee["date"])
+        cls._static_cache["_bulk_eps_estimate"] = df_ee
+        logger.info(f"US 预加载 us_eps_estimate: {len(df_ee)} 行, {time.time()-t0:.1f}s")
+
+        # 6. 预加载 us_corporate_action (dividend)
         t0 = time.time()
         ca_cols = ["ticker", "date", "action_type", "value"]
         div_start = (

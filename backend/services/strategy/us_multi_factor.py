@@ -57,6 +57,7 @@ from backend.services.us_factors.analyst import USAnalystRating, USAnalystCovera
 from backend.services.us_factors.accruals import Accruals, BuybackYield
 from backend.services.us_factors.polymarket import PolymarketSent
 from backend.services.us_factors.insider import InsiderNetBuy
+from backend.services.us_factors.earnings import EarningsSurprise, EpsRevision
 from backend.services.us_factors.base import USFactorBase
 from backend.services.us_factors.processor import process_factor, clear_neutralize_cache
 from backend.services.strategy.us_regime import USRegimeDetector
@@ -85,7 +86,7 @@ class USMultiFactorStrategy:
         "growth":    ["NET_PROFIT_YOY", "REVENUE_YOY", "NET_PROFIT_CAGR_3Y"],
         "momentum":  ["MOM_1M", "MOM_3M", "MOM_12M", "REV_5D"],
         "technical": ["TURN_20D", "VOL_20D", "IVOL", "SIZE"],
-        "analyst":   ["US_ANALYST_RATING", "US_ANALYST_COVERAGE"],
+        "analyst":   ["US_ANALYST_RATING", "US_ANALYST_COVERAGE", "EARNINGS_SURPRISE", "EPS_REVISION"],
         "sentiment": ["POLYMARKET_SENT"],
     }
     # Pruned (leave-one-out alpha analysis, 2015-2023):
@@ -135,6 +136,7 @@ class USMultiFactorStrategy:
             # Macro: entire category pruned (截面同值, Δα=-0.25% each)
             # Analyst
             USAnalystRating(db), USAnalystCoverage(db),
+            EarningsSurprise(db), EpsRevision(db),
             # Sentiment
             PolymarketSent(db),
         ]
@@ -608,12 +610,14 @@ class USMultiFactorStrategy:
         # ML scoring blend (if enabled and trained)
         if self._ml_enabled and self._ml_scorer is not None and self._ml_scorer.model is not None:
             try:
-                ml_scores = self._ml_scorer.predict(composite.set_index("ticker").reindex(
-                    composite["ticker"]
-                )[self._ml_scorer.feature_cols])
-                ml_scores = ml_scores.values
+                # Build feature matrix aligned with composite rows
+                feature_df = composite[["ticker"]].copy()
+                for col in self._ml_scorer.feature_cols:
+                    feature_df[col] = composite[col] if col in composite.columns else 0.0
+                ml_scores = self._ml_scorer.predict(
+                    feature_df[self._ml_scorer.feature_cols]
+                ).values
                 linear_scores = composite["score"].values
-                # Blend: (1-α) × linear + α × ML
                 alpha = self._ml_blend_ratio
                 composite["score"] = (1 - alpha) * linear_scores + alpha * ml_scores
                 logger.info(f"ML blend applied: α={alpha:.1f}")
@@ -922,7 +926,10 @@ class USMultiFactorStrategy:
             import os
             max_workers = min(8, os.cpu_count() or 4) if n_dates >= 6 else 1
 
-        if max_workers > 1 and n_dates > 1:
+        # ML training requires sequential execution (model state is shared)
+        if self._ml_enabled and self._ml_scorer is not None:
+            signals = self._generate_signals_sequential(rebalance_dates, cancel_check)
+        elif max_workers > 1 and n_dates > 1:
             signals = self._generate_signals_parallel(rebalance_dates, max_workers, cancel_check)
         else:
             signals = self._generate_signals_sequential(rebalance_dates, cancel_check)
@@ -941,11 +948,41 @@ class USMultiFactorStrategy:
         rebalance_dates: list[str],
         cancel_check: Optional[callable] = None,
     ) -> dict[str, pd.DataFrame]:
-        """Serial signal generation."""
+        """Serial signal generation with rolling ML training."""
+        from backend.services.config import US_ML_RETRAIN_INTERVAL, US_ML_FORWARD_DAYS
+
         signals = {}
-        for dt in rebalance_dates:
+        for i, dt in enumerate(rebalance_dates):
             if cancel_check and cancel_check():
                 raise RuntimeError("Backtest cancelled")
+
+            # Rolling ML training: retrain every N rebalance dates
+            if (
+                self._ml_enabled
+                and self._ml_scorer is not None
+                and i > 0
+                and (i - self._ml_last_train_idx) >= US_ML_RETRAIN_INTERVAL // 20
+                and len(self._ml_factor_history) >= 6
+            ):
+                # train_end = current date - forward_days (prevent look-ahead)
+                dt_ts = pd.to_datetime(dt)
+                train_end = (
+                    dt_ts - pd.Timedelta(days=US_ML_FORWARD_DAYS + 5)
+                ).strftime("%Y-%m-%d")
+                try:
+                    result_ml = self._ml_scorer.train(
+                        self._ml_factor_history, train_end
+                    )
+                    if "error" not in result_ml:
+                        self._ml_last_train_idx = i
+                        logger.info(
+                            f"ML retrained at {dt}: "
+                            f"{result_ml.get('n_samples',0)} samples, "
+                            f"val_corr={result_ml.get('val_corr',0):.3f}"
+                        )
+                except Exception as e:
+                    logger.warning(f"ML training failed at {dt}: {e}")
+
             try:
                 result = self.select_stocks(dt)
                 signals[dt] = result

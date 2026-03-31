@@ -10,13 +10,13 @@
 
 | 策略 | 代码 | 核心理念 | 适用场景 |
 |------|------|---------|---------|
-| **Alpha（多因子多空）** | `us_multi_factor.py` | 23 因子 × 7 大类，两层类别打分，多空对冲 | 追求超额收益 |
+| **Alpha（多因子多空）** | `us_multi_factor.py` | 25 因子 × 7 大类，两层类别打分，多空对冲 | 追求超额收益 |
 | **Beta（Regime 控制）** | `us_beta_strategy.py` | 不做选股，Regime 择时 + 质量筛选等权，吃市场 beta | 追求稳健、低回撤 |
 | **Baseline / Alpha v2** | `us_baseline_strategy.py` | 委托 Alpha 打分 + 月频调仓，开发迭代用 | 策略实验、A/B 对比 |
 
 核心管道：
 ```
-yfinance/SimFin/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline 策略
+FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline 策略
 → 风控调整（Baseline 禁用） → 回测引擎 / 模拟交易
 ```
 
@@ -46,7 +46,7 @@ yfinance/SimFin/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline 
 | 年化波动率 | **8.6%** | ~15% |
 | 年化换手率 | 156% | — |
 
-> **Alpha 策略：** 23 因子 × 7 大类（两层类别打分，纯线性），leave-one-out 分析剪除 6 个有害因子后 FF5 alpha +6.73%（t=2.20）。ML blend（LightGBM）代码已集成但 train() 未在回测流程中调用，当前全部结果为纯线性因子。
+> **Alpha 策略：** 25 因子 × 7 大类（两层类别打分，纯线性）。历史回测（23 因子）leave-one-out 分析剪除 6 个有害因子后 FF5 alpha +6.73%（t=2.20）。新增 EARNINGS_SURPRISE + EPS_REVISION 两因子待回测验证。ML blend（LightGBM）代码已集成但 train() 未在回测流程中调用，当前全部结果为纯线性因子。
 > **Beta 策略：** 不追求选股 alpha，通过四维 Regime 感知动态调仓（牛市高仓位吃 beta，熊市低仓位 + 现金保护）。
 > **幸存者偏差修正：** 股票池含 227 只历史 S&P 500 成分股。
 > **样本外验证：** IC 权重优化经样本外测试证伪（2015-2019 训练 → 2020-2025 alpha≈0），因此回归等权。
@@ -55,62 +55,71 @@ yfinance/SimFin/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline 
 
 ## 二、数据源
 
-### 2.1 行情数据（yfinance）
+三家付费 API 为主数据源（旧源 yfinance/EDGAR/SimFin 保留，CLI `--old-source` 可回退）。
 
-下载器：`backend/services/data/fmp_downloader.py`
+统一下载器：`backend/services/data/bulk_downloader.py`
 
+### 2.1 FMP (Financial Modeling Prep) — 主力数据源
 
-| 数据 | 来源 | 说明 |
+| 数据 | FMP 端点 | 方式 | 说明 |
+|------|----------|------|------|
+| 全市场股票列表 | stock-screener | per-ticker | NYSE+NASDAQ+AMEX 共 ~13,700 只 |
+| SP500 + NASDAQ 100 成分 | sp500_constituent, nasdaq_constituent | per-ticker | 含历史变更（幸存者偏差修正）|
+| 日线行情 | historical-price-full | per-ticker | OHLCV + adjClose，5 ticker/批 |
+| 季度财报 | income-statement-bulk | **bulk 按年** | 全市场 1995+，含 filingDate |
+| Key Metrics | key-metrics-bulk | **bulk 按年** | PE/PB/ROE/EV 等 60+ 指标 |
+| Financial Ratios | ratios-bulk | **bulk 按年** | 60+ 比率 |
+| Earnings Surprise | earnings-surprises-bulk | **bulk 按年** | actual vs estimated EPS, 1995+ |
+| EPS Consensus | analyst-estimates-bulk | **bulk 按年** | 分析师共识预期 |
+| Insider Trading | insider-trading (v4) | per-ticker 分页 | SEC Form 4，2003+ |
+| GICS 行业 | profile | per-ticker 50/批 | sector / industry |
+| 分红/拆股 | stock_dividend, stock_split | per-ticker | 全历史 |
+| 指数日线 | historical-price-full | per-ticker | ^GSPC, ^IXIC, ^DJI, ^RUI |
+| 商品日线 | historical-price-full | per-ticker | 黄金/原油/天然气等（GC=F→GCUSD） |
+| 宏观经济 | economic (v4), treasury (v4) | per-ticker | GDP/CPI/失业率/国债收益率等 |
+
+配置：`FMP_API_KEY`（Ultimate 套餐 $149/月，3000 req/min）
+
+### 2.2 Unusual Whales — 替代数据
+
+| 数据 | 端点 | 说明 |
 |------|------|------|
-| 股票列表 | Wikipedia + yfinance | S&P 500 + NASDAQ 100 成分股 |
-| 日线行情 | `yf.download()` | OHLCV + adj_close，50 ticker/批，8 线程 |
-| 季度财务 | `Ticker.quarterly_*` | 利润表/资产负债表/现金流（最近 4-8 季度）|
-| GICS 行业 | `Ticker.info` | sector / industry |
-| 分析师评级 | `Ticker.upgrades_downgrades` | 券商升降级 |
-| 公司行动 | `Ticker.dividends` / `splits` | 分红、拆股 |
+| 期权异常活动 | /api/option-trades/flow-alerts | 异常权利金、volume spike |
+| 暗池交易 | /api/darkpool/recent | 机构 off-exchange 交易 |
+| 国会交易 | /api/congress/recent-trades | 参议员/众议员股票交易披露 |
+| 新闻 | /api/news/headlines | 带 ticker 关联和情绪标签 |
 
-### 2.2 历史财报（SEC EDGAR + SimFin）
+配置：`UW_API_KEY`（$150/月，100+ 端点）
 
-**SEC EDGAR**（主力）：`backend/services/data/edgar_downloader.py`
+### 2.3 Fiscal.ai — 日频估值
 
-从 SEC XBRL API 下载全量历史季报（2010 年起），每家公司一个 JSON。完全免费，无 API 限制（bulk download），包含关键的 `filed` 日期（SEC 提交日 = 防前视偏差）。XBRL 标签自动映射到标准化字段（Revenue、NetIncomeLoss、Assets、StockholdersEquity 等）。
+| 数据 | 端点 | 说明 |
+|------|------|------|
+| 日频 PE/PB/EV | /v1/daily-ratios | 每日估值比率时序（比季报更及时）|
 
-当前数据：**35,295 条季报**，609 只股票（含历史成分股），2010-2026。
-
-**SimFin**（补充）：`backend/services/data/simfin_downloader.py`
-
-SimFin 免费版提供 5 年历史季报（2020 起），字段标准化程度高，作为 EDGAR 的交叉验证源。
-
-配置：`SIMFIN_API_KEY`（免费注册 https://www.simfin.com）
-
-### 2.3 宏观数据（FRED）
-
-下载器：`backend/services/data/fred_downloader.py`
-
-20 项 FRED 宏观指标：GDP、CPI、PPI、FEDFUNDS、M2、VIX、USD 指数等。
+配置：`FISCAL_API_KEY`（$99/月）
 
 ### 2.4 Fama-French 五因子
 
 下载器：`backend/services/strategy/ff5.py`
 
-从 Kenneth French Data Library 自动下载 FF5 日度因子收益（Mkt-RF, SMB, HML, RMW, CMA, RF），本地 CSV 缓存 30 天。用于回测后的 alpha 回归分析。
+从 Kenneth French Data Library 自动下载 FF5 日度因子收益（Mkt-RF, SMB, HML, RMW, CMA, RF），本地 CSV 缓存 30 天。
 
-### 2.5 历史成分股（幸存者偏差修正）
+### 2.5 FRED 宏观（补充）
 
-代码：`backend/services/data/historical_universe.py`
+下载器：`backend/services/data/fred_downloader.py`
 
-从 Wikipedia S&P 500 变更记录提取 2015 年以来被移除的 227 只股票，加入股票池（标记 `is_active=0`）。下载它们的行情（yfinance）、财报（SEC EDGAR）、行业分类（yfinance info）。回测时按当日是否有交易数据决定是否纳入股票池，实现 Point-in-Time 宇宙。
+20 项 FRED 宏观指标（GDP、CPI、PPI、VIX 等）。FMP 宏观端点已可覆盖大部分，FRED 作为补充/备用。
 
-修正效果：幸存者偏差贡献了约 2-3%/年的虚假 alpha（t-stat 从 2.21 降到 1.69）。
+### 2.6 旧数据源（保留，`--old-source` 回退）
 
-### 2.6 指数与商品
-
-- 指数：^GSPC（S&P 500）、^IXIC（NASDAQ）、^DJI（Dow Jones）、**^RUI（Russell 1000，回测基准）**
-- 商品：GC=F（黄金）、CL=F（原油）、NG=F（天然气）等 9 种
+- yfinance → `backend/services/data/fmp_downloader.py`（类名保留兼容）
+- SEC EDGAR → `backend/services/data/edgar_downloader.py`
+- SimFin → `backend/services/data/simfin_downloader.py`
 
 ---
 
-## 三、因子体系（23 因子 × 7 大类）
+## 三、因子体系（25 因子 × 7 大类）
 
 代码位置：`backend/services/us_factors/`
 
@@ -129,7 +138,7 @@ SimFin 免费版提供 5 年历史季报（2020 起），字段标准化程度�
 | **growth** | 1.0 | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y | 成长性 |
 | **momentum** | 1.0 | MOM_1M, MOM_3M, MOM_12M, REV_5D | 多频率动量+反转 |
 | **technical** | 1.0 | TURN_20D, VOL_20D, IVOL, SIZE | 流动性+波动率+规模 |
-| **analyst** | 1.0 | US_ANALYST_RATING, US_ANALYST_COVERAGE | 分析师共识评级+覆盖度 |
+| **analyst** | 1.0 | US_ANALYST_RATING, US_ANALYST_COVERAGE, EARNINGS_SURPRISE, EPS_REVISION | 分析师评级+覆盖度+盈利惊喜+预期修正 |
 | **sentiment** | 1.0 | POLYMARKET_SENT | Polymarket 预测市场情绪 |
 
 **大类等权（所有权重 1.0），因子内等权。** 不做 IC 引导权重优化。
@@ -314,10 +323,10 @@ Regime strength [0, 1] 线性映射到 equity_pct [10%, 90%]：
 
 代码：`backend/services/strategy/us_baseline_strategy.py`（USBaselineStrategy）
 
-**用途**：Alpha v2 开发迭代框架。委托 `USMultiFactorStrategy` 进行 23 因子打分+选股，替换为月频调仓。也用于 VQM 基线验证（历史，已完成）。
+**用途**：Alpha v2 开发迭代框架。委托 `USMultiFactorStrategy` 进行 25 因子打分+选股，月频调仓。也用于 VQM 基线验证（历史，已完成）。
 
 **当前配置**（Alpha v2 Step 3.5）：
-- 因子打分：委托 USMultiFactorStrategy（23 因子 × 7 大类，两层类别评分）
+- 因子打分：委托 USMultiFactorStrategy（25 因子 × 7 大类，两层类别评分）
 - 选股：USMultiFactorStrategy._select_from_scores（Top-15 long + Bottom-10 short, Softmax）
 - 调仓：月频（每月最后交易日）
 - 风控：引擎层 risk_controls=False（不使用 vol targeting/drawdown response）
@@ -404,7 +413,7 @@ NAV = (cash + Σ(shares × price)) / initial_capital
 |----|------|
 | `us_stock_basic` | 股票基本信息（ticker, market_cap, ipo_date） |
 | `us_daily_price` | 日线行情（OHLCV + adj_close） |
-| `us_financial_data` | 季度财报（SimFin + yfinance） |
+| `us_financial_data` | 季度财报（FMP bulk 1995+） |
 | `us_industry_class` | GICS 行业分类 |
 | `us_index_daily` | 指数日线 |
 | `us_macro_indicator` | FRED 宏观指标 |
@@ -446,7 +455,9 @@ python3 backend/cli.py factor list --market us                     # 因子列�
 python3 backend/cli.py score AAPL --date 2025-01-15                # 单股得分
 python3 backend/cli.py paper status --market us                    # 模拟账户
 python3 backend/cli.py paper trade --market us                     # 执行交易
-python3 backend/cli.py data download --market us --target simfin   # 下载 SimFin 财报
+python3 backend/cli.py data bulk-import --source fmp --target all --start-year 1995  # FMP 全量导入
+python3 backend/cli.py data bulk-import --source uw --target all   # Unusual Whales 全量
+python3 backend/cli.py data download --market us --target simfin --old-source  # SimFin 旧源
 ```
 
 ---
@@ -469,8 +480,11 @@ python3 backend/cli.py data download --market us --target simfin   # 下载 SimF
 | `US_BENCHMARK_INDEX` | `^RUI` | 回测基准（Russell 1000） |
 | `US_REGIME_INDEX` | `^GSPC` | Regime 检测基准（S&P 500） |
 | `US_CATEGORY_WEIGHTS` | 全等权 1.0 | 大类权重（等权，不做 IC 引导优化） |
-| `SIMFIN_API_KEY` | — | SimFin API Key |
-| `FRED_API_KEY` | — | FRED API Key |
+| `FMP_API_KEY` | — | FMP API Key（主数据源） |
+| `UW_API_KEY` | — | Unusual Whales API Key |
+| `FISCAL_API_KEY` | — | Fiscal.ai API Key |
+| `FRED_API_KEY` | — | FRED API Key（宏观补充） |
+| `SIMFIN_API_KEY` | — | SimFin API Key（旧源，`--old-source` 用） |
 
 ---
 
@@ -493,8 +507,8 @@ python3 backend/cli.py data download --market us --target simfin   # 下载 SimF
 | 涨跌停 | ±10% | 无 |
 | 佣金 | 万 7.5 + 印花税 0.1% | 零佣金 |
 | 复权 | `close × adj_factor` | `adj_close` 直接使用 |
-| 因子数 | 30（含舆情） | **23**（7 大类：value/quality/growth/momentum/technical/analyst/sentiment）|
-| 财报来源 | Tushare（ann_date 过滤） | **SEC EDGAR** + SimFin + yfinance（filing_date 过滤 + 45 天缓冲）|
+| 因子数 | 30（含舆情） | **25**（7 大类：value/quality/growth/momentum/technical/analyst/sentiment）|
+| 财报来源 | Tushare（ann_date 过滤） | **FMP** bulk 1995+（filing_date 过滤 + 45 天缓冲）|
 | 宏观指标 | 中国 PMI/SHIBOR/PPI/M2 | 美国 ISM/FEDFUNDS/CPI/VIX |
 | Regime | CSI 300 均线偏离（单维） | **四维复合**（趋势+VIX+利差+拥挤度）+ Credit Veto |
 | 调仓 | 半月频 + 偏离触发 | **纯月频**（偏离触发已删除） |
@@ -587,7 +601,7 @@ Step 3.5 通过 leave-one-out 分析剪除 6 个因子（VOL_PRICE_DIV、RESIDUA
 - **下行保护失效**：下行捕获 99.4%（几乎跟跌），空头对冲未起作用
 - **策略实质**：β≈0.65 的被动指数跟踪器，没有稳健的选股 alpha
 
-**诚实评估**：当前 23 因子体系在行业内缺乏选股能力，样本内 alpha 主要来自行业配置（超配 Tech），此优势在样本外行业轮动模式改变后消失。需要引入真正具有截面区分力的因子（如盈利预期修正 EPS revision）才可能产生可持续的选股 alpha。
+**诚实评估**：原 23 因子体系在行业内缺乏选股能力（已扩展至 25 因子，新增 EARNINGS_SURPRISE + EPS_REVISION 待验证），样本内 alpha 主要来自行业配置（超配 Tech），此优势在样本外行业轮动模式改变后消失。需要引入真正具有截面区分力的因子（如盈利预期修正 EPS revision）才可能产生可持续的选股 alpha。
 
 ### 设计原则
 
