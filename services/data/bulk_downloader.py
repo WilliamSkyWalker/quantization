@@ -1330,6 +1330,171 @@ class BulkDownloader:
         return results
 
     # ==============================================================
+    # Quiver Quantitative
+    # ==============================================================
+
+    def _quiver_get_json(self, path: str) -> list:
+        """Quiver API call。"""
+        from services.config import QUIVER_API_KEY, QUIVER_RATE_LIMIT
+        if not QUIVER_API_KEY:
+            logger.warning("QUIVER_API_KEY 未设置")
+            return []
+        if not hasattr(self, "_quiver_limiter"):
+            self._quiver_limiter = RateLimiter(QUIVER_RATE_LIMIT)
+        self._quiver_limiter.wait()
+        url = f"https://api.quiverquant.com/beta/{path}"
+        headers = {"Authorization": f"Token {QUIVER_API_KEY}", "Accept": "application/json"}
+        resp = _request_with_retry("GET", url, headers=headers, timeout=60)
+        if resp.status_code != 200:
+            logger.warning(f"Quiver {path}: HTTP {resp.status_code}")
+            return []
+        data = resp.json()
+        if not isinstance(data, list):
+            logger.warning(f"Quiver {path}: 非列表响应")
+            return []
+        return data
+
+    def download_quiver_lobbying(self, tickers: list[str] = None) -> int:
+        """Quiver per-ticker: 游说活动 → us_lobbying."""
+        if tickers is None:
+            tickers = self.db.get_us_tickers()
+        if not tickers:
+            logger.warning("download_quiver_lobbying: 无 ticker")
+            return 0
+
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._quiver_get_json(f"historical/lobbying/{ticker}")
+            if not data:
+                logger.debug(f"quiver_lobbying: {ticker} 无数据")
+                return 0
+            records = [{
+                "ticker": item.get("Ticker", ticker),
+                "date": item.get("Date", "")[:10],
+                "amount": pd.to_numeric(item.get("Amount"), errors="coerce"),
+                "client": item.get("Client", ""),
+                "registrant": item.get("Registrant", ""),
+                "issue": item.get("Issue", ""),
+            } for item in data if item.get("Date")]
+            if not records:
+                logger.debug(f"quiver_lobbying: {ticker} 过滤后无有效记录")
+                return 0
+            df = pd.DataFrame(records)
+            df = df.dropna(subset=["ticker", "date"])
+            if not df.empty:
+                self.db.upsert_us_lobbying(df)
+                return len(df)
+            return 0
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures),
+                               desc="Quiver Lobbying"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Lobbying 失败 {futures[future]}: {e}")
+
+        logger.info(f"Quiver lobbying 总计: {total} 条")
+        return total
+
+    def download_quiver_gov_contracts(self, tickers: list[str] = None) -> int:
+        """Quiver per-ticker: 政府合同 → us_gov_contract."""
+        if tickers is None:
+            tickers = self.db.get_us_tickers()
+        if not tickers:
+            logger.warning("download_quiver_gov_contracts: 无 ticker")
+            return 0
+
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._quiver_get_json(f"historical/govcontracts/{ticker}")
+            if not data:
+                logger.debug(f"quiver_gov_contracts: {ticker} 无数据")
+                return 0
+            records = [{
+                "ticker": item.get("Ticker", ticker),
+                "year": item.get("Year"),
+                "quarter": item.get("Qtr"),
+                "amount": pd.to_numeric(item.get("Amount"), errors="coerce"),
+            } for item in data if item.get("Year") and item.get("Qtr")]
+            if not records:
+                logger.debug(f"quiver_gov_contracts: {ticker} 过滤后无有效记录")
+                return 0
+            df = pd.DataFrame(records)
+            df = df.dropna(subset=["ticker", "year", "quarter"])
+            if not df.empty:
+                self.db.upsert_us_gov_contract(df)
+                return len(df)
+            return 0
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures),
+                               desc="Quiver Gov Contracts"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"GovContract 失败 {futures[future]}: {e}")
+
+        logger.info(f"Quiver gov contracts 总计: {total} 条")
+        return total
+
+    def download_quiver_wsb_sentiment(self, tickers: list[str] = None) -> int:
+        """Quiver per-ticker: WallStreetBets 情绪 → us_wsb_sentiment."""
+        if tickers is None:
+            tickers = self.db.get_us_tickers()
+        if not tickers:
+            logger.warning("download_quiver_wsb_sentiment: 无 ticker")
+            return 0
+
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._quiver_get_json(f"historical/wallstreetbets/{ticker}")
+            if not data:
+                logger.debug(f"quiver_wsb: {ticker} 无数据")
+                return 0
+            records = [{
+                "ticker": item.get("Ticker", ticker),
+                "date": item.get("Date", "")[:10],
+                "mentions": item.get("Mentions"),
+                "rank": item.get("Rank"),
+                "sentiment": item.get("Sentiment"),
+            } for item in data if item.get("Date")]
+            if not records:
+                logger.debug(f"quiver_wsb: {ticker} 过滤后无有效记录")
+                return 0
+            df = pd.DataFrame(records)
+            df = df.dropna(subset=["ticker", "date"])
+            if not df.empty:
+                self.db.upsert_us_wsb_sentiment(df)
+                return len(df)
+            return 0
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures),
+                               desc="Quiver WSB Sentiment"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"WSB 失败 {futures[future]}: {e}")
+
+        logger.info(f"Quiver WSB sentiment 总计: {total} 条")
+        return total
+
+    def download_quiver_all(self) -> dict:
+        """Quiver: 全量下载。"""
+        results = {}
+        results["lobbying"] = self.download_quiver_lobbying()
+        results["gov_contracts"] = self.download_quiver_gov_contracts()
+        results["wsb_sentiment"] = self.download_quiver_wsb_sentiment()
+        return results
+
+    # ==============================================================
     # 全量导入调度
     # ==============================================================
 

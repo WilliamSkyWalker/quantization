@@ -230,6 +230,11 @@ def data_bulk_import(
         # Fiscal.ai
         ("fiscal", "all"): dl.download_fiscal_all,
         ("fiscal", "ratios"): dl.download_fiscal_daily_ratios,
+        # Quiver
+        ("quiver", "all"): dl.download_quiver_all,
+        ("quiver", "lobbying"): dl.download_quiver_lobbying,
+        ("quiver", "gov-contracts"): dl.download_quiver_gov_contracts,
+        ("quiver", "wsb"): dl.download_quiver_wsb_sentiment,
         # 全部
         ("all", "all"): lambda: dl.download_all(start_year),
     }

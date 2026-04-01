@@ -10,7 +10,7 @@
 
 | 策略 | 代码 | 核心理念 | 适用场景 |
 |------|------|---------|---------|
-| **Alpha（多因子多空）** | `us_multi_factor.py` | 25 因子 × 7 大类，两层类别打分，多空对冲 | 追求超额收益 |
+| **Alpha（多因子多空）** | `us_multi_factor.py` | 29 因子 × 7 大类，两层类别打分，多空对冲 | 追求超额收益 |
 | **Beta（Regime 控制）** | `us_beta_strategy.py` | 不做选股，Regime 择时 + 质量筛选等权，吃市场 beta | 追求稳健、低回撤 |
 | **Baseline / Alpha v2** | `us_baseline_strategy.py` | 委托 Alpha 打分 + 月频调仓，开发迭代用 | 策略实验、A/B 对比 |
 
@@ -46,7 +46,7 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 | 年化波动率 | **8.6%** | ~15% |
 | 年化换手率 | 156% | — |
 
-> **Alpha 策略：** 25 因子 × 7 大类（两层类别打分，纯线性）。历史回测（23 因子）leave-one-out 分析剪除 6 个有害因子后 FF5 alpha +6.73%（t=2.20）。新增 EARNINGS_SURPRISE + EPS_REVISION 两因子待回测验证。ML blend（LightGBM）代码已集成但 train() 未在回测流程中调用，当前全部结果为纯线性因子。
+> **Alpha 策略：** 29 因子 × 7 大类（两层类别打分，纯线性）。历史回测（23 因子）leave-one-out 分析剪除 6 个有害因子后 FF5 alpha +6.73%（t=2.20）。新增 EARNINGS_SURPRISE + EPS_REVISION 两因子待回测验证。ML blend（LightGBM）代码已集成但 train() 未在回测流程中调用，当前全部结果为纯线性因子。
 > **Beta 策略：** 不追求选股 alpha，通过四维 Regime 感知动态调仓（牛市高仓位吃 beta，熊市低仓位 + 现金保护）。
 > **幸存者偏差修正：** 股票池含 227 只历史 S&P 500 成分股。
 > **样本外验证：** IC 权重优化经样本外测试证伪（2015-2019 训练 → 2020-2025 alpha≈0），因此回归等权。
@@ -119,7 +119,7 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 
 ---
 
-## 三、因子体系（25 因子 × 7 大类）
+## 三、因子体系（29 因子 × 7 大类）
 
 代码位置：`services/us_factors/`
 
@@ -138,8 +138,8 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 | **growth** | 1.0 | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y | 成长性 |
 | **momentum** | 1.0 | MOM_1M, MOM_3M, MOM_12M, REV_5D | 多频率动量+反转 |
 | **technical** | 1.0 | TURN_20D, VOL_20D, IVOL, SIZE | 流动性+波动率+规模 |
-| **analyst** | 1.0 | US_ANALYST_RATING, US_ANALYST_COVERAGE, EARNINGS_SURPRISE, EPS_REVISION | 分析师评级+覆盖度+盈利惊喜+预期修正 |
-| **sentiment** | 1.0 | POLYMARKET_SENT | Polymarket 预测市场情绪 |
+| **analyst** | 1.0 | US_ANALYST_RATING, US_ANALYST_COVERAGE, EARNINGS_SURPRISE, EPS_REVISION, INSIDER_NET_BUY | 分析师评级+覆盖度+盈利惊喜+预期修正+内部人净买入 |
+| **sentiment** | 1.0 | POLYMARKET_SENT, LOBBY_INTENSITY, GOV_CONTRACT, WSB_SENTIMENT | Polymarket 情绪+游说力度+政府合同+WSB 情绪 |
 
 **大类等权（所有权重 1.0），因子内等权。** 不做 IC 引导权重优化。
 
@@ -323,10 +323,10 @@ Regime strength [0, 1] 线性映射到 equity_pct [10%, 90%]：
 
 代码：`services/strategy/us_baseline_strategy.py`（USBaselineStrategy）
 
-**用途**：Alpha v2 开发迭代框架。委托 `USMultiFactorStrategy` 进行 25 因子打分+选股，月频调仓。也用于 VQM 基线验证（历史，已完成）。
+**用途**：Alpha v2 开发迭代框架。委托 `USMultiFactorStrategy` 进行 29 因子打分+选股，月频调仓。也用于 VQM 基线验证（历史，已完成）。
 
 **当前配置**（Alpha v2 Step 3.5）：
-- 因子打分：委托 USMultiFactorStrategy（25 因子 × 7 大类，两层类别评分）
+- 因子打分：委托 USMultiFactorStrategy（29 因子 × 7 大类，两层类别评分）
 - 选股：USMultiFactorStrategy._select_from_scores（Top-15 long + Bottom-10 short, Softmax）
 - 调仓：月频（每月最后交易日）
 - 风控：引擎层 risk_controls=False（不使用 vol targeting/drawdown response）
@@ -601,7 +601,7 @@ Step 3.5 通过 leave-one-out 分析剪除 6 个因子（VOL_PRICE_DIV、RESIDUA
 - **下行保护失效**：下行捕获 99.4%（几乎跟跌），空头对冲未起作用
 - **策略实质**：β≈0.65 的被动指数跟踪器，没有稳健的选股 alpha
 
-**诚实评估**：原 23 因子体系在行业内缺乏选股能力（已扩展至 25 因子，新增 EARNINGS_SURPRISE + EPS_REVISION 待验证），样本内 alpha 主要来自行业配置（超配 Tech），此优势在样本外行业轮动模式改变后消失。需要引入真正具有截面区分力的因子（如盈利预期修正 EPS revision）才可能产生可持续的选股 alpha。
+**诚实评估**：原 23 因子体系在行业内缺乏选股能力（已扩展至 29 因子，新增 EARNINGS_SURPRISE + EPS_REVISION + INSIDER_NET_BUY + LOBBY_INTENSITY + GOV_CONTRACT + WSB_SENTIMENT），样本内 alpha 主要来自行业配置（超配 Tech），此优势在样本外行业轮动模式改变后消失。需要引入真正具有截面区分力的因子（如盈利预期修正 EPS revision）才可能产生可持续的选股 alpha。
 
 ### 设计原则
 

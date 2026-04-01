@@ -517,6 +517,12 @@ UW_RATE_LIMIT = int(os.environ.get("UW_RATE_LIMIT", "120"))
 FISCAL_API_KEY = os.environ.get("FISCAL_API_KEY", "")
 FISCAL_RATE_LIMIT = int(os.environ.get("FISCAL_RATE_LIMIT", "60"))
 
+QUIVER_API_KEY = os.environ.get("QUIVER_API_KEY", "")
+QUIVER_RATE_LIMIT = int(os.environ.get("QUIVER_RATE_LIMIT", "60"))
+
+ALPHAVANTAGE_API_KEY = os.environ.get("ALPHAVANTAGE_API_KEY", "")
+ALPHAVANTAGE_RATE_LIMIT = int(os.environ.get("ALPHAVANTAGE_RATE_LIMIT", "150"))  # Premium 150: 150/min
+
 FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 US_DATA_START_DATE = os.environ.get("US_DATA_START_DATE", "20150101")
 

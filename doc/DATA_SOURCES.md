@@ -122,6 +122,16 @@
 |------|------|-----|
 | 日频 PE/PB/EV | /v1/daily-ratios | us_daily_ratio |
 
+### 4.4 Quiver Quantitative — 政治/另类数据
+
+配置：`QUIVER_API_KEY`（Hobbyist $10/月）
+
+| 数据 | 端点 | 表 |
+|------|------|-----|
+| 游说活动 | historical/lobbying/{ticker} | us_lobbying |
+| 政府合同 | historical/govcontracts/{ticker} | us_gov_contract |
+| WSB 情绪 | historical/wallstreetbets/{ticker} | us_wsb_sentiment |
+
 ---
 
 ## 五、美国宏观数据
@@ -247,6 +257,7 @@ LLM 支持两种后端:
 | `FMP_API_KEY` | 美股必需 | FMP Ultimate ($149/月) |
 | `UW_API_KEY` | 美股可选 | Unusual Whales ($150/月) |
 | `FISCAL_API_KEY` | 美股可选 | Fiscal.ai ($99/月) |
+| `QUIVER_API_KEY` | 美股可选 | Quiver Quantitative ($10/月) |
 | `FRED_API_KEY` | 美股宏观补充 | FRED API key |
 | `TWITTER_USERNAME` / `TWITTER_EMAIL` / `TWITTER_PASSWORD` | 可选 | Twitter 爬虫登录凭证 |
 | `LLM_PROVIDER` | 可选 | `anthropic` 或 `openai` |
@@ -266,11 +277,12 @@ LLM 支持两种后端:
 │  Tushare Pro ──→ 商品期货 (15品种主力合约) ──→ MySQL    │
 │  AKShare ────→ 券商研报 (东方财富) ──→ MySQL            │
 ├─ 美股 ──────────────────────────────────────────────────┤
-│  FMP bulk ───→ 财报/metrics/earnings/estimates (按年 1995+) │
-│  FMP ticker ─→ 行情/行业/insider/分红拆股/指数/商品/宏观  │
-│  FMP ticker ─→ SP500+NASDAQ100 成分 + 历史变更 (~13700只) │
+│  FMP bulk ───→ metrics/earnings/estimates (按年 1995+)     │
+│  FMP ticker ─→ 季度财报(IS+BS+CF)/行情/行业/insider/分析师 │
+│  FMP ticker ─→ 分红拆股/指数/商品/宏观/SP500+NQ100成分    │
 │  UW ─────────→ 期权flow/暗池/国会交易/新闻 ──→ MySQL    │
 │  Fiscal.ai ──→ 日频 PE/PB/EV ──→ MySQL                 │
+│  Quiver ─────→ 游说活动/政府合同/WSB情绪 ──→ MySQL      │
 │  FRED ───────→ 宏观指标补充 ──→ MySQL                   │
 ├─ 舆情 ──────────────────────────────────────────────────┤
 │  16 个爬虫 ──→ 政策文章 ──→ MySQL                       │
@@ -278,5 +290,5 @@ LLM 支持两种后端:
 └─────────────────────────────────────────────────────────┘
           ↓
    A股: 因子计算 → 选股 → 回测/模拟交易（详见 A_SHARE_STRATEGY.md）
-   美股: 25因子多空对冲 + FF5 回归（详见 US_SHARE_STRATEGY.md）
+   美股: 29因子多空对冲 + FF5 回归（详见 US_SHARE_STRATEGY.md）
 ```

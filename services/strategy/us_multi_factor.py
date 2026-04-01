@@ -56,6 +56,7 @@ from services.us_factors.technical import Turn20D, Vol20D, Ivol, Size
 from services.us_factors.analyst import USAnalystRating, USAnalystCoverage
 from services.us_factors.accruals import Accruals, BuybackYield
 from services.us_factors.polymarket import PolymarketSent
+from services.us_factors.quiver import LobbyIntensity, GovContract, WsbSentiment
 from services.us_factors.insider import InsiderNetBuy
 from services.us_factors.earnings import EarningsSurprise, EpsRevision
 from services.us_factors.base import USFactorBase
@@ -86,8 +87,8 @@ class USMultiFactorStrategy:
         "growth":    ["NET_PROFIT_YOY", "REVENUE_YOY", "NET_PROFIT_CAGR_3Y"],
         "momentum":  ["MOM_1M", "MOM_3M", "MOM_12M", "REV_5D"],
         "technical": ["TURN_20D", "VOL_20D", "IVOL", "SIZE"],
-        "analyst":   ["US_ANALYST_RATING", "US_ANALYST_COVERAGE", "EARNINGS_SURPRISE", "EPS_REVISION"],
-        "sentiment": ["POLYMARKET_SENT"],
+        "analyst":   ["US_ANALYST_RATING", "US_ANALYST_COVERAGE", "EARNINGS_SURPRISE", "EPS_REVISION", "INSIDER_NET_BUY"],
+        "sentiment": ["POLYMARKET_SENT", "LOBBY_INTENSITY", "GOV_CONTRACT", "WSB_SENTIMENT"],
     }
     # Pruned (leave-one-out alpha analysis, 2015-2023):
     #   RESIDUAL_MOM: Δα=-3.46% (redundant with MOM_1M/3M/12M, noisier)
@@ -136,9 +137,10 @@ class USMultiFactorStrategy:
             # Macro: entire category pruned (截面同值, Δα=-0.25% each)
             # Analyst
             USAnalystRating(db), USAnalystCoverage(db),
-            EarningsSurprise(db), EpsRevision(db),
+            EarningsSurprise(db), EpsRevision(db), InsiderNetBuy(db),
             # Sentiment
             PolymarketSent(db),
+            LobbyIntensity(db), GovContract(db), WsbSentiment(db),
         ]
 
         # 等权（不做 IC 引导权重优化——样本外验证已证明 IC 权重是数据窥探）

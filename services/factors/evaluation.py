@@ -502,7 +502,7 @@ class FactorEvaluator:
         if self.market == "us":
             from services.us_factors import (
                 value, quality, growth, momentum, technical,
-                analyst, accruals, polymarket, earnings, insider,
+                analyst, accruals, polymarket, earnings, insider, quiver,
             )
             return {
                 "EP": value.EP, "BP": value.BP, "DIV_YIELD": value.DivYield,
@@ -524,6 +524,9 @@ class FactorEvaluator:
                 "EARNINGS_SURPRISE": earnings.EarningsSurprise,
                 "EPS_REVISION": earnings.EpsRevision,
                 "INSIDER_NET_BUY": insider.InsiderNetBuy,
+                "LOBBY_INTENSITY": quiver.LobbyIntensity,
+                "GOV_CONTRACT": quiver.GovContract,
+                "WSB_SENTIMENT": quiver.WsbSentiment,
             }
         else:
             from services.factors import (

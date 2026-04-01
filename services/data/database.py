@@ -925,6 +925,62 @@ class USShortInterest(Base):
     )
 
 
+class USLobbyingActivity(Base):
+    """美股游说活动表（Quiver: lobbying）"""
+    __tablename__ = "us_lobbying"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="披露日期")
+    amount = Column(Float, comment="游说金额")
+    client = Column(String(300), comment="客户（委托方）")
+    registrant = Column(String(300), comment="游说公司")
+    issue = Column(Text, comment="议题分类")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", "registrant", name="uq_us_lobbying"),
+        Index("idx_us_lobbying_ticker", "ticker"),
+        Index("idx_us_lobbying_date", "date"),
+    )
+
+
+class USGovContract(Base):
+    """美股政府合同表（Quiver: govcontracts）"""
+    __tablename__ = "us_gov_contract"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    year = Column(Integer, nullable=False, comment="财年")
+    quarter = Column(Integer, nullable=False, comment="季度")
+    amount = Column(Float, comment="合同金额")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "year", "quarter", name="uq_us_gov_contract"),
+        Index("idx_us_gov_contract_ticker", "ticker"),
+    )
+
+
+class USWsbSentiment(Base):
+    """美股 WallStreetBets 情绪表（Quiver: wallstreetbets）"""
+    __tablename__ = "us_wsb_sentiment"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="日期")
+    mentions = Column(Integer, comment="提及次数")
+    rank = Column(Integer, comment="排名")
+    sentiment = Column(Float, comment="情绪分数")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", name="uq_us_wsb_sentiment"),
+        Index("idx_us_wsb_ticker", "ticker"),
+        Index("idx_us_wsb_date", "date"),
+    )
+
+
 class Watchlist(Base):
     """自选股表"""
     __tablename__ = "watchlist"
@@ -2514,6 +2570,15 @@ class DatabaseManager:
 
     def upsert_us_short_interest(self, df: pd.DataFrame):
         self._bulk_upsert_generic(USShortInterest, df, ["ticker", "date"], date_cols=["date"])
+
+    def upsert_us_lobbying(self, df: pd.DataFrame):
+        self._bulk_upsert_generic(USLobbyingActivity, df, ["ticker", "date", "registrant"], date_cols=["date"])
+
+    def upsert_us_gov_contract(self, df: pd.DataFrame):
+        self._bulk_upsert_generic(USGovContract, df, ["ticker", "year", "quarter"])
+
+    def upsert_us_wsb_sentiment(self, df: pd.DataFrame):
+        self._bulk_upsert_generic(USWsbSentiment, df, ["ticker", "date"], date_cols=["date"])
 
     def get_latest_us_trade_date(self, ticker: Optional[str] = None) -> Optional[str]:
         """获取美股日线最新交易日期。"""
