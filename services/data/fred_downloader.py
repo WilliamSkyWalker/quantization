@@ -97,6 +97,7 @@ class FREDDownloader:
     def update(self) -> dict[str, int]:
         """增量更新（从 DB 各指标最新日期开始）。"""
         if not self.fred:
+            logger.warning("update: FRED 客户端不可用，跳过增量更新")
             return {}
 
         end_date = datetime.now().strftime("%Y-%m-%d")
@@ -115,7 +116,8 @@ class FREDDownloader:
                         start = str(latest)
                     else:
                         start = self._start_date
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"update: 查询 {indicator_code} 最新日期失败: {e}")
                     start = self._start_date
 
                 series = self.fred.get_series(
@@ -124,6 +126,7 @@ class FREDDownloader:
                     observation_end=end_date,
                 )
                 if series is None or series.empty:
+                    logger.debug(f"update: {indicator_code} 增量数据为空")
                     results[indicator_code] = 0
                     continue
 

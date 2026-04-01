@@ -61,6 +61,7 @@ class CCTVScraper(BaseScraper):
                 continue
 
             if df is None or df.empty:
+                logger.debug(f"scrape_pages: [{self.source}] {date_str} 无新闻联播数据，跳过")
                 continue
 
             day_articles = []
@@ -69,6 +70,7 @@ class CCTVScraper(BaseScraper):
                 content = str(row.get("content", "")).strip()
 
                 if not title:
+                    logger.debug(f"scrape_pages: [{self.source}] {date_str} 某条新闻标题为空，跳过")
                     continue
 
                 # 生成唯一 URL（基于日期和标题哈希）
@@ -80,6 +82,7 @@ class CCTVScraper(BaseScraper):
                 content_hash = self._compute_content_hash(title, target_date.strftime("%Y-%m-%d"))
 
                 if content_hash in seen_hashes:
+                    logger.debug(f"scrape_pages: [{self.source}] 重复内容哈希，跳过: {title[:30]}")
                     continue
                 seen_hashes.add(content_hash)
 

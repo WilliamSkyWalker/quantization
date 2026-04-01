@@ -88,6 +88,7 @@ class FF5Analyzer:
         for line in lines[data_start:]:
             parts = [p.strip() for p in line.split(",")]
             if len(parts) < 7 or not parts[0].isdigit():
+                logger.debug("_load_factors: 遇到非数据行，停止解析")
                 break
             try:
                 date = pd.to_datetime(parts[0], format="%Y%m%d")
@@ -102,6 +103,7 @@ class FF5Analyzer:
                     "HML": hml, "RMW": rmw, "CMA": cma, "RF": rf,
                 })
             except (ValueError, IndexError):
+                logger.debug(f"_load_factors: 解析 FF5 数据行失败，跳过")
                 continue
 
         if not data_rows:
@@ -138,6 +140,7 @@ class FF5Analyzer:
         """
         ff5 = self._load_factors()
         if ff5.empty:
+            logger.warning("analyze: FF5 因子数据为空，无法执行回归")
             return {"error": "FF5 data not available"}
 
         # 策略日收益率
@@ -151,6 +154,7 @@ class FF5Analyzer:
         merged = merged.dropna()
 
         if len(merged) < 30:
+            logger.warning(f"analyze: 重叠数据不足({len(merged)}/30)，无法执行 FF5 回归")
             return {"error": f"Insufficient overlapping data: {len(merged)} days"}
 
         # 超额收益 = 策略收益 - 无风险利率
@@ -172,6 +176,7 @@ class FF5Analyzer:
             quarterly = []
             for q, grp in merged.groupby("quarter"):
                 if len(grp) < 15:
+                    logger.debug(f"analyze: 季度 {q} 数据不足({len(grp)}/15)，跳过")
                     continue
                 qreg = self._run_regression(grp)
                 qreg["period"] = str(q)

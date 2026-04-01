@@ -154,6 +154,7 @@ class USBaselineStrategy:
     def _softmax(scores: np.ndarray) -> np.ndarray:
         tau = USBaselineStrategy.WEIGHT_TAU
         if len(scores) == 0:
+            logger.debug("_softmax: 输入得分为空，返回空数组")
             return np.array([])
         shifted = scores - scores.max()
         exp_s = np.exp(shifted / tau) if tau > 0 else np.ones(len(scores))
@@ -171,6 +172,7 @@ class USBaselineStrategy:
             params={"start": start_date, "end": end_date},
         )
         if df.empty:
+            logger.debug(f"_get_month_end_dates: {start_date}~{end_date} 无交易日数据，返回空列表")
             return []
         df["trade_date"] = pd.to_datetime(df["trade_date"])
         df["ym"] = df["trade_date"].dt.to_period("M")

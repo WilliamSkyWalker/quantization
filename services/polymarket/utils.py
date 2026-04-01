@@ -1,5 +1,9 @@
 """Polymarket 工具函数。"""
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # 排除的分类（回测/下载时自动 is_excluded=True）
 EXCLUDED_CATEGORIES = {"sports", "pop-culture", "crypto"}
 

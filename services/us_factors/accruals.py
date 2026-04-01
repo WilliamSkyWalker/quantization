@@ -33,6 +33,7 @@ class Accruals(USFactorBase):
 
         bulk_fin = self._static_cache.get("_bulk_financial")
         if bulk_fin is None or bulk_fin.empty:
+            logger.debug("Accruals.compute: 无预加载财务数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = bulk_fin[bulk_fin["filing_date"] <= date_ts].copy()
@@ -58,6 +59,7 @@ class Accruals(USFactorBase):
 
             if pd.isna(ni_ttm) or pd.isna(fcf_ttm) or pd.isna(total_assets) or abs(total_assets) < 1e-6:
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"Accruals.compute: {ticker} 财务数据缺失或总资产为零，跳过")
                 continue
 
             accrual = (ni_ttm - fcf_ttm) / abs(total_assets)
@@ -78,6 +80,7 @@ class BuybackYield(USFactorBase):
 
         bulk_fin = self._static_cache.get("_bulk_financial")
         if bulk_fin is None or bulk_fin.empty:
+            logger.debug("BuybackYield.compute: 无预加载财务数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = bulk_fin[bulk_fin["filing_date"] <= date_ts].copy()
@@ -111,11 +114,13 @@ class BuybackYield(USFactorBase):
         for ticker, grp in df.groupby("ticker"):
             if len(grp) < 2:
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"BuybackYield.compute: {ticker} 季度数据不足2条，跳过")
                 continue
 
             mc = mktcap_map.get(ticker)
             if not mc or mc <= 0:
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"BuybackYield.compute: {ticker} 市值无效，跳过")
                 continue
 
             # TTM net income
@@ -126,6 +131,7 @@ class BuybackYield(USFactorBase):
 
             if pd.isna(eq_latest) or pd.isna(eq_oldest) or pd.isna(ni_ttm):
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"BuybackYield.compute: {ticker} 权益或净利润数据缺失，跳过")
                 continue
 
             equity_change = eq_latest - eq_oldest

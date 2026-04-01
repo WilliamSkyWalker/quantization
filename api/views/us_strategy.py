@@ -54,6 +54,7 @@ def select_stocks(request):
         task_manager.update_progress(task_id, 30, '计算因子...')
         result = strategy.select_stocks(date)
         if result is None or result.empty:
+            logger.debug(f"select_stocks: 美股选股结果为空, date={date}")
             return {'date': date, 'count': 0, 'data': []}
         task_manager.update_progress(task_id, 90, '生成结果...')
         return {
@@ -182,6 +183,7 @@ def paper_trade(request):
 
         result = strategy.select_stocks(trade_date)
         if result is None or result.empty:
+            logger.debug(f"paper_trade: 美股模拟交易无选股结果, date={trade_date}")
             return {'message': '无选股结果', 'trades': 0}
 
         task_manager.update_progress(task_id, 60, '执行调仓...')

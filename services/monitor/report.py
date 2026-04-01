@@ -137,6 +137,7 @@ class ReportGenerator:
 
         for name, value, higher_better in key_metrics:
             if value is None:
+                logger.debug(f"_section_metrics: 指标 {name} 值为 None，跳过")
                 continue
             if isinstance(value, float):
                 if abs(value) < 1:
@@ -188,6 +189,7 @@ class ReportGenerator:
     def _section_monthly_returns(self, monthly: pd.DataFrame) -> str:
         """月度收益率表。"""
         if monthly.empty:
+            logger.debug("_section_monthly_returns: 月度收益率为空，返回空字符串")
             return ""
 
         def color_val(val):
@@ -241,6 +243,7 @@ class ReportGenerator:
         rows = ""
         for name, ic_df in factor_ic.items():
             if ic_df.empty:
+                logger.debug(f"_section_factor_ic: 因子 {name} IC 数据为空，跳过")
                 continue
             ic = ic_df["ic"]
             ic_mean = ic.mean()

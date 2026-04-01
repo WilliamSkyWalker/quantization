@@ -83,6 +83,7 @@ class RegimeDetector:
         current_close = df["close"].iloc[-1]
 
         if ma <= 0:
+            logger.debug("_get_ma_deviation: MA <= 0，返回 None")
             return None
 
         deviation = (current_close - ma) / ma
@@ -101,6 +102,7 @@ class RegimeDetector:
         """
         deviation = self._get_ma_deviation(date)
         if deviation is None:
+            logger.debug("detect: 偏离度为 None，默认返回 bull")
             return "bull"
         return "bull" if deviation >= 0 else "bear"
 
@@ -118,6 +120,7 @@ class RegimeDetector:
         """
         deviation = self._get_ma_deviation(date)
         if deviation is None:
+            logger.debug("detect_strength: 偏离度为 None，默认返回 1.0（牛市）")
             return 1.0  # 数据不足回退到牛市
 
         band = REGIME_TRANSITION_BAND

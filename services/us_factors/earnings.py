@@ -45,6 +45,7 @@ class EarningsSurprise(USFactorBase):
             )
 
         if df.empty:
+            logger.debug("EarningsSurprise.compute: 无盈利惊喜数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         if tickers:
@@ -52,6 +53,7 @@ class EarningsSurprise(USFactorBase):
 
         df = df.dropna(subset=["surprise_pct"])
         if df.empty:
+            logger.debug("EarningsSurprise.compute: surprise_pct 全部为空")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         # 取每只股票最近一次的 surprise_pct
@@ -93,6 +95,7 @@ class EpsRevision(USFactorBase):
             )
 
         if df.empty:
+            logger.debug("EpsRevision.compute: 无EPS预期数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df["date"] = pd.to_datetime(df["date"])
@@ -100,6 +103,7 @@ class EpsRevision(USFactorBase):
             df = df[df["ticker"].isin(tickers)]
 
         if df.empty:
+            logger.debug("EpsRevision.compute: 过滤ticker后无数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         # 对每只股票，取距离当前日期最近的两个未来财报期的预期
@@ -119,6 +123,7 @@ class EpsRevision(USFactorBase):
         )
 
         if df_future.empty:
+            logger.debug("EpsRevision.compute: 无未来财报期EPS预期数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         # Forward EPS 作为 proxy：EPS_avg 越高 → 分析师预期越乐观

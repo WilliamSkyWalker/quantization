@@ -11,10 +11,16 @@
     - 所有财务数据严格遵守 ann_date <= date（公告日约束）
 """
 
+import logging
+
 import pandas as pd
 import numpy as np
 
+from services.config import LOG_LEVEL
 from services.factors.base import FactorBase
+
+logger = logging.getLogger(__name__)
+logger.setLevel(LOG_LEVEL)
 
 
 class EPFactor(FactorBase):
@@ -39,6 +45,7 @@ class EPFactor(FactorBase):
         df_share = self.get_total_share(codes)
 
         if df_ttm.empty or df_close.empty or df_share.empty:
+            logger.debug("EP.compute: TTM净利润/收盘价/总股本数据不足，返回空")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
 
         # 合并
@@ -77,6 +84,7 @@ class BPFactor(FactorBase):
         df_close = self.get_close_on_date(date, codes)
 
         if df_fin.empty or df_close.empty:
+            logger.debug("BP.compute: 财务数据或收盘价为空，返回空")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
 
         df = df_fin.merge(df_close, on="ts_code", how="inner")

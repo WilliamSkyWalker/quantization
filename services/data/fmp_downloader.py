@@ -44,6 +44,7 @@ def _check_yf():
         import yfinance as yf
         return yf
     except ImportError:
+        logger.error("yfinance 未安装")
         raise ImportError(
             "yfinance 未安装，请运行: pip install yfinance"
         )
@@ -65,6 +66,7 @@ class FMPDownloader:
         """返回在指定表中超过 days 天未更新（或从未下载）的 ticker 列表。"""
         all_tickers = self.db.get_us_tickers()
         if not all_tickers:
+            logger.debug("_stale_tickers: 无美股代码")
             return []
         try:
             cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
@@ -141,7 +143,7 @@ class FMPDownloader:
                     for _, row in wiki_df.iterrows():
                         ticker = str(row.get(ticker_col, "")).strip().replace(".", "-")
                         if not ticker:
-                            continue
+                            continue  # 跳过空 ticker
                         all_tickers[ticker] = {
                             "ticker": ticker,
                             "name": str(row.get(name_col, "")) if name_col else "",
@@ -192,7 +194,7 @@ class FMPDownloader:
                     for _, row in wiki_df.iterrows():
                         ticker = str(row.get(ticker_col, "")).strip().replace(".", "-")
                         if not ticker:
-                            continue
+                            continue  # 跳过空 ticker
                         if ticker not in all_tickers:
                             all_tickers[ticker] = {
                                 "ticker": ticker,
@@ -258,6 +260,7 @@ class FMPDownloader:
                     progress=False,
                 )
                 if data is None or data.empty:
+                    logger.debug(f"_download_prices_for: 批量下载返回空数据")
                     continue
 
                 is_multi = isinstance(data.columns, pd.MultiIndex)
@@ -265,6 +268,7 @@ class FMPDownloader:
                     try:
                         td = data[ticker].dropna(how='all') if is_multi else data.dropna(how='all')
                         if td.empty:
+                            logger.debug(f"_download_prices_for: {ticker} 无有效行情数据，跳过")
                             continue
 
                         records = []
@@ -286,6 +290,7 @@ class FMPDownloader:
                             self.db.bulk_upsert_us_daily_price(df)
                             total += len(records)
                     except KeyError:
+                        logger.debug(f"_download_prices_for: {ticker} KeyError，跳过")
                         continue
                     except Exception as e:
                         logger.warning(f"日线解析失败 {ticker}: {e}")
@@ -296,9 +301,11 @@ class FMPDownloader:
                     try:
                         t = self._safe_ticker(ticker)
                         if t is None:
+                            logger.debug(f"_download_prices_for: {ticker} Ticker 创建失败，跳过")
                             continue
                         hist = t.history(start=start, end=end, auto_adjust=False)
                         if hist.empty:
+                            logger.debug(f"_download_prices_for: {ticker} 历史数据为空，跳过")
                             continue
                         records = []
                         for date_idx, row in hist.iterrows():
@@ -327,7 +334,7 @@ class FMPDownloader:
         if tickers is None:
             tickers = self.db.get_us_tickers()
         if not tickers:
-            logger.warning("无美股代码，请先下载股票列表")
+            logger.warning("download_daily_prices: 无美股代码，请先下载股票列表")
             return 0
 
         # yfinance end 参数是排他的，需 +1 天才能包含 today
@@ -340,6 +347,7 @@ class FMPDownloader:
         """增量更新日线（从 DB 最新日期开始）。"""
         tickers = self.db.get_us_tickers()
         if not tickers:
+            logger.warning("update_daily_prices: 无美股代码")
             return 0
 
         latest = self.db.get_latest_us_trade_date()
@@ -367,6 +375,7 @@ class FMPDownloader:
         """下载单只股票的季度财报，返回写入记录数。"""
         t = self._safe_ticker(ticker)
         if t is None:
+            logger.debug(f"_download_financial_single: {ticker} Ticker 创建失败")
             return 0
 
         try:
@@ -378,6 +387,7 @@ class FMPDownloader:
             return 0
 
         if income is None or income.empty:
+            logger.debug(f"_download_financial_single: {ticker} 无季度利润表数据")
             return 0
 
         # 从 sec_filings 构建 报告期末日 → SEC提交日 映射
@@ -388,10 +398,10 @@ class FMPDownloader:
                 _sec_entries = []
                 for sf in sec_filings:
                     if sf.get("type") not in ("10-Q", "10-K"):
-                        continue
+                        continue  # 跳过非季报/年报
                     sf_date = sf.get("date")
                     if sf_date is None:
-                        continue
+                        continue  # 跳过无日期的 filing
                     edgar = sf.get("edgarUrl", "")
                     for url in [edgar] + list((sf.get("exhibits") or {}).values()):
                         m = re.search(r"-(\d{8})\.", url)
@@ -400,8 +410,8 @@ class FMPDownloader:
                                 report_end = datetime.strptime(m.group(1), "%Y%m%d").date()
                                 _sec_entries.append((report_end, sf_date))
                             except ValueError:
-                                pass
-                            break
+                                logger.debug(f"_download_financial_single: {ticker} SEC filing 日期解析失败")
+                            break  # 找到匹配的 URL 即停
                 for col_date in income.columns:
                     target = col_date.date()
                     best = None
@@ -444,14 +454,14 @@ class FMPDownloader:
                 try:
                     gross_margin = float(gross_profit) / float(revenue) * 100
                 except (ZeroDivisionError, TypeError):
-                    pass
+                    logger.debug(f"_download_financial_single: {ticker} gross_margin 计算失败")
 
             operating_margin = None
             if revenue and operating_income:
                 try:
                     operating_margin = float(operating_income) / float(revenue) * 100
                 except (ZeroDivisionError, TypeError):
-                    pass
+                    logger.debug(f"_download_financial_single: {ticker} operating_margin 计算失败")
 
             month = col_date.month
             if month <= 3:
@@ -476,7 +486,7 @@ class FMPDownloader:
                     if abs(eq) > 1e-6:
                         roe = float(net_income) / eq * 100  # 百分比
                 except (TypeError, ValueError, ZeroDivisionError):
-                    pass
+                    logger.debug(f"_download_financial_single: {ticker} ROE 计算失败")
 
             records.append({
                 "ticker": ticker,
@@ -501,6 +511,7 @@ class FMPDownloader:
             df = pd.DataFrame(records)
             self.db.upsert_us_financial_data(df)
             return len(records)
+        logger.debug(f"_download_financial_single: {ticker} 无有效财务记录")
         return 0
 
     def download_financial_data(self, tickers: list[str] = None) -> int:
@@ -508,6 +519,7 @@ class FMPDownloader:
         if tickers is None:
             tickers = self.db.get_us_tickers()
         if not tickers:
+            logger.warning("download_financial_data: 无美股代码")
             return 0
 
         total = 0
@@ -539,10 +551,12 @@ class FMPDownloader:
         """下载单只股票的行业分类，返回记录 dict 或 None。"""
         t = self._safe_ticker(ticker)
         if t is None:
+            logger.debug(f"_download_industry_single: {ticker} Ticker 创建失败")
             return None
         try:
             info = t.info
             if not info:
+                logger.debug(f"_download_industry_single: {ticker} info 为空")
                 return None
             return {
                 "ticker": ticker,
@@ -558,6 +572,7 @@ class FMPDownloader:
         """下载 GICS 行业分类（从 yfinance info 提取），多线程并行。"""
         tickers = self.db.get_us_tickers()
         if not tickers:
+            logger.warning("download_industry_class: 无美股代码")
             return 0
 
         records = []
@@ -592,10 +607,12 @@ class FMPDownloader:
         for symbol in symbols:
             t = self._safe_ticker(symbol)
             if t is None:
+                logger.debug(f"download_index_daily: {symbol} Ticker 创建失败，跳过")
                 continue
             try:
                 hist = t.history(start=self._start_date, end=today, auto_adjust=False)
                 if hist.empty:
+                    logger.debug(f"download_index_daily: {symbol} 历史数据为空，跳过")
                     continue
 
                 records = []
@@ -632,7 +649,8 @@ class FMPDownloader:
                 from_date = (pd.to_datetime(str(latest)) + timedelta(days=1)).strftime("%Y-%m-%d")
             else:
                 from_date = self._start_date
-        except Exception:
+        except Exception as e:
+            logger.debug(f"update_index_daily: 查询最新日期失败: {e}")
             from_date = self._start_date
 
         today = datetime.now().strftime("%Y-%m-%d")
@@ -644,10 +662,12 @@ class FMPDownloader:
         for symbol in US_INDEX_SYMBOLS:
             t = self._safe_ticker(symbol)
             if t is None:
+                logger.debug(f"update_index_daily: {symbol} Ticker 创建失败，跳过")
                 continue
             try:
                 hist = t.history(start=from_date, end=today, auto_adjust=False)
                 if hist.empty:
+                    logger.debug(f"update_index_daily: {symbol} 增量数据为空，跳过")
                     continue
 
                 records = []
@@ -684,10 +704,12 @@ class FMPDownloader:
         for symbol in US_COMMODITY_SYMBOLS:
             t = self._safe_ticker(symbol)
             if t is None:
+                logger.debug(f"download_commodity_prices: {symbol} Ticker 创建失败，跳过")
                 continue
             try:
                 hist = t.history(start=self._start_date, end=today, auto_adjust=False)
                 if hist.empty:
+                    logger.debug(f"download_commodity_prices: {symbol} 历史数据为空，跳过")
                     continue
 
                 records = []
@@ -724,7 +746,8 @@ class FMPDownloader:
                 from_date = (pd.to_datetime(str(latest)) + timedelta(days=1)).strftime("%Y-%m-%d")
             else:
                 from_date = self._start_date
-        except Exception:
+        except Exception as e:
+            logger.debug(f"update_commodity_prices: 查询最新日期失败: {e}")
             from_date = self._start_date
 
         today = datetime.now().strftime("%Y-%m-%d")
@@ -736,10 +759,12 @@ class FMPDownloader:
         for symbol in US_COMMODITY_SYMBOLS:
             t = self._safe_ticker(symbol)
             if t is None:
+                logger.debug(f"update_commodity_prices: {symbol} Ticker 创建失败，跳过")
                 continue
             try:
                 hist = t.history(start=from_date, end=today, auto_adjust=False)
                 if hist.empty:
+                    logger.debug(f"update_commodity_prices: {symbol} 增量数据为空，跳过")
                     continue
 
                 records = []
@@ -773,18 +798,21 @@ class FMPDownloader:
         """下载单只股票的分析师评级，返回写入记录数。"""
         t = self._safe_ticker(ticker)
         if t is None:
+            logger.debug(f"_download_analyst_single: {ticker} Ticker 创建失败")
             return 0
 
         try:
             ud = t.upgrades_downgrades
             if ud is None or ud.empty:
+                logger.debug(f"_download_analyst_single: {ticker} 无评级数据")
                 return 0
 
             records = []
             for date_idx, row in ud.iterrows():
                 try:
                     date_str = date_idx.strftime("%Y-%m-%d")
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"_download_analyst_single: {ticker} 日期格式化失败: {e}")
                     date_str = str(date_idx)[:10]
 
                 records.append({
@@ -812,6 +840,7 @@ class FMPDownloader:
         if tickers is None:
             tickers = self.db.get_us_tickers()
         if not tickers:
+            logger.warning("download_analyst_recommendations: 无美股代码")
             return 0
 
         total = 0
@@ -856,6 +885,7 @@ class FMPDownloader:
         """下载单只股票的分红/拆股历史，返回写入记录数。"""
         t = self._safe_ticker(ticker)
         if t is None:
+            logger.debug(f"_download_corporate_single: {ticker} Ticker 创建失败")
             return 0
 
         records = []
@@ -892,6 +922,7 @@ class FMPDownloader:
             df = pd.DataFrame(records)
             self.db.upsert_us_corporate_action(df)
             return len(records)
+        logger.debug(f"_download_corporate_single: {ticker} 无分红/拆股记录")
         return 0
 
     def download_corporate_actions(self, tickers: list[str] = None) -> int:
@@ -899,6 +930,7 @@ class FMPDownloader:
         if tickers is None:
             tickers = self.db.get_us_tickers()
         if not tickers:
+            logger.warning("download_corporate_actions: 无美股代码")
             return 0
 
         total = 0
@@ -962,6 +994,7 @@ class FMPDownloader:
         if tickers is None:
             tickers = self.db.get_us_tickers()
         if not tickers:
+            logger.warning("download_earnings_surprises: 无美股代码")
             return 0
 
         total = 0
@@ -985,6 +1018,7 @@ class FMPDownloader:
         """下载单只股票的盈利惊喜历史。"""
         data = self._fmp_api_get(f"earnings-surprises/{ticker}")
         if not data:
+            logger.debug(f"_download_earnings_surprise_single: {ticker} API 返回空")
             return 0
 
         records = []
@@ -992,6 +1026,7 @@ class FMPDownloader:
             actual = item.get("actualEarningResult")
             estimated = item.get("estimatedEarning")
             if actual is None or estimated is None:
+                logger.debug(f"_download_earnings_surprise_single: {ticker} 跳过记录 (actual/estimated 为空)")
                 continue
             surprise = actual - estimated
             surprise_pct = surprise / abs(estimated) if estimated != 0 else None
@@ -1019,6 +1054,7 @@ class FMPDownloader:
         if tickers is None:
             tickers = self.db.get_us_tickers()
         if not tickers:
+            logger.warning("download_eps_estimates: 无美股代码")
             return 0
 
         total = 0
@@ -1042,12 +1078,14 @@ class FMPDownloader:
         """下载单只股票的分析师共识预期（季度）。"""
         data = self._fmp_api_get(f"analyst-estimates/{ticker}", params={"period": "quarter", "limit": 200})
         if not data:
+            logger.debug(f"_download_eps_estimate_single: {ticker} API 返回空")
             return 0
 
         records = []
         for item in data:
             eps_avg = item.get("estimatedEpsAvg")
             if eps_avg is None:
+                logger.debug(f"_download_eps_estimate_single: {ticker} 跳过记录 (eps_avg 为空)")
                 continue
             records.append({
                 "ticker": ticker,
@@ -1111,13 +1149,13 @@ class FMPDownloader:
 def _safe_get(series: pd.Series, key: str):
     """从 yfinance 财务 Series 中安全取值，找不到返回 None。"""
     if series is None or series.empty:
-        return None
+        return None  # Series 为空，无需取值
     try:
         val = series.get(key)
         if val is not None and pd.notna(val):
             return float(val)
     except (TypeError, ValueError):
-        pass
+        logger.debug(f"_safe_get: 字段 '{key}' 转换失败")
     return None
 
 def _safe_date_str(date_idx):
@@ -1126,6 +1164,7 @@ def _safe_date_str(date_idx):
         if hasattr(date_idx, 'strftime'):
             return date_idx.strftime("%Y-%m-%d")
         return pd.to_datetime(date_idx).strftime("%Y-%m-%d")
-    except Exception:
+    except Exception as e:
+        logger.debug(f"_safe_date_str: 日期转换失败，回退字符串截取: {e}")
         return str(date_idx)[:10]
 

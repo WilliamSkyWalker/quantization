@@ -112,6 +112,7 @@ class USMLScorer:
         for date_str in sorted_dates:
             df = factor_history[date_str]
             if df.empty:
+                logger.debug(f"train: {date_str} 因子数据为空，跳过")
                 continue
 
             # 确定因子列
@@ -123,6 +124,7 @@ class USMLScorer:
             date_ts = pd.to_datetime(date_str)
             fwd_returns = self._compute_forward_returns(price_df, date_ts, self.forward_days)
             if fwd_returns.empty:
+                logger.debug(f"train: {date_str} 无未来收益数据，跳过")
                 continue
 
             # S&P 500 同期收益
@@ -137,6 +139,7 @@ class USMLScorer:
             # 去掉 NaN
             merged = merged.dropna(subset=factor_cols + ["excess_return"])
             if len(merged) < 10:
+                logger.debug(f"train: {date_str} 合并后样本不足({len(merged)}/10)，跳过")
                 continue
 
             all_X.append(merged[factor_cols].values)
@@ -247,7 +250,7 @@ class USMLScorer:
         extended_end = (end + pd.Timedelta(days=self.forward_days * 2 + 10)).strftime("%Y-%m-%d")
         start_str = start.strftime("%Y-%m-%d")
         df = self.db.query(
-            "SELECT ticker, trade_date, adj_close FROM us_daily_price "
+            "SELECT ticker, trade_date, COALESCE(adj_close, close) as adj_close FROM us_daily_price "
             "WHERE trade_date >= :start AND trade_date <= :end",
             params={"start": start_str, "end": extended_end},
         )
@@ -263,10 +266,12 @@ class USMLScorer:
         # 找到 date 之后的 N 个交易日
         future = price_df[price_df["trade_date"] > date]
         if future.empty:
+            logger.debug(f"_compute_forward_returns: {date} 之后无价格数据，返回空 DataFrame")
             return pd.DataFrame(columns=["ticker", "fwd_return"])
 
         trade_dates = sorted(future["trade_date"].unique())
         if len(trade_dates) < days:
+            logger.debug(f"_compute_forward_returns: {date} 之后交易日不足({len(trade_dates)}/{days})，返回空 DataFrame")
             return pd.DataFrame(columns=["ticker", "fwd_return"])
 
         target_date = trade_dates[days - 1]
@@ -295,6 +300,7 @@ class USMLScorer:
             params={"start": start.strftime("%Y-%m-%d"), "end": extended_end},
         )
         if df.empty:
+            logger.debug("_compute_index_forward_returns: S&P 500 指数数据为空，返回空字典")
             return {}
 
         df["trade_date"] = pd.to_datetime(df["trade_date"])

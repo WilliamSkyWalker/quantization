@@ -58,6 +58,7 @@ def get_removed_tickers(db: DatabaseManager, since: str = "2015-01-01") -> list[
     """
     changes = get_sp500_historical_changes(since)
     if changes.empty:
+        logger.debug("get_removed_tickers: S&P 500 变更记录为空")
         return []
 
     removed = set(changes["removed_ticker"].dropna().unique())
@@ -115,6 +116,7 @@ def download_historical_prices(db: DatabaseManager, since: str = "2015-01-01") -
     # 获取 is_active=0 的 ticker
     df = db.query("SELECT ticker FROM us_stock_basic WHERE is_active = 0")
     if df.empty:
+        logger.debug("download_historical_prices: 无 is_active=0 的历史 ticker")
         return 0
 
     tickers = df["ticker"].tolist()
@@ -137,6 +139,7 @@ def download_historical_financials(db: DatabaseManager) -> int:
 
     df = db.query("SELECT ticker FROM us_stock_basic WHERE is_active = 0")
     if df.empty:
+        logger.debug("download_historical_financials: 无 is_active=0 的历史 ticker")
         return 0
 
     tickers = df["ticker"].tolist()

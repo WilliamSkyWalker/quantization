@@ -1,8 +1,12 @@
 """URL configuration for backend."""
+import logging
+
 from django.urls import path, include, re_path
 from django.views.static import serve
 from django.views.generic import TemplateView
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _frontend_file(request, path=''):

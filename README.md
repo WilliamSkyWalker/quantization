@@ -54,6 +54,8 @@ pip install -r requirements.txt
 
 # 数据导入（新源 FMP/UW/Fiscal.ai）
 python3 cli.py data bulk-import --source fmp --target all --clean --start-year 1995
+python3 cli.py data bulk-import --source fmp --target financial-quarterly --clean  # 季度财报(IS+BS+CF)
+python3 cli.py data bulk-import --source fmp --target analyst-grades --clean       # 分析师评级
 python3 cli.py data bulk-import --source uw --target all --clean
 python3 cli.py data bulk-import --source fiscal --target all
 
@@ -118,7 +120,7 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | FF5 Alpha | **+6.73%** (t=2.20) | +6.69% (t=2.26) | +0.88% | — |
 | 超额年化 | **+7.53%** | +1.41% | -4.5% | — |
 
-> 注：回测绩效基于 23 因子（剪枝后），新增 EARNINGS_SURPRISE + EPS_REVISION 两因子待回测验证。
+> 注：回测绩效基于 23 因子（剪枝后），新增 EARNINGS_SURPRISE + EPS_REVISION 两因子数据已导入，待 IC 回测验证。Insider 因子数据也已导入，待 IC 验证后启用。
 
 ## 核心设计决策
 
@@ -142,7 +144,18 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | 美股 Alpha v1 | 29 因子多空对冲 + Regime + FF5 回归 | ✅ |
 | 美股 Alpha v2 | 阶梯式重构 → 23 因子剪枝 → 25 因子扩展 | 🔨 |
 | 数据迁移 | FMP+UW+Fiscal.ai 替代 yfinance/EDGAR/SimFin | ✅ |
-| 待办 | 券商实盘 / Insider 因子 IC 验证 / 自动化测试 | 📋 |
+| 全量数据导入 | FMP/UW/Fiscal/FRED 全量 bulk 导入完成（含 insider/earnings） | ✅ |
+| 全项目日志覆盖 | 所有 return/continue/break/except 分支加 logger | ✅ |
+| 待办 | 季度财报导入 → 全因子 IC 重跑 → 纳入策略 / 自动化测试 | 📋 |
+
+**当前待办：**
+1. 季度财报全量导入（`--target financial-quarterly`），修复 EP/BP/ROE_TTM
+2. 分析师评级全量导入（`--target analyst-grades`），替换旧 yfinance 数据
+3. 重跑全因子 IC 评估，验证价值/质量因子
+4. 将 EPS_REVISION + EARNINGS_SURPRISE 正式纳入策略（IC 已验证通过）
+5. Insider 因子 IC 验证（数据+代码已修复）
+6. Sentiment 大类重做 / 自动化测试 / 券商实盘
+
 
 ## 详细文档
 

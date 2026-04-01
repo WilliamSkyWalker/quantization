@@ -213,6 +213,7 @@ class FactorBase(ABC):
 
         bulk_daily = cls._static_cache.get("_bulk_daily")
         if bulk_daily is None or bulk_daily.empty:
+            logger.debug("precompute_rolling_stats: 无预加载日线数据，跳过预计算")
             return
 
         df = bulk_daily[["ts_code", "trade_date", "close", "adj_factor",
@@ -273,6 +274,7 @@ class FactorBase(ABC):
         """从预计算的 rolling stats 中提取指定日期的截面数据。"""
         ri = self._static_cache.get("_rolling_indexed")
         if ri is None:
+            logger.debug("_get_rolling_for_date: 无预计算 rolling 数据")
             return None
         date_ts = pd.to_datetime(date)
         try:
@@ -281,6 +283,7 @@ class FactorBase(ABC):
                 day = day[day.index.isin(codes)]
             return day
         except KeyError:
+            logger.debug(f"_get_rolling_for_date: 日期 {date} 不在预计算数据中")
             return None
 
     def _get_month_end_adj_close(
@@ -289,6 +292,7 @@ class FactorBase(ABC):
         """从预计算的月末价格中提取 N 月前月末的前复权价格。"""
         me = self._static_cache.get("_month_end_prices")
         if me is None:
+            logger.debug("_get_month_end_adj_close: 无预计算月末价格数据")
             return None
         target = pd.to_datetime(date) - pd.DateOffset(months=months_ago)
         target_period = target.to_period("M")
@@ -296,6 +300,7 @@ class FactorBase(ABC):
         if codes:
             result = result[result["ts_code"].isin(codes)]
         if result.empty:
+            logger.debug(f"_get_month_end_adj_close: {target_period} 月末无匹配数据")
             return None
         return result[["ts_code", "adj_close"]].copy()
 
@@ -638,6 +643,7 @@ class FactorBase(ABC):
 
             df = self.db.query(sql, params=params)
         if df.empty:
+            logger.debug(f"_compute_ttm_vectorized: {value_col} 财务数据为空，返回空")
             return pd.DataFrame(columns=["ts_code", result_col])
 
         df["end_date"] = pd.to_datetime(df["end_date"])

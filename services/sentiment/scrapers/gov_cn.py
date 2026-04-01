@@ -33,6 +33,7 @@ class GovCnScraper(BaseScraper):
             return articles
 
         if not isinstance(data, list):
+            logger.debug(f"parse_list_page: [{self.source}] JSON 非列表类型，返回空列表")
             return articles
 
         for item in data:
@@ -41,11 +42,13 @@ class GovCnScraper(BaseScraper):
             pub_date = item.get("DOCRELPUBTIME", "").strip()
 
             if not title or not article_url or not pub_date:
+                logger.debug(f"parse_list_page: [{self.source}] 文章缺少标题/URL/日期，跳过")
                 continue
 
             # 日期格式已经是 YYYY-MM-DD
             m = re.match(r"(\d{4}-\d{2}-\d{2})", pub_date)
             if not m:
+                logger.debug(f"parse_list_page: [{self.source}] 日期格式不匹配: {pub_date}，跳过")
                 continue
 
             articles.append({

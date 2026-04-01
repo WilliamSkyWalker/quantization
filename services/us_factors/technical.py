@@ -22,6 +22,7 @@ class Turn20D(USFactorBase):
         rolling = self._get_rolling_for_date(date, tickers_set)
 
         if rolling is None:
+            logger.debug("Turn20D.compute: 无rolling预计算数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = rolling[["dvol_20d"]].reset_index()
@@ -40,6 +41,7 @@ class Vol20D(USFactorBase):
         rolling = self._get_rolling_for_date(date, tickers_set)
 
         if rolling is None:
+            logger.debug("Vol20D.compute: 无rolling预计算数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = rolling[["vol_20d"]].reset_index()
@@ -57,6 +59,7 @@ class PriceDev60D(USFactorBase):
         rolling = self._get_rolling_for_date(date, tickers_set)
 
         if rolling is None:
+            logger.debug("PriceDev60D.compute: 无rolling预计算数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = rolling[["adj_close", "ma60_adj"]].reset_index()
@@ -78,6 +81,7 @@ class Ivol(USFactorBase):
         # 获取 60 日个股收益和 S&P 500 收益
         price_df = self.get_price_history(date, lookback_days=90, universe_tickers=tickers)
         if price_df.empty:
+            logger.debug("Ivol.compute: 无历史价格数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         # S&P 500 收益
@@ -89,11 +93,13 @@ class Ivol(USFactorBase):
                 params={"date": date},
             )
             if idx_df.empty or len(idx_df) < 20:
+                logger.debug("Ivol.compute: S&P500指数数据不足(需要>=20条)")
                 return pd.DataFrame(columns=["ticker", "factor_value"])
             idx_df = idx_df.sort_values("trade_date")
             idx_df["mkt_ret"] = idx_df["close"].astype(float).pct_change()
             mkt_rets = idx_df.set_index("trade_date")["mkt_ret"]
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Ivol.compute: 获取S&P500指数数据失败: {e}")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         # 个股收益
@@ -106,12 +112,14 @@ class Ivol(USFactorBase):
             grp = grp.dropna(subset=["ret"]).tail(60)
             if len(grp) < 20:
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"Ivol.compute: {ticker} 收益数据不足20条，跳过")
                 continue
             # 合并市场收益
             merged = grp.set_index("trade_date")[["ret"]].join(mkt_rets, how="inner")
             merged = merged.dropna()
             if len(merged) < 20:
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"Ivol.compute: {ticker} 合并市场收益后不足20条，跳过")
                 continue
             # OLS 回归: ret_i = alpha + beta * mkt_ret + epsilon
             x = merged["mkt_ret"].values
@@ -138,6 +146,7 @@ class Size(USFactorBase):
         mkcap = self.get_market_cap(date, tickers)
 
         if mkcap.empty:
+            logger.debug("Size.compute: 无市值数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = mkcap.copy()
@@ -159,6 +168,7 @@ class VolPriceDiv(USFactorBase):
         rolling = self._get_rolling_for_date(date, tickers_set)
 
         if rolling is None:
+            logger.debug("VolPriceDiv.compute: 无rolling预计算数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = rolling[["cum_ret_20d", "dvol_20d", "volume"]].reset_index()

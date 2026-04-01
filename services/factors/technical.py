@@ -12,10 +12,16 @@
 在多因子模型中，换手率因子常被用作流动性控制变量。
 """
 
+import logging
+
 import numpy as np
 import pandas as pd
 
+from services.config import LOG_LEVEL
 from services.factors.base import FactorBase
+
+logger = logging.getLogger(__name__)
+logger.setLevel(LOG_LEVEL)
 
 
 class Turnover20DFactor(FactorBase):
@@ -40,6 +46,7 @@ class Turnover20DFactor(FactorBase):
             date, lookback_days=45, universe_codes=codes, columns=["turnover_rate"],
         )
         if df_price.empty:
+            logger.debug("Turnover20D.compute: 无价格数据，返回空")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
         df_price["trade_date"] = pd.to_datetime(df_price["trade_date"])
         df_price = df_price.sort_values(["ts_code", "trade_date"])
@@ -71,6 +78,7 @@ class VolatilityFactor(FactorBase):
             date, lookback_days=45, universe_codes=codes, columns=["pct_chg"],
         )
         if df_price.empty:
+            logger.debug("Volatility.compute: 无价格数据，返回空")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
         df_price["trade_date"] = pd.to_datetime(df_price["trade_date"])
         df_price = df_price.sort_values(["ts_code", "trade_date"])
@@ -108,6 +116,7 @@ class PriceDeviationFactor(FactorBase):
             date, lookback_days=120, universe_codes=codes, columns=["close", "adj_factor"],
         )
         if df_price.empty:
+            logger.debug("PriceDev60D.compute: 无价格数据，返回空")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
         df_price["trade_date"] = pd.to_datetime(df_price["trade_date"])
         df_price["close"] = pd.to_numeric(df_price["close"], errors="coerce")
@@ -145,6 +154,7 @@ class SizeFactor(FactorBase):
         # 获取收盘价
         df_close = self.get_close_on_date(date, codes)
         if df_close.empty:
+            logger.debug("Size.compute: 无收盘价数据，返回空")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
 
         # 获取流通股本
@@ -157,6 +167,7 @@ class SizeFactor(FactorBase):
         df_share = self.db.query(sql, params=params)
 
         if df_share.empty:
+            logger.debug("Size.compute: 无流通股本数据，返回空")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
 
         df = df_close.merge(df_share, on="ts_code", how="inner")
@@ -200,6 +211,7 @@ class VolPriceDivFactor(FactorBase):
         )
 
         if df_price.empty:
+            logger.debug("VolPriceDiv.compute: 无价格数据，返回空")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
 
         df_price["pct_chg"] = pd.to_numeric(df_price["pct_chg"], errors="coerce")
@@ -269,9 +281,11 @@ class IndustryMomentumFactor(FactorBase):
 
         try:
             df_industry = self.get_industry_map_cached()
-        except Exception:
+        except Exception as e:
+            logger.warning(f"IndMom.compute: 获取行业映射失败: {e}")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
         if df_industry.empty:
+            logger.debug("IndMom.compute: 行业映射为空，返回空")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
 
         # 快速路径：使用预计算 20 日累计收益
@@ -286,6 +300,7 @@ class IndustryMomentumFactor(FactorBase):
                 date, lookback_days=45, universe_codes=codes, columns=["pct_chg"],
             )
             if df_price.empty:
+                logger.debug("IndMom.compute: 无价格数据，返回空")
                 return pd.DataFrame(columns=["ts_code", "factor_value"])
             df_price["trade_date"] = pd.to_datetime(df_price["trade_date"])
             df_price["pct_chg"] = pd.to_numeric(df_price["pct_chg"], errors="coerce")

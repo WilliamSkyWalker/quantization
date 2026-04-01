@@ -1,11 +1,14 @@
 """住建部爬虫"""
 
+import logging
 import re
 from typing import Optional
 
 from bs4 import BeautifulSoup
 
 from services.sentiment.base_scraper import BaseScraper
+
+logger = logging.getLogger(__name__)
 
 
 class MohurdScraper(BaseScraper):
@@ -27,20 +30,24 @@ class MohurdScraper(BaseScraper):
         for item in soup.find_all("li"):
             link = item.find("a")
             if not link or not link.get("href"):
+                logger.debug(f"parse_list_page: [{self.source}] 列表项无链接，跳过")
                 continue
 
             title = self._clean_text(link.get_text())
             if not title or len(title) < 4:
+                logger.debug(f"parse_list_page: [{self.source}] 标题为空或过短，跳过")
                 continue
 
             href = self._normalize_url(link["href"], url)
 
             # 只要住建部自身的链接，排除外部新华社等链接
             if "mohurd.gov.cn" not in href and not href.startswith("/"):
+                logger.debug(f"parse_list_page: [{self.source}] 外站链接，跳过: {href}")
                 continue
 
             pub_date = self._extract_date(item, href)
             if not pub_date:
+                logger.debug(f"parse_list_page: [{self.source}] 无法提取日期，跳过: {title[:30]}")
                 continue
 
             articles.append({
@@ -74,6 +81,7 @@ class MohurdScraper(BaseScraper):
         if m:
             return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
 
+        logger.debug(f"_extract_date: [{self.source}] 所有模式均未匹配到日期")
         return ""
 
     def parse_article_page(self, html: str, url: str) -> Optional[dict]:

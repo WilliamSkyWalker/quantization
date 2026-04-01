@@ -117,6 +117,7 @@ class PolymarketScraper(BaseScraper):
                     article, analysis = self._alert_to_article(alert, slug_map, day_key)
 
                     if article["content_hash"] in seen_hashes:
+                        logger.debug(f"scrape_pages: [{self.source}] 重复内容哈希，跳过 alert")
                         continue
                     seen_hashes.add(article["content_hash"])
 
@@ -210,6 +211,7 @@ class PolymarketScraper(BaseScraper):
     def _parse_json_field(value) -> list:
         """解析可能是 JSON 字符串或已解析的 list 的字段。"""
         if not value:
+            logger.debug("_parse_json_field: 值为空，返回空列表")
             return []
         if isinstance(value, list):
             return value
@@ -218,7 +220,9 @@ class PolymarketScraper(BaseScraper):
                 parsed = json.loads(value)
                 return parsed if isinstance(parsed, list) else []
             except (json.JSONDecodeError, TypeError):
+                logger.debug(f"_parse_json_field: JSON 解析失败: {str(value)[:50]}")
                 return []
+        logger.debug(f"_parse_json_field: 不支持的类型 {type(value)}，返回空列表")
         return []
 
     def scrape(self, max_pages: int = SENTIMENT_MAX_PAGES) -> list[dict]:

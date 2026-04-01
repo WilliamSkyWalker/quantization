@@ -52,16 +52,19 @@ def _get_indicator_zscore(
     )
     df = db.query(sql, params={"code": indicator_code, "start": start_date, "end": end_date})
     if df.empty or len(df) < 6:
+        logger.debug(f"_get_indicator_zscore: {indicator_code} 数据不足6条，返回0.0")
         return 0.0
 
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
     vals = df["value"].dropna().values
     if len(vals) < 6:
+        logger.debug(f"_get_indicator_zscore: {indicator_code} 有效值不足6条，返回0.0")
         return 0.0
 
     mean = np.mean(vals)
     std = np.std(vals)
     if std < 1e-10:
+        logger.debug(f"_get_indicator_zscore: {indicator_code} 标准差为零，返回0.0")
         return 0.0
     return float((vals[-1] - mean) / std)
 
@@ -82,11 +85,13 @@ def _get_indicator_delta_zscore(
     )
     df = db.query(sql, params={"code": indicator_code, "start": start_date, "end": end_date})
     if df.empty or len(df) < delta_months + 6:
+        logger.debug(f"_get_indicator_delta_zscore: {indicator_code} 数据不足，返回0.0")
         return 0.0
 
     df["value"] = pd.to_numeric(df["value"], errors="coerce").dropna()
     vals = df["value"].values
     if len(vals) < delta_months + 6:
+        logger.debug(f"_get_indicator_delta_zscore: {indicator_code} 有效值不足，返回0.0")
         return 0.0
 
     # 计算差分序列
@@ -94,6 +99,7 @@ def _get_indicator_delta_zscore(
     mean = np.mean(deltas)
     std = np.std(deltas)
     if std < 1e-10:
+        logger.debug(f"_get_indicator_delta_zscore: {indicator_code} 差分标准差为零，返回0.0")
         return 0.0
     return float((deltas[-1] - mean) / std)
 

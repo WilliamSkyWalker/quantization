@@ -134,6 +134,7 @@ class SentimentAnalyzer:
         """分析单篇文章并立即写入 DB。供线程池调用。"""
         result = self.llm.analyze(article)
         if result is None:
+            logger.debug(f"_analyze_one_llm: LLM 返回 None，article_id={article.get('id')}")
             return None
         # 序列化受影响股票为 JSON
         stocks = result.get("stocks", [])
@@ -202,6 +203,7 @@ class SentimentAnalyzer:
     def _get_high_intensity_ids(self, article_ids: list[int]) -> set[int]:
         """查询 keyword 分析中 intensity >= 阈值的 article_id。"""
         if not article_ids:
+            logger.debug("_get_high_intensity_ids: article_ids 为空，返回空集合")
             return set()
 
         ids_str = ",".join(str(i) for i in article_ids)
@@ -213,6 +215,7 @@ class SentimentAnalyzer:
         )
         df = self.db.query(sql)
         if df.empty:
+            logger.debug("_get_high_intensity_ids: 无满足阈值的 article_id")
             return set()
         return set(df["article_id"].tolist())
 
@@ -239,6 +242,7 @@ class SentimentAnalyzer:
 
         df = self._get_policy_analysis_fast(date, lookback_days)
         if df.empty:
+            logger.debug(f"get_daily_score: {date} 无政策分析数据，返回空 DataFrame")
             return pd.DataFrame(columns=["industry_name", "sentiment", "intensity"])
 
         # 同一文章 llm 优先：去重保留 llm 行
@@ -269,6 +273,7 @@ class SentimentAnalyzer:
         for _, row in df.iterrows():
             industries_str = row.get("industries", "")
             if not industries_str or pd.isna(industries_str):
+                logger.debug(f"get_daily_score: article_id={row.get('article_id')} 行业字段为空，跳过")
                 continue
             for industry in industries_str.split(","):
                 industry = industry.strip()
@@ -285,6 +290,7 @@ class SentimentAnalyzer:
                     })
 
         if not rows:
+            logger.debug(f"get_daily_score: {date} 展开行业后无有效记录，返回空 DataFrame")
             return pd.DataFrame(columns=["industry_name", "sentiment", "intensity"])
 
         expanded = pd.DataFrame(rows)
@@ -333,6 +339,7 @@ class SentimentAnalyzer:
 
         df = self._get_policy_analysis_fast(date, lookback_days, analysis_type="llm")
         if df.empty:
+            logger.debug(f"get_daily_stock_score: {date} 无 LLM 分析数据，返回空 DataFrame")
             return pd.DataFrame(columns=["ts_code", "sentiment", "intensity"])
 
         # 计算时间衰减权重
@@ -346,12 +353,15 @@ class SentimentAnalyzer:
         for _, row in df.iterrows():
             affected_str = row.get("affected_stocks", "")
             if not affected_str or pd.isna(affected_str):
+                logger.debug(f"get_daily_stock_score: article_id={row.get('article_id')} affected_stocks 为空，跳过")
                 continue
             try:
                 stocks = json.loads(affected_str)
             except (json.JSONDecodeError, TypeError):
+                logger.debug(f"get_daily_stock_score: article_id={row.get('article_id')} affected_stocks JSON 解析失败，跳过")
                 continue
             if not isinstance(stocks, list):
+                logger.debug(f"get_daily_stock_score: article_id={row.get('article_id')} affected_stocks 非列表类型，跳过")
                 continue
             for stock in stocks:
                 if not isinstance(stock, dict):
@@ -371,6 +381,7 @@ class SentimentAnalyzer:
                 })
 
         if not rows:
+            logger.debug(f"get_daily_stock_score: {date} 展开股票后无有效记录，返回空 DataFrame")
             return pd.DataFrame(columns=["ts_code", "sentiment", "intensity"])
 
         expanded = pd.DataFrame(rows)
@@ -404,7 +415,8 @@ class SentimentAnalyzer:
         try:
             total_df = self.db.query("SELECT COUNT(*) as cnt FROM policy_article")
             total = int(total_df["cnt"].iloc[0])
-        except Exception:
+        except Exception as e:
+            logger.warning(f"get_analysis_stats: 查询文章总数失败: {e}")
             total = 0
 
         try:
@@ -412,7 +424,8 @@ class SentimentAnalyzer:
                 "SELECT COUNT(*) as cnt FROM policy_analysis WHERE analysis_type = 'keyword'"
             )
             kw_count = int(kw_df["cnt"].iloc[0])
-        except Exception:
+        except Exception as e:
+            logger.warning(f"get_analysis_stats: 查询 keyword 分析数失败: {e}")
             kw_count = 0
 
         try:
@@ -420,7 +433,8 @@ class SentimentAnalyzer:
                 "SELECT COUNT(*) as cnt FROM policy_analysis WHERE analysis_type = 'llm'"
             )
             llm_count = int(llm_df["cnt"].iloc[0])
-        except Exception:
+        except Exception as e:
+            logger.warning(f"get_analysis_stats: 查询 LLM 分析数失败: {e}")
             llm_count = 0
 
         return {

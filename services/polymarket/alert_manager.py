@@ -91,6 +91,7 @@ class AlertManager:
         def _json_or_none(key):
             if llm_result and llm_result.get(key):
                 return json.dumps(llm_result[key], ensure_ascii=False)
+            logger.debug(f"trigger_alert: LLM 结果中 {key} 为空，返回 None")
             return None
 
         alert = PolymarketAlert(
@@ -219,12 +220,14 @@ class AlertManager:
         try:
             alert = session.query(PolymarketAlert).filter_by(id=alert_id).first()
             if not alert:
+                logger.debug(f"mark_read: 告警 id={alert_id} 不存在")
                 return False
             alert.is_read = True
             session.commit()
             return True
-        except Exception:
+        except Exception as e:
             session.rollback()
+            logger.warning(f"mark_read: 标记告警 id={alert_id} 已读失败: {e}")
             return False
         finally:
             session.close()

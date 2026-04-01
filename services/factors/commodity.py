@@ -89,6 +89,7 @@ class CommodityMomentumFactor(FactorBase):
         ][["ts_code", "industry_name", "l2_industry_name"]].copy()
 
         if stock_industry.empty:
+            logger.debug("CMDTY_MOM: 股票池无行业匹配数据，返回空")
             return result
 
         def _get_momentum(row):
@@ -137,12 +138,14 @@ class CommodityMomentumFactor(FactorBase):
         for code, grp in df.groupby("commodity_code"):
             grp = grp.sort_values("trade_date")
             if len(grp) < 2:
+                logger.debug(f"_calc_commodity_momentum: 商品 {code} 数据点不足({len(grp)}<2)，跳过")
                 continue
 
             # 使用 settle 优先，close 回退
             price_col = "settle" if grp["settle"].notna().any() else "close"
             prices = grp[price_col].dropna()
             if len(prices) < 2:
+                logger.debug(f"_calc_commodity_momentum: 商品 {code} 有效价格不足({len(prices)}<2)，跳过")
                 continue
 
             # N 日收益率（取最后 N+1 个数据点）
@@ -193,9 +196,11 @@ class CommodityMomentumFactor(FactorBase):
         for code, data in commodity_mom.items():
             mapping = COMMODITY_INDUSTRY_MAP.get(code)
             if not mapping:
+                logger.debug(f"_aggregate_by_industry: 商品 {code} 无行业映射，跳过")
                 continue
             ind_name = mapping.get(level)
             if not ind_name:
+                logger.debug(f"_aggregate_by_industry: 商品 {code} 无 {level} 级行业映射，跳过")
                 continue
             if ind_name not in industry_data:
                 industry_data[ind_name] = []

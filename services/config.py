@@ -508,7 +508,7 @@ SKIP_ANALYSIS_SOURCES = {"polymarket"}
 # ============================================================
 
 FMP_API_KEY = os.environ.get("FMP_API_KEY", "")
-FMP_RATE_LIMIT = int(os.environ.get("FMP_RATE_LIMIT", "700"))  # Premium: 750/min, 留余量
+FMP_RATE_LIMIT = int(os.environ.get("FMP_RATE_LIMIT", "2500"))  # Ultimate: 3000/min, 留余量
 FMP_BULK_INTERVAL = int(os.environ.get("FMP_BULK_INTERVAL", "15"))  # bulk 端点间隔秒数
 
 UW_API_KEY = os.environ.get("UW_API_KEY", "")  # Unusual Whales

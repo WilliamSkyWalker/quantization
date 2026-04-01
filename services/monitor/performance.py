@@ -205,10 +205,12 @@ class PerformanceAnalyzer:
         """
         try:
             industry_map = self.db.get_industry_map()
-        except Exception:
+        except Exception as e:
+            logger.warning(f"industry_attribution: 获取行业映射失败: {e}")
             return pd.DataFrame()
 
         if industry_map.empty:
+            logger.debug("industry_attribution: 行业映射为空，返回空 DataFrame")
             return pd.DataFrame()
 
         df = holdings.merge(industry_map, on="ts_code", how="left")
@@ -226,6 +228,7 @@ class PerformanceAnalyzer:
         )
 
         if df_price.empty:
+            logger.debug("industry_attribution: 区间内无股价数据，返回空 DataFrame")
             return pd.DataFrame()
 
         # 计算区间收益率

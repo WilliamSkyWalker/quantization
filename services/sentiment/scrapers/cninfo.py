@@ -97,6 +97,7 @@ class CninfoScraper(BaseScraper):
 
                     announcements = result.get("announcements") or []
                     if not announcements:
+                        logger.debug(f"scrape_pages: [{self.source}] {column} {se_date} 页{page_num} 无公告，结束翻页")
                         break
 
                     page_articles = []
@@ -104,20 +105,24 @@ class CninfoScraper(BaseScraper):
                         # 只保留沪深A股代码
                         sec_code = ann.get("secCode") or ""
                         if sec_code and not _A_SHARE_CODE_RE.match(sec_code):
+                            logger.debug(f"scrape_pages: [{self.source}] 非A股代码 {sec_code}，跳过")
                             continue
 
                         title = (ann.get("announcementTitle") or "").strip()
                         title = title.replace("<em>", "").replace("</em>", "")
                         if not title:
+                            logger.debug(f"scrape_pages: [{self.source}] 公告标题为空，跳过")
                             continue
 
                         adjunct_url = ann.get("adjunctUrl") or ""
                         if adjunct_url:
                             full_url = f"http://static.cninfo.com.cn/{adjunct_url}"
                         else:
+                            logger.debug(f"scrape_pages: [{self.source}] 公告无附件URL，跳过")
                             continue
 
                         if full_url in seen_urls:
+                            logger.debug(f"scrape_pages: [{self.source}] URL 重复，跳过: {full_url}")
                             continue
                         seen_urls.add(full_url)
 
@@ -154,6 +159,7 @@ class CninfoScraper(BaseScraper):
 
                     total_ann = result.get("totalAnnouncement") or 0
                     if page_num * 30 >= total_ann:
+                        logger.debug(f"scrape_pages: [{self.source}] {column} {se_date} 已翻完所有页 (total={total_ann})")
                         break
                     page_num += 1
 

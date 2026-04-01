@@ -4,12 +4,15 @@
 改用 wap.miit.gov.cn 主页（服务端渲染，含政策文件、新闻发布等约 60 篇文章）。
 """
 
+import logging
 import re
 from typing import Optional
 
 from bs4 import BeautifulSoup
 
 from services.sentiment.base_scraper import BaseScraper
+
+logger = logging.getLogger(__name__)
 
 
 class MiitScraper(BaseScraper):
@@ -54,29 +57,35 @@ class MiitScraper(BaseScraper):
         for link in soup.find_all("a", href=True):
             href = link["href"]
             if "/art/" not in href:
+                logger.debug(f"parse_list_page: [{self.source}] 非文章链接，跳过: {href[:50]}")
                 continue
 
             # 只保留政策相关路径
             if not any(href.startswith(p) for p in self._POLICY_PREFIXES):
+                logger.debug(f"parse_list_page: [{self.source}] 非政策相关路径，跳过: {href[:50]}")
                 continue
 
             full_url = self._normalize_url(href)
             if full_url in seen_urls:
+                logger.debug(f"parse_list_page: [{self.source}] URL 重复，跳过: {full_url}")
                 continue
             seen_urls.add(full_url)
 
             title = self._clean_text(link.get_text())
             if not title or len(title) < 6:
+                logger.debug(f"parse_list_page: [{self.source}] 标题为空或过短，跳过")
                 continue
 
             pub_date = self._extract_date_from_context(link, href)
             if not pub_date:
+                logger.debug(f"parse_list_page: [{self.source}] 无法提取日期，跳过: {title[:30]}")
                 continue
 
             category = "工信部"
             for prefix, cat in self._CATEGORY_MAP.items():
                 if href.startswith(prefix):
                     category = cat
+                    logger.debug(f"parse_list_page: [{self.source}] 匹配分类 '{cat}'")
                     break
 
             articles.append({
@@ -104,6 +113,7 @@ class MiitScraper(BaseScraper):
         if m:
             return f"{m.group(1)}-01-01"
 
+        logger.debug(f"_extract_date_from_context: [{self.source}] 所有模式均未匹配到日期")
         return ""
 
     def parse_article_page(self, html: str, url: str) -> Optional[dict]:

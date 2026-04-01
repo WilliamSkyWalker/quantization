@@ -168,8 +168,8 @@ class PolymarketBacktester:
                         PolymarketAlert.llm_summary.isnot(None),
                     ).all()
                     existing_keys = {(r.condition_id, r.alert_type, r.created_at) for r in existing}
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"run: 查询已有 LLM 结果失败: {e}")
 
                 pending = []
                 skipped_items = []
@@ -193,10 +193,12 @@ class PolymarketBacktester:
 
                 def _pj(val):
                     if not val:
+                        logger.debug("_pj: 值为空，返回空列表")
                         return []
                     try:
                         return _json.loads(val)
-                    except (ValueError, TypeError):
+                    except (ValueError, TypeError) as e:
+                        logger.debug(f"_pj: JSON 解析失败: {e}，返回空列表")
                         return []
 
                 def _apply_result(alert_data: dict, result: dict):
@@ -452,6 +454,7 @@ class PolymarketBacktester:
             ts = snap.timestamp.timestamp() if snap.timestamp else 0
             price = snap.yes_price
             if ts == 0 or price is None:
+                logger.debug("_replay_market: 快照时间戳为 0 或价格为 None，跳过")
                 continue
 
             price_history.append((ts, price))
@@ -464,6 +467,7 @@ class PolymarketBacktester:
             cache_key = event.condition_id
             last_trigger = cooldown.get(cache_key, 0)
             if ts - last_trigger < POLYMARKET_LLM_COOLDOWN:
+                logger.debug(f"_replay_market: condition_id={event.condition_id} 在冷却期内，跳过")
                 continue
 
             # 只保留最显著的一档 spike（与实时监控一致）
@@ -474,6 +478,7 @@ class PolymarketBacktester:
                 target_ts = ts - lookback_seconds
                 old_price = self._find_nearest_price(price_history, target_ts, lookback_seconds)
                 if old_price is None:
+                    logger.debug(f"_replay_market: {alert_type} 回看 {lookback_seconds}s 无历史价格，跳过该档")
                     continue
 
                 change = price - old_price
@@ -482,6 +487,7 @@ class PolymarketBacktester:
                     best_spike = (alert_type, old_price, change, lookback_seconds)
 
             if not best_spike:
+                logger.debug("_replay_market: 当前时刻无满足阈值的 spike，跳过")
                 continue
 
             alert_type, old_price, change, lookback_seconds = best_spike
@@ -530,12 +536,15 @@ class PolymarketBacktester:
                 for snap in snapshots:
                     p = snap.yes_price
                     if p is None:
+                        logger.debug("_replay_market: 快照 yes_price 为 None，跳过")
                         continue
                     if resolved_yes and p >= threshold:
                         resolution_snap = snap
+                        logger.debug(f"_replay_market: 找到 YES 结算快照 price={p:.4f}")
                         break
                     if resolved_no and p <= threshold:
                         resolution_snap = snap
+                        logger.debug(f"_replay_market: 找到 NO 结算快照 price={p:.4f}")
                         break
 
                 if resolution_snap:
@@ -545,9 +554,11 @@ class PolymarketBacktester:
                     for snap in snapshots:
                         snap_ts = snap.timestamp.timestamp()
                         if snap_ts >= res_ts:
+                            logger.debug("_replay_market: 搜索 before_price 到达结算时刻，中断")
                             break
                         if res_ts - snap_ts <= 86400:
                             before_price = snap.yes_price
+                            logger.debug(f"_replay_market: 找到结算前 24h 内价格 {before_price:.4f}")
                             break
 
                     change = resolution_snap.yes_price - before_price
@@ -585,6 +596,7 @@ class PolymarketBacktester:
     def _persist_alerts_batch(self, items: list[tuple[dict, ...]], source: str = "backtest"):
         """批量将回测 alerts 写入 polymarket_alert 表。"""
         if not items:
+            logger.debug("_persist_alerts_batch: items 为空，跳过持久化")
             return
         import json as _json
 
@@ -615,6 +627,7 @@ class PolymarketBacktester:
             for alert_data, timestamp in items:
                 key = (alert_data["condition_id"], alert_data["alert_type"], timestamp)
                 if key in existing_keys:
+                    logger.debug(f"_persist_alerts_batch: alert 已存在 condition_id={alert_data['condition_id']}，跳过")
                     continue
                 new_records.append(PolymarketAlert(
                     condition_id=alert_data["condition_id"],
@@ -655,6 +668,7 @@ class PolymarketBacktester:
     ) -> Optional[float]:
         """在价格历史中找到最接近 target_ts 的价格。"""
         if not history:
+            logger.debug("_find_nearest_price: 价格历史为空，返回 None")
             return None
 
         best = None
@@ -667,6 +681,7 @@ class PolymarketBacktester:
 
         # 容差：窗口的 20%
         if best_diff > window_seconds * 0.2:
+            logger.debug(f"_find_nearest_price: 最近邻距离 {best_diff:.0f}s 超过窗口 {window_seconds}s 的 20%，返回 None")
             return None
         return best
 
@@ -674,6 +689,7 @@ class PolymarketBacktester:
     def _compute_summary(market_results: list[dict], alerts: list[dict]) -> dict:
         """计算回测汇总统计。"""
         if not market_results:
+            logger.debug("_compute_summary: market_results 为空，返回空字典")
             return {}
 
         total_markets = len(market_results)

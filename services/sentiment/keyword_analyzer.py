@@ -157,6 +157,7 @@ class KeywordAnalyzer:
 
         total = pos_score + neg_score
         if total == 0:
+            logger.debug("_match_sentiment: 未命中任何情感关键词，返回 0.0")
             return 0.0, hit_keywords
 
         sentiment = (pos_score - neg_score) / total

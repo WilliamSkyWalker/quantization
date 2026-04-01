@@ -110,6 +110,7 @@ def neutralize(
 def rank_percentile(series: pd.Series) -> pd.Series:
     n = series.count()
     if n <= 1:
+        logger.debug(f"rank_percentile: 有效样本数不足({n})，返回零值")
         return series * 0.0
     ranks = series.rank(method="average")
     uniform = (ranks - 0.5) / n
@@ -120,6 +121,7 @@ def zscore(series: pd.Series) -> pd.Series:
     mean = series.mean()
     std = series.std()
     if std == 0 or pd.isna(std):
+        logger.debug("zscore: 标准差为零或NaN，返回零值")
         return series * 0.0
     return (series - mean) / std
 

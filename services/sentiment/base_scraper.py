@@ -166,6 +166,7 @@ class BaseScraper(ABC):
         for sel in selectors:
             container = soup.select_one(sel)
             if not container:
+                logger.debug(f"_extract_body_text: 选择器 '{sel}' 未匹配到容器，尝试下一个")
                 continue
             # 去除脚本和样式
             for tag in container.find_all(["script", "style"]):
@@ -173,6 +174,7 @@ class BaseScraper(ABC):
             text = container.get_text(separator="\n", strip=True)
             if len(text) > 50:  # 太短认为不是有效正文
                 return text
+        logger.debug("_extract_body_text: 所有选择器均未匹配到有效正文")
         return ""
 
     def _fetch_article_content(self, article: dict):
@@ -183,10 +185,12 @@ class BaseScraper(ABC):
         """
         url = article.get("url", "")
         if not url:
+            logger.debug("_fetch_article_content: 文章无 URL，跳过详情页抓取")
             return
 
         html = self.fetch_page(url)
         if not html:
+            logger.debug(f"_fetch_article_content: [{self.source}] 页面抓取失败: {url}")
             return
 
         try:
@@ -246,6 +250,7 @@ class BaseScraper(ABC):
                         f"[{self.source}] {url} 重试 {SENTIMENT_MAX_RETRIES} 次后仍失败: {e}"
                     )
                     return None
+        logger.debug(f"fetch_page: [{self.source}] 请求循环结束未返回内容: {url}")
         return None
 
     # ----------------------------------------------------------
@@ -269,6 +274,7 @@ class BaseScraper(ABC):
         for list_url_template in self.list_urls[:max_pages]:
             html = self.fetch_page(list_url_template)
             if not html:
+                logger.debug(f"scrape_pages: [{self.source}] 列表页抓取失败，跳过: {list_url_template}")
                 continue
 
             try:
@@ -282,6 +288,7 @@ class BaseScraper(ABC):
             for article in articles:
                 url = article.get("url", "")
                 if not url or url in seen_urls:
+                    logger.debug(f"scrape_pages: [{self.source}] URL 为空或重复，跳过")
                     continue
                 seen_urls.add(url)
 
@@ -343,6 +350,7 @@ class BaseScraper(ABC):
     def _normalize_url(self, href: str, base_url: str = "") -> str:
         """相对路径转绝对路径。"""
         if not href:
+            logger.debug("_normalize_url: href 为空，返回空字符串")
             return ""
         if href.startswith("http"):
             return href
@@ -353,6 +361,7 @@ class BaseScraper(ABC):
     def _clean_text(text: str, max_len: int = 200) -> str:
         """清理文本：去除多余空白，截断到指定长度。"""
         if not text:
+            logger.debug("_clean_text: 输入文本为空")
             return ""
         text = " ".join(text.split())
         return text[:max_len]

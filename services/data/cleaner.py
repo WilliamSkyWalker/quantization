@@ -301,7 +301,8 @@ def get_clean_universe(
             df_result = df_result.merge(df_industry, on="ts_code", how="left")
         else:
             df_result["industry_name"] = None
-    except Exception:
+    except Exception as e:
+        logger.debug(f"get_clean_universe: 获取行业信息失败: {e}")
         df_result["industry_name"] = None
 
     # 行业白名单过滤（同时检查 L1 和 L2 行业名）
@@ -357,6 +358,7 @@ def preload_clean_universes(
     t0 = time.time()
 
     if bulk_daily is None or bulk_daily.empty:
+        logger.warning("preload_clean_universes: bulk_daily 为空，返回空字典")
         return {}
 
     # 1. 查 stock_basic 一次
@@ -365,6 +367,7 @@ def preload_clean_universes(
         "FROM stock_basic"
     )
     if df_basic.empty:
+        logger.warning("preload_clean_universes: stock_basic 表为空")
         return {}
 
     # 静态过滤（ST、科创板）
@@ -378,7 +381,8 @@ def preload_clean_universes(
     # 2. 行业映射一次
     try:
         df_industry = db.get_industry_map()
-    except Exception:
+    except Exception as e:
+        logger.debug(f"preload_clean_universes: 获取行业映射失败: {e}")
         df_industry = pd.DataFrame()
 
     # 3. 预计算 rolling 20 日均成交额
@@ -425,6 +429,7 @@ def preload_clean_universes(
         # 当日行情
         day = bd_by_date.get(date_ts)
         if day is None or day.empty:
+            logger.debug(f"preload_clean_universes: {date_str} 无行情数据，跳过")
             continue
 
         day = day[day["ts_code"].isin(valid_codes)].copy()
@@ -445,6 +450,7 @@ def preload_clean_universes(
             day = day[day["total_mv"] >= MIN_MARKET_CAP]
 
         if day.empty:
+            logger.debug(f"preload_clean_universes: {date_str} 过滤后股票池为空，跳过")
             continue
 
         # 合并基本信息

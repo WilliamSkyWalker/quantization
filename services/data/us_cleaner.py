@@ -64,7 +64,7 @@ def get_us_clean_universe(db: DatabaseManager, date: str) -> pd.DataFrame:
         tickers = df["ticker"].tolist()
         start_date = (date_dt - pd.Timedelta(days=40)).strftime("%Y-%m-%d")
         vol_sql = (
-            "SELECT ticker, AVG(adj_close * volume) as avg_dollar_vol "
+            "SELECT ticker, AVG(close * volume) as avg_dollar_vol "
             "FROM us_daily_price "
             "WHERE trade_date >= :start AND trade_date <= :end "
             "GROUP BY ticker"

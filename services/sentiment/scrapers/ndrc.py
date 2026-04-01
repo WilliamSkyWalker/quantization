@@ -1,11 +1,14 @@
 """发改委爬虫"""
 
+import logging
 import re
 from typing import Optional
 
 from bs4 import BeautifulSoup
 
 from services.sentiment.base_scraper import BaseScraper
+
+logger = logging.getLogger(__name__)
 
 
 class NdrcScraper(BaseScraper):
@@ -26,16 +29,19 @@ class NdrcScraper(BaseScraper):
         for item in soup.select(".u-list li, ul.list li, .list_con li"):
             link = item.find("a")
             if not link or not link.get("href"):
+                logger.debug(f"parse_list_page: [{self.source}] 列表项无链接，跳过")
                 continue
 
             title = self._clean_text(link.get_text())
             if not title or len(title) < 4:
+                logger.debug(f"parse_list_page: [{self.source}] 标题为空或过短，跳过")
                 continue
 
             href = self._normalize_url(link["href"], url)
 
             pub_date = self._extract_date(item)
             if not pub_date:
+                logger.debug(f"parse_list_page: [{self.source}] 无法提取日期，跳过: {title[:30]}")
                 continue
 
             articles.append({
@@ -66,6 +72,7 @@ class NdrcScraper(BaseScraper):
             if m:
                 return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
 
+        logger.debug(f"_extract_date: [{self.source}] 所有模式均未匹配到日期")
         return ""
 
     def parse_article_page(self, html: str, url: str) -> Optional[dict]:

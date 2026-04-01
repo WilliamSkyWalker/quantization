@@ -33,6 +33,7 @@ def universe(request):
 
     df = get_clean_universe(db, date)
     if df.empty:
+        logger.debug(f"universe: 股票池为空, date={date}")
         return Response({'date': date, 'stocks': [], 'total': 0})
 
     # Get industry distribution
@@ -99,6 +100,7 @@ def _run_select(task_id, date):
     scored = strategy.score_all_stocks(date, include_factors=True)
 
     if scored.empty:
+        logger.debug(f"_run_select: 选股结果为空, date={date}")
         return {'date': date, 'stocks': [], 'total': 0, 'top_stocks': [], 'by_industry': {}}
 
     task_manager.update_progress(task_id, 80, '整理结果...')
@@ -117,8 +119,8 @@ def _run_select(task_id, date):
                 f"SELECT ts_code, industry_name FROM industry_class WHERE ts_code IN ('{codes_str}')"
             )
             scored = scored.merge(df_ind, on='ts_code', how='left')
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"_run_select: 合并行业分类失败: {e}")
 
     if 'industry_name' not in scored.columns:
         scored['industry_name'] = '未知'
@@ -134,8 +136,8 @@ def _run_select(task_id, date):
         )
         if not df_price.empty:
             scored = scored.merge(df_price[['ts_code', 'close', 'pct_chg', 'amount']], on='ts_code', how='left')
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"_run_select: 合并行情数据失败: {e}")
 
     # Compute score-proportional weights for top N stocks
     top_n_df = scored.head(20).copy()
@@ -304,8 +306,8 @@ def factor_detail(request):
             if r['factors']:
                 record.update(json.loads(r['factors']))
             return Response(record)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"factor_detail: 查询因子快照失败，回退到重算: {e}")
 
     # Slow path: recompute on demand
     from services.strategy.multi_factor import MultiFactorStrategy
@@ -553,8 +555,8 @@ def backtest_history(request):
                 m = re.search(r'"总收益":\s*"([^"]*)"', head)
                 if m:
                     headline = m.group(1)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"backtest_history: 解析回测摘要失败: {e}")
         items.append({
             'id': int(r['id']),
             'start_date': str(r['start_date'])[:10],
@@ -581,8 +583,8 @@ def backtest_history_detail(request, pk):
         if val:
             try:
                 return json.loads(val)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"backtest_history_detail._load: 解析字段 {field} JSON 失败: {e}")
         return {} if field == 'summary' else []
 
     return Response({
@@ -617,6 +619,7 @@ def _calc_monthly_returns(nav_series):
         if current_month is None:
             current_month = ym
             month_start_nav = val
+            logger.debug(f"_calc_monthly_returns: 初始化首月 {ym}")
             continue
         if ym != current_month:
             ret = (val / month_start_nav - 1) if month_start_nav else 0

@@ -5,12 +5,15 @@
 日期在 <span>[YYYY-MM-DD]</span> 中。
 """
 
+import logging
 import re
 from typing import Optional
 
 from bs4 import BeautifulSoup
 
 from services.sentiment.base_scraper import BaseScraper
+
+logger = logging.getLogger(__name__)
 
 
 class MofcomScraper(BaseScraper):
@@ -32,22 +35,27 @@ class MofcomScraper(BaseScraper):
         for item in soup.select(".txtList_01 li"):
             link = item.find("a")
             if not link or not link.get("href"):
+                logger.debug(f"parse_list_page: [{self.source}] 列表项无链接，跳过")
                 continue
 
             title = self._clean_text(link.get_text())
             if not title or len(title) < 6:
+                logger.debug(f"parse_list_page: [{self.source}] 标题为空或过短，跳过")
                 continue
 
             href = self._normalize_url(link["href"], url)
             if href in seen_hrefs:
+                logger.debug(f"parse_list_page: [{self.source}] URL 重复，跳过: {href}")
                 continue
             # 跳过外站链接（scio.gov.cn 等），抓详情页必 521
             if "mofcom.gov.cn" not in href:
+                logger.debug(f"parse_list_page: [{self.source}] 外站链接，跳过: {href}")
                 continue
             seen_hrefs.add(href)
 
             pub_date = self._extract_date(item, href)
             if not pub_date:
+                logger.debug(f"parse_list_page: [{self.source}] 无法提取日期，跳过: {title[:30]}")
                 continue
 
             articles.append({
@@ -79,6 +87,7 @@ class MofcomScraper(BaseScraper):
         if m:
             return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
 
+        logger.debug(f"_extract_date: [{self.source}] 所有模式均未匹配到日期")
         return ""
 
     def parse_article_page(self, html: str, url: str) -> Optional[dict]:

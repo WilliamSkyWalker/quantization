@@ -23,6 +23,7 @@ class EP(USFactorBase):
         close = self.get_close_on_date(date, tickers)
 
         if ttm_eps.empty or close.empty:
+            logger.debug("EP.compute: TTM EPS或收盘价数据为空")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = ttm_eps.merge(close, on="ticker", how="inner")
@@ -45,6 +46,7 @@ class BP(USFactorBase):
         mkcap = self.get_market_cap(date, tickers)
 
         if fin.empty or mkcap.empty:
+            logger.debug("BP.compute: 财务数据或市值数据为空")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = fin.merge(mkcap, on="ticker", how="inner")
@@ -68,6 +70,7 @@ class DivYield(USFactorBase):
         close = self.get_close_on_date(date, tickers)
 
         if divs.empty or close.empty:
+            logger.debug("DivYield.compute: 股息数据或收盘价数据为空")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = divs.merge(close, on="ticker", how="inner")

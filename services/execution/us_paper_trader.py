@@ -125,6 +125,7 @@ class USPaperTrader:
                 .first()
             )
             if not account:
+                logger.warning("get_account_info: 未找到美股模拟账户")
                 return {}
             return {
                 "total_assets": account.total_assets,
@@ -147,6 +148,7 @@ class USPaperTrader:
                 .all()
             )
             if not positions:
+                logger.debug("get_current_positions: 当前无美股持仓")
                 return pd.DataFrame(
                     columns=["ticker", "volume", "market_value", "cost_basis"]
                 )
@@ -232,6 +234,7 @@ class USPaperTrader:
             all_tickers = set(list(pos_map.keys()) + list(target.keys()))
 
             if not all_tickers:
+                logger.debug("_execute_rebalance: 无需调仓的股票")
                 return {"success": 0, "failed": 0, "skipped": 0}
 
             # Get latest prices
@@ -257,12 +260,14 @@ class USPaperTrader:
                 px = prices.get(ticker)
 
                 if not px or px <= 0:
+                    logger.debug(f"_execute_rebalance: {ticker} 无有效价格，跳过")
                     continue
 
                 target_vol = int(target_w * total_value / px)
                 delta = target_vol - current_vol
 
                 if delta == 0:
+                    logger.debug(f"_execute_rebalance: {ticker} 目标股数与当前相同，跳过")
                     continue
 
                 if delta < 0:
@@ -313,10 +318,12 @@ class USPaperTrader:
         """Execute a sell order."""
         pos = pos_map.get(ticker)
         if not pos:
+            logger.debug(f"_execute_sell: {ticker} 无持仓，跳过卖出")
             return
 
         actual_vol = min(volume, pos.volume)
         if actual_vol <= 0:
+            logger.debug(f"_execute_sell: {ticker} 卖出量为0，跳过")
             return
 
         exec_price = round(base_price * (1 - self.slippage), 4)
@@ -510,11 +517,12 @@ class USPaperTrader:
     def _get_latest_prices(self, tickers: list[str]) -> dict[str, float]:
         """Get latest adj_close for each ticker from us_daily_price."""
         if not tickers:
+            logger.debug("_get_latest_prices: 无ticker，返回空字典")
             return {}
 
         tickers_str = "','".join(tickers)
         df = self.db.query(
-            f"SELECT ticker, adj_close FROM us_daily_price "
+            f"SELECT ticker, COALESCE(adj_close, close) as adj_close FROM us_daily_price "
             f"WHERE (ticker, trade_date) IN ("
             f"  SELECT ticker, MAX(trade_date) FROM us_daily_price "
             f"  WHERE ticker IN ('{tickers_str}') "
@@ -523,6 +531,7 @@ class USPaperTrader:
         )
 
         if df.empty:
+            logger.debug("_get_latest_prices: 查询无结果，返回空字典")
             return {}
 
         return dict(zip(df["ticker"], df["adj_close"]))

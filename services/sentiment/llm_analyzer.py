@@ -160,6 +160,7 @@ class LLMAnalyzer:
             失败返回 None。
         """
         if not self._available:
+            logger.debug("analyze: LLM 分析器不可用，返回 None")
             return None
 
         content_raw = str(article.get("content") or "")
@@ -185,7 +186,10 @@ class LLMAnalyzer:
             else:
                 content = self._call_openai(user_content)
             logger.info(f"[LLM响应] 成功, 长度={len(content)}, 内容={content[:200]}")
-            return self._parse_response(content)
+            parsed = self._parse_response(content)
+            if parsed is None:
+                logger.debug(f"analyze: 解析 LLM 响应失败，article={article.get('title', '')[:30]}")
+            return parsed
         except Exception as e:
             logger.warning(
                 f"[LLM失败] article={article.get('title', '')[:30]}, "
@@ -269,6 +273,7 @@ class LLMAnalyzer:
         parsed_stocks = []
         for item in stocks:
             if not isinstance(item, dict):
+                logger.debug("_parse_response: stocks 中有非 dict 项，跳过")
                 continue
             code = str(item.get("code", "")).strip()
             name = str(item.get("name", "")).strip()

@@ -135,6 +135,7 @@ class MacroDownloader:
             start_date=start_date, end_date=end_date,
         )
         if df.empty:
+            logger.debug("_download_shibor: API 返回空数据")
             return 0
 
         records = []
@@ -156,6 +157,7 @@ class MacroDownloader:
             start_date=start_date, end_date=end_date,
         )
         if df.empty:
+            logger.debug("_download_lpr: API 返回空数据")
             return 0
 
         records = []
@@ -176,6 +178,7 @@ class MacroDownloader:
             fields="month,nt_yoy",
         )
         if df.empty:
+            logger.debug("_download_cpi: API 返回空数据")
             return 0
 
         records = []
@@ -201,6 +204,7 @@ class MacroDownloader:
             fields="month,ppi_yoy,ppi_mp_yoy",
         )
         if df.empty:
+            logger.debug("_download_ppi: API 返回空数据")
             return 0
 
         records = []
@@ -240,6 +244,7 @@ class MacroDownloader:
             return 0
 
         if df.empty:
+            logger.debug("_download_pmi: API 返回空数据")
             return 0
 
         if "month" not in df.columns:
@@ -276,6 +281,7 @@ class MacroDownloader:
             start_month=start_date[:6], end_month=end_date[:6],
         )
         if df.empty:
+            logger.debug("_download_money_supply: API 返回空数据")
             return 0
 
         records = []
@@ -317,6 +323,7 @@ class MacroDownloader:
             end_quarter=_yyyymmdd_to_quarter(end_date),
         )
         if df.empty:
+            logger.debug("_download_gdp: API 返回空数据")
             return 0
 
         records = []
@@ -324,6 +331,7 @@ class MacroDownloader:
             quarter_str = str(row["quarter"])
             report_date = _quarter_to_date(quarter_str)
             if report_date is None:
+                logger.debug(f"_download_gdp: 跳过无效季度 {quarter_str}")
                 continue
             if pd.notna(row.get("gdp_yoy")):
                 records.append({
@@ -343,6 +351,7 @@ class MacroDownloader:
             start_date=start_date, end_date=end_date,
         )
         if df.empty:
+            logger.debug("_download_us_treasury: API 返回空数据")
             return 0
 
         records = []
@@ -389,5 +398,6 @@ def _quarter_to_date(quarter_str: str) -> str | None:
         q = int(quarter_str[-1])
         month = q * 3
         return pd.Timestamp(year=year, month=month, day=1) + pd.offsets.MonthEnd(0)
-    except (ValueError, IndexError):
+    except (ValueError, IndexError) as e:
+        logger.debug(f"_quarter_to_date: 解析季度字符串 '{quarter_str}' 失败: {e}")
         return None

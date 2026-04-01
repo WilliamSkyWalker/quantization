@@ -18,10 +18,16 @@
     利用短期反转效应，暴跌期捕捉超跌反弹。
 """
 
+import logging
+
 import numpy as np
 import pandas as pd
 
+from services.config import LOG_LEVEL
 from services.factors.base import FactorBase
+
+logger = logging.getLogger(__name__)
+logger.setLevel(LOG_LEVEL)
 
 
 class _MomentumMixin:
@@ -45,6 +51,7 @@ class _MomentumMixin:
             df_prev = df_prev.rename(columns={"close": "adj_close"}) if not df_prev.empty else df_prev
 
         if (df_now is None or df_now.empty) or (df_prev is None or df_prev.empty):
+            logger.debug("_MomentumMixin._compute_momentum: 月末价格数据不足，返回空")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
 
         df = df_now.merge(df_prev, on="ts_code", suffixes=("_now", "_prev"))
@@ -107,9 +114,11 @@ class ResidualMomentumFactor(FactorBase):
 
         try:
             df_industry = self.get_industry_map_cached()
-        except Exception:
+        except Exception as e:
+            logger.warning(f"ResidualMom.compute: 获取行业映射失败: {e}")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
         if df_industry.empty:
+            logger.debug("ResidualMom.compute: 行业映射为空，返回空")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
 
         # 快速路径：使用预计算 20 日累计收益
@@ -124,6 +133,7 @@ class ResidualMomentumFactor(FactorBase):
                 date, lookback_days=45, universe_codes=codes, columns=["pct_chg"],
             )
             if df_price.empty:
+                logger.debug("ResidualMom.compute: 无价格数据，返回空")
                 return pd.DataFrame(columns=["ts_code", "factor_value"])
             df_price["trade_date"] = pd.to_datetime(df_price["trade_date"])
             df_price["pct_chg"] = pd.to_numeric(df_price["pct_chg"], errors="coerce")
@@ -172,6 +182,7 @@ class ShortReversalFactor(FactorBase):
             date, lookback_days=15, universe_codes=codes, columns=["pct_chg"],
         )
         if df_price.empty:
+            logger.debug("Rev5D.compute: 无价格数据，返回空")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
 
         df_price["trade_date"] = pd.to_datetime(df_price["trade_date"])

@@ -254,6 +254,7 @@ class USFactorBase(ABC):
 
         bulk_daily = cls._static_cache.get("_bulk_daily")
         if bulk_daily is None or bulk_daily.empty:
+            logger.debug("precompute_rolling_stats: 预加载日线数据为空，跳过rolling预计算")
             return
 
         df = bulk_daily[["ticker", "trade_date", "adj_close", "close",
@@ -262,6 +263,9 @@ class USFactorBase(ABC):
 
         for col in ["adj_close", "close", "change_pct", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # FMP /stable/ 端点不返回 adjClose，用 close 填充（FMP close 已是 split-adjusted）
+        df["adj_close"] = df["adj_close"].fillna(df["close"])
 
         g = df.groupby("ticker", sort=False)
 
@@ -324,6 +328,7 @@ class USFactorBase(ABC):
         """从预计算的 rolling stats 中提取指定日期的截面数据。"""
         ri = self._static_cache.get("_rolling_indexed")
         if ri is None:
+            logger.debug("_get_rolling_for_date: rolling预计算数据不存在")
             return None
         date_ts = pd.to_datetime(date)
         try:
@@ -332,6 +337,7 @@ class USFactorBase(ABC):
                 day = day[day.index.isin(tickers)]
             return day
         except KeyError:
+            logger.debug(f"_get_rolling_for_date: 日期 {date} 不在rolling数据中")
             return None
 
     def _get_month_end_adj_close(
@@ -340,6 +346,7 @@ class USFactorBase(ABC):
         """从预计算的月末价格中提取 N 月前月末的复权收盘价。"""
         me = self._static_cache.get("_month_end_prices")
         if me is None:
+            logger.debug("_get_month_end_adj_close: 月末价格预计算数据不存在")
             return None
         target = pd.to_datetime(date) - pd.DateOffset(months=months_ago)
         target_period = target.to_period("M")
@@ -347,6 +354,7 @@ class USFactorBase(ABC):
         if tickers:
             result = result[result["ticker"].isin(tickers)]
         if result.empty:
+            logger.debug(f"_get_month_end_adj_close: {months_ago}月前月末无价格数据")
             return None
         return result[["ticker", "adj_close"]].copy()
 
@@ -513,6 +521,7 @@ class USFactorBase(ABC):
         )
         result = self.db.query(sql, params=params)
         if result.empty:
+            logger.debug(f"get_ttm_value: SQL回退查询 {field} TTM 无结果")
             result = pd.DataFrame(columns=["ticker", "ttm_value"])
         else:
             result = result[["ticker", "ttm_value"]]
@@ -542,7 +551,12 @@ class USFactorBase(ABC):
         bulk_daily = self._static_cache.get("_bulk_daily")
         if bulk_daily is not None and not bulk_daily.empty:
             date_ts = pd.to_datetime(date)
-            df = bulk_daily[bulk_daily["trade_date"] == date_ts][["ticker", "adj_close"]].copy()
+            day_df = bulk_daily[bulk_daily["trade_date"] == date_ts].copy()
+            # adj_close 可能全为 NaN（FMP bulk 数据），回退到 close
+            if day_df["adj_close"].notna().sum() == 0 and "close" in day_df.columns:
+                logger.debug("get_close_on_date: adj_close 全为空，回退到 close")
+                day_df["adj_close"] = day_df["close"]
+            df = day_df[["ticker", "adj_close"]].copy()
             df["adj_close"] = pd.to_numeric(df["adj_close"], errors="coerce")
             self._date_cache[cache_key] = df
             if universe_tickers:
@@ -550,7 +564,7 @@ class USFactorBase(ABC):
             return df.copy()
 
         params: dict = {"date": date}
-        sql = "SELECT ticker, adj_close FROM us_daily_price WHERE trade_date = :date"
+        sql = "SELECT ticker, COALESCE(adj_close, close) as adj_close FROM us_daily_price WHERE trade_date = :date"
         if universe_tickers and len(universe_tickers) <= self._IN_CLAUSE_THRESHOLD:
             in_clause, in_params = self._build_in_clause(universe_tickers)
             sql += f" AND ticker IN {in_clause}"
@@ -655,6 +669,7 @@ class USFactorBase(ABC):
             if universe_tickers:
                 df = df[df["ticker"].isin(universe_tickers)]
             if df.empty:
+                logger.debug(f"get_month_end_price: 预加载数据中 {months_ago}月前月末无数据")
                 self._date_cache[cache_key] = df
                 return df
             df["adj_close"] = pd.to_numeric(df["adj_close"], errors="coerce")
@@ -668,12 +683,13 @@ class USFactorBase(ABC):
             "end": month_end.strftime("%Y-%m-%d"),
         }
         sql = (
-            "SELECT ticker, adj_close, trade_date FROM us_daily_price "
+            "SELECT ticker, COALESCE(adj_close, close) as adj_close, trade_date FROM us_daily_price "
             "WHERE trade_date >= :start AND trade_date <= :end "
             "ORDER BY ticker, trade_date DESC"
         )
         df = self.db.query(sql, params=params)
         if df.empty:
+            logger.debug(f"get_month_end_price: SQL查询 {months_ago}月前月末价格无结果")
             self._date_cache[cache_key] = df
             return df
         df = df.drop_duplicates(subset=["ticker"], keep="first")
@@ -753,6 +769,7 @@ class USFactorBase(ABC):
         )
         result = self.db.query(sql, params=params)
         if result.empty:
+            logger.debug(f"get_dividends: SQL查询 {date} 前 {lookback_days} 天股息数据为空")
             result = pd.DataFrame(columns=["ticker", "total_dividend"])
         self._date_cache[cache_key] = result
         if universe_tickers:

@@ -26,6 +26,7 @@ def get_list(request):
         "SELECT ts_code, name, notes, created_at FROM watchlist ORDER BY created_at DESC"
     )
     if wl.empty:
+        logger.debug("get_list: 自选股列表为空")
         return Response({'data': []})
 
     codes = wl['ts_code'].tolist()

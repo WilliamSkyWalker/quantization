@@ -56,6 +56,7 @@ class CLSScraper(BaseScraper):
             return
 
         if df is None or df.empty:
+            logger.debug(f"scrape_pages: [{self.source}] 财联社快讯数据为空，跳过")
             return
 
         # 标准化列名
@@ -94,6 +95,7 @@ class CLSScraper(BaseScraper):
             if not title or title == "nan":
                 title = content[:100] if content and content != "nan" else ""
             if not title:
+                logger.debug(f"scrape_pages: [{self.source}] 标题和内容均为空，跳过")
                 continue
 
             # 解析发布日期
@@ -103,10 +105,12 @@ class CLSScraper(BaseScraper):
             # 回看天数过滤
             days_diff = (today - pub_date).days
             if days_diff >= max_pages:
+                logger.debug(f"scrape_pages: [{self.source}] 文章 {date_str} 超出回看范围 {max_pages} 天，跳过")
                 continue
 
             content_hash = self._compute_content_hash(title, date_str)
             if content_hash in seen_hashes:
+                logger.debug(f"scrape_pages: [{self.source}] 重复内容哈希，跳过: {title[:30]}")
                 continue
             seen_hashes.add(content_hash)
 
@@ -164,4 +168,5 @@ class CLSScraper(BaseScraper):
                 return datetime.strptime(raw_str, fmt).date()
             except (ValueError, TypeError):
                 continue
+        logger.debug(f"_parse_date: 所有格式均无法解析日期 '{raw_str}'，使用默认值")
         return default_date

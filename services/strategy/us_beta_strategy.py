@@ -86,6 +86,7 @@ class USBetaStrategy:
         """
         universe = get_us_clean_universe(self.db, date)
         if universe.empty:
+            logger.debug(f"select_holdings: {date} 股票池为空，返回空 DataFrame")
             return pd.DataFrame(columns=["ticker", "weight"])
 
         # 质量筛选：Gross Profitability = gross_margin * revenue / total_assets
@@ -102,6 +103,7 @@ class USBetaStrategy:
 
         n = len(selected)
         if n == 0:
+            logger.debug(f"select_holdings: {date} 筛选后无股票，返回空 DataFrame")
             return pd.DataFrame(columns=["ticker", "weight"])
 
         result = selected[["ticker"]].copy()
@@ -122,6 +124,7 @@ class USBetaStrategy:
         # 获取交易日
         trade_dates = self._get_trade_dates(start_date, end_date)
         if not trade_dates:
+            logger.debug(f"generate_signals: {start_date}~{end_date} 无交易日，返回空信号")
             return {}
 
         # 月频调仓日
@@ -146,6 +149,7 @@ class USBetaStrategy:
             # 选股（质量筛选等权）
             holdings = self.select_holdings(date)
             if holdings.empty:
+                logger.debug(f"generate_signals: {date} 持仓为空，跳过该调仓日")
                 continue
 
             # 乘以 equity_pct（余下自动变现金）
@@ -170,6 +174,7 @@ class USBetaStrategy:
         """简化版 Gross Profitability（不走完整因子流水线）。"""
         bulk_fin = USFactorBase._static_cache.get("_bulk_financial")
         if bulk_fin is None or bulk_fin.empty:
+            logger.debug("_compute_gross_profitability: 财务数据缓存为空，返回空 DataFrame")
             return pd.DataFrame(columns=["ticker", "gp_score"])
 
         tickers = universe["ticker"].tolist()
@@ -196,5 +201,6 @@ class USBetaStrategy:
             params={"start": start_date, "end": end_date},
         )
         if df.empty:
+            logger.debug(f"_get_trade_dates: {start_date}~{end_date} 无交易日数据，返回空列表")
             return []
         return [d.strftime("%Y-%m-%d") for d in pd.to_datetime(df["trade_date"])]

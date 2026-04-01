@@ -90,7 +90,7 @@
 | 全市场股票列表 | stock-screener | per-ticker | us_stock_basic |
 | SP500 + NASDAQ 100 成分 + 历史变更 | sp500_constituent, nasdaq_constituent + historical | per-ticker | us_stock_basic |
 | 日线行情 | historical-price-full | per-ticker 5/批 | us_daily_price |
-| 季度财报 (IS) | income-statement-bulk | **bulk 按年** 1995+ | us_financial_data |
+| 季度财报 (IS+BS+CF) | stable/income-statement + balance-sheet + cash-flow | **per-ticker** 季度 | us_financial_data |
 | Key Metrics | key-metrics-bulk | **bulk 按年** | us_key_metric |
 | Financial Ratios | ratios-bulk | **bulk 按年** | us_key_metric |
 | Earnings Surprise | earnings-surprises-bulk | **bulk 按年** | us_earnings_surprise |
@@ -100,6 +100,7 @@
 | 分红/拆股 | stock_dividend, stock_split | per-ticker | us_corporate_action |
 | 指数日线 | historical-price-full | per-ticker | us_index_daily |
 | 商品日线 | historical-price-full | per-ticker (GC=F→GCUSD) | us_commodity_price |
+| 分析师评级变更 | grade (v3) | per-ticker | us_analyst_recommendation |
 | 宏观经济 | economic (v4), treasury (v4) | per-ticker | us_macro_indicator |
 
 ### 4.2 Unusual Whales — 替代数据

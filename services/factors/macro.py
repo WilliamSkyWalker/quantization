@@ -63,6 +63,7 @@ class _MacroFactorBase(FactorBase):
         ][["ts_code", "industry_name"]].copy()
 
         if stock_industry.empty:
+            logger.debug(f"{self.name}: 股票池无行业匹配数据，返回空")
             return result
 
         def _map(row):
@@ -117,6 +118,7 @@ class _MacroFactorBase(FactorBase):
 
         df = self.db.get_macro_indicator_history(indicator_code, effective_date, months)
         if df.empty:
+            logger.debug(f"_get_indicator_history: 指标 {indicator_code} 无数据")
             return pd.Series(dtype=float)
 
         df["report_date"] = pd.to_datetime(df["report_date"])
@@ -137,6 +139,7 @@ class _MacroFactorBase(FactorBase):
             window = MACRO_ZSCORE_WINDOW
 
         if len(series) < max(3, window // 2):
+            logger.debug(f"_trailing_zscore: 数据不足({len(series)}<{max(3, window // 2)})，返回 None")
             return None
 
         # 取最近 window 个观测值
@@ -144,6 +147,7 @@ class _MacroFactorBase(FactorBase):
         mean = tail.mean()
         std = tail.std()
         if std == 0 or np.isnan(std):
+            logger.debug("_trailing_zscore: 标准差为0或NaN，返回 0.0")
             return 0.0
 
         latest = series.iloc[-1]
@@ -169,6 +173,7 @@ class _MacroFactorBase(FactorBase):
         """
         series = self._get_indicator_history(indicator_code, date)
         if len(series) < delta_months + 3:
+            logger.debug(f"_delta_zscore: 指标 {indicator_code} 数据不足({len(series)}<{delta_months + 3})，返回 None")
             return None
 
         # 对日频数据按月重采样取末值
@@ -178,6 +183,7 @@ class _MacroFactorBase(FactorBase):
         # 计算 delta
         delta = series.diff(delta_months).dropna()
         if delta.empty:
+            logger.debug(f"_delta_zscore: 指标 {indicator_code} 差分后为空，返回 None")
             return None
 
         return self._trailing_zscore(delta)
@@ -236,6 +242,7 @@ class MacroCycleFactor(_MacroFactorBase):
                     signal += 0.4 * z_ppi_mp
                 return signal
 
+        logger.debug("MACRO_CYCLE._compute_signal: PMI 和 PPI 数据均不足，返回 None")
         return None
 
 
@@ -281,6 +288,7 @@ class MacroLiquidityFactor(_MacroFactorBase):
             weights.append(0.2)
 
         if not components:
+            logger.debug("MACRO_LIQD._compute_signal: 无可用流动性指标，返回 None")
             return None
 
         # 加权求和（按实际可用权重归一化）
@@ -304,23 +312,27 @@ class MacroInflationFactor(_MacroFactorBase):
         ppi = self._get_indicator_history("PPI_YOY", date)
 
         if len(cpi) < 6 or len(ppi) < 6:
+            logger.debug(f"MACRO_INFL._compute_signal: CPI({len(cpi)})或PPI({len(ppi)})数据不足，返回 None")
             return None
 
         z_cpi = self._trailing_zscore(cpi)
         z_ppi = self._trailing_zscore(ppi)
 
         if z_cpi is None or z_ppi is None:
+            logger.debug("MACRO_INFL._compute_signal: CPI 或 PPI z-score 计算失败，返回 None")
             return None
 
         # CPI-PPI 剪刀差（对齐日期后相减）
         aligned = pd.DataFrame({"cpi": cpi, "ppi": ppi}).dropna()
         if len(aligned) < 6:
+            logger.debug(f"MACRO_INFL._compute_signal: CPI-PPI 对齐后数据不足({len(aligned)}<6)，返回 None")
             return None
 
         spread = aligned["cpi"] - aligned["ppi"]
         z_spread = self._trailing_zscore(spread)
 
         if z_spread is None:
+            logger.debug("MACRO_INFL._compute_signal: CPI-PPI 剪刀差 z-score 计算失败，返回 None")
             return None
 
         return 0.5 * z_spread + 0.3 * z_cpi + 0.2 * (-z_ppi)
@@ -363,6 +375,7 @@ class MacroExternalFactor(_MacroFactorBase):
                 weights.append(0.4)
 
         if not components:
+            logger.debug("MACRO_EXTR._compute_signal: 无可用美债指标，返回 None")
             return None
 
         total_w = sum(weights)

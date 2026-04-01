@@ -70,6 +70,7 @@ class AShareBacktester:
                     a.created_at.date() if a.created_at else None,
                 )
                 if day_key in seen_keys:
+                    logger.debug(f"run_from_db: 告警去重跳过 condition_id={a.condition_id} type={a.alert_type}")
                     continue
                 seen_keys.add(day_key)
 
@@ -77,10 +78,11 @@ class AShareBacktester:
                 if a.affected_a_shares:
                     try:
                         a_shares = json.loads(a.affected_a_shares) if isinstance(a.affected_a_shares, str) else a.affected_a_shares
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+                    except (json.JSONDecodeError, TypeError) as e:
+                        logger.warning(f"run_from_db: 解析 affected_a_shares 失败 condition_id={a.condition_id}: {e}")
 
                 if not a_shares:
+                    logger.debug(f"run_from_db: condition_id={a.condition_id} 无受影响 A 股，跳过")
                     continue
 
                 alerts.append({
@@ -116,6 +118,7 @@ class AShareBacktester:
         for idx, alert in enumerate(alerts):
             a_shares = alert.get("affected_a_shares", [])
             if not a_shares:
+                logger.debug(f"_extract_trades_from_alerts: 告警 idx={idx} 无 affected_a_shares，跳过")
                 continue
 
             alert_time = alert.get("timestamp")
@@ -125,10 +128,12 @@ class AShareBacktester:
             for s in a_shares:
                 code = s.get("code", "")
                 if not code:
+                    logger.debug("_extract_trades_from_alerts: A 股 code 为空，跳过")
                     continue
                 direction = s.get("direction", "bullish")
                 confidence = s.get("confidence", 0.5)
                 if confidence < min_confidence:
+                    logger.debug(f"_extract_trades_from_alerts: code={code} confidence={confidence} < min_confidence={min_confidence}，跳过")
                     continue
 
                 trades.append({
@@ -153,6 +158,7 @@ class AShareBacktester:
     ) -> dict:
         """核心 P&L 计算逻辑。"""
         if not trades_input:
+            logger.debug("_run_pnl: 无可用 A 股交易信号，返回空结果")
             task_manager.update_progress(task_id, 100, "无可用 A 股交易信号")
             return {
                 "trades": [],
@@ -176,10 +182,11 @@ class AShareBacktester:
                 try:
                     ts = self._parse_timestamp(t["alert_time"])
                     timestamps.append(ts)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"_run_pnl: 解析时间戳失败: {e}")
 
         if not timestamps:
+            logger.debug("_run_pnl: 无有效时间戳，返回空结果")
             task_manager.update_progress(task_id, 100, "无有效时间戳")
             return {
                 "trades": [],
@@ -207,20 +214,24 @@ class AShareBacktester:
 
             ticker = trade["ticker"]
             if ticker not in price_data or price_data[ticker].empty:
+                logger.debug(f"_run_pnl: ticker={ticker} 无股价数据，跳过")
                 continue
 
             df = price_data[ticker]
             alert_time = trade["alert_time"]
             if not alert_time:
+                logger.debug(f"_run_pnl: ticker={ticker} alert_time 为空，跳过")
                 continue
 
             try:
                 ts = self._parse_timestamp(alert_time)
-            except Exception:
+            except Exception as e:
+                logger.debug(f"_run_pnl: ticker={ticker} 解析 alert_time 失败: {e}，跳过")
                 continue
 
             entry_date = self._find_entry_date(ts, df.index)
             if entry_date is None:
+                logger.debug(f"_run_pnl: ticker={ticker} 未找到入场日期，跳过")
                 continue
 
             exit_date = self._find_exit_date(entry_date, holding_days, df.index)
@@ -239,6 +250,7 @@ class AShareBacktester:
             exit_price = float(df.loc[exit_date, "close"])
 
             if entry_price <= 0 or not math.isfinite(entry_price) or not math.isfinite(exit_price):
+                logger.debug(f"_run_pnl: ticker={ticker} 价格无效 entry={entry_price} exit={exit_price}，跳过")
                 continue
 
             if trade["direction"] == "bearish":
@@ -363,6 +375,7 @@ class AShareBacktester:
             try:
                 return datetime.strptime(ts_str, fmt)
             except ValueError:
+                logger.debug(f"_parse_timestamp: 格式 {fmt} 不匹配，尝试下一个")
                 continue
 
         if "+" in ts_str or ts_str.endswith("Z"):
@@ -379,6 +392,7 @@ class AShareBacktester:
         - 保守策略: 告警日期 +1 天起找下一个 A 股交易日 (T+1)
         """
         if trading_days.empty:
+            logger.debug("_find_entry_date: 交易日序列为空，返回 None")
             return None
 
         alert_date = alert_time.date() if isinstance(alert_time, datetime) else alert_time
@@ -388,6 +402,7 @@ class AShareBacktester:
             if search_date in trading_days:
                 return search_date
             search_date += pd.Timedelta(days=1)
+        logger.debug(f"_find_entry_date: 搜索 {max_search} 天后仍未找到交易日，返回 None")
         return None
 
     @staticmethod
@@ -401,6 +416,7 @@ class AShareBacktester:
                 if count >= holding_days:
                     return current
             current += pd.Timedelta(days=1)
+        logger.debug(f"_find_exit_date: 持有 {holding_days} 交易日后未找到出场日期，返回 None")
         return None
 
     def _compute_summary(self, trades: list[dict]) -> dict:

@@ -123,11 +123,13 @@ class EdgarDownloader:
         """
         self._load_cik_map()
         if not self._cik_map:
+            logger.warning("download_financials: CIK 映射为空，跳过下载")
             return 0
 
         if tickers is None:
             tickers = self.db.get_us_tickers()
         if not tickers:
+            logger.warning("download_financials: 无 ticker 可下载")
             return 0
 
         min_dt = pd.to_datetime(min_date)
@@ -137,6 +139,7 @@ class EdgarDownloader:
         for i, ticker in enumerate(tickers):
             cik = self._cik_map.get(ticker)
             if not cik:
+                logger.debug(f"download_financials: 跳过 {ticker} (无 CIK 映射)")
                 continue
 
             url = f"{_SEC_BASE}/CIK{cik}.json"
@@ -145,6 +148,7 @@ class EdgarDownloader:
 
             if not data:
                 failed += 1
+                logger.debug(f"download_financials: 跳过 {ticker} (API 返回空)")
                 continue
 
             records = self._parse_company_facts(ticker, data, min_dt)
@@ -163,6 +167,7 @@ class EdgarDownloader:
         """解析单家公司的 XBRL facts → 季报记录列表。"""
         facts = data.get("facts", {}).get("us-gaap", {})
         if not facts:
+            logger.debug(f"_parse_company_facts: {ticker} 无 us-gaap facts")
             return []
 
         # 提取每个字段的季度数据
@@ -171,16 +176,15 @@ class EdgarDownloader:
         for field_name, tag_candidates in _TAG_MAP.items():
             for tag in tag_candidates:
                 if tag not in facts:
-                    continue
+                    continue  # 该标签不在 facts 中，尝试下一个
                 entries = facts[tag].get("units", {}).get("USD", [])
                 if not entries and field_name == "eps":
                     entries = facts[tag].get("units", {}).get("USD/shares", [])
                 if not entries:
-                    continue
-
+                    continue  # 该标签无 USD 单位数据，尝试下一个
                 quarterly = [e for e in entries if e.get("form") in ("10-Q", "10-K/A")]
                 if not quarterly:
-                    continue
+                    continue  # 该标签无季度数据，尝试下一个
 
                 if field_name not in field_data:
                     field_data[field_name] = {}
@@ -201,7 +205,7 @@ class EdgarDownloader:
                 continue  # 已有数据
             for tag in tag_candidates:
                 if tag not in facts:
-                    continue
+                    continue  # 该标签不在 facts 中，尝试下一个
                 entries = facts[tag].get("units", {}).get("USD", [])
                 if not entries and field_name == "eps":
                     entries = facts[tag].get("units", {}).get("USD/shares", [])
@@ -218,9 +222,10 @@ class EdgarDownloader:
                                 "fp": e.get("fp", ""),
                                 "fy": e.get("fy", 0),
                             }
-                    break
+                    break  # 用第一个有年报数据的标签
 
         if not field_data:
+            logger.debug(f"_parse_company_facts: {ticker} 无可解析的字段数据")
             return []
 
         # 合并所有字段到统一的季度记录
@@ -232,7 +237,7 @@ class EdgarDownloader:
         for end_date in sorted(all_dates):
             end_dt = pd.to_datetime(end_date, errors="coerce")
             if pd.isna(end_dt) or end_dt < min_dt:
-                continue
+                continue  # 跳过无效或早于最小日期的记录
 
             # 确定 filing_date（取所有字段中最晚的 filed 日期）
             filed_dates = []
@@ -309,5 +314,6 @@ def _get_val(field_data: dict, field: str, end_date: str) -> Optional[float]:
         try:
             return float(entry["val"])
         except (TypeError, ValueError):
+            logger.debug(f"_get_val: 字段 {field} 值转换失败")
             return None
     return None

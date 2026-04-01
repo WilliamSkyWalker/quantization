@@ -154,6 +154,7 @@ def _tushare_call(pro, method: str, limiter: TushareRateLimiter, **kwargs) -> pd
                     time.sleep(2)
                 else:
                     raise RuntimeError(f"{method}({kwargs}) 重试 {TUSHARE_MAX_RETRIES} 次后仍失败: {e}")
+    logger.debug(f"_tushare_call: {method} 超过最大重试次数，返回空 DataFrame")
     return pd.DataFrame()
 
 
@@ -170,6 +171,7 @@ def _group_consecutive_dates(dates: list[str]) -> list[tuple[str, str]]:
         [(start, end), ...] 元组列表。
     """
     if not dates:
+        logger.debug("_group_consecutive_dates: 输入日期列表为空")
         return []
     groups = []
     start = dates[0]
@@ -329,6 +331,7 @@ class TushareDownloader:
                            exchange="SSE", start_date=start_date, end_date=end_date,
                            fields="cal_date,is_open")
         if df.empty:
+            logger.debug("_get_trade_dates: 交易日历 API 返回空")
             return []
         df = df[df["is_open"] == 1].sort_values("cal_date")
         return df["cal_date"].tolist()
@@ -349,6 +352,7 @@ class TushareDownloader:
         # 1. 日线行情（OHLCV + 涨跌幅）
         df_daily = _tushare_call(self.pro, "daily", self.limiter, trade_date=trade_date)
         if df_daily.empty:
+            logger.debug(f"_fetch_daily_by_date: {trade_date} daily API 返回空")
             return None
 
         # 2. 每日指标（换手率、估值、市值等）
@@ -365,6 +369,7 @@ class TushareDownloader:
         # 筛选沪深两市
         df_daily = df_daily[df_daily["ts_code"].str.match(r"^(00|30|60|68)")].copy()
         if df_daily.empty:
+            logger.debug(f"_fetch_daily_by_date: {trade_date} 筛选沪深两市后无数据")
             return None
 
         # 合并每日指标（换手率、估值、市值等）
@@ -518,11 +523,13 @@ class TushareDownloader:
                     trade_date=trade_date, fields=basic_fields,
                 )
                 if df.empty:
+                    logger.debug(f"backfill_daily_basic: {trade_date} daily_basic 返回空，跳过")
                     continue
 
                 # 筛选沪深两市
                 df = df[df["ts_code"].str.match(r"^(00|30|60|68)")].copy()
                 if df.empty:
+                    logger.debug(f"backfill_daily_basic: {trade_date} 筛选沪深后无数据，跳过")
                     continue
 
                 # 构建批量 UPDATE（通过临时 INSERT ON DUPLICATE KEY UPDATE）
@@ -533,6 +540,7 @@ class TushareDownloader:
                 existing_update_cols = [c for c in update_cols if c in df.columns]
 
                 if not existing_update_cols:
+                    logger.debug(f"backfill_daily_basic: {trade_date} 无可更新列，跳过")
                     continue
 
                 # 转日期格式
@@ -613,6 +621,7 @@ class TushareDownloader:
 
             missing = sorted(all_trade_dates - existing_dates)
             if not missing:
+                logger.debug(f"backfill_index_daily: 指数 {code} 无缺失交易日，跳过")
                 continue
 
             logger.info(f"指数 {code}: 缺失 {len(missing)} 个交易日")
@@ -798,6 +807,7 @@ class TushareDownloader:
             start_date=start, end_date=today,
         )
         if df is None or df.empty:
+            logger.debug(f"download_index_daily: {ts_code} 无指数日线数据")
             return 0
 
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")

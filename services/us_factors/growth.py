@@ -25,6 +25,7 @@ class NetProfitYoY(USFactorBase):
         date_ts = pd.to_datetime(date)
         bulk_fin = self._static_cache.get("_bulk_financial")
         if bulk_fin is None or bulk_fin.empty:
+            logger.debug("NetProfitYoY._yoy_growth: 无预加载财务数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = bulk_fin[bulk_fin["filing_date"] <= date_ts].copy()
@@ -40,11 +41,13 @@ class NetProfitYoY(USFactorBase):
         for ticker, grp in df.groupby("ticker"):
             if len(grp) < 8:
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"NetProfitYoY._yoy_growth: {ticker} 季度数据不足8条，跳过")
                 continue
             current_ttm = grp.iloc[:4][field].sum()
             prior_ttm = grp.iloc[4:8][field].sum()
             if abs(prior_ttm) < 1e-10 or np.isnan(prior_ttm) or np.isnan(current_ttm):
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"NetProfitYoY._yoy_growth: {ticker} TTM值无效，跳过")
                 continue
             results.append({"ticker": ticker, "factor_value": current_ttm / abs(prior_ttm) - 1})
 
@@ -61,6 +64,7 @@ class RevenueYoY(USFactorBase):
         date_ts = pd.to_datetime(date)
         bulk_fin = self._static_cache.get("_bulk_financial")
         if bulk_fin is None or bulk_fin.empty:
+            logger.debug("RevenueYoY.compute: 无预加载财务数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = bulk_fin[bulk_fin["filing_date"] <= date_ts].copy()
@@ -75,11 +79,13 @@ class RevenueYoY(USFactorBase):
         for ticker, grp in df.groupby("ticker"):
             if len(grp) < 8:
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"RevenueYoY.compute: {ticker} 季度数据不足8条，跳过")
                 continue
             current_ttm = grp.iloc[:4]["revenue"].sum()
             prior_ttm = grp.iloc[4:8]["revenue"].sum()
             if abs(prior_ttm) < 1e-10 or np.isnan(prior_ttm) or np.isnan(current_ttm):
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"RevenueYoY.compute: {ticker} TTM营收值无效，跳过")
                 continue
             results.append({"ticker": ticker, "factor_value": current_ttm / abs(prior_ttm) - 1})
 
@@ -96,6 +102,7 @@ class NetProfitCAGR3Y(USFactorBase):
         date_ts = pd.to_datetime(date)
         bulk_fin = self._static_cache.get("_bulk_financial")
         if bulk_fin is None or bulk_fin.empty:
+            logger.debug("NetProfitCAGR3Y.compute: 无预加载财务数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = bulk_fin[bulk_fin["filing_date"] <= date_ts].copy()
@@ -111,14 +118,17 @@ class NetProfitCAGR3Y(USFactorBase):
         for ticker, grp in df.groupby("ticker"):
             if len(grp) < 16:
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"NetProfitCAGR3Y.compute: {ticker} 季度数据不足16条，跳过")
                 continue
             current_ttm = grp.iloc[:4]["net_income"].sum()
             prior_ttm = grp.iloc[12:16]["net_income"].sum()
             if prior_ttm <= 0 or current_ttm <= 0:
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"NetProfitCAGR3Y.compute: {ticker} TTM净利润<=0，跳过")
                 continue
             if np.isnan(prior_ttm) or np.isnan(current_ttm):
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"NetProfitCAGR3Y.compute: {ticker} TTM净利润为NaN，跳过")
                 continue
             cagr = (current_ttm / prior_ttm) ** (1.0 / 3.0) - 1
             results.append({"ticker": ticker, "factor_value": cagr})

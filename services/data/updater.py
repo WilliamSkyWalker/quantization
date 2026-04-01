@@ -100,6 +100,7 @@ class FinancialUpdater:
 
         for round_num in range(1, max_retry_rounds + 1):
             if not pending:
+                logger.debug(f"_download_stock_batch: 无待处理股票，结束循环")
                 break
 
             failed = []
@@ -125,6 +126,7 @@ class FinancialUpdater:
                     df = self._merge_income(df, df_income)
 
                     if df.empty:
+                        logger.debug(f"_download_stock_batch: {ts_code} fina_indicator 返回空，跳过")
                         continue
 
                     df_write = self._process_financial_df(df)
@@ -208,6 +210,7 @@ class FinancialUpdater:
     def _process_financial_df(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """处理 fina_indicator 返回的 DataFrame，统一列名并清洗。"""
         if df.empty:
+            logger.debug("_process_financial_df: 输入 DataFrame 为空")
             return None
 
         # 列名映射
@@ -259,7 +262,10 @@ class FinancialUpdater:
         if existing_value_cols:
             df_write = df_write.dropna(subset=existing_value_cols, how="all")
 
-        return df_write if not df_write.empty else None
+        if df_write.empty:
+            logger.debug("_process_financial_df: 清洗后 DataFrame 为空")
+            return None
+        return df_write
 
     def _fetch_income(
         self,
@@ -549,6 +555,7 @@ class FinancialUpdater:
 
         for round_num in range(1, max_retry_rounds + 1):
             if not pending:
+                logger.debug("backfill_income: 无待处理股票，结束循环")
                 break
 
             failed = []
@@ -562,6 +569,7 @@ class FinancialUpdater:
                 try:
                     df_income = self._fetch_income(ts_code, start_date, None, income_fields)
                     if df_income.empty:
+                        logger.debug(f"backfill_income: {ts_code} income 数据为空，跳过")
                         continue
 
                     df_income = df_income.sort_values(
@@ -576,6 +584,7 @@ class FinancialUpdater:
                             n_income = row.get("n_income")
 
                             if pd.isna(end_date):
+                                logger.debug(f"backfill_income: {ts_code} 跳过记录 (end_date 为空)")
                                 continue
 
                             set_parts = []
@@ -645,7 +654,7 @@ class FinancialUpdater:
                 if qdate <= today.strftime("%Y%m%d"):
                     quarters.append(qdate)
                     if len(quarters) >= n:
-                        break
+                        break  # 已收集足够季度数
             y -= 1
         return quarters
 
@@ -683,6 +692,7 @@ class FinancialUpdater:
                                fields="ts_code,pe_ttm,pb,total_mv,circ_mv,total_share,float_share")
             if not df.empty:
                 latest_trade_date = cal_date
+                logger.debug(f"download_valuation_snapshot: 使用交易日 {cal_date}")
                 break
 
         if df.empty:
@@ -716,6 +726,7 @@ class FinancialUpdater:
         for _, row in df.iterrows():
             ts_code = row.get("ts_code")
             if not ts_code:
+                logger.debug("download_valuation_snapshot: 跳过行 (ts_code 为空)")
                 continue
 
             record = {"ts_code": ts_code}
@@ -746,6 +757,7 @@ class FinancialUpdater:
         result = self.db.query("SELECT MAX(end_date) as max_date FROM financial_data")
         val = result["max_date"].iloc[0]
         if pd.isna(val):
+            logger.debug("_get_latest_quarter: financial_data 表为空")
             return None
         return str(val)
 
@@ -787,6 +799,7 @@ class FinancialUpdater:
             industry_name = row.get("industry_name", "")
 
             if not index_code:
+                logger.debug("download_industry_classification: 跳过行 (index_code 为空)")
                 continue
 
             try:
@@ -844,6 +857,7 @@ class FinancialUpdater:
                 industry_name = row.get("industry_name", "")
 
                 if not index_code:
+                    logger.debug("download_industry_classification: 跳过 L2 行 (index_code 为空)")
                     continue
 
                 try:

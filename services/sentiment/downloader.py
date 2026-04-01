@@ -54,6 +54,7 @@ class SentimentDownloader:
         try:
             last_dt = datetime.strptime(str(last_date)[:10], "%Y-%m-%d").date()
         except ValueError:
+            logger.warning(f"_calc_incremental_days: [{source}] 日期解析失败 last_date={last_date}，回退到全量 {SENTIMENT_MAX_PAGES} 天")
             return SENTIMENT_MAX_PAGES
         days_back = (datetime.now().date() - last_dt).days + overlap_days
         days_back = max(days_back, 1)
@@ -120,8 +121,8 @@ class SentimentDownloader:
                 if not df.empty:
                     existing_urls = set(df["url"].tolist())
                     logger.info(f"[{source}] 库中已有 {len(existing_urls)} 篇，将跳过详情页")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"download_source: [{source}] 查询已有 URL 失败: {e}")
 
             found = 0
             new_count = 0
@@ -190,11 +191,13 @@ class SentimentDownloader:
         通过 URL 反查 article_id，然后写入对应的 analysis 记录。
         """
         if not analysis_records:
+            logger.debug("_inject_analysis: 无分析记录，跳过注入")
             return
 
         # 按 URL 查 article_id
         urls = [a["url"] for a in articles if "url" in a]
         if not urls:
+            logger.debug("_inject_analysis: 无有效 URL，跳过注入")
             return
 
         url_to_analysis = {}
@@ -203,6 +206,7 @@ class SentimentDownloader:
                 url_to_analysis[article["url"]] = analysis
 
         if not url_to_analysis:
+            logger.debug("_inject_analysis: 无 URL 到分析的映射，跳过注入")
             return
 
         try:
@@ -278,6 +282,7 @@ class SentimentDownloader:
 
             # 跳过不支持详情页抓取的爬虫
             if not scraper.fetch_content:
+                logger.debug(f"backfill_content: [{src}] 爬虫不支持详情页抓取，跳过: {url}")
                 continue
 
             html = scraper.fetch_page(url)

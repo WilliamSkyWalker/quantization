@@ -60,7 +60,7 @@ def _sanitize_records(records: list[dict]) -> list[dict]:
     for rec in records:
         for k, v in rec.items():
             if v is None:
-                continue
+                continue  # None 无需清理
             if isinstance(v, float):
                 if math.isnan(v) or math.isinf(v) or abs(v) > _FLOAT_MAX:
                     rec[k] = None
@@ -1088,13 +1088,13 @@ class DatabaseManager:
                 import services.sentiment.models  # noqa: F401
                 _sentiment_models_loaded = True
             except ImportError:
-                pass
+                logger.debug("init_tables: sentiment 模块未安装，跳过")
         if not _polymarket_models_loaded:
             try:
                 import services.polymarket.models  # noqa: F401
                 _polymarket_models_loaded = True
             except ImportError:
-                pass
+                logger.debug("init_tables: polymarket 模块未安装，跳过")
 
         try:
             Base.metadata.create_all(self.engine)
@@ -1105,8 +1105,8 @@ class DatabaseManager:
             for table in Base.metadata.sorted_tables:
                 try:
                     table.create(self.engine, checkfirst=True)
-                except Exception:
-                    logger.debug(f"跳过表 {table.name} 创建失败")
+                except Exception as e:
+                    logger.debug(f"跳过表 {table.name} 创建失败: {e}")
         self._ensure_adj_factor_column()
         self._ensure_new_columns()
         logger.info("数据库表初始化完成")
@@ -1305,6 +1305,7 @@ class DatabaseManager:
             df: 日线行情 DataFrame。
         """
         if df.empty:
+            logger.debug("bulk_insert_daily_price: 输入DataFrame为空，跳过")
             return
 
         if "trade_date" in df.columns:
@@ -1334,6 +1335,7 @@ class DatabaseManager:
             df: 日线行情 DataFrame。
         """
         if df.empty:
+            logger.debug("bulk_upsert_daily_price: 输入DataFrame为空，跳过")
             return
 
         if "trade_date" in df.columns:
@@ -1381,9 +1383,9 @@ class DatabaseManager:
                     "daily_price", self.engine,
                     if_exists="append", index=False, method="multi",
                 )
-            except Exception:
+            except Exception as e:
                 # 忽略重复键错误
-                pass
+                logger.debug(f"bulk_upsert_daily_price: SQLite 插入忽略重复: {e}")
             logger.info(f"daily_price: 批量插入(SQLite) {len(df)} 条记录")
 
     def batch_update_financial(self, updates: list[dict], end_date: str = None):
@@ -1398,6 +1400,7 @@ class DatabaseManager:
             end_date: 已废弃，保留参数兼容性但不再使用。
         """
         if not updates:
+            logger.debug("batch_update_financial: 更新列表为空，跳过")
             return
 
         is_mysql = not str(self.engine.url).startswith("sqlite")
@@ -1528,6 +1531,7 @@ class DatabaseManager:
         result = self.query(sql)
         max_date = result["max_date"].iloc[0]
         if pd.isna(max_date):
+            logger.debug("get_latest_trade_date: daily_price 表为空")
             return None
         return str(max_date)
 
@@ -1725,9 +1729,11 @@ class DatabaseManager:
             result = self.query("SELECT MAX(trade_date) as max_date FROM commodity_price")
             max_date = result["max_date"].iloc[0]
             if pd.isna(max_date):
+                logger.debug("get_latest_commodity_date: 商品价格表为空")
                 return None
             return str(max_date)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"get_latest_commodity_date: 查询失败: {e}")
             return None
 
     # ----------------------------------------------------------
@@ -1840,9 +1846,11 @@ class DatabaseManager:
             result = self.query(sql)
             max_date = result["max_date"].iloc[0]
             if pd.isna(max_date):
+                logger.debug("get_latest_macro_date: 宏观指标表为空")
                 return None
             return str(max_date)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"get_latest_macro_date: 查询失败: {e}")
             return None
 
     # ----------------------------------------------------------
@@ -1859,6 +1867,7 @@ class DatabaseManager:
             records: 每条记录包含 industry_name, factor_name, weight, description(可选)。
         """
         if not records:
+            logger.debug("upsert_industry_factor_config: 记录列表为空，跳过")
             return
 
         with self.get_session() as session:
@@ -2026,6 +2035,7 @@ class DatabaseManager:
             新增文章数。
         """
         if not articles:
+            logger.debug("upsert_policy_articles: 文章列表为空，跳过")
             return 0
 
         from services.sentiment.models import PolicyArticle
@@ -2058,6 +2068,7 @@ class DatabaseManager:
             新增文章数（近似值）。
         """
         if not articles:
+            logger.debug("bulk_upsert_policy_articles: 文章列表为空，跳过")
             return 0
 
         is_mysql = not str(self.engine.url).startswith("sqlite")
@@ -2122,6 +2133,7 @@ class DatabaseManager:
         )
         df = self.query(sql, params=params)
         if df.empty:
+            logger.debug("get_articles_without_content: 无需补录正文的文章")
             return []
         return df.to_dict("records")
 
@@ -2156,6 +2168,7 @@ class DatabaseManager:
         result = self.query(sql, params={"source": source})
         max_date = result["max_date"].iloc[0]
         if pd.isna(max_date):
+            logger.debug(f"get_latest_article_date: source={source} 无数据")
             return None
         return str(max_date)
 
@@ -2171,6 +2184,7 @@ class DatabaseManager:
             写入记录数。
         """
         if not records:
+            logger.debug("upsert_policy_analysis: 记录列表为空，跳过")
             return 0
 
         from services.sentiment.models import PolicyAnalysis
@@ -2255,6 +2269,7 @@ class DatabaseManager:
         )
         df = self.query(sql, params={"atype": analysis_type, "lim": limit})
         if df.empty:
+            logger.debug(f"get_unanalyzed_articles: 无未分析文章 (type={analysis_type})")
             return []
         # 转换日期为字符串
         for col in ["publish_date"]:
@@ -2401,11 +2416,13 @@ class DatabaseManager:
                 try:
                     with self.engine.begin() as conn:
                         conn.execute(sql, batch)
+                    logger.debug(f"_fast_bulk_upsert: {table_name} 批次写入成功")
                     break
                 except Exception as e:
                     if "Deadlock" in str(e) and attempt < 2:
                         import time as _time
                         _time.sleep(0.5 * (attempt + 1))
+                        logger.debug(f"_fast_bulk_upsert: {table_name} 死锁重试 (attempt {attempt+1})")
                         continue
                     raise
         logger.info(f"{table_name}: 批量upsert {len(records)} 条记录")
@@ -2451,7 +2468,8 @@ class DatabaseManager:
         try:
             table_cols_df = self.query("SHOW COLUMNS FROM us_dark_pool")
             valid_cols = set(table_cols_df["Field"].tolist())
-        except Exception:
+        except Exception as e:
+            logger.debug(f"upsert_us_dark_pool: 获取 us_dark_pool 表结构失败，使用 DataFrame 列名: {e}")
             valid_cols = set(df.columns)
         cols = [c for c in df.columns if c in valid_cols and c != "id"]
         records = _sanitize_records(df[cols].to_dict("records"))
@@ -2470,11 +2488,13 @@ class DatabaseManager:
                 try:
                     with self.engine.begin() as conn:
                         conn.execute(sql, batch)
+                    logger.debug("upsert_us_dark_pool: 批次写入成功")
                     break
                 except Exception as e:
                     if "Deadlock" in str(e) and attempt < 2:
                         import time as _time
                         _time.sleep(0.5)
+                        logger.debug(f"upsert_us_dark_pool: 死锁重试 (attempt {attempt+1})")
                         continue
                     raise
         logger.info(f"us_dark_pool: 插入 {len(records)} 条记录")
@@ -2504,9 +2524,11 @@ class DatabaseManager:
             result = self.query(sql)
             max_date = result["max_date"].iloc[0]
             if pd.isna(max_date):
+                logger.debug("get_latest_us_trade_date: us_daily_price 表为空")
                 return None
             return str(max_date)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"get_latest_us_trade_date: 查询失败: {e}")
             return None
 
     def upsert_scrape_log(self, record: dict):

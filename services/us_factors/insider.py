@@ -8,8 +8,6 @@
 """
 
 import logging
-import re
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -21,7 +19,6 @@ logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
 
 _LOOKBACK_DAYS = 90
-_OPENINSIDER_URL = "http://openinsider.com/screener?s={ticker}&o=&pl=&ph=&ll=&lh=&fd=90&fdr=&td=0&tdr=&feession=&cession=&sidTicker=&tiession=&z=&zb=&za=&export=csv"
 
 
 class InsiderNetBuy(USFactorBase):
@@ -36,11 +33,13 @@ class InsiderNetBuy(USFactorBase):
         # 尝试从预加载缓存获取（回测模式）
         insider_data = self._get_insider_data(date, tickers)
         if insider_data.empty:
+            logger.debug("InsiderNetBuy.compute: 无内部人交易数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         # 市值
         mktcap = self.get_market_cap(date, tickers)
         if mktcap.empty:
+            logger.debug("InsiderNetBuy.compute: 无市值数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = insider_data.merge(mktcap, on="ticker", how="inner")
@@ -53,20 +52,28 @@ class InsiderNetBuy(USFactorBase):
 
     def _get_insider_data(self, date: str, tickers: list[str]) -> pd.DataFrame:
         """
-        获取内部人交易数据。
+        获取内部人交易数据（从 us_insider_trade 表）。
 
-        优先从 DB 查询（如果有 us_insider_transaction 表），
-        否则从 SEC EDGAR Form 4 RSS feed 获取。
+        计算近 90 天每个 ticker 的净买入金额：
+        - A (Acquisition) = 买入，金额为正
+        - D (Disposition) = 卖出，金额为负
+        - net_value = SUM(signed_value)
         """
         date_ts = pd.to_datetime(date)
         start_ts = date_ts - pd.Timedelta(days=_LOOKBACK_DAYS)
 
-        # 尝试从 DB 查询
+        # 从 us_insider_trade 表查询（P-Purchase/S-Sale 或 A/D 标记）
         try:
             sql = (
-                "SELECT ticker, SUM(net_value) as net_value "
-                "FROM us_insider_transaction "
-                "WHERE trade_date >= :start AND trade_date <= :end "
+                "SELECT ticker, "
+                "  SUM(CASE WHEN acquisition_or_disposition = 'A' "
+                "    THEN securities_transacted * price "
+                "    ELSE -securities_transacted * price END) as net_value "
+                "FROM us_insider_trade "
+                "WHERE transaction_date >= :start AND transaction_date <= :end "
+                "  AND price > 0 AND securities_transacted > 0 "
+                "  AND transaction_type IN ('P-Purchase', 'S-Sale', 'A-Award', "
+                "      'P-Purchase+', 'S-Sale+') "
                 "GROUP BY ticker"
             )
             df = self.db.query(sql, params={
@@ -75,22 +82,11 @@ class InsiderNetBuy(USFactorBase):
             })
             if not df.empty:
                 df["net_value"] = pd.to_numeric(df["net_value"], errors="coerce")
-                return df[df["ticker"].isin(tickers)]
-        except Exception:
-            pass  # 表不存在
+                result = df[df["ticker"].isin(tickers)]
+                if not result.empty:
+                    return result
+            logger.debug(f"_get_insider_data: 日期 {date} 近90天无内部人交易数据")
+        except Exception as e:
+            logger.warning(f"_get_insider_data: us_insider_trade 查询失败: {e}")
 
-        # 回退：从 SEC EDGAR RSS feed 批量获取 Form 4
-        return self._fetch_from_edgar_rss(date, tickers)
-
-    def _fetch_from_edgar_rss(self, date: str, tickers: list[str]) -> pd.DataFrame:
-        """从 SEC EDGAR 的 full-text search 获取近期 Form 4 数据。"""
-        # SEC EDGAR EFTS API 支持按 form type 搜索
-        # 但实时抓取在回测中太慢，这里返回空（需要预下载）
-        cache_key = ("insider_data", date)
-        cached = self._date_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        # 回测模式下返回空（需要先用 download_insider_data() 预填充）
-        self._date_cache[cache_key] = pd.DataFrame(columns=["ticker", "net_value"])
         return pd.DataFrame(columns=["ticker", "net_value"])

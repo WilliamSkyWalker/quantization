@@ -68,27 +68,32 @@ class NfraScraper(BaseScraper):
                     break
 
                 if result.get("rptCode") != 200:
+                    logger.debug(f"scrape_pages: [{self.source}] API 返回非200状态码 rptCode={result.get('rptCode')}，结束")
                     break
 
                 rows = result.get("data", {}).get("rows") or []
                 if not rows:
+                    logger.debug(f"scrape_pages: [{self.source}] itemId={item_id} page={page_idx} 无数据行，结束翻页")
                     break
 
                 page_articles = []
                 for row in rows:
                     doc_id = row.get("docId")
                     if not doc_id or doc_id in seen_ids:
+                        logger.debug(f"scrape_pages: [{self.source}] docId 为空或重复: {doc_id}，跳过")
                         continue
                     seen_ids.add(doc_id)
 
                     title = (row.get("docSubtitle") or row.get("docTitle") or "").strip()
                     if not title:
+                        logger.debug(f"scrape_pages: [{self.source}] 文档标题为空 docId={doc_id}，跳过")
                         continue
 
                     # 发布日期
                     pub_date_str = row.get("publishDate") or row.get("builddate") or ""
                     pub_date = pub_date_str[:10] if len(pub_date_str) >= 10 else ""
                     if not pub_date:
+                        logger.debug(f"scrape_pages: [{self.source}] 文档日期为空 docId={doc_id}，跳过")
                         continue
 
                     # 详情页 URL
@@ -115,6 +120,7 @@ class NfraScraper(BaseScraper):
                 # 检查是否还有更多
                 total = result.get("data", {}).get("total", 0)
                 if page_idx * 50 >= total:
+                    logger.debug(f"scrape_pages: [{self.source}] itemId={item_id} 已翻完所有页 (total={total})")
                     break
 
     def scrape(self, max_pages: int = SENTIMENT_MAX_PAGES) -> list[dict]:

@@ -125,6 +125,7 @@ class RiskManager:
             风控调整后的 DataFrame[ts_code, weight]。
         """
         if weights_df.empty:
+            logger.debug("adjust_weights: 输入权重为空，直接返回")
             return weights_df
 
         df = weights_df[["ts_code", "weight"]].copy()
@@ -184,6 +185,7 @@ class RiskManager:
             过滤后的 DataFrame。
         """
         if self.min_turnover <= 0:
+            logger.debug("_filter_liquidity: 成交额阈值<=0，跳过流动性过滤")
             return df
 
         codes = df["ts_code"].tolist()
@@ -203,6 +205,7 @@ class RiskManager:
         )
 
         if df_amount.empty:
+            logger.debug("_filter_liquidity: 无成交额数据，跳过流动性过滤")
             return df
 
         liquid_codes = df_amount[
@@ -235,6 +238,7 @@ class RiskManager:
         for _ in range(10):
             over_mask = df["weight"] > self.max_single_weight
             if not over_mask.any():
+                logger.debug("_cap_single_weight: 所有个股权重已在上限内，截断收敛")
                 break
 
             excess = (df.loc[over_mask, "weight"] - self.max_single_weight).sum()
@@ -272,10 +276,12 @@ class RiskManager:
         """
         try:
             industry_map = self.db.get_industry_map()
-        except Exception:
+        except Exception as e:
+            logger.warning(f"_cap_industry_weight: 获取行业映射失败: {e}")
             return df
 
         if industry_map.empty:
+            logger.debug("_cap_industry_weight: 行业映射为空，跳过行业暴露限制")
             return df
 
         df = df.merge(industry_map, on="ts_code", how="left")
@@ -305,14 +311,17 @@ class RiskManager:
         截断关联行业组合权重（如地产链=房地产+建筑装饰+建筑材料合计不超过上限）。
         """
         if not INDUSTRY_GROUPS or MAX_INDUSTRY_GROUP_WEIGHT >= 1.0:
+            logger.debug("_cap_industry_group_weight: 未配置行业组或上限>=100%，跳过")
             return df
 
         try:
             industry_map = self.db.get_industry_map()
-        except Exception:
+        except Exception as e:
+            logger.warning(f"_cap_industry_group_weight: 获取行业映射失败: {e}")
             return df
 
         if industry_map.empty:
+            logger.debug("_cap_industry_group_weight: 行业映射为空，跳过")
             return df
 
         df = df.merge(industry_map, on="ts_code", how="left")
@@ -351,12 +360,14 @@ class RiskManager:
             仓位缩放系数：1.0 = 满仓, <1.0 = 降仓。
         """
         if nav_series.empty:
+            logger.debug("check_drawdown: 净值序列为空，返回满仓")
             return 1.0
 
         peak = nav_series.cummax()
         dd = abs((nav_series.iloc[-1] - peak.iloc[-1]) / peak.iloc[-1])
 
         if dd <= self.dd_start:
+            logger.debug(f"check_drawdown: 回撤 {dd:.2%} 未达起始阈值 {self.dd_start:.2%}，保持满仓")
             return 1.0
 
         if dd >= self.dd_max:
@@ -390,6 +401,7 @@ class RiskManager:
             仓位缩放系数。
         """
         if len(nav_series) < self.vol_lookback + 1:
+            logger.debug(f"calc_vol_scale: 净值数据不足({len(nav_series)}<{self.vol_lookback+1})，返回最大仓位")
             return self.vol_scale_max
 
         daily_ret = nav_series.pct_change().dropna()
@@ -398,6 +410,7 @@ class RiskManager:
         realized_vol = recent_ret.std() * np.sqrt(252)
 
         if realized_vol <= 0 or np.isnan(realized_vol):
+            logger.debug("calc_vol_scale: 已实现波动率无效，返回最大仓位")
             return self.vol_scale_max
 
         scale = self.target_vol / realized_vol
@@ -456,7 +469,7 @@ class RiskManager:
                     f"{name}({w:.1%})"
                     for name, w in ind_weights.nlargest(3).items()
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"risk_report: 获取行业集中度失败: {e}")
 
         return report

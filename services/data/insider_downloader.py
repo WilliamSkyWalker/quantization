@@ -31,6 +31,7 @@ def _parse_value(s: str) -> float | None:
     try:
         return float(s)
     except ValueError:
+        logger.debug(f"_parse_value: 无法解析值 '{s}'")
         return None
 
 
@@ -96,14 +97,17 @@ def download_insider_bulk(db: DatabaseManager, days: int = 365) -> int:
     for row in rows[1:]:
         cells = row.find_all("td")
         if len(cells) <= max(col_idx.values()):
+            logger.debug("download_insider_bulk: 跳过行 (列数不足)")
             continue
 
         ticker = cells[col_idx["ticker"]].get_text(strip=True).upper()
         if ticker not in our_tickers:
+            logger.debug(f"download_insider_bulk: 跳过 {ticker} (不在股票池中)")
             continue
 
         value = _parse_value(cells[col_idx["value"]].get_text(strip=True))
         if value is None or value == 0:
+            logger.debug(f"download_insider_bulk: 跳过 {ticker} (value为空或0)")
             continue
 
         trade_type_str = cells[col_idx.get("trade_type", 0)].get_text(strip=True).lower() if "trade_type" in col_idx else ""
@@ -172,5 +176,5 @@ def _upsert_insider_data(db: DatabaseManager, df: pd.DataFrame):
                     "nv": row["net_value"],
                     "name": row.get("insider_name", ""),
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"_upsert_insider_data: 写入失败 ticker={row['ticker']}: {e}")

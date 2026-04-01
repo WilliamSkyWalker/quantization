@@ -168,6 +168,7 @@ class EventAnalyzer:
             失败返回 None。
         """
         if not self._available:
+            logger.debug("analyze: LLM 不可用，跳过分析")
             return None
 
         alert_type = event_info.get("alert_type", "")
@@ -270,9 +271,11 @@ class EventAnalyzer:
         us_tickers = []
         for item in raw_tickers:
             if not isinstance(item, dict):
+                logger.debug("_parse_response: affected_tickers 中包含非 dict 元素，跳过")
                 continue
             ticker = str(item.get("ticker", "")).upper().strip()
             if not ticker:
+                logger.debug("_parse_response: ticker 为空，跳过")
                 continue
             direction = str(item.get("direction", "")).lower()
             if direction not in ("bullish", "bearish"):
@@ -294,10 +297,12 @@ class EventAnalyzer:
         a_shares = []
         for item in raw_a_shares:
             if not isinstance(item, dict):
+                logger.debug("_parse_response: affected_a_shares 中包含非 dict 元素，跳过")
                 continue
             code = str(item.get("code", "")).strip()
             name = str(item.get("name", "")).strip()
             if not code and not name:
+                logger.debug("_parse_response: A股 code 和 name 均为空，跳过")
                 continue
             direction = str(item.get("direction", "")).lower()
             if direction not in ("bullish", "bearish"):

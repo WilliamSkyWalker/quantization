@@ -156,7 +156,8 @@ def mock_alert(request):
                 gamma_market_id=f"MOCK_{condition_id}",
             ))
         session.commit()
-    except Exception:
+    except Exception as e:
+        logger.warning(f"mock_alert: upsert mock event 失败: {e}")
         session.rollback()
         raise
     finally:
@@ -211,6 +212,7 @@ def delete_mock_alerts(request):
             "deleted_events": event_count,
         })
     except Exception as e:
+        logger.error(f"delete_mock_alerts: 删除 mock 数据失败: {e}")
         session.rollback()
         return Response({"error": str(e)}, status=500)
     finally:
@@ -393,10 +395,12 @@ def backtest_result(request):
         for r in rows:
             def _parse_json(val):
                 if not val:
+                    logger.debug("backtest_result._parse_json: 输入为空")
                     return []
                 try:
                     return _json.loads(val)
-                except (ValueError, TypeError):
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"backtest_result._parse_json: JSON 解析失败: {e}")
                     return []
 
             alerts.append({
@@ -474,6 +478,7 @@ def backtest_result(request):
         for ev in events:
             cid = ev.condition_id
             if cid not in condition_ids_with_alerts:
+                logger.debug(f"backtest_result: 跳过无告警的市场 {cid}")
                 continue
             # 快照统计
             stats = session.query(
@@ -612,12 +617,14 @@ def impact_overview(request):
             if sw_raw:
                 try:
                     industries = json.loads(sw_raw) if isinstance(sw_raw, str) else sw_raw
-                except (json.JSONDecodeError, TypeError):
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.debug(f"impact_overview: 解析 sw_industries JSON 失败: {e}")
                     industries = []
                 if isinstance(industries, list):
                     for ind in industries:
                         name = ind if isinstance(ind, str) else str(ind)
                         if not name:
+                            logger.debug("impact_overview: 跳过空行业名")
                             continue
                         industry_counter[name] += 1
                         if alert.llm_sentiment is not None:
@@ -630,16 +637,19 @@ def impact_overview(request):
             if a_raw:
                 try:
                     stocks = json.loads(a_raw) if isinstance(a_raw, str) else a_raw
-                except (json.JSONDecodeError, TypeError):
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.debug(f"impact_overview: 解析 a_shares JSON 失败: {e}")
                     stocks = []
                 if isinstance(stocks, list):
                     for s in stocks:
                         if not isinstance(s, dict):
+                            logger.debug(f"impact_overview: 跳过非 dict 类型的 A 股记录: {type(s)}")
                             continue
                         code = s.get("code", "")
                         name = s.get("name", code)
                         direction = s.get("direction", "unknown")
                         if not code:
+                            logger.debug("impact_overview: 跳过无股票代码的 A 股记录")
                             continue
                         stock_counter[code] += 1
                         stock_names[code] = name
@@ -716,8 +726,8 @@ def impact_overview(request):
                 "WHERE a.source = 'polymarket'"
             )
             bridged_analysis = int(df2["cnt"].iloc[0]) if not df2.empty else 0
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"impact_overview: 查询 polymarket 桥接数据失败: {e}")
 
         # 最近的 alert（取最新 20 条，序列化为前端可用格式）
         recent_alerts = []
@@ -725,13 +735,15 @@ def impact_overview(request):
             # 解析 JSON 字段
             def _parse_json(val):
                 if not val:
+                    logger.debug("impact_overview._parse_json: 输入为空")
                     return []
                 if isinstance(val, list):
                     return val
                 try:
                     parsed = json.loads(val)
                     return parsed if isinstance(parsed, list) else []
-                except (json.JSONDecodeError, TypeError):
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.debug(f"impact_overview._parse_json: JSON 解析失败: {e}")
                     return []
 
             recent_alerts.append({

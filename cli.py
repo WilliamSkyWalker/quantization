@@ -9,6 +9,7 @@
     python3 cli.py backtest --market us --start 2020-01-01 --end 2025-12-31
 """
 
+import logging
 import os
 import sys
 import time
@@ -27,6 +28,8 @@ django.setup()
 import typer
 from rich.console import Console
 from rich.table import Table
+
+logger = logging.getLogger(__name__)
 
 console = Console()
 app = typer.Typer(help="量化交易系统 CLI", no_args_is_help=True)
@@ -96,6 +99,7 @@ def db_status():
 
             t.add_row(table, f"{cnt:,}", tickers, dates)
         except Exception as e:
+            logger.warning(f"db_status: 查询表 {table} 失败: {e}")
             t.add_row(table, "[red]ERROR[/red]", "-", str(e)[:40])
 
     console.print(t)
@@ -170,14 +174,15 @@ def _clean_tables_for_import(db, source: str, target: str):
                 session.execute(sa_text(f"TRUNCATE TABLE `{table}`"))
                 console.print(f"  [dim]✓ {table} 已清空[/dim]")
             except Exception as e:
+                logger.warning(f"_clean_tables_for_import: 清空表 {table} 失败: {e}")
                 console.print(f"  [red]✗ {table} 清空失败: {e}[/red]")
         # 清 news 按 source 过滤
         if source == "uw" and target in ("all", "news"):
             try:
                 session.execute(sa_text("DELETE FROM us_news WHERE source = 'uw'"))
                 console.print("  [dim]✓ us_news (source=uw) 已清空[/dim]")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"_clean_tables_for_import: 清空 us_news 失败: {e}")
         session.commit()
 
 
@@ -205,11 +210,13 @@ def data_bulk_import(
         ("fmp", "earnings"): lambda: dl.download_fmp_earnings_surprises_bulk(start_year),
         ("fmp", "estimates"): lambda: dl.download_fmp_eps_estimates_bulk(start_year),
         ("fmp", "income"): lambda: dl.download_fmp_income_statement_bulk(start_year),
+        ("fmp", "financial-quarterly"): lambda: dl.download_fmp_financial_quarterly(),
         ("fmp", "metrics"): lambda: dl.download_fmp_key_metrics_bulk(start_year),
         ("fmp", "ratios"): lambda: dl.download_fmp_ratios_bulk(start_year),
         ("fmp", "prices"): lambda: dl._download_fmp_prices_per_ticker(start_year, 2026),
         ("fmp", "profiles"): dl.download_fmp_profiles,
         ("fmp", "insider"): dl.download_fmp_insider_trading,
+        ("fmp", "analyst-grades"): dl.download_fmp_analyst_grades,
         ("fmp", "dividends"): dl.download_fmp_dividends_splits,
         ("fmp", "index"): lambda: dl.download_fmp_index_daily(start_year),
         ("fmp", "commodity"): lambda: dl.download_fmp_commodity_prices(start_year),
@@ -261,6 +268,7 @@ def data_download(
             "analyst": lambda: dl.download_fmp_eps_estimates_bulk(1995),
             "earnings": lambda: dl.download_fmp_earnings_surprises_bulk(1995),
             "insider": dl.download_fmp_insider_trading,
+            "macro": lambda: _download_fred(db),
         }
     elif market == "us":
         from services.data.fmp_downloader import FMPDownloader
@@ -277,6 +285,7 @@ def data_download(
             "corporate": dl.download_corporate_actions,
             "earnings": dl.download_earnings_surprises,
             "estimates": dl.download_eps_estimates,
+            "macro": lambda: _download_fred(db),
             "simfin": lambda: _download_simfin(db),
             "edgar": lambda: _download_edgar(db),
             "historical": lambda: _download_historical(db),
@@ -294,6 +303,11 @@ def data_download(
     if target not in dispatch:
         console.print(f"[red]未知目标: {target}[/red]，可选: {', '.join(dispatch.keys())}")
         raise typer.Exit(1)
+
+    def _download_fred(db_inst):
+        from services.data.fred_downloader import FREDDownloader
+        fred = FREDDownloader(db_inst)
+        return fred.download_all()
 
     def _download_simfin(db_inst):
         from services.data.simfin_downloader import SimFinDownloader
@@ -349,12 +363,14 @@ def data_update(
         try:
             results["uw"] = dl.download_uw_all()
         except Exception as e:
+            logger.warning(f"data_update: UW 更新跳过: {e}")
             console.print(f"[yellow]UW 更新跳过: {e}[/yellow]")
         # FRED
         try:
             fred = FREDDownloader(db)
             results["macro"] = fred.update()
         except Exception as e:
+            logger.warning(f"data_update: FRED 更新跳过: {e}")
             console.print(f"[yellow]FRED 更新跳过: {e}[/yellow]")
         elapsed = time.time() - t0
         console.print(f"[green]完成[/green] {elapsed:.1f}s — {results}")
@@ -372,17 +388,20 @@ def data_update(
         try:
             n6 = dl.update_earnings_surprises()
         except Exception as e:
+            logger.warning(f"data_update: Earnings surprises 更新跳过: {e}")
             console.print(f"[yellow]Earnings surprises 更新跳过: {e}[/yellow]")
             n6 = 0
         try:
             n7 = dl.update_eps_estimates()
         except Exception as e:
+            logger.warning(f"data_update: EPS estimates 更新跳过: {e}")
             console.print(f"[yellow]EPS estimates 更新跳过: {e}[/yellow]")
             n7 = 0
         try:
             fred = FREDDownloader(db)
             n5 = fred.update()
         except Exception as e:
+            logger.warning(f"data_update: FRED 更新跳过: {e}")
             console.print(f"[yellow]FRED 更新跳过: {e}[/yellow]")
             n5 = 0
         elapsed = time.time() - t0
@@ -765,6 +784,105 @@ def factor_list(
         total += len(factors)
     t.add_row("[bold]Total[/bold]", "", f"[bold]{total}[/bold]")
     console.print(t)
+
+
+@factor_app.command("eval")
+def factor_eval(
+    market: str = typer.Option("us", help="市场: cn 或 us"),
+    start: str = typer.Option("2020-01-01", help="开始日期"),
+    end: str = typer.Option("2025-12-31", help="结束日期"),
+    freq: int = typer.Option(1, help="采样频率（月）"),
+    factors: str = typer.Option("", help="因子列表，逗号分隔（默认全部）"),
+    no_plot: bool = typer.Option(False, "--no-plot", help="不生成图表"),
+):
+    """运行因子评估（IC/ICIR/分层/IC Decay/换手率/相关性）"""
+    db = _get_db()
+
+    import numpy as np
+    from services.factors.evaluation import FactorEvaluator
+    evaluator = FactorEvaluator(db, market=market)
+
+    factor_list_arg = [f.strip() for f in factors.split(",") if f.strip()] or None
+
+    console.print(f"[cyan]运行 {market.upper()} 因子评估: {start} ~ {end}, freq={freq}m[/cyan]")
+    t0 = time.time()
+
+    report = evaluator.run_all(
+        start=start, end=end, freq_months=freq,
+        factors=factor_list_arg, plot=not no_plot,
+    )
+
+    elapsed = time.time() - t0
+    console.print(f"[green]完成 ({elapsed:.1f}s)[/green]\n")
+
+    # 汇总表格
+    t = Table(title=f"{market.upper()} 因子评估 ({start} ~ {end})")
+    t.add_column("Factor", style="cyan")
+    t.add_column("IC Mean", justify="right")
+    t.add_column("IC Std", justify="right")
+    t.add_column("ICIR", justify="right")
+    t.add_column("IC>0", justify="right")
+    t.add_column("Q5-Q1 Ann", justify="right")
+    t.add_column("Top Turn", justify="right")
+    t.add_column("N", justify="right")
+
+    for fname, data in report.items():
+        if fname.startswith("_"):
+            logger.debug(f"factor_eval: 跳过内部键 {fname}")
+            continue
+        ic_mean = data.get("ic_mean", np.nan)
+        icir = data.get("icir", np.nan)
+        spread = data.get("quantile_spread_annual", np.nan)
+
+        # 颜色标注
+        ic_str = f"{ic_mean:.4f}" if not np.isnan(ic_mean) else "-"
+        icir_str = f"{icir:.4f}" if not np.isnan(icir) else "-"
+        spread_str = f"{spread:.2%}" if not np.isnan(spread) else "-"
+
+        if not np.isnan(icir) and abs(icir) >= 0.5:
+            icir_str = f"[green]{icir_str}[/green]" if icir > 0 else f"[red]{icir_str}[/red]"
+
+        t.add_row(
+            fname,
+            ic_str,
+            f"{data.get('ic_std', np.nan):.4f}" if not np.isnan(data.get("ic_std", np.nan)) else "-",
+            icir_str,
+            f"{data.get('ic_positive_rate', np.nan):.0%}" if not np.isnan(data.get("ic_positive_rate", np.nan)) else "-",
+            spread_str,
+            f"{data.get('top_turnover', np.nan):.0%}" if not np.isnan(data.get("top_turnover", np.nan)) else "-",
+            str(data.get("num_periods", 0)),
+        )
+
+    console.print(t)
+
+    # IC Decay 汇总
+    console.print()
+    t2 = Table(title="IC Decay (horizons: 1/5/10/20/60 days)")
+    t2.add_column("Factor", style="cyan")
+    t2.add_column("1d", justify="right")
+    t2.add_column("5d", justify="right")
+    t2.add_column("10d", justify="right")
+    t2.add_column("20d", justify="right")
+    t2.add_column("60d", justify="right")
+
+    for fname, data in report.items():
+        if fname.startswith("_"):
+            logger.debug(f"factor_eval: 跳过内部键 {fname}")
+            continue
+        decay = data.get("ic_decay", [])
+        decay_map = {d["horizon"]: d["ic_mean"] for d in decay if isinstance(d, dict)}
+        vals = []
+        for h in [1, 5, 10, 20, 60]:
+            v = decay_map.get(h, np.nan)
+            vals.append(f"{v:.4f}" if not np.isnan(v) else "-")
+        t2.add_row(fname, *vals)
+
+    console.print(t2)
+
+    # 相关性矩阵提示
+    corr = report.get("_correlation_matrix")
+    if corr is not None and not corr.empty:
+        console.print(f"\n[dim]因子相关性矩阵已保存到 output/factor_corr_{market}.png[/dim]")
 
 
 # ============================================================

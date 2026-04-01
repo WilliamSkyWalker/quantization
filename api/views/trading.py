@@ -150,6 +150,7 @@ def paper_nav(request):
     df = trader.get_nav_history(last_n=days)
 
     if df.empty:
+        logger.debug("paper_nav: NAV 历史为空")
         return Response({'nav': [], 'benchmark': []})
 
     # Build nav list (sorted ascending by date)
@@ -192,6 +193,7 @@ def paper_transactions(request):
     df = trader.get_transactions(trade_date=trade_date, last_n=last_n)
 
     if df.empty:
+        logger.debug("paper_transactions: 交易记录为空")
         return Response([])
 
     # Get stock names

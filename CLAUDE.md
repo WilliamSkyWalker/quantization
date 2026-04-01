@@ -26,6 +26,13 @@ Claude Code 编码规范。所有代码变更必须遵守。
 - **业务逻辑只写在 `services/`** — CLI 和 API views 只做参数解析 + 调用 service + 格式化输出
 - **前端修改后必须 `pnpm build`** — Django 只提供 dist 静态文件
 
+### 操作授权规则
+
+- **禁止擅自执行数据导入/外部 API 调用/写数据库操作** — 只给出命令，等用户确认后再执行
+- 涉及的命令包括但不限于：`data bulk-import`、`data download`、`data update`、`paper trade`、`paper reset`
+- **禁止并行调用同一外部 API** — FMP/UW/Fiscal 等有限流，必须逐个执行
+- **不确定的事说"我不确定"，不要编** — 不知道标准就问用户，给选项让用户选，不要自己编造结论
+
 ### 通用规范
 
 - 所有模块使用 `logging.getLogger(__name__)`，日志级别取 `config.settings.LOG_LEVEL`

@@ -270,7 +270,8 @@ class MultiFactorStrategy:
         """获取行业映射（复用 FactorBase 静态缓存）。"""
         try:
             return self.factors[0].get_industry_map_cached()
-        except Exception:
+        except Exception as e:
+            logger.debug(f"_get_cached_industry_df: 获取行业映射失败: {e}")
             return None
 
     def _get_cached_mktcap_df(self, date: str) -> pd.DataFrame | None:
@@ -293,8 +294,8 @@ class MultiFactorStrategy:
                 mktcap_df = mktcap_df[["ts_code", "total_mv"]]
                 FactorBase._date_cache[cache_key] = mktcap_df
                 return mktcap_df
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"_get_cached_mktcap_df: 计算市值数据失败: {e}")
         return None
 
     def _load_industry_weights(self) -> dict[str, dict[str, float]]:
@@ -307,6 +308,7 @@ class MultiFactorStrategy:
         try:
             df = self.db.get_industry_factor_weights()
             if df.empty:
+                logger.debug("_load_industry_weights: 行业因子权重配置为空")
                 return {}
             result = {}
             for _, row in df.iterrows():
@@ -389,6 +391,7 @@ class MultiFactorStrategy:
         日常均匀分布的信号保持基础权重。
         """
         if SENTIMENT_SURGE_MULTIPLIER <= 1.0:
+            logger.debug("_adjust_sentiment_weight: SENTIMENT_SURGE_MULTIPLIER <= 1.0，跳过舆情权重调整")
             return weights
 
         try:
@@ -398,12 +401,15 @@ class MultiFactorStrategy:
                     daily_score = factor._analyzer.get_daily_score(date)
                     break
             else:
+                logger.debug("_adjust_sentiment_weight: 无舆情因子实例，跳过")
                 return weights
 
             if daily_score.empty or len(daily_score) < 5:
+                logger.debug("_adjust_sentiment_weight: 舆情数据不足，跳过权重调整")
                 return weights
 
             if "n_articles" not in daily_score.columns:
+                logger.debug("_adjust_sentiment_weight: 无 n_articles 列，跳过权重调整")
                 return weights
 
             # 用文章数计算 z-score
@@ -411,6 +417,7 @@ class MultiFactorStrategy:
             mean_c = counts.mean()
             std_c = counts.std()
             if std_c < 1.0:
+                logger.debug("_adjust_sentiment_weight: 文章数标准差 < 1.0，无显著集中，跳过")
                 return weights
 
             max_z = (counts.max() - mean_c) / std_c
@@ -474,6 +481,7 @@ class MultiFactorStrategy:
                 logger.info(f"核心财务准入过滤: 剔除 {n_dropped} 只（缺失全部核心财务指标）")
 
         if composite.empty:
+            logger.debug("_compute_scores: 核心财务过滤后股票池为空，返回空评分")
             composite["score"] = np.nan
             return composite
 
@@ -515,6 +523,7 @@ class MultiFactorStrategy:
             val_idx = cat_names.index("value")
             qual_idx = cat_names.index("quality")
         except ValueError:
+            logger.debug("_apply_value_trap_penalty: 缺少 value 或 quality 大类，跳过价值陷阱惩罚")
             return cat_scores
 
         cat_scores = cat_scores.copy()
@@ -584,6 +593,7 @@ class MultiFactorStrategy:
         """
         fin_cols = [f for f in self.FINANCIAL_DEPENDENT_FACTORS if f in factor_cols]
         if not fin_cols:
+            logger.debug("_apply_financial_staleness_decay: 无财务依赖因子，跳过衰减")
             return composite
 
         # 查每只股票最新财报的 end_date（报告期）— 优先使用预加载数据
@@ -595,6 +605,7 @@ class MultiFactorStrategy:
                 (bulk_fin["ann_date"] <= date_ts) & bulk_fin["ts_code"].isin(codes_set)
             ]
             if df_fin.empty:
+                logger.debug(f"_apply_financial_staleness_decay: {date} 无财报数据，跳过衰减")
                 return composite
             df_latest = df_fin.groupby("ts_code")["end_date"].max().reset_index()
             df_latest.columns = ["ts_code", "latest_end_date"]
@@ -609,6 +620,7 @@ class MultiFactorStrategy:
             )
 
         if df_latest.empty:
+            logger.debug(f"_apply_financial_staleness_decay: {date} 无财报日期数据，跳过衰减")
             return composite
 
         composite = composite.copy()
@@ -913,6 +925,7 @@ class MultiFactorStrategy:
             选中的股票 DataFrame[ts_code, score, weight]。
         """
         if composite.empty:
+            logger.debug("_select_from_scores: 输入评分为空，返回空选股结果")
             return pd.DataFrame(columns=["ts_code", "score", "weight"])
 
         composite = composite.copy()
@@ -985,6 +998,7 @@ class MultiFactorStrategy:
 
         universe = get_clean_universe(self.db, date, min_turnover=0, skip_industry_filter=True)
         if universe.empty:
+            logger.warning(f"score_all_stocks: {date} 股票池为空，返回空 DataFrame")
             return pd.DataFrame(columns=["ts_code", "score"])
 
         # 计算因子
@@ -998,6 +1012,7 @@ class MultiFactorStrategy:
                 logger.warning(f"因子 {factor.name} 计算失败: {e}")
 
         if not factor_scores:
+            logger.warning(f"score_all_stocks: {date} 所有因子计算失败，返回空 DataFrame")
             return pd.DataFrame(columns=["ts_code", "score"])
 
         # 行业/市值数据（使用缓存）
@@ -1070,6 +1085,7 @@ class MultiFactorStrategy:
         )
 
         if df.empty:
+            logger.debug("get_rebalance_dates: 无交易日数据，返回空列表")
             return []
 
         trading_days = sorted(pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d").tolist())
@@ -1204,6 +1220,7 @@ class MultiFactorStrategy:
             params={"start_date": start_date, "end_date": end_date},
         )
         if df.empty:
+            logger.debug("_get_adaptive_check_dates: 无交易日数据，返回空列表")
             return []
 
         all_trade_dates = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d").tolist()
@@ -1310,13 +1327,16 @@ class MultiFactorStrategy:
                 # 检查日：计算偏离度，决定是否触发
                 current_idx = trade_date_to_idx.get(dt, 0)
                 if current_idx - last_rebalance_idx < REBALANCE_MIN_INTERVAL:
+                    logger.debug(f"_generate_signals_adaptive: {dt} 距上次调仓间隔不足，跳过")
                     continue
 
                 if composite.empty:
+                    logger.debug(f"_generate_signals_adaptive: {dt} 因子评分为空，跳过")
                     continue
 
                 new_top = self._select_from_scores(composite, prev_holdings)
                 if new_top.empty:
+                    logger.debug(f"_generate_signals_adaptive: {dt} 选股结果为空，跳过")
                     continue
 
                 new_codes = set(new_top["ts_code"].tolist())

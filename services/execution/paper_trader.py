@@ -143,6 +143,7 @@ class PaperTrader(BaseTrader):
                 account_name=self.account_name
             ).first()
             if not account:
+                logger.warning("get_account_info: 未找到模拟账户")
                 return {}
             return {
                 "total_assets": account.total_assets,
@@ -162,6 +163,7 @@ class PaperTrader(BaseTrader):
                 account_name=self.account_name
             ).all()
             if not positions:
+                logger.debug("get_current_positions: 当前无持仓")
                 return pd.DataFrame(
                     columns=["ts_code", "volume", "market_value", "cost"]
                 )
@@ -248,6 +250,7 @@ class PaperTrader(BaseTrader):
             all_codes = set(list(pos_map.keys()) + list(target.keys()))
 
             if not all_codes:
+                logger.debug("_execute_rebalance: 无需调仓的股票代码")
                 return {"success": 0, "failed": 0, "skipped": 0}
 
             price_info = self._get_price_info(trade_date, list(all_codes))
@@ -274,9 +277,11 @@ class PaperTrader(BaseTrader):
                 info = price_info.get(code)
 
                 if not info:
+                    logger.debug(f"_execute_rebalance: {code} 无行情数据，跳过")
                     continue
                 open_px = info.get("open") or info["close"]
                 if open_px <= 0:
+                    logger.debug(f"_execute_rebalance: {code} 开盘价无效({open_px})，跳过")
                     continue
 
                 target_vol = self._round_to_lot(
@@ -285,6 +290,7 @@ class PaperTrader(BaseTrader):
                 delta = target_vol - current_vol
 
                 if abs(delta) < LOT_SIZE:
+                    logger.debug(f"_execute_rebalance: {code} 变动量({delta})不足一手，跳过")
                     continue
 
                 if delta < 0:
@@ -364,11 +370,13 @@ class PaperTrader(BaseTrader):
         """执行卖出。"""
         pos = pos_map.get(ts_code)
         if not pos:
+            logger.debug(f"_execute_sell: {ts_code} 无持仓，跳过卖出")
             return
 
         actual_vol = min(volume, pos.volume)
         actual_vol = self._round_to_lot(actual_vol)
         if actual_vol <= 0:
+            logger.debug(f"_execute_sell: {ts_code} 取整后卖出量为0，跳过")
             return
 
         exec_price = round(base_price * (1 - self.slippage), 2)
@@ -568,10 +576,12 @@ class PaperTrader(BaseTrader):
                     for code, vol in pending_sells.items():
                         info = price_info.get(code)
                         if not info:
+                            logger.debug(f"replay: {code} 停牌无行情，排队卖单继续等待")
                             continue  # 停牌，继续排队
 
                         one_char_up, one_char_down = self._is_one_char_limit(info)
                         if one_char_down or info.get("is_limit_down"):
+                            logger.debug(f"replay: {code} 仍然跌停，排队卖单继续等待")
                             continue  # 仍然跌停，继续排队
 
                         # 可以卖出
@@ -624,6 +634,7 @@ class PaperTrader(BaseTrader):
             ).all()
 
             if not positions:
+                logger.debug("_apply_corporate_actions: 无持仓，跳过除权除息检测")
                 return {}
 
             codes = [p.ts_code for p in positions]
@@ -730,6 +741,7 @@ class PaperTrader(BaseTrader):
         self._ensure_connected()
         account = self.get_account_info()
         if not account:
+            logger.warning("reconcile: 获取账户信息失败，返回空DataFrame")
             return pd.DataFrame()
 
         total_assets = account["total_assets"]
@@ -802,6 +814,7 @@ class PaperTrader(BaseTrader):
             f"ORDER BY trade_date"
         )
         if df.empty:
+            logger.debug("get_nav_series: 无净值数据")
             return pd.Series(dtype=float)
         df["trade_date"] = pd.to_datetime(df["trade_date"])
         return df.set_index("trade_date")["nav"]
@@ -891,6 +904,7 @@ class PaperTrader(BaseTrader):
             {ts_code: {open, close, high, low, is_limit_up, is_limit_down, adj_factor}}。
         """
         if not codes:
+            logger.debug("_get_price_info: 无股票代码，返回空字典")
             return {}
 
         codes_str = "','".join(codes)
@@ -919,6 +933,7 @@ class PaperTrader(BaseTrader):
     def _get_adj_factors(self, trade_date: str, codes: list[str]) -> dict:
         """获取复权因子。"""
         if not codes:
+            logger.debug("_get_adj_factors: 无股票代码，返回空字典")
             return {}
         codes_str = "','".join(codes)
         df = self.db.query(
@@ -937,6 +952,7 @@ class PaperTrader(BaseTrader):
             f"ORDER BY trade_date"
         )
         if df.empty:
+            logger.debug(f"_get_trade_dates: {start_date}~{end_date} 无交易日数据")
             return []
         return [str(d) for d in pd.to_datetime(df["trade_date"]).dt.date]
 

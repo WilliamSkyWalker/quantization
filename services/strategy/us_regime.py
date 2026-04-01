@@ -119,12 +119,15 @@ class USRegimeDetector:
             params={"index": US_REGIME_INDEX, "date": date, "limit": lookback},
         )
         if df.empty or len(df) < US_REGIME_MA_WINDOW:
+            logger.debug(f"_trend_score: 数据不足({len(df) if not df.empty else 0}/{US_REGIME_MA_WINDOW})，返回中性 0.5")
             return 0.5
         prices = pd.to_numeric(df["close"], errors="coerce").dropna().values
         if len(prices) < US_REGIME_MA_WINDOW:
+            logger.debug(f"_trend_score: 有效价格不足({len(prices)}/{US_REGIME_MA_WINDOW})，返回中性 0.5")
             return 0.5
         current, ma = prices[0], np.mean(prices[:US_REGIME_MA_WINDOW])
         if ma <= 0:
+            logger.debug("_trend_score: MA <= 0，返回中性 0.5")
             return 0.5
         dev = (current - ma) / ma
         if dev >= _TRANSITION_BAND:
@@ -142,9 +145,11 @@ class USRegimeDetector:
             params={"date": date, "limit": _VIX_LOOKBACK_DAYS + 10},
         )
         if df.empty or len(df) < 20:
+            logger.debug(f"_vol_score: VIX 数据不足({len(df) if not df.empty else 0}/20)，返回中性 0.5")
             return 0.5
         vals = pd.to_numeric(df["value"], errors="coerce").dropna().values
         if len(vals) < 20:
+            logger.debug(f"_vol_score: VIX 有效值不足({len(vals)}/20)，返回中性 0.5")
             return 0.5
         pct = np.mean(vals <= vals[0])
         if pct <= 0.2:
@@ -162,9 +167,11 @@ class USRegimeDetector:
             params={"date": date},
         )
         if df.empty:
+            logger.debug("_credit_score: 利差数据为空，返回中性 0.5")
             return 0.5
         spread = pd.to_numeric(df["value"], errors="coerce").dropna()
         if spread.empty:
+            logger.debug("_credit_score: 利差有效值为空，返回中性 0.5")
             return 0.5
         v = float(spread.iloc[0])
         if v >= 0.5:
@@ -185,6 +192,7 @@ class USRegimeDetector:
         # 从预加载的 rolling stats 获取动量截面分散度
         ri = USFactorBase._static_cache.get("_rolling_indexed")
         if ri is None:
+            logger.debug("_crowding_score: rolling_indexed 缓存为空，返回中性 0.5")
             return 0.5  # 无数据时中性
 
         date_ts = pd.to_datetime(date)
@@ -195,6 +203,7 @@ class USRegimeDetector:
             available_dates = ri.index.get_level_values("trade_date").unique()
             recent = available_dates[available_dates <= date_ts]
             if len(recent) < 60:
+                logger.debug(f"_crowding_score: 可用日期不足({len(recent)}/60)，返回中性 0.5")
                 return 0.5
 
             dispersions = []
@@ -206,9 +215,11 @@ class USRegimeDetector:
                     if len(ret) > 20:
                         dispersions.append(ret.std())
                 except KeyError:
+                    logger.debug(f"_crowding_score: 日期 {d} 无截面数据，跳过")
                     continue
 
             if len(dispersions) < 10:
+                logger.debug(f"_crowding_score: 分散度样本不足({len(dispersions)}/10)，返回中性 0.5")
                 return 0.5
 
             # 当前分散度
@@ -216,6 +227,7 @@ class USRegimeDetector:
                 today = ri.xs(recent[-1], level="trade_date")
                 current_disp = today["cum_ret_20d"].dropna().std()
             except KeyError:
+                logger.debug("_crowding_score: 当前日期截面数据 KeyError，返回中性 0.5")
                 return 0.5
 
             # 百分位

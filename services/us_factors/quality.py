@@ -21,6 +21,7 @@ class RoeTTM(USFactorBase):
         tickers = universe["ticker"].tolist()
         fin = self.get_latest_financial(date, ["roe"], tickers)
         if fin.empty:
+            logger.debug("RoeTTM.compute: 无财务数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
         fin["factor_value"] = pd.to_numeric(fin["roe"], errors="coerce")
         return fin[["ticker", "factor_value"]]
@@ -35,6 +36,7 @@ class GrossMargin(USFactorBase):
         tickers = universe["ticker"].tolist()
         fin = self.get_latest_financial(date, ["gross_margin"], tickers)
         if fin.empty:
+            logger.debug("GrossMargin.compute: 无财务数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
         fin["factor_value"] = pd.to_numeric(fin["gross_margin"], errors="coerce")
         return fin[["ticker", "factor_value"]]
@@ -51,6 +53,7 @@ class ProfitStability(USFactorBase):
 
         bulk_fin = self._static_cache.get("_bulk_financial")
         if bulk_fin is None or bulk_fin.empty:
+            logger.debug("ProfitStability.compute: 无预加载财务数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = bulk_fin[bulk_fin["filing_date"] <= date_ts].copy()
@@ -66,11 +69,13 @@ class ProfitStability(USFactorBase):
         for ticker, grp in df.groupby("ticker"):
             if len(grp) < 5:
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"ProfitStability.compute: {ticker} 季度数据不足5条，跳过")
                 continue
             vals = grp["net_income"].values
             # YoY growth: q(i) vs q(i+4)
             if len(vals) < 5:
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"ProfitStability.compute: {ticker} 净利润数据不足5条，跳过")
                 continue
             yoy_growths = []
             for i in range(len(vals) - 4):
@@ -79,6 +84,7 @@ class ProfitStability(USFactorBase):
                     yoy_growths.append((vals[i] - base) / abs(base))
             if len(yoy_growths) < 2:
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"ProfitStability.compute: {ticker} YoY增速不足2条，跳过")
                 continue
             arr = np.array(yoy_growths)
             mean = np.mean(arr)
@@ -101,6 +107,7 @@ class MarginTrend(USFactorBase):
 
         bulk_fin = self._static_cache.get("_bulk_financial")
         if bulk_fin is None or bulk_fin.empty:
+            logger.debug("MarginTrend.compute: 无预加载财务数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = bulk_fin[bulk_fin["filing_date"] <= date_ts].copy()
@@ -116,11 +123,13 @@ class MarginTrend(USFactorBase):
         for ticker, grp in df.groupby("ticker"):
             if len(grp) < 2:
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"MarginTrend.compute: {ticker} 季度数据不足2条，跳过")
                 continue
             latest = grp.iloc[0]["gross_margin"]
             prev = grp.iloc[1]["gross_margin"]
             if pd.isna(latest) or pd.isna(prev):
                 results.append({"ticker": ticker, "factor_value": np.nan})
+                logger.debug(f"MarginTrend.compute: {ticker} 毛利率数据缺失，跳过")
                 continue
             results.append({"ticker": ticker, "factor_value": latest - prev})
 

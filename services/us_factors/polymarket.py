@@ -42,6 +42,7 @@ class PolymarketSent(USFactorBase):
         # 查询 polymarket_alert
         alerts = self._get_alerts(start_ts, date_ts)
         if alerts.empty:
+            logger.debug("PolymarketSent.compute: 无Polymarket alerts数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         # 解析 affected_tickers JSON，构建 per-ticker 信号
@@ -49,27 +50,33 @@ class PolymarketSent(USFactorBase):
         for _, row in alerts.iterrows():
             tickers_json = row.get("affected_tickers")
             if not tickers_json:
+                logger.debug("PolymarketSent.compute: alert affected_tickers为空，跳过")
                 continue
             try:
                 affected = json.loads(tickers_json) if isinstance(tickers_json, str) else tickers_json
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"PolymarketSent.compute: JSON解析失败: {e}")
                 continue
 
             if not isinstance(affected, list):
+                logger.debug("PolymarketSent.compute: affected_tickers不是列表，跳过")
                 continue
 
             llm_conf = float(row.get("llm_confidence") or 0)
             created = pd.to_datetime(row.get("created_at"))
             days_ago = (date_ts - created).total_seconds() / 86400
             if days_ago < 0:
+                logger.debug("PolymarketSent.compute: alert日期在计算日之后，跳过")
                 continue
             time_weight = np.exp(-_TIME_DECAY * days_ago)
 
             for item in affected:
                 if not isinstance(item, dict):
+                    logger.debug("PolymarketSent.compute: affected_tickers元素不是字典，跳过")
                     continue
                 ticker = item.get("ticker", "")
                 if ticker not in tickers:
+                    logger.debug(f"PolymarketSent.compute: ticker {ticker} 不在universe中，跳过")
                     continue
                 direction = _DIRECTION_MAP.get(item.get("direction", ""), 0.0)
                 confidence = float(item.get("confidence", 0.5))
@@ -78,6 +85,7 @@ class PolymarketSent(USFactorBase):
                 records.append({"ticker": ticker, "score": score})
 
         if not records:
+            logger.debug("PolymarketSent.compute: 解析后无有效情感记录")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = pd.DataFrame(records)

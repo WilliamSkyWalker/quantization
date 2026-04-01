@@ -4,6 +4,7 @@ CSRC 官网改版后列表页使用 JS 渲染，静态 HTML 仅含旧数据。
 改为抓取门户页，解析所有指向 /csrc/cNNN/cNNN/content.shtml 的链接。
 """
 
+import logging
 import re
 from datetime import datetime
 from typing import Optional
@@ -11,6 +12,8 @@ from typing import Optional
 from bs4 import BeautifulSoup
 
 from services.sentiment.base_scraper import BaseScraper
+
+logger = logging.getLogger(__name__)
 
 
 class CsrcScraper(BaseScraper):
@@ -35,10 +38,12 @@ class CsrcScraper(BaseScraper):
         for link in soup.find_all("a", href=self._ARTICLE_RE):
             href = self._normalize_url(link["href"], url)
             if href in seen_hrefs:
+                logger.debug(f"parse_list_page: [{self.source}] URL 重复，跳过: {href}")
                 continue
 
             title = self._clean_text(link.get_text())
             if not title or len(title) < 6:
+                logger.debug(f"parse_list_page: [{self.source}] 标题为空或过短，跳过")
                 continue
 
             seen_hrefs.add(href)
@@ -47,6 +52,7 @@ class CsrcScraper(BaseScraper):
             li = link.find_parent("li")
             pub_date = self._extract_date(li or link.parent, href)
             if not pub_date:
+                logger.debug(f"parse_list_page: [{self.source}] 无法提取日期，跳过: {title[:30]}")
                 continue
 
             articles.append({
@@ -60,6 +66,7 @@ class CsrcScraper(BaseScraper):
 
     def _extract_date(self, item, href: str = "") -> str:
         if item is None:
+            logger.debug(f"_extract_date: [{self.source}] item 为 None，无法提取日期")
             return ""
 
         text = item.get_text(strip=True)
@@ -82,6 +89,7 @@ class CsrcScraper(BaseScraper):
         if m:
             return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
 
+        logger.debug(f"_extract_date: [{self.source}] 所有模式均未匹配到日期")
         return ""
 
     def parse_article_page(self, html: str, url: str) -> Optional[dict]:

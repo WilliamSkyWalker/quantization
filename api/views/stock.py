@@ -21,6 +21,7 @@ def search(request):
     """Search stocks by code or name (fuzzy), return top 20."""
     q = request.query_params.get('q', '').strip()
     if not q or len(q) < 1:
+        logger.debug("search: 搜索关键词为空")
         return Response({'results': []})
 
     db = _get_db()
@@ -103,6 +104,7 @@ def kline(request, ts_code):
 
     df = db.query(sql, params=params)
     if df.empty:
+        logger.debug(f"kline: 无 K 线数据, ts_code={ts_code}")
         return Response({'data': []})
 
     # QFQ: price * adj_factor / latest_adj_factor

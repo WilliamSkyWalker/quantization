@@ -170,6 +170,7 @@ class BacktestEngine:
                 for code in list(positions.keys()):
                     info = price_cache.get((code, today_str))
                     if not info:
+                        logger.debug(f"run: {code} 在 {today_str} 无价格数据，跳过除权检测")
                         continue
                     curr_adj = info.get('adj_factor')
                     prev_adj = prev_adj_factors.get(code)
@@ -192,14 +193,17 @@ class BacktestEngine:
                 for code, vol in pending_sells.items():
                     info = price_cache.get((code, today_str))
                     if not info:
+                        logger.debug(f"run: {code} 在 {today_str} 停牌，排队卖单继续等待")
                         continue  # 停牌，继续排队
 
                     one_char_up, one_char_down = self._is_one_char_limit(info)
                     if one_char_down:
                         # 一字跌停，仍不可卖，继续排队
+                        logger.debug(f"run: {code} 在 {today_str} 一字跌停，排队卖单继续等待")
                         continue
                     if info['is_limit_down'] and not one_char_down:
                         # 普通跌停（非一字板），也不可卖
+                        logger.debug(f"run: {code} 在 {today_str} 跌停，排队卖单继续等待")
                         continue
 
                     # 可以卖出
@@ -208,6 +212,7 @@ class BacktestEngine:
                     actual_vol = min(vol, positions.get(code, 0))
                     actual_vol = self._round_to_lot(actual_vol)
                     if actual_vol <= 0:
+                        logger.debug(f"run: {code} 排队卖单整手量为 0，移除")
                         resolved.append(code)
                         continue
 
@@ -264,16 +269,19 @@ class BacktestEngine:
                     info = price_cache.get((code, today_str))
                     if not info:
                         # 停牌：维持原仓位
+                        logger.debug(f"run: {code} 在 {today_str} 停牌，维持原仓位")
                         continue
 
                     open_px = info['open']
                     if not open_px or pd.isna(open_px) or open_px <= 0:
+                        logger.debug(f"run: {code} 在 {today_str} 开盘价无效，跳过")
                         continue
 
                     target_vol = self._round_to_lot(target_w * total_value / open_px)
                     delta = target_vol - current_vol
 
                     if abs(delta) < LOT_SIZE:
+                        logger.debug(f"run: {code} 目标变动量 < 1 手，跳过")
                         continue
 
                     if delta < 0:
@@ -296,6 +304,7 @@ class BacktestEngine:
                     actual_vol = min(volume, positions.get(code, 0))
                     actual_vol = self._round_to_lot(actual_vol)
                     if actual_vol <= 0:
+                        logger.debug(f"run: {code} 卖出整手量为 0，跳过")
                         continue
 
                     amount = actual_vol * exec_price
@@ -508,6 +517,7 @@ class BacktestEngine:
             params={"start_date": start_date, "end_date": end_date},
         )
         if df.empty:
+            logger.debug("_get_trade_dates: 无交易日数据，返回空 DatetimeIndex")
             return pd.DatetimeIndex([])
         return pd.to_datetime(df["trade_date"])
 
@@ -521,6 +531,7 @@ class BacktestEngine:
             字典 {(ts_code, date_str): {open, close, high, low, is_limit_up, is_limit_down, adj_factor}}。
         """
         if not codes:
+            logger.debug("_load_prices: 股票代码列表为空，返回空缓存")
             return {}
 
         from services.factors.base import FactorBase
@@ -539,6 +550,7 @@ class BacktestEngine:
         )
 
         if df.empty:
+            logger.warning("_load_prices: 价格数据查询为空，返回空缓存")
             return {}
 
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
@@ -552,7 +564,8 @@ class BacktestEngine:
             if adj is not None:
                 try:
                     adj = float(adj)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError) as e:
+                    logger.debug(f"_load_prices: adj_factor 转换失败: {e}")
                     adj = None
             cache[(row.ts_code, row.trade_date)] = {
                 'open': row.open,
@@ -624,6 +637,7 @@ class BacktestEngine:
         )
 
         if df.empty:
+            logger.warning("_get_benchmark_nav: 全市场等权平均数据也为空，返回空 Series")
             return pd.Series(dtype=float)
 
         df["trade_date"] = pd.to_datetime(df["trade_date"])
@@ -645,6 +659,7 @@ class BacktestEngine:
             {行业名: nav_series} 字典，无数据的行业会被跳过。
         """
         if not ALLOWED_INDUSTRIES or not INDUSTRY_INDEX_MAP:
+            logger.debug("_get_industry_benchmark_navs: 行业白名单未配置，跳过")
             return {}
 
         result = {}
@@ -691,6 +706,7 @@ class BacktestEngine:
         """
         nav = result.get("nav")
         if nav is None or nav.empty:
+            logger.debug("summary: NAV 为空，返回空 DataFrame")
             return pd.DataFrame()
 
         benchmark = result.get("benchmark_nav")
@@ -756,6 +772,7 @@ class BacktestEngine:
         industry_benchmarks = result.get("industry_benchmarks", {})
         for ind_name, ind_nav in industry_benchmarks.items():
             if ind_nav is None or ind_nav.empty:
+                logger.debug(f"summary: 行业指数 {ind_name} 数据为空，跳过")
                 continue
             ind_ret = ind_nav.iloc[-1] / ind_nav.iloc[0] - 1
             ind_annual = (1 + ind_ret) ** (1 / max(n_years, 0.01)) - 1
@@ -782,6 +799,7 @@ class BacktestEngine:
         """
         nav = result.get("nav")
         if nav is None or nav.empty:
+            logger.debug("plot: NAV 为空，跳过绘图")
             return
 
         benchmark = result.get("benchmark_nav")
@@ -808,6 +826,7 @@ class BacktestEngine:
         industry_colors = ["#2ecc71", "#9b59b6", "#f39c12", "#1abc9c", "#e67e22"]
         for idx, (ind_name, ind_nav) in enumerate(industry_benchmarks.items()):
             if ind_nav is None or ind_nav.empty:
+                logger.debug(f"plot: 行业指数 {ind_name} 数据为空，跳过绘图")
                 continue
             common = nav.index.intersection(ind_nav.index)
             if len(common) > 0:

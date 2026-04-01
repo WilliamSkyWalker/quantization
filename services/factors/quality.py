@@ -10,10 +10,16 @@
 使用公告日期获取最新可用的财务数据，防止未来函数。
 """
 
+import logging
+
 import numpy as np
 import pandas as pd
 
+from services.config import LOG_LEVEL
 from services.factors.base import FactorBase
+
+logger = logging.getLogger(__name__)
+logger.setLevel(LOG_LEVEL)
 
 
 class ROEFactor(FactorBase):
@@ -33,6 +39,7 @@ class ROEFactor(FactorBase):
         df_fin = self.get_latest_financial(date, ["roe_ttm"], codes)
 
         if df_fin.empty:
+            logger.debug("ROE_TTM.compute: 无财务数据，返回空")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
 
         df_fin["factor_value"] = pd.to_numeric(df_fin["roe_ttm"], errors="coerce")
@@ -57,6 +64,7 @@ class GrossMarginFactor(FactorBase):
         df_fin = self.get_latest_financial(date, ["gross_margin"], codes)
 
         if df_fin.empty:
+            logger.debug("GrossMargin.compute: 无财务数据，返回空")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
 
         df_fin["factor_value"] = pd.to_numeric(
@@ -107,6 +115,7 @@ class ProfitStabilityFactor(FactorBase):
             df = self.db.query(sql, params=params)
 
         if df.empty:
+            logger.debug("ProfitStability.compute: 无财务数据，返回空")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
 
         df["end_date"] = pd.to_datetime(df["end_date"])
@@ -205,6 +214,7 @@ class MarginTrendFactor(FactorBase):
             df = self.db.query(sql, params=params)
 
         if df.empty:
+            logger.debug("MarginTrend.compute: 无财务数据，返回空")
             return pd.DataFrame(columns=["ts_code", "factor_value"])
 
         df["end_date"] = pd.to_datetime(df["end_date"])

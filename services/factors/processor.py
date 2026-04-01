@@ -57,6 +57,7 @@ def winsorize_mad(series: pd.Series, n: float = 5.0) -> pd.Series:
     mad = (series - median).abs().median()
 
     if mad == 0:
+        logger.debug("winsorize_mad: MAD=0（所有值相同），跳过去极值")
         return series
 
     upper = median + n * 1.4826 * mad
@@ -185,6 +186,7 @@ def rank_percentile(series: pd.Series) -> pd.Series:
     """
     n = series.count()
     if n <= 1:
+        logger.debug(f"rank_percentile: 有效值不足({n}<=1)，返回零值")
         return series * 0.0
     ranks = series.rank(method="average")
     uniform = (ranks - 0.5) / n       # (0, 1) 均匀分布
@@ -211,6 +213,7 @@ def zscore(series: pd.Series) -> pd.Series:
     std = series.std()
 
     if std == 0 or pd.isna(std):
+        logger.debug("zscore: 标准差为0（所有值相同），返回零值")
         return series * 0.0  # 全部相同则返回0
 
     return (series - mean) / std

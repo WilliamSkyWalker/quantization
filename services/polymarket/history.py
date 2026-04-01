@@ -84,6 +84,7 @@ class PolymarketHistoryDownloader:
                 break
 
             if not events:
+                logger.debug("discover_resolved_markets: 当前页返回空数据，分页结束")
                 break
 
             all_events.extend(events)
@@ -94,10 +95,12 @@ class PolymarketHistoryDownloader:
             logger.info(f"[发现] offset={offset - page_size}: {len(events)} events (累计 {len(all_events)})")
 
             if len(events) < page_size:
+                logger.debug(f"discover_resolved_markets: 当前页 {len(events)} < page_size {page_size}，分页结束")
                 break
             # 如果有 limit 限制
             if limit > 0 and len(all_events) >= limit:
                 all_events = all_events[:limit]
+                logger.debug(f"discover_resolved_markets: 已达 limit={limit}，分页结束")
                 break
 
             time.sleep(0.1)
@@ -119,10 +122,12 @@ class PolymarketHistoryDownloader:
                 for market in event.get("markets", []):
                     volume = float(market.get("volume", 0) or 0)
                     if volume < vol_threshold:
+                        logger.debug(f"discover_resolved_markets: volume={volume} < {vol_threshold}，跳过")
                         continue
 
                     condition_id = market.get("conditionId") or market.get("condition_id", "")
                     if not condition_id or condition_id in seen_condition_ids:
+                        logger.debug(f"discover_resolved_markets: condition_id 为空或已见过，跳过")
                         continue
                     seen_condition_ids.add(condition_id)
 
@@ -141,7 +146,8 @@ class PolymarketHistoryDownloader:
                     try:
                         prices = _json.loads(market.get("outcomePrices", "[0.5,0.5]"))
                         yes_price = float(prices[0])
-                    except (ValueError, IndexError, TypeError):
+                    except (ValueError, IndexError, TypeError) as e:
+                        logger.debug(f"discover_resolved_markets: 解析 outcomePrices 失败: {e}，使用默认 0.5")
                         yes_price = 0.5
 
                     market_info = {
@@ -178,8 +184,8 @@ class PolymarketHistoryDownloader:
                                 end_date = datetime.fromisoformat(
                                     str(market_info["end_date"]).replace("Z", "+00:00")
                                 )
-                            except (ValueError, TypeError):
-                                pass
+                            except (ValueError, TypeError) as e:
+                                logger.debug(f"discover_resolved_markets: 解析 end_date 失败: {e}")
 
                         session.add(PolymarketEvent(
                             condition_id=condition_id,
@@ -199,8 +205,9 @@ class PolymarketHistoryDownloader:
                         ))
 
             session.commit()
-        except Exception:
+        except Exception as e:
             session.rollback()
+            logger.error(f"discover_resolved_markets: 保存已结算市场失败: {e}")
             raise
         finally:
             session.close()
@@ -259,8 +266,9 @@ class PolymarketHistoryDownloader:
             session.commit()
             logger.info(f"[回填分类] 完成: {updated}/{len(events_no_cat)} 更新")
             return {"updated": updated, "total": len(events_no_cat)}
-        except Exception:
+        except Exception as e:
             session.rollback()
+            logger.error(f"backfill_categories: 回填分类失败: {e}")
             raise
         finally:
             session.close()
@@ -322,6 +330,7 @@ class PolymarketHistoryDownloader:
                 ts = point.get("t", 0)
                 price = float(point.get("p", 0))
                 if ts == 0 or price == 0:
+                    logger.debug("download_price_history: 数据点 ts 或 price 为 0，跳过")
                     continue
                 objects.append(PolymarketPriceSnapshot(
                     condition_id=condition_id,
@@ -337,8 +346,9 @@ class PolymarketHistoryDownloader:
                 saved = len(objects)
             session.commit()
             logger.info(f"保存 {saved} 条历史快照: {condition_id}")
-        except Exception:
+        except Exception as e:
             session.rollback()
+            logger.error(f"download_price_history: 保存历史快照失败: {e}")
             raise
         finally:
             session.close()
@@ -418,6 +428,7 @@ class PolymarketHistoryDownloader:
                 session_m.close()
 
         if not markets:
+            logger.debug("download_batch: 未发现符合条件的已结算市场，返回空结果")
             task_manager.update_progress(task_id, 100, "未发现符合条件的已结算市场")
             return {"total_markets": 0, "total_snapshots": 0, "skipped": 0}
 
@@ -445,6 +456,7 @@ class PolymarketHistoryDownloader:
             )
 
         if not markets:
+            logger.debug(f"download_batch: 全部 {skipped} 个市场已有数据，无需下载")
             task_manager.update_progress(task_id, 100, f"全部 {skipped} 个市场已有数据，无需下载")
             return {"total_markets": 0, "total_snapshots": 0, "skipped": skipped}
 

@@ -61,8 +61,8 @@ def sentiment_status(request):
                     'earliest': str(row['earliest']) if row['earliest'] else None,
                     'latest': str(row['latest']) if row['latest'] else None,
                 }
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"sentiment_status: 查询 policy_article 统计失败: {e}")
 
     # Query research_report counts
     try:
@@ -76,8 +76,8 @@ def sentiment_status(request):
                 'earliest': str(rr_df['earliest'].iloc[0]) if rr_df['earliest'].iloc[0] else None,
                 'latest': str(rr_df['latest'].iloc[0]) if rr_df['latest'].iloc[0] else None,
             }
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"sentiment_status: 查询 research_report 统计失败: {e}")
 
     # Build sources list: all registered scrapers + research_report, even if 0
     sources = []
@@ -104,8 +104,8 @@ def sentiment_status(request):
             "WHERE category IS NOT NULL AND category != '' ORDER BY category"
         )
         categories = cat_df['category'].tolist() if not cat_df.empty else []
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"sentiment_status: 查询分类列表失败: {e}")
 
     return Response({'sources': sources, 'total': total, 'categories': categories})
 
@@ -163,7 +163,8 @@ def sentiment_articles(request):
             f"ORDER BY publish_date DESC LIMIT :limit OFFSET :offset",
             params={**params, 'limit': page_size, 'offset': offset},
         )
-    except Exception:
+    except Exception as e:
+        logger.warning(f"sentiment_articles: 查询文章列表失败: {e}")
         return Response({'articles': [], 'total': 0, 'page': page, 'page_size': page_size})
 
     articles = df.to_dict('records') if not df.empty else []
@@ -218,7 +219,8 @@ def _query_research_reports(db, start_date, end_date, keyword, page, page_size, 
             f"ORDER BY report_date DESC LIMIT :limit OFFSET :offset",
             params={**params, 'limit': page_size, 'offset': offset},
         )
-    except Exception:
+    except Exception as e:
+        logger.warning(f"_query_research_reports: 查询研报列表失败: {e}")
         return Response({'articles': [], 'total': 0, 'page': page, 'page_size': page_size})
 
     articles = df.to_dict('records') if not df.empty else []
@@ -400,6 +402,7 @@ def _run_backfill_analyze(task_id):
         total_kw += result["keyword_analyzed"]
         total_llm += result["llm_analyzed"]
         if result["keyword_analyzed"] == 0 and result["llm_analyzed"] == 0:
+            logger.debug(f"_run_backfill_analyze: 第 {batch} 批无新增分析，结束循环")
             break
 
     return {"keyword_analyzed": total_kw, "llm_analyzed": total_llm}
@@ -437,6 +440,7 @@ def _run_backfill_content(task_id, source=None):
         total_success += result["success"]
         total_failed += result["failed"]
         if result["total"] == 0:
+            logger.debug(f"_run_backfill_content: 第 {batch} 批无待补录文章，结束循环")
             break
 
     return {"total": total_count, "success": total_success, "failed": total_failed}
@@ -470,6 +474,7 @@ def _run_backfill_llm(task_id):
         total_kw += result["keyword_analyzed"]
         total_llm += result["llm_analyzed"]
         if result["keyword_analyzed"] == 0 and result["llm_analyzed"] == 0:
+            logger.debug(f"_run_backfill_llm: 第 {batch} 批无新增分析，结束循环")
             break
 
     logger.info(f'补录LLM打分: 完成, 关键词 {total_kw} 篇, LLM {total_llm} 篇')

@@ -87,6 +87,7 @@ def update_settings(request):
     # Update or append
     for key, value in updates.items():
         if key.startswith('_'):
+            logger.debug(f"update_settings: 跳过内部键 {key}")
             continue
         # Convert list values to comma-separated string for .env
         if isinstance(value, list):
@@ -155,7 +156,8 @@ def get_all_industries(request):
             "ORDER BY industry_name"
         )
         industries = df['industry_name'].tolist() if not df.empty else []
-    except Exception:
+    except Exception as e:
+        logger.warning(f"get_all_industries: 查询行业列表失败: {e}")
         industries = []
     return Response({'industries': industries})
 

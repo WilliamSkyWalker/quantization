@@ -182,8 +182,9 @@ class USMultiFactorStrategy:
             if not df.empty:
                 USFactorBase._static_cache[cache_key] = df
                 return df
-        except Exception:
-            pass
+            logger.debug("_get_cached_sector_df: 行业映射表为空")
+        except Exception as e:
+            logger.debug(f"_get_cached_sector_df: 获取行业映射失败: {e}")
         return None
 
     def _get_cached_mktcap_df(self, date: str) -> pd.DataFrame | None:
@@ -213,8 +214,9 @@ class USMultiFactorStrategy:
                 df = df.dropna(subset=["market_cap"])
                 USFactorBase._date_cache[cache_key] = df
                 return df
-        except Exception:
-            pass
+            logger.debug(f"_get_cached_mktcap_df: {date} 市值数据为空")
+        except Exception as e:
+            logger.debug(f"_get_cached_mktcap_df: 获取市值数据失败: {e}")
         return None
 
     # ----------------------------------------------------------
@@ -283,6 +285,7 @@ class USMultiFactorStrategy:
                 logger.info(f"Core financial filter: dropped {n_dropped} stocks (missing all core financials)")
 
         if composite.empty:
+            logger.debug("_compute_scores: 核心财务过滤后股票池为空，返回空评分")
             composite["score"] = np.nan
             return composite
 
@@ -308,6 +311,7 @@ class USMultiFactorStrategy:
             val_idx = cat_names.index("value")
             qual_idx = cat_names.index("quality")
         except ValueError:
+            logger.debug("_apply_value_trap_penalty: 缺少 value 或 quality 大类，跳过价值陷阱惩罚")
             return cat_scores
 
         cat_scores = cat_scores.copy()
@@ -372,6 +376,7 @@ class USMultiFactorStrategy:
         """
         fin_cols = [f for f in self.FINANCIAL_DEPENDENT_FACTORS if f in factor_cols]
         if not fin_cols:
+            logger.debug("_apply_financial_staleness_decay: 无财务依赖因子，跳过衰减")
             return composite
 
         # Get latest filing date per ticker from preloaded data
@@ -383,6 +388,7 @@ class USMultiFactorStrategy:
                 (bulk_fin["filing_date"] <= date_ts) & bulk_fin["ticker"].isin(codes_set)
             ]
             if df_fin.empty:
+                logger.debug(f"_apply_financial_staleness_decay: {date} 无财报数据，跳过衰减")
                 return composite
             df_latest = df_fin.groupby("ticker")["date"].max().reset_index()
             df_latest.columns = ["ticker", "latest_end_date"]
@@ -397,6 +403,7 @@ class USMultiFactorStrategy:
             )
 
         if df_latest.empty:
+            logger.debug(f"_apply_financial_staleness_decay: {date} 无财报日期数据，跳过衰减")
             return composite
 
         composite = composite.copy()
@@ -638,6 +645,7 @@ class USMultiFactorStrategy:
     def _softmax_weights(scores: np.ndarray, tau: float, min_w: float) -> np.ndarray:
         """Apply Softmax to scores and return normalized weights (all positive)."""
         if len(scores) == 0:
+            logger.debug("_softmax_weights: 输入得分为空，返回空数组")
             return np.array([])
         if tau > 0:
             shifted = scores - scores.max()
@@ -819,6 +827,7 @@ class USMultiFactorStrategy:
         )
 
         if df.empty:
+            logger.debug("get_rebalance_dates: 无交易日数据，返回空列表")
             return []
 
         trading_days = sorted(pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d").tolist())
@@ -835,6 +844,7 @@ class USMultiFactorStrategy:
             params={"start_date": start_date, "end_date": end_date},
         )
         if df.empty:
+            logger.debug("_get_all_trade_dates: 无交易日数据，返回空列表")
             return []
         return pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d").tolist()
 

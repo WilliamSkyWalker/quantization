@@ -52,6 +52,7 @@ class AnalystRatingFactor(FactorBase):
         stats = stats[stats["ts_code"].isin(codes)]
 
         if stats.empty:
+            logger.debug("ANALYST_RATING: 研报数据过滤后无匹配股票，返回空")
             return result
 
         rating_map = dict(zip(stats["ts_code"], stats["avg_rating"]))
@@ -95,6 +96,7 @@ class AnalystCoverageFactor(FactorBase):
         stats = stats[stats["ts_code"].isin(codes)]
 
         if stats.empty:
+            logger.debug("ANALYST_COVERAGE: 研报数据过滤后无匹配股票，返回空")
             return result
 
         coverage_map = {

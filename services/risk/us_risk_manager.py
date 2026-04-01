@@ -81,6 +81,7 @@ class USRiskManager:
             Risk-adjusted DataFrame[ticker, weight].
         """
         if weights.empty:
+            logger.debug("adjust_weights: 输入权重为空，直接返回")
             return weights
 
         df = weights[["ticker", "weight"]].copy()
@@ -115,6 +116,7 @@ class USRiskManager:
         Uses 20-day lookback from us_daily_price (volume * adj_close).
         """
         if self.min_daily_volume <= 0:
+            logger.debug("_filter_liquidity: 成交额阈值<=0，跳过流动性过滤")
             return df
 
         tickers = df["ticker"].tolist()
@@ -125,7 +127,7 @@ class USRiskManager:
         ).strftime("%Y-%m-%d")
 
         df_vol = self.db.query(
-            f"SELECT ticker, AVG(volume * adj_close) as avg_dollar_volume "
+            f"SELECT ticker, AVG(volume * COALESCE(adj_close, close)) as avg_dollar_volume "
             f"FROM us_daily_price "
             f"WHERE trade_date >= '{lookback_start}' "
             f"AND trade_date <= '{date}' "
@@ -134,6 +136,7 @@ class USRiskManager:
         )
 
         if df_vol.empty:
+            logger.debug("_filter_liquidity: 无成交量数据，跳过流动性过滤")
             return df
 
         liquid_tickers = df_vol[
@@ -196,6 +199,7 @@ class USRiskManager:
         )
 
         if sector_df.empty:
+            logger.debug("_cap_sector_weight: 无sector数据，跳过行业暴露限制")
             return df
 
         df = df.merge(sector_df, on="ticker", how="left")
@@ -299,7 +303,7 @@ class USRiskManager:
                     f"{name}({w:.1%})"
                     for name, w in sec_weights.nlargest(3).items()
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"risk_report: 获取sector集中度失败: {e}")
 
         return report

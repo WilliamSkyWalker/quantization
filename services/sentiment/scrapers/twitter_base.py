@@ -120,13 +120,16 @@ class TwitterBaseScraper(BaseScraper):
 
         for page_num in range(max_pages):
             if result is None:
+                logger.debug(f"_async_scrape: [{self.source}] 推文结果为 None，结束翻页")
                 break
 
             for tweet in result:
                 if self._is_retweet(tweet):
+                    logger.debug(f"_async_scrape: [{self.source}] 跳过转推: {str(tweet.id)}")
                     continue
                 tweet_id = str(tweet.id)
                 if tweet_id in seen_ids:
+                    logger.debug(f"_async_scrape: [{self.source}] 重复推文 ID {tweet_id}，跳过")
                     continue
                 seen_ids.add(tweet_id)
                 article = self._tweet_to_article(tweet)
@@ -136,9 +139,11 @@ class TwitterBaseScraper(BaseScraper):
             if page_num < max_pages - 1:
                 try:
                     result = await result.next()
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"_async_scrape: [{self.source}] 获取下一页推文失败: {e}，结束翻页")
                     break
             else:
+                logger.debug(f"_async_scrape: [{self.source}] 已达到最大翻页数 {max_pages}，结束")
                 break
 
         logger.info(f"[{self.source}] {self.source_name} 抓取完成: {len(all_articles)} 篇")

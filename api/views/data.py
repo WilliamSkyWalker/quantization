@@ -110,8 +110,8 @@ def data_status(request):
         val = row.iloc[0, 0] if not row.empty else None
         if val is not None and not (isinstance(val, float) and pd.isna(val)):
             latest_trade_date = str(val)[:10]
-    except (OperationalError, ProgrammingError):
-        pass
+    except (OperationalError, ProgrammingError) as e:
+        logger.debug(f"data_status: 查询最新交易日失败: {e}")
 
     result = []
     for table_name, label in tables:
@@ -735,7 +735,8 @@ def research_reports(request):
             f"ORDER BY report_date DESC LIMIT :limit OFFSET :offset",
             params={**params, 'limit': page_size, 'offset': offset},
         )
-    except (OperationalError, ProgrammingError):
+    except (OperationalError, ProgrammingError) as e:
+        logger.warning(f"research_reports: 查询研报列表失败: {e}")
         return Response({'reports': [], 'total': 0, 'page': page, 'page_size': page_size})
 
     reports = df.to_dict('records') if not df.empty else []
@@ -1124,6 +1125,7 @@ def data_browse(request):
             params={**params, 'lim': page_size, 'off': offset},
         )
     except (OperationalError, ProgrammingError) as e:
+        logger.warning(f"data_browse: 查询表 {table} 失败: {e}")
         return Response({'error': str(e), 'rows': [], 'total': 0})
 
     # Convert to JSON-safe format (NaN, NaT, None → None; everything else → str)
@@ -1135,8 +1137,8 @@ def data_browse(request):
         try:
             if pd.isna(v):
                 return None
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as e:
+            logger.debug(f"data_browse._safe_str: 类型检查异常: {e}")
         return str(v)
 
     rows = []

@@ -40,7 +40,8 @@ def _check_gm_available() -> bool:
     try:
         import gm.api  # noqa: F401
         return True
-    except ImportError:
+    except ImportError as e:
+        logger.debug(f"_check_gm_available: 掘金 SDK 不可用: {e}")
         return False
 
 
@@ -120,6 +121,7 @@ class GMTrader:
             return f"SZSE.{code}"
         elif market == "SH":
             return f"SHSE.{code}"
+        logger.debug(f"_to_gm_symbol: 未知市场代码 {market}，原样返回 {ts_code}")
         return ts_code
 
     def _from_gm_symbol(self, gm_symbol: str) -> str:
@@ -134,12 +136,14 @@ class GMTrader:
         """
         parts = gm_symbol.split(".")
         if len(parts) != 2:
+            logger.debug(f"_from_gm_symbol: 无法解析掘金代码 {gm_symbol}，原样返回")
             return gm_symbol
         exchange, code = parts
         if exchange == "SZSE":
             return f"{code}.SZ"
         elif exchange == "SHSE":
             return f"{code}.SH"
+        logger.debug(f"_from_gm_symbol: 未知交易所 {exchange}，原样返回 {gm_symbol}")
         return gm_symbol
 
     # ----------------------------------------------------------
@@ -162,6 +166,7 @@ class GMTrader:
             return pd.DataFrame()
 
         if not positions:
+            logger.debug("get_current_positions: 当前无持仓")
             return pd.DataFrame(columns=["ts_code", "volume", "market_value", "cost"])
 
         records = []
@@ -251,10 +256,12 @@ class GMTrader:
         # 获取当前持仓比例
         account = self.get_account_info()
         if not account:
+            logger.warning("order_twap: 获取账户信息失败，无法执行TWAP")
             return False
 
         total_assets = account.get("total_assets", 0)
         if total_assets <= 0:
+            logger.warning("order_twap: 总资产为零或负数，无法执行TWAP")
             return False
 
         positions = self.get_current_positions()
@@ -318,6 +325,7 @@ class GMTrader:
 
         account = self.get_account_info()
         if not account:
+            logger.warning("sync_position: 获取账户信息失败，无法同步持仓")
             return {"status": "error", "message": "获取账户信息失败"}
 
         total_assets = account["total_assets"]
@@ -348,6 +356,7 @@ class GMTrader:
 
             if abs(delta) < 0.001:
                 results["skipped"] += 1
+                logger.debug(f"sync_position: {code} 权重变化过小({delta:.4f})，跳过")
                 continue
 
             if delta < 0:
@@ -396,6 +405,7 @@ class GMTrader:
 
         account = self.get_account_info()
         if not account:
+            logger.warning("reconcile: 获取账户信息失败，返回空DataFrame")
             return pd.DataFrame()
 
         total_assets = account["total_assets"]

@@ -150,6 +150,7 @@ class CommodityDownloader:
         )
 
         if mapping.empty:
+            logger.debug(f"_fetch_dominant_daily: {symbol} 主力合约映射为空")
             return pd.DataFrame()
 
         # mapping 列: ts_code(品种), trade_date, mapping_ts_code(主力合约代码)
@@ -171,6 +172,7 @@ class CommodityDownloader:
             )
 
             if daily.empty:
+                logger.debug(f"_fetch_dominant_daily: {symbol} 合约 {contract_code} 日线为空，跳过")
                 continue
 
             daily["trade_date"] = pd.to_datetime(daily["trade_date"])
@@ -183,6 +185,7 @@ class CommodityDownloader:
                 all_dfs.append(daily)
 
         if not all_dfs:
+            logger.debug(f"_fetch_dominant_daily: {symbol} 无任何日线数据")
             return pd.DataFrame()
 
         result = pd.concat(all_dfs, ignore_index=True)

@@ -268,16 +268,19 @@ class USBacktestEngine:
                     info = price_cache.get((ticker, today_str))
                     if not info:
                         # No price data (halted/missing): keep current position
+                        logger.debug(f"run: {ticker} 在 {today_str} 无价格数据（停牌/缺失），维持原仓位")
                         continue
 
                     close_px = info["adj_close"]
                     if not close_px or pd.isna(close_px) or close_px <= 0:
+                        logger.debug(f"run: {ticker} 在 {today_str} 收盘价无效，跳过")
                         continue
 
                     target_vol = int(target_w * total_value / close_px)
                     delta = target_vol - current_vol
 
                     if abs(delta) < 1:
+                        logger.debug(f"run: {ticker} 目标变动量 < 1 股，跳过")
                         continue
 
                     if delta < 0:
@@ -317,6 +320,7 @@ class USBacktestEngine:
                         # Selling long shares
                         sell_vol = min(abs(delta), abs(cur))
                         if sell_vol < 1:
+                            logger.debug(f"run: {ticker} 平仓卖出量 < 1，跳过")
                             continue
                         exec_price = round(close_px * (1 - self.slippage), 4)
                         amount = sell_vol * exec_price
@@ -329,6 +333,7 @@ class USBacktestEngine:
                         # Buying to cover short
                         cover_vol = min(abs(delta), abs(cur))
                         if cover_vol < 1:
+                            logger.debug(f"run: {ticker} 平仓买入量 < 1，跳过")
                             continue
                         exec_price = round(close_px * (1 + self.slippage), 4)
                         amount = cover_vol * exec_price
@@ -362,6 +367,7 @@ class USBacktestEngine:
                         max_affordable = int(cash / cost_per) if cost_per > 0 else 0
                         actual_vol = min(delta, max_affordable)
                         if actual_vol < 1:
+                            logger.debug(f"run: {ticker} 买入量 < 1（资金不足或目标量过小），跳过")
                             continue
                         amount = actual_vol * exec_price
                         fees = self._calc_fees(amount, "BUY")
@@ -499,6 +505,7 @@ class USBacktestEngine:
             },
         )
         if df.empty:
+            logger.debug("_get_trade_dates: 无交易日数据，返回空 DatetimeIndex")
             return pd.DatetimeIndex([])
         return pd.to_datetime(df["trade_date"])
 
@@ -512,6 +519,7 @@ class USBacktestEngine:
             Dict {(ticker, date_str): {open, close, adj_close, high, low, volume}}.
         """
         if not tickers:
+            logger.debug("_load_prices: ticker 列表为空，返回空缓存")
             return {}
 
         from services.factors.base import FactorBase
@@ -566,6 +574,7 @@ class USBacktestEngine:
             params={"idx": index_code, "start": start_date, "end": end_date},
         )
         if df.empty:
+            logger.debug(f"_load_index_prices: {index_code} 无指数价格数据，返回空字典")
             return {}
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
         df["close"] = pd.to_numeric(df["close"], errors="coerce")
@@ -630,6 +639,7 @@ class USBacktestEngine:
             benchmark comparison metrics.
         """
         if nav is None or nav.empty:
+            logger.debug("_compute_stats: NAV 为空，返回空统计")
             return {}
 
         daily_ret = nav.pct_change().dropna()
@@ -743,6 +753,7 @@ class USBacktestEngine:
         if not stats:
             nav = result.get("nav")
             if nav is None or nav.empty:
+                logger.debug("summary: NAV 为空，返回空 DataFrame")
                 return pd.DataFrame()
             # Recompute if stats missing
             stats = USBacktestEngine._compute_stats(
@@ -799,6 +810,7 @@ class USBacktestEngine:
         """
         nav = result.get("nav")
         if nav is None or nav.empty:
+            logger.debug("plot: NAV 为空，跳过绘图")
             return
 
         benchmark = result.get("benchmark_nav")

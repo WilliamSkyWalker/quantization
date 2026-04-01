@@ -52,6 +52,7 @@ def _code_to_ts_code(code: str) -> str:
 def _parse_page_records(items: list) -> list[dict]:
     """将一页 API 原始数据转换为入库记录列表。"""
     if not items:
+        logger.debug("_parse_page_records: items 为空")
         return []
     df = pd.DataFrame(items)
 
@@ -67,6 +68,7 @@ def _parse_page_records(items: list) -> list[dict]:
     }
     available_cols = {k: v for k, v in col_map.items() if k in df.columns}
     if not available_cols or "stockCode" not in df.columns:
+        logger.debug(f"_parse_page_records: 缺少必要列，实际列: {list(df.columns)}")
         return []
 
     df = df.rename(columns=available_cols)
@@ -78,6 +80,7 @@ def _parse_page_records(items: list) -> list[dict]:
     records = []
     for _, row in df.iterrows():
         if pd.isna(row.get("report_date")):
+            logger.debug("_parse_page_records: 跳过记录 (report_date 为空)")
             continue
         records.append({
             "ts_code": row.get("ts_code", ""),
@@ -175,7 +178,7 @@ class AKShareDownloader:
                 r = requests.get(_REPORT_API_URL, params=params, timeout=30)
                 page_data = r.json().get("data", [])
             except Exception as e:
-                logger.warning(f"研报第 {page} 页下载失败: {e}")
+                logger.warning(f"研报第 {page} 页下载失败，中断下载: {e}")
                 break
 
             records = _parse_page_records(page_data)

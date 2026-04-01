@@ -87,10 +87,12 @@ class TaskManager:
                     info.result = result
                     info.message = '完成'
             except _TaskCancelled:
+                logger.info(f"Task {task_id}: 被取消 (_TaskCancelled)")
                 info.status = TaskStatus.CANCELLED
                 info.message = '已取消'
             except Exception as e:
                 if info._cancel_event.is_set():
+                    logger.info(f"Task {task_id}: 执行中被取消")
                     info.status = TaskStatus.CANCELLED
                     info.message = '已取消'
                 else:
@@ -105,8 +107,9 @@ class TaskManager:
 
         try:
             future = self._executor.submit(_wrapper)
-        except RuntimeError:
+        except RuntimeError as e:
             # Python 3.14: executor shut down during reload — recreate
+            logger.warning(f"submit: 线程池已关闭，重新创建: {e}")
             self._executor = ThreadPoolExecutor(max_workers=2)
             future = self._executor.submit(_wrapper)
         self._futures[task_id] = future
@@ -121,6 +124,7 @@ class TaskManager:
         """Update task progress and push via WebSocket. Raises if cancelled."""
         info = self._tasks.get(task_id)
         if not info:
+            logger.debug(f"update_progress: 任务 {task_id} 不存在，跳过更新")
             return
         # Check cancel flag on every progress update — natural checkpoint
         if info._cancel_event.is_set():
@@ -133,6 +137,7 @@ class TaskManager:
     def get_status(self, task_id: str) -> Optional[dict]:
         info = self._tasks.get(task_id)
         if not info:
+            logger.debug(f"get_status: 任务 {task_id} 不存在")
             return None
         return self._info_to_dict(info)
 

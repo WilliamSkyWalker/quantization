@@ -47,6 +47,7 @@ class USAnalystRating(USFactorBase):
             )
 
         if df.empty:
+            logger.debug("USAnalystRating.compute: 无分析师推荐数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         if tickers:
@@ -57,6 +58,7 @@ class USAnalystRating(USFactorBase):
         df = df.dropna(subset=["score"])
 
         if df.empty:
+            logger.debug("USAnalystRating.compute: 评级映射后无有效数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         result = df.groupby("ticker")["score"].mean().reset_index()
@@ -86,6 +88,7 @@ class USAnalystCoverage(USFactorBase):
             )
 
         if df.empty:
+            logger.debug("USAnalystCoverage.compute: 无分析师推荐数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         if tickers:

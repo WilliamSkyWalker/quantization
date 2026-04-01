@@ -62,6 +62,7 @@ class PriceHistory:
     def get_price_at(self, seconds_ago: int) -> Optional[float]:
         """获取 N 秒前的价格（最近邻匹配）。"""
         if not self._data:
+            logger.debug("get_price_at: 价格历史为空，无法获取历史价格")
             return None
         target = time.time() - seconds_ago
         best = None
@@ -73,6 +74,7 @@ class PriceHistory:
                 best = price
         # 如果最近邻距离超过窗口 20%，认为数据不足
         if best_diff > seconds_ago * 0.2:
+            logger.debug(f"get_price_at: 最近邻距离 {best_diff:.0f}s 超过窗口 {seconds_ago}s 的 20%，数据不足")
             return None
         return best
 
@@ -192,16 +194,19 @@ class PolymarketMonitor:
                 for market in markets:
                     volume = float(market.get("volume", 0) or 0)
                     if volume < POLYMARKET_MIN_VOLUME:
+                        logger.debug(f"_discover_markets: 交易量 {volume} 低于阈值 {POLYMARKET_MIN_VOLUME}，跳过")
                         continue
 
                     condition_id = market.get("conditionId") or market.get("condition_id", "")
                     if not condition_id:
+                        logger.debug("_discover_markets: condition_id 为空，跳过")
                         continue
 
                     try:
                         prices = json.loads(market.get("outcomePrices", "[0.5,0.5]"))
                         yes_price = float(prices[0])
-                    except (json.JSONDecodeError, ValueError, IndexError, TypeError):
+                    except (json.JSONDecodeError, ValueError, IndexError, TypeError) as e:
+                        logger.debug(f"_discover_markets: 解析 outcomePrices 失败: {e}，使用默认 0.5")
                         yes_price = 0.5
                     no_price = 1.0 - yes_price
 
@@ -246,8 +251,8 @@ class PolymarketMonitor:
                                 end_date = datetime.fromisoformat(
                                     str(market_info["end_date"]).replace("Z", "+00:00")
                                 )
-                            except (ValueError, TypeError):
-                                pass
+                            except (ValueError, TypeError) as e:
+                                logger.debug(f"_discover_markets: 解析 end_date 失败: {e}")
                         event_obj = PolymarketEvent(
                             condition_id=condition_id,
                             token_id=market_info["token_id"],
@@ -332,6 +337,7 @@ class PolymarketMonitor:
 
                     async for message in ws:
                         if self._stop_event.is_set():
+                            logger.debug("_ws_connect: 收到停止信号，中断消息接收")
                             break
                         try:
                             self._handle_ws_message(json.loads(message))
@@ -340,6 +346,7 @@ class PolymarketMonitor:
 
             except Exception as e:
                 if self._stop_event.is_set():
+                    logger.debug("_ws_connect: WebSocket 异常但已收到停止信号，中断重连")
                     break
                 logger.warning(f"WebSocket 断开: {e}, 5s 后重连")
                 await asyncio.sleep(5)
@@ -350,6 +357,7 @@ class PolymarketMonitor:
         asset_id = data.get("asset_id", "")
         price = data.get("price")
         if price is None:
+            logger.debug("_handle_ws_message: 消息中无 price 字段，跳过")
             return
 
         price = float(price)
@@ -359,9 +367,11 @@ class PolymarketMonitor:
         for cid, info in self._markets.items():
             if info.get("token_id") == asset_id:
                 condition_id = cid
+                logger.debug(f"_handle_ws_message: asset_id={asset_id} 匹配到 condition_id={cid}")
                 break
 
         if not condition_id:
+            logger.debug(f"_handle_ws_message: asset_id={asset_id} 未匹配到已监控的 condition_id，跳过")
             return
 
         # 更新价格历史
@@ -382,6 +392,7 @@ class PolymarketMonitor:
         """检查三档时间窗口是否有 Spike，仅触发最显著的一档。"""
         history = self._price_histories.get(condition_id)
         if not history:
+            logger.debug(f"_check_spikes: condition_id={condition_id} 无价格历史，跳过")
             return
 
         best_spike = None
@@ -390,6 +401,7 @@ class PolymarketMonitor:
         for alert_type, lookback_seconds, threshold in SPIKE_RULES:
             old_price = history.get_price_at(lookback_seconds)
             if old_price is None:
+                logger.debug(f"_check_spikes: {alert_type} 回看 {lookback_seconds}s 无历史价格，跳过该档")
                 continue
 
             change = current_price - old_price
@@ -434,6 +446,7 @@ class PolymarketMonitor:
             for cid, history in self._price_histories.items():
                 price = history.latest
                 if price is None:
+                    logger.debug(f"_save_snapshots: condition_id={cid} 无最新价格，跳过")
                     continue
                 market = self._markets.get(cid, {})
                 snapshot = PolymarketPriceSnapshot(
@@ -475,8 +488,8 @@ class PolymarketMonitor:
                         },
                     },
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"_push_price_update: WebSocket 推送价格失败: {e}")
 
 
 # 全局单例

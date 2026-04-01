@@ -46,11 +46,12 @@ def _ensure_downloaded(sf, dataset: str, refresh_days: int):
             sf.load_balance(variant="quarterly", market="us", refresh_days=0)
         elif "cashflow" in dataset:
             sf.load_cashflow(variant="quarterly", market="us", refresh_days=0)
-    except Exception:
-        pass  # pandas 2.x 兼容问题，但 CSV 已经下载完成
+    except Exception as e:
+        logger.debug(f"_ensure_downloaded: simfin 加载 {dataset} 抛出异常(预期行为, pandas 2.x 兼容): {e}")
 
     if csv_path.exists():
         return csv_path
+    logger.debug(f"_ensure_downloaded: CSV 文件不存在 {csv_path}")
     return None
 
 
@@ -83,6 +84,7 @@ class SimFinDownloader:
             sf.set_data_dir(SIMFIN_DATA_DIR)
             self._sf = sf
         except ImportError:
+            logger.error("simfin 未安装")
             raise ImportError("simfin 未安装，请运行: pip install simfin")
 
     def download_financials(self, force: bool = False) -> int:
@@ -114,6 +116,7 @@ class SimFinDownloader:
         logger.info(f"SimFin income: {len(df_income)} rows after filter")
 
         if df_income.empty:
+            logger.debug("download_financials: income 数据为空，跳过")
             return 0
 
         df_balance = None
@@ -154,6 +157,7 @@ class SimFinDownloader:
             fiscal_year = row.get("Fiscal Year", "")
 
             if pd.isna(report_date):
+                logger.debug(f"download_financials: 跳过记录 (report_date 为空, ticker={ticker})")
                 continue
 
             period = f"{fiscal_period} {fiscal_year}" if fiscal_period and fiscal_year else ""
@@ -231,8 +235,9 @@ class SimFinDownloader:
 def _sf(val) -> float | None:
     """Safe float conversion for SimFin values."""
     if val is None or (isinstance(val, float) and np.isnan(val)):
-        return None
+        return None  # NaN/None 无需转换
     try:
         return float(val)
     except (TypeError, ValueError):
+        logger.debug(f"_sf: 无法转换值 '{val}' 为 float")
         return None

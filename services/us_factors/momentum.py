@@ -23,6 +23,7 @@ class Mom1M(USFactorBase):
         prev = self._get_month_end_adj_close(date, 1, tickers_set)
 
         if current is None or prev is None:
+            logger.debug("Mom1M.compute: 当前价格或1月前价格数据缺失")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         cur = current[["adj_close"]].reset_index().rename(columns={"adj_close": "cur_price"})
@@ -47,6 +48,7 @@ class Mom3M(USFactorBase):
         prev = self._get_month_end_adj_close(date, 3, tickers_set)
 
         if current is None or prev is None:
+            logger.debug("Mom3M.compute: 当前价格或3月前价格数据缺失")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         cur = current[["adj_close"]].reset_index().rename(columns={"adj_close": "cur_price"})
@@ -71,6 +73,7 @@ class Mom12M(USFactorBase):
         prev_12m = self._get_month_end_adj_close(date, 12, tickers_set)
 
         if prev_1m is None or prev_12m is None:
+            logger.debug("Mom12M.compute: 1月前或12月前价格数据缺失")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         prev_1m = prev_1m.rename(columns={"adj_close": "p1m"})
@@ -94,6 +97,7 @@ class Rev5D(USFactorBase):
         rolling = self._get_rolling_for_date(date, tickers_set)
 
         if rolling is None:
+            logger.debug("Rev5D.compute: 无rolling预计算数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df = rolling[["cum_ret_5d"]].reset_index()
@@ -111,6 +115,7 @@ class ResidualMom(USFactorBase):
         rolling = self._get_rolling_for_date(date, tickers_set)
 
         if rolling is None:
+            logger.debug("ResidualMom.compute: 无rolling预计算数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         # 获取 S&P 500 同期 20D 收益
@@ -143,8 +148,9 @@ class ResidualMom(USFactorBase):
                 ret = prices[0] / prices[-1] - 1 if prices[-1] > 0 else 0.0
                 self._date_cache[cache_key] = ret
                 return ret
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"_get_sp500_20d_return: 获取S&P500指数数据失败: {e}")
 
+        logger.debug("_get_sp500_20d_return: 无法获取S&P500收益，使用默认值0.0")
         self._date_cache[cache_key] = 0.0
         return 0.0

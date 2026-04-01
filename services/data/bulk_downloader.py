@@ -60,19 +60,16 @@ def _request_with_retry(method: str, url: str, max_retries: int = 3, **kwargs) -
             resp = requests.request(method, url, **kwargs)
             if resp.status_code == 429:
                 wait = 2 ** (attempt + 2)  # 4s, 8s, 16s
-                logger.warning(f"Rate limited (429), waiting {wait}s...")
+                logger.warning(f"Rate limited (429), waiting {wait}s (attempt {attempt+1}/{max_retries})...")
                 time.sleep(wait)
-                logger.debug(f"wait: 跳过 (time.sleep(wait))")
-
                 continue
             if resp.status_code >= 500:
                 logger.warning(f"Server error ({resp.status_code}), retrying...")
                 time.sleep(2 ** attempt)
-                logger.debug(f"wait: 跳过 (time.sleep(2 ** attempt))")
-
                 continue
             return resp
         except requests.exceptions.RequestException as e:
+            logger.warning(f"HTTP 请求异常 (attempt {attempt+1}/{max_retries}): {e}")
             if attempt == max_retries - 1:
                 raise
             time.sleep(2 ** attempt)
@@ -113,6 +110,26 @@ class BulkDownloader:
         data = resp.json()
         if isinstance(data, dict) and "Error Message" in data:
             logger.warning(f"FMP error: {data['Error Message']}")
+            return []
+        return data
+
+    def _fmp_get_stable_json(self, endpoint: str, params: dict = None) -> list | dict:
+        """FMP stable JSON API call (/stable/xxx)."""
+        if not FMP_API_KEY:
+            logger.warning("FMP_API_KEY 未设置")
+            return []
+        self._fmp_limiter.wait()
+        url = f"https://financialmodelingprep.com/stable/{endpoint}"
+        p = {"apikey": FMP_API_KEY}
+        if params:
+            p.update(params)
+        resp = _request_with_retry("GET", url, params=p)
+        if resp.status_code != 200:
+            logger.warning(f"FMP stable {endpoint}: HTTP {resp.status_code}")
+            return []
+        data = resp.json()
+        if isinstance(data, dict) and "Error Message" in data:
+            logger.warning(f"FMP stable error: {data['Error Message']}")
             return []
         return data
 
@@ -407,6 +424,136 @@ class BulkDownloader:
         logger.info(f"FMP income statement bulk 总计: {total} 条")
         return total
 
+    def download_fmp_financial_quarterly(self, tickers: list[str] = None, limit: int = 400) -> int:
+        """FMP per-ticker: 季度财报 (IS+BS+CF 三表合并) → us_financial_data.
+
+        使用 /stable/ 端点逐 ticker 下载季度数据，合并三张报表后 upsert。
+        替代已失效的 bulk 端点。
+
+        Args:
+            tickers: 要下载的 ticker 列表，None=全部
+            limit: 每个 ticker 最多拉取的季度数（默认 400 ~ 100年）
+        """
+        if tickers is None:
+            tickers = self.db.get_us_tickers()
+        if not tickers:
+            logger.warning("download_fmp_financial_quarterly: 无 ticker 可下载")
+            return 0
+
+        total = 0
+
+        def _fetch_single(ticker):
+            # 1. Income Statement
+            is_data = self._fmp_get_stable_json(
+                "income-statement",
+                params={"symbol": ticker, "period": "quarter", "limit": limit},
+            )
+            if not is_data:
+                logger.debug(f"financial_quarterly: {ticker} IS 无数据")
+                return 0
+
+            # 构建 IS DataFrame
+            is_df = pd.DataFrame(is_data)
+            is_df = is_df.rename(columns={"symbol": "ticker"})
+
+            # 2. Balance Sheet
+            bs_data = self._fmp_get_stable_json(
+                "balance-sheet-statement",
+                params={"symbol": ticker, "period": "quarter", "limit": limit},
+            )
+            bs_df = pd.DataFrame(bs_data) if bs_data else pd.DataFrame()
+            if not bs_df.empty:
+                bs_df = bs_df.rename(columns={"symbol": "ticker"})
+
+            # 3. Cash Flow
+            cf_data = self._fmp_get_stable_json(
+                "cash-flow-statement",
+                params={"symbol": ticker, "period": "quarter", "limit": limit},
+            )
+            cf_df = pd.DataFrame(cf_data) if cf_data else pd.DataFrame()
+            if not cf_df.empty:
+                cf_df = cf_df.rename(columns={"symbol": "ticker"})
+
+            # 合并三表（以 IS 为基础，按 ticker+date 左连接 BS 和 CF）
+            merge_keys = ["ticker", "date"]
+            merged = is_df.copy()
+            if not bs_df.empty:
+                bs_cols = merge_keys + [c for c in bs_df.columns if c not in merged.columns]
+                merged = merged.merge(bs_df[bs_cols], on=merge_keys, how="left")
+            if not cf_df.empty:
+                cf_cols = merge_keys + [c for c in cf_df.columns if c not in merged.columns]
+                merged = merged.merge(cf_df[cf_cols], on=merge_keys, how="left")
+
+            # 构造 period_label
+            if "fiscalYear" in merged.columns and "period" in merged.columns:
+                merged["period_label"] = merged["fiscalYear"].astype(str) + "-" + merged["period"].astype(str)
+            elif "date" in merged.columns:
+                merged["period_label"] = merged["date"].apply(
+                    lambda d: f"{str(d)[:4]}-Q{(int(str(d)[5:7])-1)//3+1}" if pd.notna(d) else None
+                )
+
+            # 映射到 us_financial_data 表字段
+            result = pd.DataFrame({
+                "ticker": merged["ticker"],
+                "period": merged.get("period_label"),
+                "date": merged["date"],
+                "filing_date": merged.get("filingDate", merged.get("acceptedDate")),
+                "revenue": merged.get("revenue"),
+                "cost_of_revenue": merged.get("costOfRevenue"),
+                "gross_profit": merged.get("grossProfit"),
+                "operating_income": merged.get("operatingIncome"),
+                "net_income": merged.get("netIncome"),
+                "eps": merged.get("eps"),
+                "eps_diluted": merged.get("epsDiluted"),
+                "ebitda": merged.get("ebitda"),
+                "gross_margin": merged.get("grossProfitRatio"),
+                "operating_margin": merged.get("operatingIncomeRatio"),
+                "net_margin": merged.get("netIncomeRatio"),
+                "rd_expenses": merged.get("researchAndDevelopmentExpenses"),
+                "sga_expenses": merged.get("sellingGeneralAndAdministrativeExpenses"),
+                "weighted_avg_shares": merged.get("weightedAverageShsOutDil",
+                                                   merged.get("weightedAverageShsOut")),
+                # BS 字段
+                "total_assets": merged.get("totalAssets"),
+                "total_equity": merged.get("totalStockholdersEquity",
+                                           merged.get("totalEquity")),
+                "total_debt": merged.get("totalDebt"),
+                "total_current_assets": merged.get("totalCurrentAssets"),
+                "total_current_liabilities": merged.get("totalCurrentLiabilities"),
+                "cash_and_equivalents": merged.get("cashAndCashEquivalents"),
+                "net_receivables": merged.get("netReceivables"),
+                "inventory": merged.get("inventory"),
+                "long_term_debt": merged.get("longTermDebt"),
+                "retained_earnings": merged.get("retainedEarnings"),
+                # CF 字段
+                "operating_cash_flow": merged.get("operatingCashFlow",
+                                                   merged.get("netCashProvidedByOperatingActivities")),
+                "capital_expenditure": merged.get("capitalExpenditure"),
+                "free_cash_flow": merged.get("freeCashFlow"),
+                "dividends_paid": merged.get("commonDividendsPaid",
+                                              merged.get("netDividendsPaid")),
+                "share_repurchased": merged.get("commonStockRepurchased"),
+            })
+            result = result.dropna(subset=["ticker", "date"])
+            if not result.empty:
+                self.db.upsert_us_financial_data(result)
+                return len(result)
+
+            logger.debug(f"financial_quarterly: {ticker} 合并后无有效数据")
+            return 0
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures),
+                               desc="FMP Quarterly Financials"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Financial 失败 {futures[future]}: {e}")
+
+        logger.info(f"FMP quarterly financials 总计: {total} 条")
+        return total
+
     def download_fmp_key_metrics_bulk(self, start_year: int = 1995, end_year: int = None) -> int:
         """FMP bulk: key metrics by year, 每年立即写入。"""
         if end_year is None:
@@ -528,62 +675,58 @@ class BulkDownloader:
         return self._download_fmp_prices_per_ticker(start_year, end_year)
 
     def _download_fmp_prices_per_ticker(self, start_year: int, end_year: int) -> int:
-        """FMP per-ticker: historical daily prices (多线程)."""
+        """FMP per-ticker: historical daily prices (多线程).
+
+        使用 /stable/historical-price-eod/full 端点（新版）。
+        该端点每次最多返回 5000 行，所以按 10 年分段请求。
+        """
         tickers = self.db.get_us_tickers()
         if not tickers:
             logger.warning("无 ticker 可下载行情，请先下载股票列表")
             return 0
 
-        start_date = f"{start_year}-01-01"
-        end_date = f"{end_year}-12-31"
+        # 按 10 年分段，确保每段不超过 5000 行
+        segments = []
+        for yr in range(start_year, end_year + 1, 10):
+            seg_end = min(yr + 9, end_year)
+            segments.append((f"{yr}-01-01", f"{seg_end}-12-31"))
+
         total = 0
-        batch_size = 5  # FMP 支持逗号分隔批量查询
-        batches = [tickers[i:i + batch_size] for i in range(0, len(tickers), batch_size)]
 
-        def _fetch_price_batch(batch):
-            symbols = ",".join(batch)
-            data = self._fmp_get_json(
-                f"historical-price-full/{symbols}",
-                params={"from": start_date, "to": end_date},
-            )
-            stock_list = []
-            if isinstance(data, list) and len(data) == 1:
-                data = data[0]
-            if isinstance(data, dict):
-                if "historicalStockList" in data:
-                    stock_list = data["historicalStockList"]
-                elif "historical" in data:
-                    stock_list = [data]
-
+        def _fetch_price_single(ticker):
             count = 0
-            for stock in stock_list:
-                sym = stock.get("symbol", batch[0] if len(batch) == 1 else "")
-                hist = stock.get("historical", [])
-                if not hist:
-                    logger.debug(f"_fetch_price_batch: 跳过 (not hist)")
-
+            for seg_start, seg_end in segments:
+                data = self._fmp_get_stable_json(
+                    "historical-price-eod/full",
+                    params={"symbol": ticker, "from": seg_start, "to": seg_end},
+                )
+                if not data:
+                    logger.debug(f"_fetch_price_single: {ticker} 段 {seg_start}~{seg_end} 无数据，跳过")
                     continue
                 rows = [{
-                    "ticker": sym, "trade_date": h["date"],
-                    "open": h.get("open"), "high": h.get("high"),
-                    "low": h.get("low"), "close": h.get("close"),
-                    "adj_close": h.get("adjClose"), "volume": h.get("volume"),
-                    "change_pct": h.get("changePercent"),
-                    "vwap": h.get("vwap"),
-                    "unadjusted_volume": h.get("unadjustedVolume"),
-                } for h in hist]
-                df = pd.DataFrame(rows)
-                self.db.bulk_upsert_us_daily_price(df)
-                count += len(rows)
+                    "ticker": item.get("symbol", ticker),
+                    "trade_date": item["date"],
+                    "open": item.get("open"), "high": item.get("high"),
+                    "low": item.get("low"), "close": item.get("close"),
+                    "adj_close": item.get("adjClose"),
+                    "volume": item.get("volume"),
+                    "change_pct": item.get("changePercent"),
+                    "vwap": item.get("vwap"),
+                    "unadjusted_volume": item.get("unadjustedVolume"),
+                } for item in data if item.get("date")]
+                if rows:
+                    df = pd.DataFrame(rows)
+                    self.db.bulk_upsert_us_daily_price(df)
+                    count += len(rows)
             return count
 
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_fetch_price_batch, b): b for b in batches}
+            futures = {pool.submit(_fetch_price_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Daily Prices"):
                 try:
                     total += future.result()
                 except Exception as e:
-                    logger.warning(f"Price batch 失败: {e}")
+                    logger.warning(f"Price 失败 {futures[future]}: {e}")
 
         logger.info(f"FMP daily prices 总计: {total} 条")
         return total
@@ -690,6 +833,52 @@ class BulkDownloader:
         logger.info(f"FMP insider trading 总计: {total} 条")
         return total
 
+    def download_fmp_analyst_grades(self, tickers: list[str] = None) -> int:
+        """FMP per-ticker: 分析师评级变更 (v3/grade) → us_analyst_recommendation.
+
+        替代旧 yfinance upgrades_downgrades，字段更完整（gradingCompany + newGrade + previousGrade）。
+        """
+        if tickers is None:
+            tickers = self.db.get_us_tickers()
+        if not tickers:
+            logger.warning("download_fmp_analyst_grades: 无 ticker")
+            return 0
+
+        total = 0
+
+        def _fetch_grade_single(ticker):
+            data = self._fmp_get_json(f"grade/{ticker}")
+            if not data:
+                logger.debug(f"analyst_grades: {ticker} 无评级数据")
+                return 0
+            records = [{
+                "ticker": item.get("symbol", ticker),
+                "date": item.get("date", "")[:10],
+                "analyst_company": item.get("gradingCompany", ""),
+                "analyst_name": "",
+                "rating": item.get("newGrade", ""),
+                "price_target": None,
+            } for item in data if item.get("date") and item.get("newGrade")]
+            if not records:
+                logger.debug(f"analyst_grades: {ticker} 过滤后无有效记录")
+                return 0
+            df = pd.DataFrame(records)
+            df = df.drop_duplicates(subset=["ticker", "date", "analyst_company"], keep="last")
+            self.db.upsert_us_analyst_recommendation(df)
+            return len(df)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_grade_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures),
+                               desc="FMP Analyst Grades"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Grade 失败 {futures[future]}: {e}")
+
+        logger.info(f"FMP analyst grades 总计: {total} 条")
+        return total
+
     def download_fmp_dividends_splits(self, tickers: list[str] = None) -> int:
         """FMP per-ticker: dividends + splits (多线程)."""
         if tickers is None:
@@ -704,6 +893,8 @@ class BulkDownloader:
         def _fetch_div_split_single(ticker):
             count = 0
             # Dividends
+            # NOTE: legacy 端点，FMP 已废弃。当前 plan 无可用替代端点。
+            # us_corporate_action 表已有 61 万行历史数据，暂不影响使用。
             div_data = self._fmp_get_json(f"historical-price-full/stock_dividend/{ticker}")
             if isinstance(div_data, dict) and "historical" in div_data:
                 records = [{
@@ -739,38 +930,40 @@ class BulkDownloader:
         return total
 
     def download_fmp_index_daily(self, start_year: int = 1995) -> int:
-        """FMP per-ticker: index daily prices (S&P 500, NASDAQ, Dow, Russell 1000)."""
+        """FMP: index daily prices (S&P 500, NASDAQ, Dow, Russell 1000).
+
+        使用 /stable/historical-price-eod/full 端点，按 10 年分段。
+        """
         from services.config import US_INDEX_SYMBOLS
-        start_date = f"{start_year}-01-01"
-        end_date = datetime.now().strftime("%Y-%m-%d")
+        end_year = datetime.now().year
+        segments = []
+        for yr in range(start_year, end_year + 1, 10):
+            seg_end = min(yr + 9, end_year)
+            segments.append((f"{yr}-01-01", f"{seg_end}-12-31"))
+
         total = 0
-
         for symbol in tqdm(US_INDEX_SYMBOLS, desc="FMP Index Daily"):
-            data = self._fmp_get_json(
-                f"historical-price-full/{symbol}",
-                params={"from": start_date, "to": end_date},
-            )
-            if isinstance(data, list) and len(data) == 1:
-                data = data[0]
-            if not isinstance(data, dict) or "historical" not in data:
-                logger.debug(f"download_fmp_index_daily: 跳过 (not isinstance(data, dict) or 'historical' not in data)")
-
-                continue
-            rows = []
-            for h in data["historical"]:
-                rows.append({
-                    "index_code": symbol,
-                    "trade_date": h["date"],
-                    "open": h.get("open"),
-                    "high": h.get("high"),
-                    "low": h.get("low"),
-                    "close": h.get("close"),
-                    "volume": h.get("volume"),
-                })
-            if rows:
-                df = pd.DataFrame(rows)
-                self.db.bulk_upsert_us_index_daily(df)
-                total += len(rows)
+            for seg_start, seg_end in segments:
+                data = self._fmp_get_stable_json(
+                    "historical-price-eod/full",
+                    params={"symbol": symbol, "from": seg_start, "to": seg_end},
+                )
+                if not data:
+                    logger.debug(f"download_fmp_index_daily: {symbol} 段 {seg_start}~{seg_end} 无数据，跳过")
+                    continue
+                rows = [{
+                    "index_code": item.get("symbol", symbol),
+                    "trade_date": item["date"],
+                    "open": item.get("open"),
+                    "high": item.get("high"),
+                    "low": item.get("low"),
+                    "close": item.get("close"),
+                    "volume": item.get("volume"),
+                } for item in data if item.get("date")]
+                if rows:
+                    df = pd.DataFrame(rows)
+                    self.db.bulk_upsert_us_index_daily(df)
+                    total += len(rows)
 
         logger.info(f"FMP index daily 总计: {total} 条")
         return total
@@ -783,38 +976,41 @@ class BulkDownloader:
     }
 
     def download_fmp_commodity_prices(self, start_year: int = 1995) -> int:
-        """FMP per-ticker: commodity futures prices."""
-        from services.config import US_COMMODITY_SYMBOLS
-        start_date = f"{start_year}-01-01"
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        total = 0
+        """FMP: commodity futures prices.
 
+        使用 /stable/historical-price-eod/full 端点，按 10 年分段。
+        """
+        from services.config import US_COMMODITY_SYMBOLS
+        end_year = datetime.now().year
+        segments = []
+        for yr in range(start_year, end_year + 1, 10):
+            seg_end = min(yr + 9, end_year)
+            segments.append((f"{yr}-01-01", f"{seg_end}-12-31"))
+
+        total = 0
         for yf_sym in tqdm(US_COMMODITY_SYMBOLS, desc="FMP Commodities"):
             fmp_sym = self._COMMODITY_MAP.get(yf_sym, yf_sym.replace("=F", "USD"))
-            data = self._fmp_get_json(
-                f"historical-price-full/{fmp_sym}",
-                params={"from": start_date, "to": end_date},
-            )
-            if isinstance(data, list) and len(data) == 1:
-                data = data[0]
-            if not isinstance(data, dict) or "historical" not in data:
-                logger.warning(f"FMP commodity {yf_sym}→{fmp_sym}: 无数据")
-                continue
-            rows = []
-            for h in data["historical"]:
-                rows.append({
+            for seg_start, seg_end in segments:
+                data = self._fmp_get_stable_json(
+                    "historical-price-eod/full",
+                    params={"symbol": fmp_sym, "from": seg_start, "to": seg_end},
+                )
+                if not data:
+                    logger.debug(f"download_fmp_commodity_prices: {fmp_sym} 段 {seg_start}~{seg_end} 无数据，跳过")
+                    continue
+                rows = [{
                     "symbol": yf_sym,  # 保持 yfinance 符号兼容
-                    "trade_date": h["date"],
-                    "open": h.get("open"),
-                    "high": h.get("high"),
-                    "low": h.get("low"),
-                    "close": h.get("close"),
-                    "volume": h.get("volume"),
-                })
-            if rows:
-                df = pd.DataFrame(rows)
-                self.db.bulk_upsert_us_commodity_price(df)
-                total += len(rows)
+                    "trade_date": item["date"],
+                    "open": item.get("open"),
+                    "high": item.get("high"),
+                    "low": item.get("low"),
+                    "close": item.get("close"),
+                    "volume": item.get("volume"),
+                } for item in data if item.get("date")]
+                if rows:
+                    df = pd.DataFrame(rows)
+                    self.db.bulk_upsert_us_commodity_price(df)
+                    total += len(rows)
 
         logger.info(f"FMP commodity prices 总计: {total} 条")
         return total
