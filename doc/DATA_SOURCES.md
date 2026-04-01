@@ -132,6 +132,15 @@
 | 政府合同 | historical/govcontracts/{ticker} | us_gov_contract |
 | WSB 情绪 | historical/wallstreetbets/{ticker} | us_wsb_sentiment |
 
+### 4.5 Alpha Vantage — 新闻情绪/期权数据
+
+配置：`ALPHAVANTAGE_API_KEY`（Premium $99-150/月）
+
+| 数据 | 端点 | 表 |
+|------|------|-----|
+| AI 新闻情绪 | NEWS_SENTIMENT | us_news_sentiment |
+| 期权快照（IV/Greeks 聚合） | HISTORICAL_OPTIONS | us_options_snapshot |
+
 ---
 
 ## 五、美国宏观数据
@@ -258,6 +267,7 @@ LLM 支持两种后端:
 | `UW_API_KEY` | 美股可选 | Unusual Whales ($150/月) |
 | `FISCAL_API_KEY` | 美股可选 | Fiscal.ai ($99/月) |
 | `QUIVER_API_KEY` | 美股可选 | Quiver Quantitative ($10/月) |
+| `ALPHAVANTAGE_API_KEY` | 美股可选 | Alpha Vantage Premium ($99-150/月) |
 | `FRED_API_KEY` | 美股宏观补充 | FRED API key |
 | `TWITTER_USERNAME` / `TWITTER_EMAIL` / `TWITTER_PASSWORD` | 可选 | Twitter 爬虫登录凭证 |
 | `LLM_PROVIDER` | 可选 | `anthropic` 或 `openai` |
@@ -290,5 +300,5 @@ LLM 支持两种后端:
 └─────────────────────────────────────────────────────────┘
           ↓
    A股: 因子计算 → 选股 → 回测/模拟交易（详见 A_SHARE_STRATEGY.md）
-   美股: 29因子多空对冲 + FF5 回归（详见 US_SHARE_STRATEGY.md）
+   美股: 32因子多空对冲 + FF5 回归（详见 US_SHARE_STRATEGY.md）
 ```

@@ -981,6 +981,48 @@ class USWsbSentiment(Base):
     )
 
 
+class USNewsSentiment(Base):
+    """美股新闻情绪表（Alpha Vantage: NEWS_SENTIMENT）"""
+    __tablename__ = "us_news_sentiment"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="日期")
+    sentiment_score = Column(Float, comment="ticker 情绪分数 (-1~1)")
+    relevance_score = Column(Float, comment="相关性分数 (0~1)")
+    article_count = Column(Integer, comment="文章数量")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", name="uq_us_news_sentiment"),
+        Index("idx_us_news_sentiment_ticker", "ticker"),
+        Index("idx_us_news_sentiment_date", "date"),
+    )
+
+
+class USOptionsSnapshot(Base):
+    """美股期权快照表（Alpha Vantage: HISTORICAL_OPTIONS 聚合）"""
+    __tablename__ = "us_options_snapshot"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="日期")
+    avg_call_iv = Column(Float, comment="ATM 看涨平均 IV")
+    avg_put_iv = Column(Float, comment="ATM 看跌平均 IV")
+    iv_skew = Column(Float, comment="IV skew (put_iv - call_iv)")
+    put_call_volume_ratio = Column(Float, comment="看跌/看涨成交量比")
+    put_call_oi_ratio = Column(Float, comment="看跌/看涨持仓量比")
+    total_volume = Column(Integer, comment="总成交量")
+    total_open_interest = Column(Integer, comment="总持仓量")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", name="uq_us_options_snapshot"),
+        Index("idx_us_options_snapshot_ticker", "ticker"),
+        Index("idx_us_options_snapshot_date", "date"),
+    )
+
+
 class Watchlist(Base):
     """自选股表"""
     __tablename__ = "watchlist"
@@ -2579,6 +2621,12 @@ class DatabaseManager:
 
     def upsert_us_wsb_sentiment(self, df: pd.DataFrame):
         self._bulk_upsert_generic(USWsbSentiment, df, ["ticker", "date"], date_cols=["date"])
+
+    def upsert_us_news_sentiment(self, df: pd.DataFrame):
+        self._bulk_upsert_generic(USNewsSentiment, df, ["ticker", "date"], date_cols=["date"])
+
+    def upsert_us_options_snapshot(self, df: pd.DataFrame):
+        self._bulk_upsert_generic(USOptionsSnapshot, df, ["ticker", "date"], date_cols=["date"])
 
     def get_latest_us_trade_date(self, ticker: Optional[str] = None) -> Optional[str]:
         """获取美股日线最新交易日期。"""

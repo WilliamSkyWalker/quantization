@@ -1495,6 +1495,208 @@ class BulkDownloader:
         return results
 
     # ==============================================================
+    # Alpha Vantage
+    # ==============================================================
+
+    def _av_get_json(self, params: dict) -> dict:
+        """Alpha Vantage API call."""
+        from services.config import ALPHAVANTAGE_API_KEY, ALPHAVANTAGE_RATE_LIMIT
+        if not ALPHAVANTAGE_API_KEY:
+            logger.warning("ALPHAVANTAGE_API_KEY 未设置")
+            return {}
+        if not hasattr(self, "_av_limiter"):
+            self._av_limiter = RateLimiter(ALPHAVANTAGE_RATE_LIMIT)
+        self._av_limiter.wait()
+        params["apikey"] = ALPHAVANTAGE_API_KEY
+        resp = _request_with_retry("GET", "https://www.alphavantage.co/query", params=params, timeout=60)
+        if resp.status_code != 200:
+            logger.warning(f"AlphaVantage: HTTP {resp.status_code}")
+            return {}
+        data = resp.json()
+        if "Error Message" in data or "Note" in data:
+            logger.warning(f"AlphaVantage error: {data.get('Error Message', data.get('Note', ''))}")
+            return {}
+        return data
+
+    def download_av_news_sentiment(self, tickers: list[str] = None, time_from: str = None) -> int:
+        """Alpha Vantage: 新闻情绪 → us_news_sentiment (按 ticker 聚合到日级别)。
+
+        NEWS_SENTIMENT 端点返回文章级别数据，每篇文章含多个 ticker 的情绪分。
+        聚合策略：同一 ticker 同一天的所有文章取加权平均（relevance_score 加权）。
+        """
+        if tickers is None:
+            tickers = self.db.get_us_tickers()
+        if not tickers:
+            logger.warning("download_av_news_sentiment: 无 ticker")
+            return 0
+
+        total = 0
+        # 分批（每次最多 50 tickers，API 支持逗号分隔）
+        batch_size = 50
+        batches = [tickers[i:i + batch_size] for i in range(0, len(tickers), batch_size)]
+
+        for batch in tqdm(batches, desc="AV News Sentiment"):
+            ticker_str = ",".join(batch)
+            params = {
+                "function": "NEWS_SENTIMENT",
+                "tickers": ticker_str,
+                "limit": 1000,
+                "sort": "LATEST",
+            }
+            if time_from:
+                params["time_from"] = time_from
+
+            data = self._av_get_json(params)
+            if not data or "feed" not in data:
+                logger.debug(f"av_news_sentiment: batch {batch[:3]}... 无 feed")
+                continue
+
+            # 解析每篇文章的 ticker_sentiment
+            records = []
+            for article in data["feed"]:
+                pub_date = str(article.get("time_published", ""))[:8]
+                if len(pub_date) == 8:
+                    pub_date = f"{pub_date[:4]}-{pub_date[4:6]}-{pub_date[6:8]}"
+                else:
+                    continue
+
+                for ts in article.get("ticker_sentiment", []):
+                    t = ts.get("ticker", "")
+                    if t not in batch:
+                        continue
+                    records.append({
+                        "ticker": t,
+                        "date": pub_date,
+                        "sentiment_score": float(ts.get("ticker_sentiment_score", 0)),
+                        "relevance_score": float(ts.get("relevance_score", 0)),
+                    })
+
+            if not records:
+                logger.debug(f"av_news_sentiment: batch {batch[:3]}... 无有效记录")
+                continue
+
+            # 按 ticker+date 聚合（relevance 加权平均）
+            df = pd.DataFrame(records)
+            df["weighted_sent"] = df["sentiment_score"] * df["relevance_score"]
+
+            agg = df.groupby(["ticker", "date"]).agg(
+                weighted_sent_sum=("weighted_sent", "sum"),
+                relevance_sum=("relevance_score", "sum"),
+                article_count=("sentiment_score", "count"),
+            ).reset_index()
+
+            agg["sentiment_score"] = agg["weighted_sent_sum"] / agg["relevance_sum"].clip(lower=0.01)
+            agg["relevance_score"] = agg["relevance_sum"] / agg["article_count"]
+            result = agg[["ticker", "date", "sentiment_score", "relevance_score", "article_count"]]
+
+            self.db.upsert_us_news_sentiment(result)
+            total += len(result)
+
+        logger.info(f"AV news sentiment 总计: {total} 条")
+        return total
+
+    def download_av_options_snapshot(self, tickers: list[str] = None) -> int:
+        """Alpha Vantage: 期权快照 → us_options_snapshot (聚合 ATM IV + put/call ratio)。
+
+        HISTORICAL_OPTIONS 端点返回完整期权链，这里聚合为每日快照：
+        - ATM call/put IV 均值
+        - IV skew = put_iv - call_iv
+        - put/call volume ratio + OI ratio
+        """
+        if tickers is None:
+            tickers = self.db.get_us_tickers()
+        if not tickers:
+            logger.warning("download_av_options_snapshot: 无 ticker")
+            return 0
+
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._av_get_json({
+                "function": "HISTORICAL_OPTIONS",
+                "symbol": ticker,
+            })
+            if not data or "data" not in data or not data["data"]:
+                logger.debug(f"av_options: {ticker} 无数据")
+                return 0
+
+            df = pd.DataFrame(data["data"])
+            for col in ["strike", "implied_volatility", "volume", "open_interest", "delta"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+
+            if df.empty or "date" not in df.columns:
+                logger.debug(f"av_options: {ticker} DataFrame 为空")
+                return 0
+
+            # 筛选 ATM（|delta| 在 0.3~0.7 之间）
+            df_atm = df[(df["delta"].abs() >= 0.3) & (df["delta"].abs() <= 0.7)].copy()
+            if df_atm.empty:
+                # 退而求其次：取所有有 IV 的
+                df_atm = df[df["implied_volatility"].notna()].copy()
+
+            if df_atm.empty:
+                logger.debug(f"av_options: {ticker} 无 ATM 数据")
+                return 0
+
+            # 按日期聚合
+            snapshots = []
+            for dt, grp in df_atm.groupby("date"):
+                calls = grp[grp["type"] == "call"]
+                puts = grp[grp["type"] == "put"]
+
+                avg_call_iv = calls["implied_volatility"].mean() if not calls.empty else None
+                avg_put_iv = puts["implied_volatility"].mean() if not puts.empty else None
+                iv_skew = (avg_put_iv - avg_call_iv) if avg_put_iv and avg_call_iv else None
+
+                call_vol = calls["volume"].sum()
+                put_vol = puts["volume"].sum()
+                pc_vol_ratio = put_vol / call_vol if call_vol > 0 else None
+
+                call_oi = calls["open_interest"].sum()
+                put_oi = puts["open_interest"].sum()
+                pc_oi_ratio = put_oi / call_oi if call_oi > 0 else None
+
+                snapshots.append({
+                    "ticker": ticker,
+                    "date": dt,
+                    "avg_call_iv": avg_call_iv,
+                    "avg_put_iv": avg_put_iv,
+                    "iv_skew": iv_skew,
+                    "put_call_volume_ratio": pc_vol_ratio,
+                    "put_call_oi_ratio": pc_oi_ratio,
+                    "total_volume": int(grp["volume"].sum()),
+                    "total_open_interest": int(grp["open_interest"].sum()),
+                })
+
+            if snapshots:
+                result_df = pd.DataFrame(snapshots)
+                self.db.upsert_us_options_snapshot(result_df)
+                return len(snapshots)
+
+            logger.debug(f"av_options: {ticker} 聚合后无快照")
+            return 0
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures),
+                               desc="AV Options Snapshot"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Options 失败 {futures[future]}: {e}")
+
+        logger.info(f"AV options snapshot 总计: {total} 条")
+        return total
+
+    def download_av_all(self) -> dict:
+        """Alpha Vantage: 全量下载。"""
+        results = {}
+        results["news_sentiment"] = self.download_av_news_sentiment()
+        results["options_snapshot"] = self.download_av_options_snapshot()
+        return results
+
+    # ==============================================================
     # 全量导入调度
     # ==============================================================
 

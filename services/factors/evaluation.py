@@ -503,6 +503,7 @@ class FactorEvaluator:
             from services.us_factors import (
                 value, quality, growth, momentum, technical,
                 analyst, accruals, polymarket, earnings, insider, quiver,
+                alphavantage,
             )
             return {
                 "EP": value.EP, "BP": value.BP, "DIV_YIELD": value.DivYield,
@@ -527,6 +528,9 @@ class FactorEvaluator:
                 "LOBBY_INTENSITY": quiver.LobbyIntensity,
                 "GOV_CONTRACT": quiver.GovContract,
                 "WSB_SENTIMENT": quiver.WsbSentiment,
+                "NEWS_SENTIMENT": alphavantage.NewsSentiment,
+                "IV_SKEW": alphavantage.IvSkew,
+                "PUT_CALL_RATIO": alphavantage.PutCallRatio,
             }
         else:
             from services.factors import (

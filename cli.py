@@ -230,6 +230,10 @@ def data_bulk_import(
         # Fiscal.ai
         ("fiscal", "all"): dl.download_fiscal_all,
         ("fiscal", "ratios"): dl.download_fiscal_daily_ratios,
+        # Alpha Vantage
+        ("av", "all"): dl.download_av_all,
+        ("av", "news-sentiment"): dl.download_av_news_sentiment,
+        ("av", "options"): dl.download_av_options_snapshot,
         # Quiver
         ("quiver", "all"): dl.download_quiver_all,
         ("quiver", "lobbying"): dl.download_quiver_lobbying,

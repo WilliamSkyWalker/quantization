@@ -57,6 +57,7 @@ from services.us_factors.analyst import USAnalystRating, USAnalystCoverage
 from services.us_factors.accruals import Accruals, BuybackYield
 from services.us_factors.polymarket import PolymarketSent
 from services.us_factors.quiver import LobbyIntensity, GovContract, WsbSentiment
+from services.us_factors.alphavantage import NewsSentiment, IvSkew, PutCallRatio
 from services.us_factors.insider import InsiderNetBuy
 from services.us_factors.earnings import EarningsSurprise, EpsRevision
 from services.us_factors.base import USFactorBase
@@ -86,9 +87,9 @@ class USMultiFactorStrategy:
         "quality":   ["ROE_TTM", "GROSS_MARGIN", "PROFIT_STB", "MARGIN_TREND", "ACCRUALS"],
         "growth":    ["NET_PROFIT_YOY", "REVENUE_YOY", "NET_PROFIT_CAGR_3Y"],
         "momentum":  ["MOM_1M", "MOM_3M", "MOM_12M", "REV_5D"],
-        "technical": ["TURN_20D", "VOL_20D", "IVOL", "SIZE"],
+        "technical": ["TURN_20D", "VOL_20D", "IVOL", "SIZE", "IV_SKEW", "PUT_CALL_RATIO"],
         "analyst":   ["US_ANALYST_RATING", "US_ANALYST_COVERAGE", "EARNINGS_SURPRISE", "EPS_REVISION", "INSIDER_NET_BUY"],
-        "sentiment": ["POLYMARKET_SENT", "LOBBY_INTENSITY", "GOV_CONTRACT", "WSB_SENTIMENT"],
+        "sentiment": ["POLYMARKET_SENT", "LOBBY_INTENSITY", "GOV_CONTRACT", "WSB_SENTIMENT", "NEWS_SENTIMENT"],
     }
     # Pruned (leave-one-out alpha analysis, 2015-2023):
     #   RESIDUAL_MOM: Δα=-3.46% (redundant with MOM_1M/3M/12M, noisier)
@@ -134,6 +135,7 @@ class USMultiFactorStrategy:
             Mom1M(db), Mom3M(db), Mom12M(db), Rev5D(db),
             # Technical (pruned: VolPriceDiv — no signal, Δα=-4.30%)
             Turn20D(db), Vol20D(db), Ivol(db), Size(db),
+            IvSkew(db), PutCallRatio(db),
             # Macro: entire category pruned (截面同值, Δα=-0.25% each)
             # Analyst
             USAnalystRating(db), USAnalystCoverage(db),
@@ -141,6 +143,7 @@ class USMultiFactorStrategy:
             # Sentiment
             PolymarketSent(db),
             LobbyIntensity(db), GovContract(db), WsbSentiment(db),
+            NewsSentiment(db),
         ]
 
         # 等权（不做 IC 引导权重优化——样本外验证已证明 IC 权重是数据窥探）

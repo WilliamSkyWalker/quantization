@@ -119,7 +119,7 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 
 ---
 
-## 三、因子体系（29 因子 × 7 大类）
+## 三、因子体系（32 因子 × 7 大类）
 
 代码位置：`services/us_factors/`
 
@@ -137,9 +137,9 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 | **quality** | 1.0 | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND, ACCRUALS | 盈利能力+稳定性+应计异常 |
 | **growth** | 1.0 | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y | 成长性 |
 | **momentum** | 1.0 | MOM_1M, MOM_3M, MOM_12M, REV_5D | 多频率动量+反转 |
-| **technical** | 1.0 | TURN_20D, VOL_20D, IVOL, SIZE | 流动性+波动率+规模 |
+| **technical** | 1.0 | TURN_20D, VOL_20D, IVOL, SIZE, IV_SKEW, PUT_CALL_RATIO | 流动性+波动率+规模+期权 IV 偏斜+看跌看涨比 |
 | **analyst** | 1.0 | US_ANALYST_RATING, US_ANALYST_COVERAGE, EARNINGS_SURPRISE, EPS_REVISION, INSIDER_NET_BUY | 分析师评级+覆盖度+盈利惊喜+预期修正+内部人净买入 |
-| **sentiment** | 1.0 | POLYMARKET_SENT, LOBBY_INTENSITY, GOV_CONTRACT, WSB_SENTIMENT | Polymarket 情绪+游说力度+政府合同+WSB 情绪 |
+| **sentiment** | 1.0 | POLYMARKET_SENT, LOBBY_INTENSITY, GOV_CONTRACT, WSB_SENTIMENT, NEWS_SENTIMENT | Polymarket+游说+政府合同+WSB+新闻情绪 |
 
 **大类等权（所有权重 1.0），因子内等权。** 不做 IC 引导权重优化。
 
@@ -601,7 +601,7 @@ Step 3.5 通过 leave-one-out 分析剪除 6 个因子（VOL_PRICE_DIV、RESIDUA
 - **下行保护失效**：下行捕获 99.4%（几乎跟跌），空头对冲未起作用
 - **策略实质**：β≈0.65 的被动指数跟踪器，没有稳健的选股 alpha
 
-**诚实评估**：原 23 因子体系在行业内缺乏选股能力（已扩展至 29 因子，新增 EARNINGS_SURPRISE + EPS_REVISION + INSIDER_NET_BUY + LOBBY_INTENSITY + GOV_CONTRACT + WSB_SENTIMENT），样本内 alpha 主要来自行业配置（超配 Tech），此优势在样本外行业轮动模式改变后消失。需要引入真正具有截面区分力的因子（如盈利预期修正 EPS revision）才可能产生可持续的选股 alpha。
+**诚实评估**：原 23 因子体系在行业内缺乏选股能力（已扩展至 32 因子，新增 EARNINGS_SURPRISE + EPS_REVISION + INSIDER_NET_BUY + LOBBY_INTENSITY + GOV_CONTRACT + WSB_SENTIMENT + NEWS_SENTIMENT + IV_SKEW + PUT_CALL_RATIO），样本内 alpha 主要来自行业配置（超配 Tech），此优势在样本外行业轮动模式改变后消失。需要引入真正具有截面区分力的因子（如盈利预期修正 EPS revision）才可能产生可持续的选股 alpha。
 
 ### 设计原则
 
