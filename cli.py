@@ -381,6 +381,13 @@ def data_update(
         except Exception as e:
             logger.warning(f"data_update: FRED 更新跳过: {e}")
             console.print(f"[yellow]FRED 更新跳过: {e}[/yellow]")
+        # Alpha Vantage: 期权快照（每日增量）+ 新闻情绪
+        try:
+            results["av_options"] = dl.download_av_options_snapshot()
+            results["av_news"] = dl.download_av_news_sentiment()
+        except Exception as e:
+            logger.warning(f"data_update: AV 更新跳过: {e}")
+            console.print(f"[yellow]AV 更新跳过: {e}[/yellow]")
         elapsed = time.time() - t0
         console.print(f"[green]完成[/green] {elapsed:.1f}s — {results}")
     elif market == "us":

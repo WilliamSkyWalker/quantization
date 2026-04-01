@@ -1531,16 +1531,13 @@ class BulkDownloader:
             return 0
 
         total = 0
-        # 分批（每次最多 50 tickers，API 支持逗号分隔）
-        batch_size = 50
-        batches = [tickers[i:i + batch_size] for i in range(0, len(tickers), batch_size)]
+        ticker_set = set(tickers)
 
-        for batch in tqdm(batches, desc="AV News Sentiment"):
-            ticker_str = ",".join(batch)
+        def _fetch_single(ticker):
             params = {
                 "function": "NEWS_SENTIMENT",
-                "tickers": ticker_str,
-                "limit": 1000,
+                "tickers": ticker,
+                "limit": 200,
                 "sort": "LATEST",
             }
             if time_from:
@@ -1548,10 +1545,10 @@ class BulkDownloader:
 
             data = self._av_get_json(params)
             if not data or "feed" not in data:
-                logger.debug(f"av_news_sentiment: batch {batch[:3]}... 无 feed")
-                continue
+                logger.debug(f"av_news_sentiment: {ticker} 无 feed")
+                return 0
 
-            # 解析每篇文章的 ticker_sentiment
+            # 解析每篇文章中该 ticker 的情绪分
             records = []
             for article in data["feed"]:
                 pub_date = str(article.get("time_published", ""))[:8]
@@ -1562,18 +1559,21 @@ class BulkDownloader:
 
                 for ts in article.get("ticker_sentiment", []):
                     t = ts.get("ticker", "")
-                    if t not in batch:
+                    if t != ticker:
                         continue
-                    records.append({
-                        "ticker": t,
-                        "date": pub_date,
-                        "sentiment_score": float(ts.get("ticker_sentiment_score", 0)),
-                        "relevance_score": float(ts.get("relevance_score", 0)),
-                    })
+                    try:
+                        records.append({
+                            "ticker": t,
+                            "date": pub_date,
+                            "sentiment_score": float(ts.get("ticker_sentiment_score", 0)),
+                            "relevance_score": float(ts.get("relevance_score", 0)),
+                        })
+                    except (ValueError, TypeError):
+                        continue
 
             if not records:
-                logger.debug(f"av_news_sentiment: batch {batch[:3]}... 无有效记录")
-                continue
+                logger.debug(f"av_news_sentiment: {ticker} 无有效记录")
+                return 0
 
             # 按 ticker+date 聚合（relevance 加权平均）
             df = pd.DataFrame(records)
@@ -1590,7 +1590,16 @@ class BulkDownloader:
             result = agg[["ticker", "date", "sentiment_score", "relevance_score", "article_count"]]
 
             self.db.upsert_us_news_sentiment(result)
-            total += len(result)
+            return len(result)
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures),
+                               desc="AV News Sentiment"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"News 失败 {futures[future]}: {e}")
 
         logger.info(f"AV news sentiment 总计: {total} 条")
         return total
