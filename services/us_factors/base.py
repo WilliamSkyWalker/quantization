@@ -188,7 +188,24 @@ class USFactorBase(ABC):
         cls._static_cache["_bulk_daily"] = df_price
         logger.info(f"US 预加载 us_daily_price: {len(df_price)} 行, {time.time()-t0:.1f}s")
 
-        # 3. 预加载 us_analyst_recommendation
+        # 3. 预加载 S&P 500 指数（IVOL 因子用）
+        t0 = time.time()
+        try:
+            df_idx = db.query(
+                "SELECT trade_date, close FROM us_index_daily "
+                f"WHERE index_code = '^GSPC' AND trade_date >= '{price_start}' "
+                f"AND trade_date <= '{end_date}' ORDER BY trade_date"
+            )
+            if not df_idx.empty:
+                df_idx["trade_date"] = pd.to_datetime(df_idx["trade_date"])
+                df_idx["close"] = pd.to_numeric(df_idx["close"], errors="coerce")
+            cls._static_cache["_bulk_index"] = df_idx
+            logger.info(f"US 预加载 us_index_daily (^GSPC): {len(df_idx)} 行, {time.time()-t0:.1f}s")
+        except Exception as e:
+            logger.warning(f"预加载 S&P 500 指数失败: {e}")
+            cls._static_cache["_bulk_index"] = pd.DataFrame()
+
+        # 4. 预加载 us_analyst_recommendation
         t0 = time.time()
         ar_cols = ["ticker", "date", "analyst_company", "rating", "price_target"]
         analyst_start = (

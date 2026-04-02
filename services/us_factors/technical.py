@@ -78,65 +78,91 @@ class Ivol(USFactorBase):
 
     def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
         tickers = universe["ticker"].tolist()
-        # 获取 60 日个股收益和 S&P 500 收益
         price_df = self.get_price_history(date, lookback_days=90, universe_tickers=tickers)
         if price_df.empty:
             logger.debug("Ivol.compute: 无历史价格数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        # S&P 500 收益
-        try:
-            idx_df = self.db.query(
-                "SELECT trade_date, close FROM us_index_daily "
-                "WHERE index_code = '^GSPC' AND trade_date <= :date "
-                "ORDER BY trade_date DESC LIMIT 65",
-                params={"date": date},
-            )
-            if idx_df.empty or len(idx_df) < 20:
-                logger.debug("Ivol.compute: S&P500指数数据不足(需要>=20条)")
+        # S&P 500 收益（优先从预加载缓存取）
+        bulk_daily = self._static_cache.get("_bulk_daily")
+        if bulk_daily is not None and not bulk_daily.empty:
+            idx_cache = self._static_cache.get("_bulk_index")
+            if idx_cache is not None:
+                date_ts = pd.to_datetime(date)
+                start_ts = date_ts - pd.Timedelta(days=90)
+                idx_df = idx_cache[
+                    (idx_cache["trade_date"] >= start_ts) & (idx_cache["trade_date"] <= date_ts)
+                ].copy()
+            else:
+                idx_df = pd.DataFrame()
+        else:
+            idx_df = pd.DataFrame()
+
+        if idx_df.empty:
+            try:
+                idx_df = self.db.query(
+                    "SELECT trade_date, close FROM us_index_daily "
+                    "WHERE index_code = '^GSPC' AND trade_date <= :date "
+                    "ORDER BY trade_date DESC LIMIT 65",
+                    params={"date": date},
+                )
+            except Exception as e:
+                logger.warning(f"Ivol.compute: 获取S&P500指数数据失败: {e}")
                 return pd.DataFrame(columns=["ticker", "factor_value"])
-            idx_df = idx_df.sort_values("trade_date")
-            idx_df["mkt_ret"] = idx_df["close"].astype(float).pct_change()
-            mkt_rets = idx_df.set_index("trade_date")["mkt_ret"]
-        except Exception as e:
-            logger.warning(f"Ivol.compute: 获取S&P500指数数据失败: {e}")
+
+        if idx_df.empty or len(idx_df) < 20:
+            logger.debug("Ivol.compute: S&P500指数数据不足")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        # 个股收益（adj_close 为空时回退到 close）
+        idx_df = idx_df.sort_values("trade_date")
+        idx_df["close"] = pd.to_numeric(idx_df["close"], errors="coerce")
+        idx_df["mkt_ret"] = idx_df["close"].pct_change()
+        mkt_series = idx_df.set_index("trade_date")["mkt_ret"].dropna()
+
+        # 个股收益（向量化）
         price_df["adj_close"] = pd.to_numeric(price_df["adj_close"], errors="coerce")
         if price_df["adj_close"].notna().sum() == 0 and "close" in price_df.columns:
-            logger.debug("Ivol.compute: adj_close 全为空，回退到 close")
             price_df["adj_close"] = pd.to_numeric(price_df["close"], errors="coerce")
         price_df = price_df.sort_values(["ticker", "trade_date"])
         price_df["ret"] = price_df.groupby("ticker")["adj_close"].pct_change()
 
-        results = []
-        for ticker, grp in price_df.groupby("ticker"):
-            grp = grp.dropna(subset=["ret"]).tail(60)
-            if len(grp) < 20:
-                results.append({"ticker": ticker, "factor_value": np.nan})
-                logger.debug(f"Ivol.compute: {ticker} 收益数据不足20条，跳过")
-                continue
-            # 合并市场收益
-            merged = grp.set_index("trade_date")[["ret"]].join(mkt_rets, how="inner")
-            merged = merged.dropna()
-            if len(merged) < 20:
-                results.append({"ticker": ticker, "factor_value": np.nan})
-                logger.debug(f"Ivol.compute: {ticker} 合并市场收益后不足20条，跳过")
-                continue
-            # OLS 回归: ret_i = alpha + beta * mkt_ret + epsilon
-            x = merged["mkt_ret"].values
-            y = merged["ret"].values
-            x_mean = x.mean()
-            y_mean = y.mean()
-            beta = np.sum((x - x_mean) * (y - y_mean)) / (np.sum((x - x_mean) ** 2) + 1e-10)
-            alpha = y_mean - beta * x_mean
-            residuals = y - (alpha + beta * x)
-            ivol = np.std(residuals)
-            # 取反：低特质波动率 = 高因子值
-            results.append({"ticker": ticker, "factor_value": -ivol})
+        # Pivot 成矩阵：行=trade_date, 列=ticker, 值=ret
+        ret_pivot = price_df.pivot_table(index="trade_date", columns="ticker", values="ret")
+        # 取最近 60 个交易日
+        common_dates = ret_pivot.index.intersection(mkt_series.index)
+        common_dates = sorted(common_dates)[-60:]
+        if len(common_dates) < 20:
+            logger.debug(f"Ivol.compute: 公共交易日不足({len(common_dates)}<20)")
+            return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        return pd.DataFrame(results)
+        ret_mat = ret_pivot.loc[common_dates]  # (T, N)
+        mkt = mkt_series.loc[common_dates].values  # (T,)
+
+        # 向量化 OLS: beta = cov(x,y)/var(x), residual = y - alpha - beta*x
+        mkt_dm = mkt - mkt.mean()  # demeaned market
+        var_mkt = (mkt_dm ** 2).sum() + 1e-10
+
+        ret_vals = ret_mat.values  # (T, N)
+        ret_dm = ret_vals - np.nanmean(ret_vals, axis=0, keepdims=True)
+
+        # beta for each stock: (T,) dot (T, N) / var
+        betas = np.nansum(mkt_dm[:, None] * ret_dm, axis=0) / var_mkt  # (N,)
+        alphas = np.nanmean(ret_vals, axis=0) - betas * mkt.mean()  # (N,)
+
+        # residuals and std
+        predicted = alphas[None, :] + betas[None, :] * mkt[:, None]  # (T, N)
+        residuals = ret_vals - predicted
+        ivol_values = np.nanstd(residuals, axis=0)  # (N,)
+
+        # 有效样本数检查
+        valid_count = np.sum(~np.isnan(ret_vals), axis=0)
+        ivol_values[valid_count < 20] = np.nan
+
+        result = pd.DataFrame({
+            "ticker": ret_mat.columns,
+            "factor_value": -ivol_values,  # 取反：低特质波动率 = 高因子值
+        })
+        return result[result["factor_value"].notna()].reset_index(drop=True)
 
 
 class Size(USFactorBase):
