@@ -59,31 +59,54 @@ def get_us_clean_universe(db: DatabaseManager, date: str) -> pd.DataFrame:
     df["market_cap"] = pd.to_numeric(df["market_cap"], errors="coerce")
     df = df[(df["market_cap"] >= US_MIN_MARKET_CAP) | df["market_cap"].isna()]
 
-    # 流动性过滤：查询最近20个交易日的平均成交额
+    # 流动性过滤：优先从预加载缓存计算，回退到 SQL
     if not df.empty:
-        tickers = df["ticker"].tolist()
-        start_date = (date_dt - pd.Timedelta(days=40)).strftime("%Y-%m-%d")
-        vol_sql = (
-            "SELECT ticker, AVG(close * volume) as avg_dollar_vol "
-            "FROM us_daily_price "
-            "WHERE trade_date >= :start AND trade_date <= :end "
-            "GROUP BY ticker"
-        )
-        vol_df = db.query(vol_sql, params={"start": start_date, "end": date})
-        if not vol_df.empty:
-            vol_df["avg_dollar_vol"] = pd.to_numeric(vol_df["avg_dollar_vol"], errors="coerce")
-            liquid = vol_df[vol_df["avg_dollar_vol"] >= US_MIN_DAILY_VOLUME]["ticker"]
-            df = df[df["ticker"].isin(liquid)]
+        from services.us_factors.base import USFactorBase
+        bulk_daily = USFactorBase._static_cache.get("_bulk_daily")
 
-    # 排除当日无交易的股票
-    if not df.empty:
-        traded_sql = (
-            "SELECT DISTINCT ticker FROM us_daily_price "
-            "WHERE trade_date = :date AND volume > 0"
-        )
-        traded = db.query(traded_sql, params={"date": date})
-        if not traded.empty:
-            df = df[df["ticker"].isin(traded["ticker"])]
+        if bulk_daily is not None and not bulk_daily.empty:
+            # 内存计算（快速路径）
+            start_dt = date_dt - pd.Timedelta(days=40)
+            mask = (bulk_daily["trade_date"] >= start_dt) & (bulk_daily["trade_date"] <= date_dt)
+            recent = bulk_daily[mask]
+            if not recent.empty:
+                close = pd.to_numeric(recent["close"], errors="coerce")
+                volume = pd.to_numeric(recent["volume"], errors="coerce")
+                dvol = recent.assign(dollar_vol=close * volume)
+                vol_df = dvol.groupby("ticker")["dollar_vol"].mean().reset_index()
+                vol_df.columns = ["ticker", "avg_dollar_vol"]
+                liquid = vol_df[vol_df["avg_dollar_vol"] >= US_MIN_DAILY_VOLUME]["ticker"]
+                df = df[df["ticker"].isin(liquid)]
+
+                # 排除当日无交易
+                day_mask = bulk_daily["trade_date"] == date_dt
+                traded = bulk_daily[day_mask & (pd.to_numeric(bulk_daily["volume"], errors="coerce") > 0)]["ticker"]
+                df = df[df["ticker"].isin(traded)]
+            else:
+                logger.debug(f"get_us_clean_universe: 内存缓存中 {date} 附近无数据，跳过流动性过滤")
+        else:
+            # SQL 回退（无预加载时）
+            start_date = (date_dt - pd.Timedelta(days=40)).strftime("%Y-%m-%d")
+            vol_sql = (
+                "SELECT ticker, AVG(close * volume) as avg_dollar_vol "
+                "FROM us_daily_price "
+                "WHERE trade_date >= :start AND trade_date <= :end "
+                "GROUP BY ticker"
+            )
+            vol_df = db.query(vol_sql, params={"start": start_date, "end": date})
+            if not vol_df.empty:
+                vol_df["avg_dollar_vol"] = pd.to_numeric(vol_df["avg_dollar_vol"], errors="coerce")
+                liquid = vol_df[vol_df["avg_dollar_vol"] >= US_MIN_DAILY_VOLUME]["ticker"]
+                df = df[df["ticker"].isin(liquid)]
+
+            # 排除当日无交易的股票
+            traded_sql = (
+                "SELECT DISTINCT ticker FROM us_daily_price "
+                "WHERE trade_date = :date AND volume > 0"
+            )
+            traded = db.query(traded_sql, params={"date": date})
+            if not traded.empty:
+                df = df[df["ticker"].isin(traded["ticker"])]
 
     # 注意：低覆盖度股票池筛选已移除（样本外验证显示可能有前视偏差）
 
