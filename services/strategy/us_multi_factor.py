@@ -152,7 +152,7 @@ class USMultiFactorStrategy:
         #   新增: BP/SIZE/DIV_YIELD/BUYBACK_YIELD/LOBBY_INTENSITY (IC 评估确认 ICIR < -0.3)
         _REVERSE_FACTORS = {
             "TURN_20D", "VOL_20D", "IVOL", "PROFIT_STB",  # 原有反向因子
-            "BP", "SIZE", "DIV_YIELD", "BUYBACK_YIELD", "LOBBY_INTENSITY",  # IC 评估确认负 IC
+            "BP", "SIZE", "DIV_YIELD", "BUYBACK_YIELD", "LOBBY_INTENSITY", "GROSS_MARGIN",  # IC 评估确认负 IC
         }
         if factor_weights is None:
             self.factor_weights = {

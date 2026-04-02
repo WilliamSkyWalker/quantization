@@ -102,8 +102,11 @@ class Ivol(USFactorBase):
             logger.warning(f"Ivol.compute: 获取S&P500指数数据失败: {e}")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        # 个股收益
+        # 个股收益（adj_close 为空时回退到 close）
         price_df["adj_close"] = pd.to_numeric(price_df["adj_close"], errors="coerce")
+        if price_df["adj_close"].notna().sum() == 0 and "close" in price_df.columns:
+            logger.debug("Ivol.compute: adj_close 全为空，回退到 close")
+            price_df["adj_close"] = pd.to_numeric(price_df["close"], errors="coerce")
         price_df = price_df.sort_values(["ticker", "trade_date"])
         price_df["ret"] = price_df.groupby("ticker")["adj_close"].pct_change()
 

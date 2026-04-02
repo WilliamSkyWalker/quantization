@@ -180,6 +180,11 @@ class USFactorBase(ABC):
         )
         if not df_price.empty:
             df_price["trade_date"] = pd.to_datetime(df_price["trade_date"])
+            # FMP stable 端点不返回 adjClose，用 close 填充
+            if "adj_close" in df_price.columns and "close" in df_price.columns:
+                df_price["adj_close"] = pd.to_numeric(df_price["adj_close"], errors="coerce")
+                df_price["close"] = pd.to_numeric(df_price["close"], errors="coerce")
+                df_price["adj_close"] = df_price["adj_close"].fillna(df_price["close"])
         cls._static_cache["_bulk_daily"] = df_price
         logger.info(f"US 预加载 us_daily_price: {len(df_price)} 行, {time.time()-t0:.1f}s")
 
