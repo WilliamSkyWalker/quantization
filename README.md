@@ -124,7 +124,7 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | 市场 Beta | **0.38** | — | — |
 | 下行/上行捕获 | **0.45 / 0.86** | — | — |
 
-> Alpha v3 核心改进：32 因子（+EPS_REVISION/EARNINGS_SURPRISE/INSIDER/Quiver/AV），9 因子反转（BP/SIZE/DIV_YIELD 等负 IC 因子），季度财报修复（roe/gross_margin 自动计算），IVOL 向量化。FF5 Alpha 翻倍（6.73%→11.26%），t 值从 2.20 提升到 2.98（1% 显著性）。
+> Alpha v3 核心改进：32 因子（+EPS_REVISION/EARNINGS_SURPRISE/INSIDER/Quiver/AV），9 因子反转（BP/SIZE/DIV_YIELD 等负 IC 因子），季度财报修复（roe/gross_margin 自动计算），IVOL 向量化。FF5 Alpha 翻倍（6.73%→11.26%），t 值从 2.20 提升到 2.98（1% 显著性）。样本外（2024-2026）alpha=+25.32%(t=1.59)，v2 的 alpha 消失问题已解决。
 
 ## 核心设计决策
 
