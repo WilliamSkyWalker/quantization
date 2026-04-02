@@ -265,6 +265,32 @@ class USFactorBase(ABC):
         cls._static_cache["_bulk_dividends"] = df_ca
         logger.info(f"US 预加载 dividends: {len(df_ca)} 行, {time.time()-t0:.1f}s")
 
+        # 8. 预加载 us_insider_trade（INSIDER_NET_BUY 因子用，按 filing_date）
+        t0 = time.time()
+        insider_start = (
+            pd.to_datetime(start_date) - pd.Timedelta(days=120)
+        ).strftime("%Y-%m-%d")
+        try:
+            df_insider = db.query(
+                "SELECT ticker, DATE(filing_date) as filing_date, "
+                "  CASE WHEN acquisition_or_disposition = 'A' "
+                "    THEN securities_transacted * price "
+                "    ELSE -securities_transacted * price END as net_value "
+                "FROM us_insider_trade "
+                f"WHERE DATE(filing_date) >= '{insider_start}' "
+                f"  AND DATE(filing_date) <= '{end_date}' "
+                "  AND price > 0 AND securities_transacted > 0 "
+                "  AND transaction_type IN ('P-Purchase', 'S-Sale', 'A-Award', "
+                "      'P-Purchase+', 'S-Sale+')"
+            )
+            if not df_insider.empty:
+                df_insider["filing_date"] = pd.to_datetime(df_insider["filing_date"])
+            cls._static_cache["_bulk_insider"] = df_insider
+            logger.info(f"US 预加载 us_insider_trade: {len(df_insider)} 行, {time.time()-t0:.1f}s")
+        except Exception as e:
+            logger.warning(f"预加载 insider trade 失败: {e}")
+            cls._static_cache["_bulk_insider"] = pd.DataFrame()
+
     @classmethod
     def precompute_rolling_stats(cls):
         """

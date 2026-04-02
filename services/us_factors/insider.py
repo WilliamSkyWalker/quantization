@@ -62,7 +62,21 @@ class InsiderNetBuy(USFactorBase):
         date_ts = pd.to_datetime(date)
         start_ts = date_ts - pd.Timedelta(days=_LOOKBACK_DAYS)
 
-        # 从 us_insider_trade 表查询（P-Purchase/S-Sale 或 A/D 标记）
+        # 优先从预加载缓存获取
+        bulk_insider = self._static_cache.get("_bulk_insider")
+        if bulk_insider is not None and not bulk_insider.empty:
+            mask = (bulk_insider["filing_date"] >= start_ts) & \
+                   (bulk_insider["filing_date"] <= date_ts)
+            df = bulk_insider[mask].copy()
+            if not df.empty:
+                df = df[df["ticker"].isin(tickers)]
+                if not df.empty:
+                    result = df.groupby("ticker")["net_value"].sum().reset_index()
+                    return result
+            logger.debug(f"_get_insider_data: 预加载缓存中 {date} 近90天无数据")
+            return pd.DataFrame(columns=["ticker", "net_value"])
+
+        # 回退到 SQL 查询
         try:
             sql = (
                 "SELECT ticker, "
