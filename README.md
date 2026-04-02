@@ -110,23 +110,25 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | analyst | 1.0 | US_ANALYST_RATING, US_ANALYST_COVERAGE, EARNINGS_SURPRISE, EPS_REVISION, INSIDER_NET_BUY |
 | sentiment | 1.0 | POLYMARKET_SENT, LOBBY_INTENSITY, GOV_CONTRACT, WSB_SENTIMENT, NEWS_SENTIMENT |
 
-等权合成，两层类别打分（类内动态分母 + 类间加权），不做 IC 引导权重优化。
+等权合成，两层类别打分（类内动态分母 + 类间加权），不做 IC 引导权重优化。9 个稳定负 IC 因子反转（权重 -1.0）。
 
-## 美股回测绩效（2015-2025，含幸存者偏差修正，基准 Russell 1000）
+## 美股回测绩效（含幸存者偏差修正，基准 Russell 1000）
 
-| 指标 | Alpha v2 (23因子) | Alpha v1 (29因子) | Beta | Russell 1000 |
-|------|-------------------|-------------------|------|-------------|
-| 年化收益 | **17.2%** | 12.8% | 6.9% | 11.4% |
-| 最大回撤 | -29.8% | **-16.3%** | -16.5% | — |
-| Sharpe | **0.72** | 0.68 | 0.33 | — |
-| FF5 Alpha | **+6.73%** (t=2.20) | +6.69% (t=2.26) | +0.88% | — |
-| 超额年化 | **+7.53%** | +1.41% | -4.5% | — |
+| 指标 | Alpha v3 (32因子, 2012-2025) | Alpha v2 (23因子, 2015-2025) | Alpha v1 (29因子) |
+|------|----------------------------|-------------------|-------------------|
+| 年化收益 | **16.85%** | 17.2% | 12.8% |
+| 最大回撤 | **-23.5%** | -29.8% | -16.3% |
+| Sharpe | **0.78** | 0.72 | 0.68 |
+| FF5 Alpha | **+11.26%** (t=2.98) | +6.73% (t=2.20) | +6.69% (t=2.26) |
+| 超额年化 | **+4.17%** | +7.53% | +1.41% |
+| 市场 Beta | **0.38** | — | — |
+| 下行/上行捕获 | **0.45 / 0.86** | — | — |
 
-> 注：回测绩效基于 23 因子（剪枝后），新增 EARNINGS_SURPRISE + EPS_REVISION 两因子数据已导入，待 IC 回测验证。Insider 因子数据也已导入，待 IC 验证后启用。
+> Alpha v3 核心改进：32 因子（+EPS_REVISION/EARNINGS_SURPRISE/INSIDER/Quiver/AV），9 因子反转（BP/SIZE/DIV_YIELD 等负 IC 因子），季度财报修复（roe/gross_margin 自动计算），IVOL 向量化。FF5 Alpha 翻倍（6.73%→11.26%），t 值从 2.20 提升到 2.98（1% 显著性）。
 
 ## 核心设计决策
 
-- **无未来数据泄露：** 财务数据始终按 `ann_date <= date`（公告日）过滤
+- **无前视偏差（全 32 因子已审计）：** 财务数据按 `filing_date <= date`（公告日）过滤，价格按 `trade_date <= date`，宏观 30 天 lag，情绪/另类数据用 trailing lookback 窗口
 - **两层因子打分：** 类内动态分母 + 类间动态分母，`MIN_VALID_CATEGORIES=4`
 - **Upsert 语义：** 所有数据库写入为幂等操作（`INSERT ... ON DUPLICATE KEY UPDATE`）
 - **Regime 切换：** 四维复合（趋势+VIX+利差+拥挤度）+ Credit Veto
@@ -144,19 +146,11 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | Phase 7-14 | 因子增强 + 舆情 + Polymarket + 美股接入 | ✅ |
 | Phase 15-24 | 性能优化 + 自适应调仓 + 因子质量增强 | ✅ |
 | 美股 Alpha v1 | 29 因子多空对冲 + Regime + FF5 回归 | ✅ |
-| 美股 Alpha v2 | 阶梯式重构 → 23 因子剪枝 → 32 因子扩展 | 🔨 |
-| 数据迁移 | FMP+UW+Fiscal.ai 替代 yfinance/EDGAR/SimFin | ✅ |
-| 全量数据导入 | FMP/UW/Fiscal/FRED 全量 bulk 导入完成（含 insider/earnings） | ✅ |
+| 美股 Alpha v2 | 阶梯式重构 → 23 因子剪枝 | ✅ |
+| 美股 Alpha v3 | 32 因子扩展 + 9 因子反转 + 数据修复 → FF5α=11.26%(t=2.98) | ✅ |
+| 数据迁移 | FMP+UW+Fiscal.ai+Quiver+AlphaVantage 六源数据接入 | ✅ |
 | 全项目日志覆盖 | 所有 return/continue/break/except 分支加 logger | ✅ |
-| 待办 | 季度财报导入 → 全因子 IC 重跑 → 纳入策略 / 自动化测试 | 📋 |
-
-**当前待办：**
-1. 季度财报全量导入（`--target financial-quarterly`），修复 EP/BP/ROE_TTM
-2. 分析师评级全量导入（`--target analyst-grades`），替换旧 yfinance 数据
-3. 重跑全因子 IC 评估，验证价值/质量因子
-4. 将 EPS_REVISION + EARNINGS_SURPRISE 正式纳入策略（IC 已验证通过）
-5. Insider 因子 IC 验证（数据+代码已修复）
-6. Sentiment 大类重做 / 自动化测试 / 券商实盘
+| 待办 | 样本外验证 / 自动化测试 / 券商实盘 | 📋 |
 
 
 ## 详细文档

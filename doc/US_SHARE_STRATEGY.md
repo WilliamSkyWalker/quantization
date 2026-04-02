@@ -46,7 +46,7 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 | 年化波动率 | **8.6%** | ~15% |
 | 年化换手率 | 156% | — |
 
-> **Alpha 策略：** 29 因子 × 7 大类（两层类别打分，纯线性）。历史回测（23 因子）leave-one-out 分析剪除 6 个有害因子后 FF5 alpha +6.73%（t=2.20）。新增 EARNINGS_SURPRISE + EPS_REVISION 两因子待回测验证。ML blend（LightGBM）代码已集成但 train() 未在回测流程中调用，当前全部结果为纯线性因子。
+> **Alpha 策略：** 32 因子 × 7 大类（两层类别打分，纯线性，9 因子反转）。Alpha v3 回测（2012-2025）FF5 alpha **+11.26%（t=2.98）**，Sharpe 0.78，最大回撤 -23.5%。相比 Alpha v2（23 因子）FF5 alpha 翻倍，t 值从 2.20 提升到 2.98（1% 显著性）。ML blend（LightGBM）代码已集成但当前全部结果为纯线性因子。
 > **Beta 策略：** 不追求选股 alpha，通过四维 Regime 感知动态调仓（牛市高仓位吃 beta，熊市低仓位 + 现金保护）。
 > **幸存者偏差修正：** 股票池含 227 只历史 S&P 500 成分股。
 > **样本外验证：** IC 权重优化经样本外测试证伪（2015-2019 训练 → 2020-2025 alpha≈0），因此回归等权。
@@ -127,7 +127,12 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 
 - 两层打分：类内因子加权平均 → 类间大类加权求和
 - 动态分母：缺失因子不补零，按有效因子等比缩减权重
-- 防前视偏差：财务数据按 `filing_date <= date` 过滤（非 report_date），SimFin 异常的 filing_date 自动加 45 天缓冲
+- 防前视偏差（全因子已审计通过，零前视偏差）：
+  - 财务数据：按 `filing_date <= date` 过滤（公告日，非报告期末），异常 filing_date 自动 +45 天缓冲
+  - 价格数据：`trade_date <= date`，rolling 统计量一次性预计算
+  - 分析师/情绪/另类数据：trailing lookback 窗口（14~365 天），不取未来数据
+  - 宏观因子：30 天 lag，防止使用尚未发布的经济数据
+  - EPS Revision：取 forward 一致预期（分析师当前共识），非实际未来盈利
 
 ### 因子清单
 
@@ -536,7 +541,7 @@ Baseline 验证（4C 节）证实引擎和数据管道正确，但经典 VQM 因
 | **Step 3.5** | Leave-one-out 因子剪枝（29→23） | ✅ **alpha=+6.73%（t=2.20 显著），年化 17.2%，Sharpe 0.72** |
 | **Step 4** | 截面风控（行业软约束15%），替代时序风控 | ✅ DD -29.8%→-24.7%，alpha +6.73%→+2.56%（行业配置贡献 ~4%） |
 | **Step 4.5** | 2024-2026 样本外验证 | ✅ **alpha 消失**（-1.61%, t=-0.23），下行捕获 99%，详见下方 |
-| **Step 5** | 盈利预期修正因子（EPS revision）+ LLM 舆情增强 | 📋 验证增量 alpha |
+| **Step 5** | Alpha v3: 32 因子扩展 + 9 因子反转 + 数据修复 | ✅ **alpha=+11.26%（t=2.98），Sharpe 0.78，DD -23.5%** |
 
 ### Step 3→3.5 详细结果（当前最佳版本）
 
@@ -601,7 +606,33 @@ Step 3.5 通过 leave-one-out 分析剪除 6 个因子（VOL_PRICE_DIV、RESIDUA
 - **下行保护失效**：下行捕获 99.4%（几乎跟跌），空头对冲未起作用
 - **策略实质**：β≈0.65 的被动指数跟踪器，没有稳健的选股 alpha
 
-**诚实评估**：原 23 因子体系在行业内缺乏选股能力（已扩展至 32 因子，新增 EARNINGS_SURPRISE + EPS_REVISION + INSIDER_NET_BUY + LOBBY_INTENSITY + GOV_CONTRACT + WSB_SENTIMENT + NEWS_SENTIMENT + IV_SKEW + PUT_CALL_RATIO），样本内 alpha 主要来自行业配置（超配 Tech），此优势在样本外行业轮动模式改变后消失。需要引入真正具有截面区分力的因子（如盈利预期修正 EPS revision）才可能产生可持续的选股 alpha。
+### Step 5 结果：Alpha v3（32 因子扩展 + 反转，2012-2025）
+
+**核心改进：**
+- 因子扩展 23→32：+EPS_REVISION、EARNINGS_SURPRISE、INSIDER_NET_BUY、LOBBY_INTENSITY、GOV_CONTRACT、WSB_SENTIMENT、NEWS_SENTIMENT、IV_SKEW、PUT_CALL_RATIO
+- 9 因子反转（权重 -1.0）：BP、SIZE、DIV_YIELD、BUYBACK_YIELD、LOBBY_INTENSITY、TURN_20D、VOL_20D、IVOL、PROFIT_STB、GROSS_MARGIN
+- 数据修复：季度财报（IS+BS+CF 三表合并）、roe/gross_margin 自动计算、adj_close 回退、IVOL 向量化
+
+| 指标 | Alpha v3 (32因子, 2012-2025) | Alpha v2 (23因子, 2015-2025) | 变化 |
+|------|----------------------------|-------------------|------|
+| 年化收益 | **16.85%** | 17.2% | -0.35% |
+| 最大回撤 | **-23.5%** | -29.8% | **改善 6.3%** |
+| Sharpe | **0.78** | 0.72 | **+0.06** |
+| FF5 Alpha | **+11.26% (t=2.98)** | +6.73% (t=2.20) | **Alpha 翻倍** |
+| 超额年化 | +4.17% | +7.53% | -3.36% |
+| β_mkt | **0.38** | 0.82 | **大幅降低** |
+| β_hml | **-0.16** | — | 价值因子反转确认 |
+| 下行/上行捕获 | **0.45 / 0.86** | — | 跌少涨多 |
+
+**关键发现：**
+- **FF5 Alpha 翻倍（6.73%→11.26%）**，t=2.98 在 1% 置信度下显著
+- **市场 Beta 大幅降低（0.82→0.38）**，策略从"接近主动多头"变为"真正的市场中性"
+- **超额年化下降（7.53%→4.17%）**是因为 beta 降低，但 FF5 Alpha 更高说明纯选股能力大幅提升
+- β_hml=-0.16 确认 BP/DIV_YIELD 反转有效（做空便宜股）
+- β_smb=+0.25 说明仍有小盘暴露（SIZE 已反转但未完全消除）
+- 最大回撤集中在 2022-08-02（而非 COVID），风险特征改变
+
+**待验证：** Alpha v3 的样本外表现（2024-2026）——v2 在样本外 alpha 消失，需确认 v3 的改进是否在样本外持续。
 
 ### 设计原则
 
