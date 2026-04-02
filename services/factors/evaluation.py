@@ -791,7 +791,7 @@ class FactorEvaluator:
         # 并行评估所有因子
         report = {}
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        n_workers = min(4, len(factor_map))
+        n_workers = min(8, len(factor_map))
         logger.info(f"并行评估 {len(factor_map)} 个因子 (workers={n_workers})")
 
         with ThreadPoolExecutor(max_workers=n_workers) as pool:

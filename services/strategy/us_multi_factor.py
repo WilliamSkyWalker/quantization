@@ -147,16 +147,20 @@ class USMultiFactorStrategy:
         ]
 
         # 等权（不做 IC 引导权重优化——样本外验证已证明 IC 权重是数据窥探）
+        # 反向因子：高值 = 负信号，权重设为 -1.0 使其方向翻转
+        #   原有: TURN_20D(高换手=差), VOL_20D(高波动=差), IVOL(同), PROFIT_STB(CV取反已在因子内处理但权重仍为负)
+        #   新增: BP/SIZE/DIV_YIELD/BUYBACK_YIELD/LOBBY_INTENSITY (IC 评估确认 ICIR < -0.3)
+        _REVERSE_FACTORS = {
+            "TURN_20D", "VOL_20D", "IVOL", "PROFIT_STB",  # 原有反向因子
+            "BP", "SIZE", "DIV_YIELD", "BUYBACK_YIELD", "LOBBY_INTENSITY",  # IC 评估确认负 IC
+        }
         if factor_weights is None:
-            self.factor_weights = {f.name: 1.0 for f in self.factors}
+            self.factor_weights = {
+                f.name: (-1.0 if f.name in _REVERSE_FACTORS else 1.0)
+                for f in self.factors
+            }
         else:
             self.factor_weights = factor_weights
-
-        # 反向因子
-        self._reverse_factors = ["TURN_20D", "VOL_20D", "IVOL", "PROFIT_STB"]
-        for fname in self._reverse_factors:
-            if fname in self.factor_weights:
-                self.factor_weights[fname] = -abs(self.factor_weights[fname])
 
         # Regime detector
         self._regime_detector = USRegimeDetector(db) if US_REGIME_ENABLED else None

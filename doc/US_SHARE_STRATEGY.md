@@ -141,7 +141,7 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 | **analyst** | 1.0 | US_ANALYST_RATING, US_ANALYST_COVERAGE, EARNINGS_SURPRISE, EPS_REVISION, INSIDER_NET_BUY | 分析师评级+覆盖度+盈利惊喜+预期修正+内部人净买入 |
 | **sentiment** | 1.0 | POLYMARKET_SENT, LOBBY_INTENSITY, GOV_CONTRACT, WSB_SENTIMENT, NEWS_SENTIMENT | Polymarket+游说+政府合同+WSB+新闻情绪 |
 
-**大类等权（所有权重 1.0），因子内等权。** 不做 IC 引导权重优化。
+**大类等权，因子内等权。** 不做 IC 引导权重优化。9 个稳定负 IC 因子反转（权重 -1.0）：BP、SIZE、DIV_YIELD、BUYBACK_YIELD、LOBBY_INTENSITY、TURN_20D、VOL_20D、IVOL、PROFIT_STB。
 
 ### 因子剪枝记录（leave-one-out alpha 分析，2015-2023 样本内）
 

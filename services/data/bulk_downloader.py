@@ -535,6 +535,21 @@ class BulkDownloader:
                 "share_repurchased": merged.get("commonStockRepurchased"),
             })
             result = result.dropna(subset=["ticker", "date"])
+
+            # FMP stable API 不再返回比率字段，需自行计算
+            for col in ["revenue", "gross_profit", "net_income", "total_equity",
+                         "operating_income"]:
+                if col in result.columns:
+                    result[col] = pd.to_numeric(result[col], errors="coerce")
+            if result["gross_margin"].isna().all() and "gross_profit" in result.columns:
+                result["gross_margin"] = result["gross_profit"] / result["revenue"].replace(0, pd.NA)
+            if result["operating_margin"].isna().all() and "operating_income" in result.columns:
+                result["operating_margin"] = result["operating_income"] / result["revenue"].replace(0, pd.NA)
+            if result["net_margin"].isna().all() and "net_income" in result.columns:
+                result["net_margin"] = result["net_income"] / result["revenue"].replace(0, pd.NA)
+            if "roe" not in result.columns or result.get("roe") is None or result["roe"].isna().all():
+                result["roe"] = result["net_income"] / result["total_equity"].replace(0, pd.NA)
+
             if not result.empty:
                 self.db.upsert_us_financial_data(result)
                 return len(result)
