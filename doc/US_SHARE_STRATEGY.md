@@ -10,7 +10,7 @@
 
 | 策略 | 代码 | 核心理念 | 适用场景 |
 |------|------|---------|---------|
-| **Alpha（多因子多空）** | `us_multi_factor.py` | 29 因子 × 7 大类，两层类别打分，多空对冲 | 追求超额收益 |
+| **Alpha（多因子多空）** | `us_multi_factor.py` | 31 因子 × 7 大类，两层类别打分，多空对冲 | 追求超额收益 |
 | **Beta（Regime 控制）** | `us_beta_strategy.py` | 不做选股，Regime 择时 + 质量筛选等权，吃市场 beta | 追求稳健、低回撤 |
 | **Baseline / Alpha v2** | `us_baseline_strategy.py` | 委托 Alpha 打分 + 月频调仓，开发迭代用 | 策略实验、A/B 对比 |
 
@@ -46,7 +46,7 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 | 年化波动率 | **8.6%** | ~15% |
 | 年化换手率 | 156% | — |
 
-> **Alpha 策略：** 32 因子 × 7 大类（两层类别打分，纯线性，9 因子反转）。Alpha v3 回测（2012-2025）FF5 alpha **+11.26%（t=2.98）**，Sharpe 0.78，最大回撤 -23.5%。相比 Alpha v2（23 因子）FF5 alpha 翻倍，t 值从 2.20 提升到 2.98（1% 显著性）。ML blend（LightGBM）代码已集成但当前全部结果为纯线性因子。
+> **Alpha 策略：** 31 因子 × 7 大类（两层类别打分，纯线性，9 因子反转）。Alpha v3 回测（2012-2025）FF5 alpha **+11.26%（t=2.98）**，Sharpe 0.78，最大回撤 -23.5%。相比 Alpha v2（23 因子）FF5 alpha 翻倍，t 值从 2.20 提升到 2.98（1% 显著性）。ML blend（LightGBM）代码已集成但当前全部结果为纯线性因子。
 > **Beta 策略：** 不追求选股 alpha，通过四维 Regime 感知动态调仓（牛市高仓位吃 beta，熊市低仓位 + 现金保护）。
 > **幸存者偏差修正：** 股票池含 227 只历史 S&P 500 成分股。
 > **样本外验证：** IC 权重优化经样本外测试证伪（2015-2019 训练 → 2020-2025 alpha≈0），因此回归等权。
@@ -119,7 +119,7 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 
 ---
 
-## 三、因子体系（32 因子 × 7 大类）
+## 三、因子体系（31 因子 × 7 大类）
 
 代码位置：`services/us_factors/`
 
@@ -144,9 +144,25 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 | **momentum** | 1.0 | MOM_1M, MOM_3M, MOM_12M, REV_5D | 多频率动量+反转 |
 | **technical** | 1.0 | TURN_20D, VOL_20D, IVOL, SIZE, IV_SKEW, PUT_CALL_RATIO | 流动性+波动率+规模+期权 IV 偏斜+看跌看涨比 |
 | **analyst** | 1.0 | US_ANALYST_RATING, US_ANALYST_COVERAGE, EARNINGS_SURPRISE, EPS_REVISION, INSIDER_NET_BUY | 分析师评级+覆盖度+盈利惊喜+预期修正+内部人净买入 |
-| **sentiment** | 1.0 | POLYMARKET_SENT, LOBBY_INTENSITY, GOV_CONTRACT, WSB_SENTIMENT, NEWS_SENTIMENT | Polymarket+游说+政府合同+WSB+新闻情绪 |
+| **sentiment** | 1.0 | POLYMARKET_SENT, LOBBY_INTENSITY, GOV_CONTRACT, NEWS_SENTIMENT | Polymarket+游说+政府合同+新闻情绪 |
 
-**大类等权，因子内等权。** 不做 IC 引导权重优化。9 个稳定负 IC 因子反转（权重 -1.0）：BP、SIZE、DIV_YIELD、BUYBACK_YIELD、LOBBY_INTENSITY、TURN_20D、VOL_20D、IVOL、PROFIT_STB。
+**大类等权，因子内等权。** 不做 IC 引导权重优化。
+
+### 因子反转记录（IC 评估 2012-2025，权重设为 -1.0）
+
+| 因子 | IC Mean | ICIR | IC>0 | 原大类 | 反转理由 | 经济学解释 |
+|------|---------|------|------|--------|---------|-----------|
+| BP | -0.0620 | **-0.69** | 21% | value | 稳定强负 | 2012-2025 成长 > 价值，低 B/P（成长股）持续跑赢 |
+| SIZE | -0.0438 | **-0.61** | 28% | technical | 稳定强负 | 大盘股溢价，小盘跑输 |
+| LOBBY_INTENSITY | -0.0349 | -0.47 | 32% | sentiment | 中等负 | ⚠️ 理论支撑不足，可能是监管风险信号 |
+| DIV_YIELD | -0.0459 | -0.32 | 37% | value | 中等负 | 高息股多为低增长，跑输成长股 |
+| BUYBACK_YIELD | -0.0265 | -0.26 | 38% | value | 中等负 | 回购多的公司缺乏再投资机会 |
+| TURN_20D | 0.0078 | 0.12 | 55% | technical | 原有反转 | 高换手 = 投机性强 = 负信号 |
+| VOL_20D | -0.0156 | -0.08 | 49% | technical | 原有反转 | 高波动 = 风险溢价为负 |
+| IVOL | -0.0040 | -0.02 | 48% | technical | 原有反转 | 特质波动率异象（低 IVOL 跑赢） |
+| PROFIT_STB | 0.0046 | 0.11 | 54% | quality | 原有反转 | 因子定义为 -CV，已在因子内取反 |
+
+**⚠️ 注意：** 反转决策基于样本内 IC 方向（2012-2025），构成数据窥探风险。BP/SIZE/DIV_YIELD 有经济学理论支撑（价值因子在成长主导市场失效），LOBBY_INTENSITY 缺乏理论依据。TURN_20D/VOL_20D/IVOL/PROFIT_STB 是因子设计上的固有方向（高值=负信号），不构成数据窥探。
 
 ### 因子剪枝记录（leave-one-out alpha 分析，2015-2023 样本内）
 
@@ -331,7 +347,7 @@ Regime strength [0, 1] 线性映射到 equity_pct [10%, 90%]：
 **用途**：Alpha v2 开发迭代框架。委托 `USMultiFactorStrategy` 进行 29 因子打分+选股，月频调仓。也用于 VQM 基线验证（历史，已完成）。
 
 **当前配置**（Alpha v2 Step 3.5）：
-- 因子打分：委托 USMultiFactorStrategy（29 因子 × 7 大类，两层类别评分）
+- 因子打分：委托 USMultiFactorStrategy（31 因子 × 7 大类，两层类别评分）
 - 选股：USMultiFactorStrategy._select_from_scores（Top-15 long + Bottom-10 short, Softmax）
 - 调仓：月频（每月最后交易日）
 - 风控：引擎层 risk_controls=False（不使用 vol targeting/drawdown response）
@@ -541,7 +557,7 @@ Baseline 验证（4C 节）证实引擎和数据管道正确，但经典 VQM 因
 | **Step 3.5** | Leave-one-out 因子剪枝（29→23） | ✅ **alpha=+6.73%（t=2.20 显著），年化 17.2%，Sharpe 0.72** |
 | **Step 4** | 截面风控（行业软约束15%），替代时序风控 | ✅ DD -29.8%→-24.7%，alpha +6.73%→+2.56%（行业配置贡献 ~4%） |
 | **Step 4.5** | 2024-2026 样本外验证 | ✅ **alpha 消失**（-1.61%, t=-0.23），下行捕获 99%，详见下方 |
-| **Step 5** | Alpha v3: 32 因子扩展 + 9 因子反转 + 数据修复 | ✅ **alpha=+11.26%（t=2.98），Sharpe 0.78，DD -23.5%** |
+| **Step 5** | Alpha v3: 31 因子扩展 + 9 因子反转 + 数据修复 | ✅ **alpha=+11.26%（t=2.98），Sharpe 0.78，DD -23.5%** |
 
 ### Step 3→3.5 详细结果（当前最佳版本）
 
@@ -606,14 +622,14 @@ Step 3.5 通过 leave-one-out 分析剪除 6 个因子（VOL_PRICE_DIV、RESIDUA
 - **下行保护失效**：下行捕获 99.4%（几乎跟跌），空头对冲未起作用
 - **策略实质**：β≈0.65 的被动指数跟踪器，没有稳健的选股 alpha
 
-### Step 5 结果：Alpha v3（32 因子扩展 + 反转，2012-2025）
+### Step 5 结果：Alpha v3（31 因子扩展 + 反转，2012-2025）
 
 **核心改进：**
 - 因子扩展 23→32：+EPS_REVISION、EARNINGS_SURPRISE、INSIDER_NET_BUY、LOBBY_INTENSITY、GOV_CONTRACT、WSB_SENTIMENT、NEWS_SENTIMENT、IV_SKEW、PUT_CALL_RATIO
 - 9 因子反转（权重 -1.0）：BP、SIZE、DIV_YIELD、BUYBACK_YIELD、LOBBY_INTENSITY、TURN_20D、VOL_20D、IVOL、PROFIT_STB、GROSS_MARGIN
 - 数据修复：季度财报（IS+BS+CF 三表合并）、roe/gross_margin 自动计算、adj_close 回退、IVOL 向量化
 
-| 指标 | Alpha v3 (32因子, 2012-2025) | Alpha v2 (23因子, 2015-2025) | 变化 |
+| 指标 | Alpha v3 (31因子, 2012-2025) | Alpha v2 (23因子, 2015-2025) | 变化 |
 |------|----------------------------|-------------------|------|
 | 年化收益 | **16.85%** | 17.2% | -0.35% |
 | 最大回撤 | **-23.5%** | -29.8% | **改善 6.3%** |
@@ -650,6 +666,14 @@ Step 3.5 通过 leave-one-out 分析剪除 6 个因子（VOL_PRICE_DIV、RESIDUA
 - 下行捕获从 99.4%→-0.01%，市场下跌时策略几乎不受影响
 - t=1.59 不够显著（<1.96），样本仅 2.25 年，需更长区间确认
 - β_rmw=-1.02 反盈利因子暴露较强，可持续性待观察
+
+**⚠️ 风险提示（v3 结果存疑，需重跑确认）：**
+1. **样本外 > 样本内是反常信号**：年化 36.24% vs 16.85%，alpha 25.32% vs 11.26%。正常衰减 30-50%，v3 反而翻倍，高度可疑
+2. **替代数据质量问题**：NEWS_SENTIMENT 2024 前每年仅数百条（截面覆盖极低），WSB_SENTIMENT 仅 3 ticker（已移除），历史回测结果不可信赖这些因子
+3. **INSIDER_NET_BUY 前视偏差已修复**：原代码用 transaction_date 过滤（交易日），已改为 filing_date（SEC 披露日）。此前的回测结果受此影响，需重跑
+4. **9 因子反转是样本内决策**：基于 2012-2025 IC 方向决定反转，构成额外的数据窥探层。BP/SIZE/DIV_YIELD 的反转在经济学上可解释（2015-2025 成长 > 价值），但 LOBBY_INTENSITY 反转缺乏理论支撑
+5. **β_rmw=-1.02 与 quality 大类设计矛盾**：策略设计上看好高质量公司（quality 权重 1.0），但组合层面系统性做空高盈利公司，需排查因子交互效应
+6. **v3 样本外结果在上述问题修复前不应作为有效结论引用**
 
 ### 设计原则
 

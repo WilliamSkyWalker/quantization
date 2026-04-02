@@ -30,7 +30,7 @@ A股管道:
   FRED → data/fred_downloader.py → us_macro_indicator 表
   FF5 → strategy/ff5.py → Fama-French 五因子回归分析
   (旧源 yfinance/EDGAR/SimFin 保留在 data/fmp_downloader.py，CLI --old-source 可回退)
-  → data/us_cleaner.py → us_factors/*.py (32因子×7大类) → us_factors/processor.py
+  → data/us_cleaner.py → us_factors/*.py (31因子×7大类) → us_factors/processor.py
   → strategy/us_regime.py (四维复合 + credit veto)
     → Alpha:    strategy/us_multi_factor.py (多空) → risk/us_risk_manager.py
     → Beta:     strategy/us_beta_strategy.py (Regime→仓位, 质量筛选等权)
@@ -98,7 +98,7 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | 宏观 | 0.6 | MACRO_CYCLE, MACRO_LIQD, MACRO_INFL, MACRO_EXTR |
 | 舆情 | 0.6 | POLICY_SENT, POLICY_INTENSITY, ANALYST_RATING, ANALYST_COVERAGE |
 
-## 美股因子体系（32 因子 × 7 大类，`services/us_factors/`）
+## 美股因子体系（31 因子 × 7 大类，`services/us_factors/`）
 
 | 大类 | 权重 | 因子 |
 |------|------|------|
@@ -108,13 +108,13 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | momentum | 1.0 | MOM_1M, MOM_3M, MOM_12M, REV_5D |
 | technical | 1.0 | TURN_20D, VOL_20D, IVOL, SIZE, IV_SKEW, PUT_CALL_RATIO |
 | analyst | 1.0 | US_ANALYST_RATING, US_ANALYST_COVERAGE, EARNINGS_SURPRISE, EPS_REVISION, INSIDER_NET_BUY |
-| sentiment | 1.0 | POLYMARKET_SENT, LOBBY_INTENSITY, GOV_CONTRACT, WSB_SENTIMENT, NEWS_SENTIMENT |
+| sentiment | 1.0 | POLYMARKET_SENT, LOBBY_INTENSITY, GOV_CONTRACT, NEWS_SENTIMENT |
 
 等权合成，两层类别打分（类内动态分母 + 类间加权），不做 IC 引导权重优化。9 个稳定负 IC 因子反转（权重 -1.0）。
 
 ## 美股回测绩效（含幸存者偏差修正，基准 Russell 1000）
 
-| 指标 | Alpha v3 (32因子, 2012-2025) | Alpha v2 (23因子, 2015-2025) | Alpha v1 (29因子) |
+| 指标 | Alpha v3 (31因子, 2012-2025) | Alpha v2 (23因子, 2015-2025) | Alpha v1 (29因子) |
 |------|----------------------------|-------------------|-------------------|
 | 年化收益 | **16.85%** | 17.2% | 12.8% |
 | 最大回撤 | **-23.5%** | -29.8% | -16.3% |
@@ -124,11 +124,13 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | 市场 Beta | **0.38** | — | — |
 | 下行/上行捕获 | **0.45 / 0.86** | — | — |
 
-> Alpha v3 核心改进：32 因子（+EPS_REVISION/EARNINGS_SURPRISE/INSIDER/Quiver/AV），9 因子反转（BP/SIZE/DIV_YIELD 等负 IC 因子），季度财报修复（roe/gross_margin 自动计算），IVOL 向量化。FF5 Alpha 翻倍（6.73%→11.26%），t 值从 2.20 提升到 2.98（1% 显著性）。样本外（2024-2026）alpha=+25.32%(t=1.59)，v2 的 alpha 消失问题已解决。
+> Alpha v3 核心改进：31 因子 + 9 因子反转 + 季度财报修复。FF5 Alpha 翻倍（6.73%→11.26%），t=2.98。
+>
+> **⚠️ 风险提示：** v3 样本外（2024-2026）alpha=+25.32% 远超样本内 11.26%，这是反常信号。可能原因：(1) 2024-2025 恰好是 EPS revision 因子最有效的环境；(2) 部分替代数据（NEWS_SENTIMENT 历史覆盖极低、WSB 仅 3 ticker 已移除）可能存在数据质量偏差；(3) 9 因子反转决策基于样本内 IC，构成额外数据窥探层。INSIDER_NET_BUY 已修复前视偏差（transaction_date→filing_date），需重跑回测确认。
 
 ## 核心设计决策
 
-- **无前视偏差（全 32 因子已审计）：** 财务数据按 `filing_date <= date`（公告日）过滤，价格按 `trade_date <= date`，宏观 30 天 lag，情绪/另类数据用 trailing lookback 窗口
+- **无前视偏差（全 31 因子已审计）：** 财务数据按 `filing_date <= date`（公告日）过滤，价格按 `trade_date <= date`，宏观 30 天 lag，情绪/另类数据用 trailing lookback 窗口
 - **两层因子打分：** 类内动态分母 + 类间动态分母，`MIN_VALID_CATEGORIES=4`
 - **Upsert 语义：** 所有数据库写入为幂等操作（`INSERT ... ON DUPLICATE KEY UPDATE`）
 - **Regime 切换：** 四维复合（趋势+VIX+利差+拥挤度）+ Credit Veto
@@ -147,7 +149,7 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | Phase 15-24 | 性能优化 + 自适应调仓 + 因子质量增强 | ✅ |
 | 美股 Alpha v1 | 29 因子多空对冲 + Regime + FF5 回归 | ✅ |
 | 美股 Alpha v2 | 阶梯式重构 → 23 因子剪枝 | ✅ |
-| 美股 Alpha v3 | 32 因子扩展 + 9 因子反转 + 数据修复 → FF5α=11.26%(t=2.98) | ✅ |
+| 美股 Alpha v3 | 31 因子扩展 + 9 因子反转 + 数据修复 → FF5α=11.26%(t=2.98) | ✅ |
 | 数据迁移 | FMP+UW+Fiscal.ai+Quiver+AlphaVantage 六源数据接入 | ✅ |
 | 全项目日志覆盖 | 所有 return/continue/break/except 分支加 logger | ✅ |
 | 待办 | 样本外验证 / 自动化测试 / 券商实盘 | 📋 |

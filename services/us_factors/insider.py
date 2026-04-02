@@ -70,7 +70,7 @@ class InsiderNetBuy(USFactorBase):
                 "    THEN securities_transacted * price "
                 "    ELSE -securities_transacted * price END) as net_value "
                 "FROM us_insider_trade "
-                "WHERE transaction_date >= :start AND transaction_date <= :end "
+                "WHERE DATE(filing_date) >= :start AND DATE(filing_date) <= :end "
                 "  AND price > 0 AND securities_transacted > 0 "
                 "  AND transaction_type IN ('P-Purchase', 'S-Sale', 'A-Award', "
                 "      'P-Purchase+', 'S-Sale+') "

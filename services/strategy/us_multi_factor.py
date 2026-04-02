@@ -89,7 +89,8 @@ class USMultiFactorStrategy:
         "momentum":  ["MOM_1M", "MOM_3M", "MOM_12M", "REV_5D"],
         "technical": ["TURN_20D", "VOL_20D", "IVOL", "SIZE", "IV_SKEW", "PUT_CALL_RATIO"],
         "analyst":   ["US_ANALYST_RATING", "US_ANALYST_COVERAGE", "EARNINGS_SURPRISE", "EPS_REVISION", "INSIDER_NET_BUY"],
-        "sentiment": ["POLYMARKET_SENT", "LOBBY_INTENSITY", "GOV_CONTRACT", "WSB_SENTIMENT", "NEWS_SENTIMENT"],
+        "sentiment": ["POLYMARKET_SENT", "LOBBY_INTENSITY", "GOV_CONTRACT", "NEWS_SENTIMENT"],
+        # WSB_SENTIMENT 移除：只有 3 个 ticker（AAPL/GME/TSLA），无截面区分力
     }
     # Pruned (leave-one-out alpha analysis, 2015-2023):
     #   RESIDUAL_MOM: Δα=-3.46% (redundant with MOM_1M/3M/12M, noisier)
@@ -142,8 +143,9 @@ class USMultiFactorStrategy:
             EarningsSurprise(db), EpsRevision(db), InsiderNetBuy(db),
             # Sentiment
             PolymarketSent(db),
-            LobbyIntensity(db), GovContract(db), WsbSentiment(db),
+            LobbyIntensity(db), GovContract(db),
             NewsSentiment(db),
+            # WsbSentiment 移除：只有 3 个 ticker，无截面区分力
         ]
 
         # 等权（不做 IC 引导权重优化——样本外验证已证明 IC 权重是数据窥探）
@@ -152,7 +154,7 @@ class USMultiFactorStrategy:
         #   新增: BP/SIZE/DIV_YIELD/BUYBACK_YIELD/LOBBY_INTENSITY (IC 评估确认 ICIR < -0.3)
         _REVERSE_FACTORS = {
             "TURN_20D", "VOL_20D", "IVOL", "PROFIT_STB",  # 原有反向因子
-            "BP", "SIZE", "DIV_YIELD", "BUYBACK_YIELD", "LOBBY_INTENSITY", "GROSS_MARGIN",  # IC 评估确认负 IC
+            "BP", "SIZE", "DIV_YIELD", "BUYBACK_YIELD", "LOBBY_INTENSITY",  # IC 评估确认负 IC (ICIR < -0.25)
         }
         if factor_weights is None:
             self.factor_weights = {
