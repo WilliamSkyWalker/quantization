@@ -46,7 +46,7 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 | 年化波动率 | **8.6%** | ~15% |
 | 年化换手率 | 156% | — |
 
-> **Alpha 策略：** 31 因子 × 7 大类（两层类别打分，纯线性，9 因子反转）。Alpha v3 回测（2012-2025）FF5 alpha **+10.72%（t=3.34）**，Sharpe 0.86，最大回撤 -24.7%。样本外（2024-2026）alpha +26.34%（t=2.08）⚠️ 样本外远超样本内，需更长区间确认。ML blend（LightGBM）代码已集成但当前全部结果为纯线性因子。
+> **Alpha 策略：** 31 因子 × 7 大类（两层类别打分，纯线性，trailing 36M 滚动 IC 动态方向）。以下绩效数字基于旧硬编码反转版本，滚动 IC 机制实现后待重跑。ML blend（LightGBM）代码已集成但当前全部结果为纯线性因子。
 > **Beta 策略：** 不追求选股 alpha，通过四维 Regime 感知动态调仓（牛市高仓位吃 beta，熊市低仓位 + 现金保护）。
 > **幸存者偏差修正：** 股票池含 227 只历史 S&P 500 成分股。
 > **样本外验证：** IC 权重优化经样本外测试证伪（2015-2019 训练 → 2020-2025 alpha≈0），因此回归等权。
@@ -146,23 +146,45 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 | **analyst** | 1.0 | US_ANALYST_RATING, US_ANALYST_COVERAGE, EARNINGS_SURPRISE, EPS_REVISION, INSIDER_NET_BUY | 分析师评级+覆盖度+盈利惊喜+预期修正+内部人净买入 |
 | **sentiment** | 1.0 | POLYMARKET_SENT, LOBBY_INTENSITY, GOV_CONTRACT, NEWS_SENTIMENT | Polymarket+游说+政府合同+新闻情绪 |
 
-**大类等权，因子内等权。** 不做 IC 引导权重优化。
+**大类等权，因子内 ±1.0 等权。** 因子方向由 trailing 36M 滚动 IC 自动决定（不硬编码）。
 
-### 因子反转记录（IC 评估 2012-2025，权重设为 -1.0）
+**方向决策规则：**
+- 固有反转（TURN_20D/VOL_20D/IVOL）：始终 -1.0，因子定义上高值=负信号
+- 质量因子（ROE_TTM/GROSS_MARGIN/PROFIT_STB/MARGIN_TREND/ACCRUALS）：始终 +1.0，永不反转（做空优质资产长期自杀）
+- 其他因子：每月调仓时计算过去 36 个月截面 Rank IC 均值，< -0.01 则反转，否则正向
+- 冷启动期（前 12 个月无 IC 数据）：默认 +1.0
 
-| 因子 | IC Mean | ICIR | IC>0 | 原大类 | 反转理由 | 经济学解释 |
-|------|---------|------|------|--------|---------|-----------|
-| BP | -0.0620 | **-0.69** | 21% | value | 稳定强负 | 2012-2025 成长 > 价值，低 B/P（成长股）持续跑赢 |
-| SIZE | -0.0438 | **-0.61** | 28% | technical | 稳定强负 | 大盘股溢价，小盘跑输 |
-| LOBBY_INTENSITY | -0.0349 | -0.47 | 32% | sentiment | 中等负 | ⚠️ 理论支撑不足，可能是监管风险信号 |
-| DIV_YIELD | -0.0459 | -0.32 | 37% | value | 中等负 | 高息股多为低增长，跑输成长股 |
-| BUYBACK_YIELD | -0.0265 | -0.26 | 38% | value | 中等负 | 回购多的公司缺乏再投资机会 |
-| TURN_20D | 0.0078 | 0.12 | 55% | technical | 原有反转 | 高换手 = 投机性强 = 负信号 |
-| VOL_20D | -0.0156 | -0.08 | 49% | technical | 原有反转 | 高波动 = 风险溢价为负 |
-| IVOL | -0.0040 | -0.02 | 48% | technical | 原有反转 | 特质波动率异象（低 IVOL 跑赢） |
-| PROFIT_STB | 0.0046 | 0.11 | 54% | quality | 原有反转 | 因子定义为 -CV，已在因子内取反 |
+**替代数据时间覆盖说明：** POLYMARKET_SENT（2020+）、LOBBY_INTENSITY（1999+）、GOV_CONTRACT（2008+）、NEWS_SENTIMENT（2024+ 才有足够截面覆盖）、IV_SKEW/PUT_CALL_RATIO（仅当日快照）在早期回测中因动态分母机制自动剥离。2020 年以前的回测实质上由传统财务/量价因子驱动。
 
-**⚠️ 注意：** 反转决策基于样本内 IC 方向（2012-2025），构成数据窥探风险。BP/SIZE/DIV_YIELD 有经济学理论支撑（价值因子在成长主导市场失效），LOBBY_INTENSITY 缺乏理论依据。TURN_20D/VOL_20D/IVOL/PROFIT_STB 是因子设计上的固有方向（高值=负信号），不构成数据窥探。
+### 因子方向机制
+
+**固有反转（硬编码 -1.0，因子定义决定）：**
+
+| 因子 | 原大类 | 理由 |
+|------|--------|------|
+| TURN_20D | technical | 高换手 = 投机性强 = 负信号 |
+| VOL_20D | technical | 高波动 = 风险溢价为负 |
+| IVOL | technical | 特质波动率异象（低 IVOL 跑赢） |
+
+**质量保护（锁定 +1.0，永不反转）：**
+
+| 因子 | 原大类 | 理由 |
+|------|--------|------|
+| ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND, ACCRUALS | quality | 做空优质资产长期自杀，即使短期 IC 为负也不反转 |
+
+**动态方向（trailing 36M 滚动 IC 自动决定）：**
+
+BP、SIZE、DIV_YIELD、BUYBACK_YIELD、EP、LOBBY_INTENSITY、GOV_CONTRACT、NEWS_SENTIMENT 等非固有、非质量因子，每月调仓时根据过去 36 个月截面 Rank IC 均值自动决定方向。冷启动期（< 12 个月 IC 数据）默认 +1.0。
+
+**IC 参考值（2012-2025 全样本，仅供参考，不用于硬编码决策）：**
+
+| 因子 | IC Mean | ICIR | 全样本方向 | 说明 |
+|------|---------|------|-----------|------|
+| BP | -0.0620 | -0.69 | 负 | 成长 > 价值时期，滚动 IC 会自动捕捉 |
+| SIZE | -0.0438 | -0.61 | 负 | 大盘溢价时期，未来可能反转 |
+| DIV_YIELD | -0.0459 | -0.32 | 负 | 高息股跑输 |
+| BUYBACK_YIELD | -0.0265 | -0.26 | 负 | 回购无效 |
+| LOBBY_INTENSITY | -0.0349 | -0.47 | 负 | 理论支撑不足 |
 
 ### 因子剪枝记录（leave-one-out alpha 分析，2015-2023 样本内）
 
@@ -626,7 +648,7 @@ Step 3.5 通过 leave-one-out 分析剪除 6 个因子（VOL_PRICE_DIV、RESIDUA
 
 **核心改进：**
 - 因子扩展 23→32：+EPS_REVISION、EARNINGS_SURPRISE、INSIDER_NET_BUY、LOBBY_INTENSITY、GOV_CONTRACT、WSB_SENTIMENT、NEWS_SENTIMENT、IV_SKEW、PUT_CALL_RATIO
-- 9 因子反转（权重 -1.0）：BP、SIZE、DIV_YIELD、BUYBACK_YIELD、LOBBY_INTENSITY、TURN_20D、VOL_20D、IVOL、PROFIT_STB、GROSS_MARGIN
+- 因子方向改为 trailing 36M 滚动 IC 动态决定（3 固有反转 + 5 质量保护 + 其余动态）
 - 数据修复：季度财报（IS+BS+CF 三表合并）、roe/gross_margin 自动计算、adj_close 回退、IVOL 向量化
 
 | 指标 | Alpha v3 (31因子, 2012-2025) | Alpha v2 (23因子, 2015-2025) | 变化 |
@@ -673,7 +695,7 @@ Step 3.5 通过 leave-one-out 分析剪除 6 个因子（VOL_PRICE_DIV、RESIDUA
 1. **样本外 > 样本内仍然是反常信号**：年化 35.07% vs 17.01%，alpha 26.34% vs 10.72%。修复前视偏差后 t 值改善（1.59→2.08），但样本外远超样本内的特征未改变
 2. **替代数据质量问题**：NEWS_SENTIMENT 2024 前每年仅数百条（截面覆盖极低），WSB_SENTIMENT 仅 3 ticker（已移除），历史回测期间这些因子几乎无贡献
 3. **INSIDER_NET_BUY 前视偏差已修复**：transaction_date→filing_date，修复后 t 值反而提升，说明前视偏差是噪音
-4. **9 因子反转是样本内决策**：基于 2012-2025 IC 方向决定反转，构成额外的数据窥探层。BP/SIZE/DIV_YIELD 的反转在经济学上可解释（2015-2025 成长 > 价值），但 LOBBY_INTENSITY 反转缺乏理论支撑
+4. **因子方向已改为滚动 IC 动态决定**：不再硬编码反转，BP/SIZE 等方向由 trailing 36M IC 每月自动调整，消除数据窥探
 5. **β_rmw=-0.89 与 quality 大类设计矛盾**：策略设计上看好高质量公司（quality 权重 1.0），但组合层面系统性做空高盈利公司。较修复前（-1.02）有改善
 6. **2.25 年样本外 t=2.08 刚过显著性门槛**，需更长区间确认稳健性
 

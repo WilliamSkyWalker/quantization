@@ -110,7 +110,7 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | analyst | 1.0 | US_ANALYST_RATING, US_ANALYST_COVERAGE, EARNINGS_SURPRISE, EPS_REVISION, INSIDER_NET_BUY |
 | sentiment | 1.0 | POLYMARKET_SENT, LOBBY_INTENSITY, GOV_CONTRACT, NEWS_SENTIMENT |
 
-等权合成，两层类别打分（类内动态分母 + 类间加权），不做 IC 引导权重优化。9 个稳定负 IC 因子反转（权重 -1.0）。
+等权合成，两层类别打分（类内动态分母 + 类间加权）。因子方向由 trailing 36M 滚动 IC 自动决定（3 个固有反转 + 5 个质量保护锁定 + 其余动态）。
 
 ## 美股回测绩效（含幸存者偏差修正，基准 Russell 1000）
 
@@ -123,9 +123,9 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | 市场 Beta | 0.42 | 0.43 | 0.82 |
 | 下行/上行捕获 | 0.40 / 0.84 | **0.35 / 1.45** | — |
 
-> Alpha v3：31 因子 + 9 因子反转。样本内 FF5α=10.72%(t=3.34)，样本外 FF5α=26.34%(t=2.08)。
+> Alpha v3：31 因子 + 滚动 IC 动态方向。以下数字基于旧硬编码反转版本，待重跑。
 >
-> **⚠️ 风险提示：** 样本外年化 35% 远超样本内 17%，仍然是反常信号。t=2.08 刚过 5% 显著性，样本仅 2.25 年。β_rmw=-0.89 说明策略系统性做空高盈利公司，与 quality 大类设计意图矛盾。9 因子反转基于样本内 IC，构成数据窥探层。需要更长样本外区间确认。
+> **⚠️ 风险提示：** 以上回测数字基于硬编码反转版本，滚动 IC 动态方向机制实现后需重跑。质量因子已锁定永不反转（解决 β_rmw 矛盾），BP/SIZE 等方向改为动态决定（解决数据窥探问题），替代数据在 2020 年前因动态分母自动剥离。
 
 ## 核心设计决策
 

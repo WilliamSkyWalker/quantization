@@ -152,10 +152,12 @@ class USMultiFactorStrategy:
         # 反向因子：高值 = 负信号，权重设为 -1.0 使其方向翻转
         #   原有: TURN_20D(高换手=差), VOL_20D(高波动=差), IVOL(同), PROFIT_STB(CV取反已在因子内处理但权重仍为负)
         #   新增: BP/SIZE/DIV_YIELD/BUYBACK_YIELD/LOBBY_INTENSITY (IC 评估确认 ICIR < -0.3)
-        _REVERSE_FACTORS = {
-            "TURN_20D", "VOL_20D", "IVOL", "PROFIT_STB",  # 原有反向因子
-            "BP", "SIZE", "DIV_YIELD", "BUYBACK_YIELD", "LOBBY_INTENSITY",  # IC 评估确认负 IC (ICIR < -0.25)
-        }
+        # 因子固有方向反转（因子定义上高值=负信号，与 IC 方向无关）
+        _INHERENT_REVERSE = {"TURN_20D", "VOL_20D", "IVOL"}
+        # 注意：PROFIT_STB 因子内部已取反（factor_value = -CV），不需要再反转
+        # BP/SIZE/DIV_YIELD/BUYBACK_YIELD/LOBBY_INTENSITY 的反转
+        # 已迁移到 _compute_rolling_ic_direction() 动态决定
+        _REVERSE_FACTORS = _INHERENT_REVERSE
         if factor_weights is None:
             self.factor_weights = {
                 f.name: (-1.0 if f.name in _REVERSE_FACTORS else 1.0)
@@ -370,6 +372,116 @@ class USMultiFactorStrategy:
 
         return result
 
+    # ----------------------------------------------------------
+    # 滚动 IC 动态方向
+    # ----------------------------------------------------------
+
+    # 因子固有方向（因子定义上高值=负信号，不受 IC 控制）
+    _INHERENT_REVERSE_SET = {"TURN_20D", "VOL_20D", "IVOL"}
+    # 质量因子永不反转（即使短期 IC 为负，做空优质资产长期自杀）
+    _NEVER_REVERSE_SET = {"ROE_TTM", "GROSS_MARGIN", "PROFIT_STB", "MARGIN_TREND", "ACCRUALS"}
+    # 滚动窗口（月数）
+    _ROLLING_IC_MONTHS = 36
+
+    def _update_rolling_ic_weights(
+        self, date: str, composite: pd.DataFrame, factor_cols: list[str],
+    ):
+        """
+        根据 trailing 36 个月的截面 Rank IC 方向，动态决定每个因子的权重符号。
+
+        机制：
+        1. 在每个调仓日 T，用上一期的因子快照 + T 的实际收益计算 IC
+        2. 将 IC 追加到滚动窗口（最多 36 个月）
+        3. 用滚动 IC 均值的符号决定本期权重方向
+
+        规则：
+        - 固有反转因子（TURN_20D/VOL_20D/IVOL）：始终 -1.0，不受 IC 控制
+        - 质量因子（ROE_TTM/GROSS_MARGIN/PROFIT_STB/MARGIN_TREND/ACCRUALS）：始终 +1.0，永不反转
+        - 其他因子：trailing 36M IC 均值 < -0.01 → -1.0，否则 +1.0
+        - 滚动窗口不足 12 个月时：保持 +1.0（冷启动期）
+        """
+        date_ts = pd.to_datetime(date)
+
+        # 初始化滚动 IC 存储
+        if not hasattr(self, "_rolling_ic_window"):
+            self._rolling_ic_window = {}  # {factor_name: [ic_values]}
+            self._prev_factor_snapshot = None
+            self._prev_date = None
+
+        # Step 1: 用上一期快照 + 本期收益计算 IC（回看，不前看）
+        bulk_daily = USFactorBase._static_cache.get("_bulk_daily")
+        if (self._prev_factor_snapshot is not None
+                and self._prev_date is not None
+                and bulk_daily is not None
+                and not bulk_daily.empty):
+            prev_ts = pd.to_datetime(self._prev_date)
+
+            # 上一期价格
+            mask1 = (bulk_daily["trade_date"] >= prev_ts - pd.Timedelta(days=5)) & \
+                     (bulk_daily["trade_date"] <= prev_ts)
+            px_prev = bulk_daily[mask1].sort_values("trade_date").groupby("ticker").tail(1)[["ticker", "adj_close"]]
+
+            # 本期价格
+            mask2 = (bulk_daily["trade_date"] >= date_ts - pd.Timedelta(days=5)) & \
+                     (bulk_daily["trade_date"] <= date_ts)
+            px_now = bulk_daily[mask2].sort_values("trade_date").groupby("ticker").tail(1)[["ticker", "adj_close"]]
+
+            if not px_prev.empty and not px_now.empty:
+                px_prev.columns = ["ticker", "px_prev"]
+                px_now.columns = ["ticker", "px_now"]
+                fwd_ret = px_prev.merge(px_now, on="ticker")
+                fwd_ret["ret"] = fwd_ret["px_now"] / fwd_ret["px_prev"] - 1
+
+                prev_snap = self._prev_factor_snapshot
+                for fname in prev_snap.columns:
+                    if fname == "ticker":
+                        continue
+                    if fname in self._INHERENT_REVERSE_SET or fname in self._NEVER_REVERSE_SET:
+                        continue
+
+                    merged = prev_snap[["ticker", fname]].merge(
+                        fwd_ret[["ticker", "ret"]], on="ticker"
+                    ).dropna()
+                    if len(merged) < 30:
+                        continue
+
+                    ic = merged[fname].corr(merged["ret"], method="spearman")
+                    if not np.isnan(ic):
+                        if fname not in self._rolling_ic_window:
+                            self._rolling_ic_window[fname] = []
+                        self._rolling_ic_window[fname].append(ic)
+                        # 保持窗口大小
+                        if len(self._rolling_ic_window[fname]) > self._ROLLING_IC_MONTHS:
+                            self._rolling_ic_window[fname] = \
+                                self._rolling_ic_window[fname][-self._ROLLING_IC_MONTHS:]
+
+        # Step 2: 保存本期因子快照（供下一期计算 IC）
+        snap_cols = ["ticker"] + [f for f in factor_cols if f in composite.columns]
+        self._prev_factor_snapshot = composite[snap_cols].copy()
+        self._prev_date = date
+
+        # Step 3: 用滚动 IC 均值决定方向
+        changes = []
+        for fname in factor_cols:
+            if fname in self._INHERENT_REVERSE_SET:
+                new_dir = -1.0
+            elif fname in self._NEVER_REVERSE_SET:
+                new_dir = 1.0
+            elif fname in self._rolling_ic_window and len(self._rolling_ic_window[fname]) >= 12:
+                avg_ic = np.mean(self._rolling_ic_window[fname])
+                new_dir = -1.0 if avg_ic < -0.01 else 1.0
+            else:
+                new_dir = 1.0  # 冷启动期默认正向
+
+            if fname in self.factor_weights:
+                old_dir = self.factor_weights[fname]
+                if old_dir != new_dir:
+                    changes.append(f"{fname} {old_dir:+.0f}→{new_dir:+.0f}")
+                self.factor_weights[fname] = new_dir
+
+        if changes:
+            logger.info(f"Rolling IC 方向变更: {', '.join(changes)}")
+
     def _apply_financial_staleness_decay(
         self,
         date: str,
@@ -578,7 +690,10 @@ class USMultiFactorStrategy:
 
         factor_cols = [c for c in composite.columns if c != "ticker"]
 
-        # 3.5. Financial staleness decay (post-standardize, pre-compose)
+        # 3.5a. 滚动 IC 动态方向（trailing 36M，每月调仓时重算）
+        self._update_rolling_ic_weights(date, composite, factor_cols)
+
+        # 3.5b. Financial staleness decay (post-standardize, pre-compose)
         composite = self._apply_financial_staleness_decay(date, composite, factor_cols)
 
         # 4. Category scoring (regime-aware)
