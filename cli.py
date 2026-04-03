@@ -853,6 +853,184 @@ def factor_list(
     console.print(t)
 
 
+@factor_app.command("intra-sector")
+def factor_intra_sector(
+    start: str = typer.Option("2012-01-01", help="开始日期"),
+    end: str = typer.Option("2023-12-31", help="结束日期"),
+    freq: int = typer.Option(1, help="采样频率（月）"),
+    factors: str = typer.Option("", help="因子列表，逗号分隔（默认全部）"),
+):
+    """行业内截面 IC 测试：验证因子在同一行业内是否有选股能力"""
+    import numpy as np
+    import pandas as pd
+
+    db = _get_db()
+
+    from services.factors.evaluation import FactorEvaluator
+    from services.us_factors.base import USFactorBase
+    from services.data.us_cleaner import get_us_clean_universe
+
+    evaluator = FactorEvaluator(db, market="us")
+    factor_map = evaluator._get_factor_map()
+    factor_list = [f.strip() for f in factors.split(",") if f.strip()] or None
+    if factor_list:
+        factor_map = {k: v for k, v in factor_map.items() if k in factor_list}
+
+    console.print(f"[cyan]行业内截面 IC 测试: {start} ~ {end}, {len(factor_map)} 因子[/cyan]")
+
+    # 预加载
+    evaluator._preload(start, end)
+
+    # 评估日期
+    eval_dates = evaluator._get_eval_dates(start, end, freq)
+    if len(eval_dates) < 2:
+        console.print("[red]评估日期不足[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"  评估日期: {len(eval_dates)} 个")
+
+    # 收集数据
+    bulk_daily = USFactorBase._static_cache.get("_bulk_daily")
+    if bulk_daily is None or bulk_daily.empty:
+        console.print("[red]无预加载日线数据[/red]")
+        raise typer.Exit(1)
+
+    # {sector: {factor: [ic_values]}}
+    sector_ic = {}
+    all_ic = {}  # {factor: [ic_values]} 全市场对照
+
+    t0 = time.time()
+    for i, date_str in enumerate(eval_dates[:-1]):
+        next_date = eval_dates[i + 1]
+        date_dt = pd.to_datetime(date_str)
+        next_dt = pd.to_datetime(next_date)
+
+        # 股票池 + 行业
+        universe = get_us_clean_universe(db, date_str)
+        if universe.empty or len(universe) < 50:
+            continue
+
+        # 前瞻收益
+        mask1 = (bulk_daily["trade_date"] >= date_dt - pd.Timedelta(days=5)) & \
+                (bulk_daily["trade_date"] <= date_dt)
+        px1 = bulk_daily[mask1].sort_values("trade_date").groupby("ticker").tail(1)[["ticker", "adj_close"]]
+        mask2 = (bulk_daily["trade_date"] >= next_dt - pd.Timedelta(days=5)) & \
+                (bulk_daily["trade_date"] <= next_dt)
+        px2 = bulk_daily[mask2].sort_values("trade_date").groupby("ticker").tail(1)[["ticker", "adj_close"]]
+        if px1.empty or px2.empty:
+            continue
+        px1.columns = ["ticker", "px1"]
+        px2.columns = ["ticker", "px2"]
+        ret = px1.merge(px2, on="ticker")
+        ret["fwd_ret"] = ret["px2"] / ret["px1"] - 1
+
+        # 计算因子
+        for fname, fcls in factor_map.items():
+            try:
+                fv = fcls(db).compute(date_str, universe)
+            except Exception:
+                continue
+            if fv.empty or fv["factor_value"].notna().sum() < 30:
+                continue
+
+            merged = fv[["ticker", "factor_value"]].merge(ret[["ticker", "fwd_ret"]], on="ticker")
+            merged = merged.merge(universe[["ticker", "sector"]], on="ticker", how="left")
+            merged = merged.dropna(subset=["factor_value", "fwd_ret", "sector"])
+
+            # 全市场 IC
+            if len(merged) >= 30:
+                ic_all = merged["factor_value"].corr(merged["fwd_ret"], method="spearman")
+                if not np.isnan(ic_all):
+                    all_ic.setdefault(fname, []).append(ic_all)
+
+            # 行业内 IC
+            for sector, grp in merged.groupby("sector"):
+                if len(grp) < 15:
+                    continue
+                ic = grp["factor_value"].corr(grp["fwd_ret"], method="spearman")
+                if not np.isnan(ic):
+                    sector_ic.setdefault(sector, {}).setdefault(fname, []).append(ic)
+
+        if (i + 1) % 12 == 0:
+            console.print(f"  进度: {i+1}/{len(eval_dates)-1} ({date_str})")
+
+    elapsed = time.time() - t0
+    console.print(f"[green]完成 ({elapsed:.1f}s)[/green]\n")
+
+    # 汇总：每个行业的平均 IC
+    sectors = sorted(sector_ic.keys())
+    factor_names = sorted(factor_map.keys())
+
+    # 1. 全市场 IC 表
+    console.print("[bold]全市场截面 IC（对照）[/bold]")
+    t_all = Table()
+    t_all.add_column("Factor", style="cyan")
+    t_all.add_column("IC Mean", justify="right")
+    t_all.add_column("ICIR", justify="right")
+    t_all.add_column("N", justify="right")
+    for fname in factor_names:
+        ics = all_ic.get(fname, [])
+        if ics:
+            mean_ic = np.mean(ics)
+            icir = mean_ic / (np.std(ics) + 1e-10)
+            t_all.add_row(fname, f"{mean_ic:.4f}", f"{icir:.4f}", str(len(ics)))
+        else:
+            t_all.add_row(fname, "-", "-", "0")
+    console.print(t_all)
+
+    # 2. 行业内 IC 表
+    console.print(f"\n[bold]行业内截面 IC（关键测试）[/bold]")
+    for sector in sectors:
+        s_data = sector_ic[sector]
+        has_sig = False
+        rows = []
+        for fname in factor_names:
+            ics = s_data.get(fname, [])
+            if len(ics) >= 6:
+                mean_ic = np.mean(ics)
+                icir = mean_ic / (np.std(ics) + 1e-10)
+                sig = "**" if abs(icir) >= 0.3 else "*" if abs(icir) >= 0.15 else ""
+                if abs(icir) >= 0.15:
+                    has_sig = True
+                rows.append((fname, f"{mean_ic:.4f}", f"{icir:.4f}{sig}", str(len(ics))))
+            else:
+                rows.append((fname, "-", "-", str(len(ics))))
+
+        if has_sig:
+            t_sec = Table(title=f"{sector}")
+            t_sec.add_column("Factor", style="cyan")
+            t_sec.add_column("IC Mean", justify="right")
+            t_sec.add_column("ICIR", justify="right")
+            t_sec.add_column("N", justify="right")
+            for row in rows:
+                t_sec.add_row(*row)
+            console.print(t_sec)
+
+    # 3. 汇总：行业内平均 ICIR
+    console.print(f"\n[bold]行业内平均 |ICIR|（跨行业均值）[/bold]")
+    t_sum = Table()
+    t_sum.add_column("Factor", style="cyan")
+    t_sum.add_column("全市场 ICIR", justify="right")
+    t_sum.add_column("行业内均 |ICIR|", justify="right")
+    t_sum.add_column("结论", justify="right")
+    for fname in factor_names:
+        # 全市场
+        ics_all = all_ic.get(fname, [])
+        icir_all = np.mean(ics_all) / (np.std(ics_all) + 1e-10) if ics_all else 0
+
+        # 行业内平均
+        sector_icirs = []
+        for sector in sectors:
+            ics = sector_ic.get(sector, {}).get(fname, [])
+            if len(ics) >= 6:
+                sector_icirs.append(abs(np.mean(ics) / (np.std(ics) + 1e-10)))
+        avg_intra = np.mean(sector_icirs) if sector_icirs else 0
+
+        verdict = "[green]有选股力[/green]" if avg_intra >= 0.15 else "[red]无选股力[/red]" if avg_intra < 0.05 else "[yellow]弱[/yellow]"
+        t_sum.add_row(fname, f"{icir_all:.4f}", f"{avg_intra:.4f}", verdict)
+    console.print(t_sum)
+
+
 @factor_app.command("eval")
 def factor_eval(
     market: str = typer.Option("us", help="市场: cn 或 us"),
