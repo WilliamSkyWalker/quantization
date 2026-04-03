@@ -172,13 +172,13 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 
 **当前待办（按优先级）：**
 
-P0 — 回答根本问题：
-1. 行业内 long-short 测试（对每个 GICS Sector 单独跑行业内 L/S，验证截面选股是否有 alpha）
-2. EPS_REVISION 单因子行业内测试（ICIR=0.91 是唯一强信号）
+P0 — ✅ 已完成：行业内选股 alpha 确认存在
+- EPS_REVISION 行业内 |ICIR|=0.43（所有行业 >0.29），是真正的选股因子
+- 9 个因子有行业内选股力，弱因子（NET_PROFIT_YOY、IVOL 等）仅有行业间信号
 
-P1 — 策略架构决策（取决于 P0）：
-3. 有行业内 alpha → Alpha v4: β_rmw 约束（quality 提权 / 二次规划优化器）
-4. 无行业内 alpha → 放弃多空，转 Beta 策略（低波动 smart beta）
+P1 — Alpha v4 方向（基于 P0 结论）：
+3. EPS_REVISION 提权 + 行业内 L/S 优化 + β_rmw 约束
+4. 弱行业内因子降权或剪枝
 
 P2 — 回测鲁棒性：
 5. 换手率控制（年化 ~8x 太高，加 buffer zone / 换手惩罚）

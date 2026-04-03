@@ -719,13 +719,30 @@ Step 3.5 通过 leave-one-out 分析剪除 6 个因子（VOL_PRICE_DIV、RESIDUA
 
 **核心矛盾**：策略本质上是自适应风格轮动产品，不是选股策略。alpha 来自行业配置（超配科技），行业中性后 alpha 归零。空头端形同虚设（下行保护来自半仓效应）。2025 +108% 是 AI 泡沫风格红利（β_rmw=-1.01），不是选股能力。
 
-**P0 — 回答根本问题：**
-1. 行业内 long-short 测试：对每个 GICS Sector 单独跑行业内 L/S，验证截面选股是否有 alpha
-2. EPS_REVISION 单因子行业内测试：ICIR=0.91 是唯一强信号，单独验证行业内效果
+**P0 — 行业内选股验证（已完成 2026-04-03）：**
 
-**P1 — 策略架构决策（取决于 P0）：**
-- 有行业内 alpha → Alpha v4: β_rmw 约束（quality 提权 / 二次规划优化器）
-- 无行业内 alpha → 放弃多空框架，转向 Beta 策略完善（低波动 smart beta）
+结论：**行业内选股 alpha 确实存在**，集中在少数因子，尤其是 EPS_REVISION。
+
+行业内有选股力的因子（跨行业均 |ICIR| ≥ 0.15）：
+
+| 因子 | 全市场 ICIR | 行业内 |ICIR| | 各行业一致性 |
+|------|-----------|------------|------------|
+| **EPS_REVISION** | **0.79** | **0.43** | 所有行业 ICIR > 0.29（最强） |
+| BP | -0.70 | 0.41 | 行业内也强负 |
+| BUYBACK_YIELD | -0.29 | 0.23 | |
+| SIZE | -0.52 | 0.21 | |
+| ACCRUALS | 0.34 | 0.17 | |
+| US_ANALYST_RATING | 0.24 | 0.15 | |
+| REV_5D | 0.03 | 0.15 | 全市场弱但行业内有效 |
+
+无行业内选股力（行业内 |ICIR| < 0.05）：NET_PROFIT_YOY、IV_SKEW、PUT_CALL_RATIO、WSB_SENTIMENT、NEWS_SENTIMENT
+
+EPS_REVISION 行业内 ICIR 明细：Basic Materials 0.59、Financial Services 0.75、Technology 0.55、Energy 0.46、Industrials 0.52、Healthcare 0.40、Real Estate 0.40、Communication Services 0.29、Consumer Cyclical 0.34、Consumer Defensive 0.32
+
+**P1 — 策略架构决策（基于 P0 结论）：**
+- ✅ 行业内有 alpha → 继续多空框架，聚焦 EPS_REVISION 提权
+- Alpha v4 方向：EPS_REVISION 提权 + 行业内 L/S 优化 + β_rmw 约束
+- 弱行业内因子（NET_PROFIT_YOY、IVOL、MOM_3M、TURN_20D 等）考虑降权或剪枝
 
 **P2 — 回测鲁棒性：**
 - 换手率控制（年化 ~8x 太高，加 buffer zone / 换手惩罚）
