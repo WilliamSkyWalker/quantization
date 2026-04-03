@@ -527,7 +527,7 @@ FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 US_DATA_START_DATE = os.environ.get("US_DATA_START_DATE", "20150101")
 
 US_INDEX_SYMBOLS = ["^GSPC", "^IXIC", "^DJI", "^RUI"]  # S&P 500, NASDAQ, Dow, Russell 1000
-US_BENCHMARK_INDEX = os.environ.get("US_BENCHMARK_INDEX", "^RUI")  # 回测基准：Russell 1000
+US_BENCHMARK_INDEX = os.environ.get("US_BENCHMARK_INDEX", "^GSPC")  # 回测基准：S&P 500
 
 # SimFin (免费历史财报数据)
 SIMFIN_API_KEY = os.environ.get("SIMFIN_API_KEY", "")

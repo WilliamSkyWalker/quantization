@@ -639,6 +639,15 @@ def backtest(
             t.add_row(str(k), str(v))
         console.print(t)
 
+        # FF5 Alpha 醒目输出
+        ff5_alpha = stats.get("ff5_alpha_annual")
+        ff5_t = stats.get("ff5_alpha_t_stat")
+        if ff5_alpha is not None and ff5_t is not None:
+            sig = "***" if abs(ff5_t) >= 2.58 else "**" if abs(ff5_t) >= 1.96 else "*" if abs(ff5_t) >= 1.65 else ""
+            color = "green" if ff5_alpha > 0 else "red"
+            console.print(f"\n  [bold {color}]FF5 Alpha: {ff5_alpha:.2%}/年 (t={ff5_t:.2f}{sig})[/bold {color}]")
+            console.print(f"  β_mkt={stats.get('ff5_beta_mkt',0):.2f}, β_rmw={stats.get('ff5_beta_rmw',0):.2f}, R²={stats.get('ff5_r_squared',0):.2f}")
+
     nav = result.get("nav")
     benchmark_nav = result.get("benchmark_nav")
     if nav is not None and not nav.empty:
