@@ -22,14 +22,15 @@ A股管道:
   → strategy/backtest.py | execution/paper_trader.py
 
 美股管道（三策略：Alpha 多空对冲 + Beta Regime 控制 + Baseline VQM 验证）:
-  FMP API → data/bulk_downloader.py → MySQL (us_* 表, bulk 按年/per-ticker)
-    含: 行情/财报/key-metrics/earnings-surprise/EPS-consensus/insider/分红拆股
-    SP500+NASDAQ100 成分股 + 历史变更（幸存者偏差修正）
+  FMP API → data/bulk_downloader.py → MySQL (us_* 表, per-ticker + bulk 按年)
+    含: 行情/季度财报(IS+BS+CF)/key-metrics/earnings-surprise/EPS-consensus/insider/分析师评级/分红拆股
+    SP500+NASDAQ100 成分股 + 历史变更（幸存者偏差修正，227 只历史退市股）
   Unusual Whales → data/bulk_downloader.py → us_options_flow/us_dark_pool/us_congress_trade/us_news
   Fiscal.ai → data/bulk_downloader.py → us_daily_ratio (日频 PE/PB/EV)
+  Quiver → data/bulk_downloader.py → us_lobbying/us_gov_contract/us_wsb_sentiment
+  Alpha Vantage → data/bulk_downloader.py → us_news_sentiment/us_options_snapshot
   FRED → data/fred_downloader.py → us_macro_indicator 表
   FF5 → strategy/ff5.py → Fama-French 五因子回归分析
-  (旧源 yfinance/EDGAR/SimFin 保留在 data/fmp_downloader.py，CLI --old-source 可回退)
   → data/us_cleaner.py → us_factors/*.py (31因子×7大类) → us_factors/processor.py
   → strategy/us_regime.py (四维复合 + credit veto)
     → Alpha:    strategy/us_multi_factor.py (多空) → risk/us_risk_manager.py
@@ -81,8 +82,7 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 
 - **A股**: `TUSHARE_TOKEN`、`MAX_HOLDINGS`、`NEUTRALIZE_MODE`、`USE_VOL_TARGETING`、风控参数
 - **美股**: `US_MAX_HOLDINGS`、`US_SLIPPAGE`、`US_REGIME_INDEX`、`US_CATEGORY_WEIGHTS` 等（均带 `US_` 前缀）
-- **美股数据**: `FMP_API_KEY`（主数据源）、`UW_API_KEY`（Unusual Whales）、`FISCAL_API_KEY`（Fiscal.ai）、`FRED_API_KEY`（FRED 宏观）
-- **美股旧源（保留）**: `SIMFIN_API_KEY`（SimFin）、SEC EDGAR（免费），CLI `--old-source` 可回退
+- **美股数据**: `FMP_API_KEY`（主数据源）、`UW_API_KEY`（Unusual Whales）、`FISCAL_API_KEY`（Fiscal.ai）、`QUIVER_API_KEY`（Quiver）、`ALPHAVANTAGE_API_KEY`（Alpha Vantage）、`FRED_API_KEY`（FRED 宏观）
 - **舆情**: `TWITTER_USERNAME`/`TWITTER_EMAIL`/`TWITTER_PASSWORD`、`LLM_PROVIDER`/`LLM_API_KEY`/`LLM_MODEL`
 - **数据库**: MySQL 连接信息
 
@@ -110,39 +110,50 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | analyst | 1.0 | US_ANALYST_RATING, US_ANALYST_COVERAGE, EARNINGS_SURPRISE, EPS_REVISION, INSIDER_NET_BUY |
 | sentiment | 1.0 | POLYMARKET_SENT, LOBBY_INTENSITY, GOV_CONTRACT, NEWS_SENTIMENT |
 
-等权合成，两层类别打分（类内动态分母 + 类间加权）。因子方向由 trailing 36M 滚动 IC 自动决定（3 个固有反转 + 5 个质量保护锁定 + 其余动态）。
+等权合成，两层类别打分（类内动态分母 + 类间加权）。因子方向由分因子滚动 IC 自动决定：基本面 24-36M、动量 6-12M、情绪 6M（3 个固有反转 + 5 个质量保护锁定 + 23 个动态）。
 
-## 美股回测绩效（含幸存者偏差修正，基准 Russell 1000）
+## 美股回测绩效（含幸存者偏差修正，基准 S&P 500）
 
-**Alpha 策略逐年收益（31 因子多空对冲，净敞口 ~60%，基准 S&P 500）：**
+**Alpha 策略逐年收益（31 因子多空对冲，净敞口 ~60%）：**
 
 | Year | 策略 | S&P 500 | 超额 | 区间 |
 |------|------|---------|------|------|
-| 2012 | 5.89% | 11.68% | -5.79% | IS |
-| 2013 | 23.50% | 26.39% | -2.89% | IS |
-| 2014 | 3.76% | 12.39% | -8.63% | IS |
-| 2015 | 11.11% | -0.69% | **+11.80%** | IS |
-| 2016 | 12.16% | 11.24% | +0.92% | IS |
-| 2017 | 24.40% | 18.42% | **+5.98%** | IS |
-| 2018 | 15.48% | -7.01% | **+22.49%** | IS |
-| 2019 | 0.33% | 28.71% | -28.38% | IS |
-| 2020 | 16.04% | 15.29% | +0.75% | IS |
-| 2021 | 7.01% | 28.79% | -21.78% | IS |
-| 2022 | 7.78% | -19.95% | **+27.73%** | OOS |
-| 2023 | 3.36% | 24.73% | -21.37% | OOS |
+| 2000 | -7.06% | -9.27% | **+2.21%** | 扩展 |
+| 2001 | 7.53% | -10.53% | **+18.06%** | 扩展 |
+| 2002 | 11.85% | -23.80% | **+35.65%** | 扩展 |
+| 2003 | 48.42% | 22.32% | **+26.10%** | 扩展 |
+| 2004 | 14.84% | 9.33% | **+5.51%** | 扩展 |
+| 2005 | 19.45% | 3.84% | **+15.61%** | 扩展 |
+| 2006 | 11.58% | 11.78% | -0.20% | 扩展 |
+| 2007 | 1.57% | 3.65% | -2.08% | 扩展 |
+| 2008 | -5.79% | -37.58% | **+31.80%** | 扩展 |
+| 2009 | 21.87% | 19.67% | +2.20% | 扩展 |
+| 2010 | 17.50% | 11.00% | **+6.50%** | 扩展 |
+| 2011 | -3.78% | -1.12% | -2.65% | 扩展 |
+| 2012 | 5.72% | 11.68% | -5.96% | IS |
+| 2013 | 27.27% | 26.39% | +0.88% | IS |
+| 2014 | 28.95% | 12.39% | **+16.56%** | IS |
+| 2015 | 1.71% | -0.69% | +2.40% | IS |
+| 2016 | 2.97% | 11.24% | -8.27% | IS |
+| 2017 | 22.57% | 18.42% | **+4.15%** | IS |
+| 2018 | -13.68% | -7.01% | -6.67% | IS |
+| 2019 | 10.88% | 28.71% | -17.84% | IS |
+| 2020 | 70.20% | 15.29% | **+54.90%** | IS |
+| 2021 | 4.53% | 28.79% | -24.27% | IS |
+| 2022 | -3.29% | -19.95% | **+16.66%** | OOS |
+| 2023 | 11.80% | 24.73% | -12.92% | OOS |
 | 2024 | 48.73% | 24.01% | **+24.72%** | OOS |
 | 2025 | 108.25% | 16.65% | **+91.61%** ⚠️ | OOS |
 | 2026 | -2.33% | -5.97% | +3.64% | OOS |
 
-| 指标 | IS (2012-2021) | OOS (2022-2026) |
-|------|---------------|-----------------|
-| FF5 Alpha | +6.66% (t=2.26**) | 待确认 |
-| Sharpe | 0.64 | ~0.88 |
-| β_mkt | 0.44 | ~0.40 |
-| β_rmw | -0.21 | ~-0.60 ⚠️ |
-| 下行捕获 | 0.40 | ~0.35 |
+**跨时代 FF5 Alpha 一致性验证：**
 
-> **策略特征：** FF5 Alpha 跨时代一致（2000-2011: 6.18% t=2.19, 2012-2023: 6.58% t=2.20）。熊市保护极强（2002 +36%, 2008 +32%, 2022 +17%），牛市跟不上（半仓 L/S 天然代价）。2025 +108% 是 AI 泡沫风格红利，不可持续。
+| 区间 | FF5 Alpha | t-stat | β_mkt | β_rmw | Sharpe | 超额年化 | 下行捕获 |
+|------|-----------|--------|-------|-------|--------|---------|---------|
+| 2000-2011（无 analyst 大类） | **6.18%** | **2.19** | 0.37 | -0.05 | 0.51 | +12.33% | 0.30 |
+| 2012-2023（完整因子） | **6.58%** | **2.20** | 0.44 | -0.21 | 0.63 | +0.89% | 0.44 |
+
+> **策略特征：** FF5 Alpha 跨时代一致（~6.2%, t~2.2），行业内选股 alpha 确认存在（EPS_REVISION 行业内 ICIR=0.43）。熊市保护极强（2002 +36%, 2008 +32%, 2022 +17%），牛市跟不上（半仓 L/S 天然代价）。2025 +108% 是 AI 泡沫风格红利（β_rmw=-1.01），不可持续。
 
 ## 核心设计决策
 
@@ -165,10 +176,11 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | Phase 15-24 | 性能优化 + 自适应调仓 + 因子质量增强 | ✅ |
 | 美股 Alpha v1 | 29 因子多空对冲 + Regime + FF5 回归 | ✅ |
 | 美股 Alpha v2 | 阶梯式重构 → 23 因子剪枝 | ✅ |
-| 美股 Alpha v3 | 31 因子 + 滚动 IC → IS α=6.66%(t=2.26), OOS 熊市保护强(2022 +27.7%) | ✅ |
+| 美股 Alpha v3 | 31 因子 + 分因子滚动 IC + ML blend → 跨时代 α~6.2%(t~2.2) | ✅ |
 | 数据迁移 | FMP+UW+Fiscal.ai+Quiver+AlphaVantage 六源数据接入 | ✅ |
-| 全项目日志覆盖 | 所有 return/continue/break/except 分支加 logger | ✅ |
-| 待办 | 行业内选股验证 / β_rmw 约束 / 换手率控制 / 滑点测试 / 实盘接入 | 📋 |
+| 全项目日志覆盖 | 106 个 Python 文件所有 return/continue/break/except 分支加 logger | ✅ |
+| P0 行业内验证 | EPS_REVISION 行业内 ICIR=0.43，确认截面选股 alpha 存在 | ✅ |
+| 待办 | P0 因子优化 / P1 空头重建 / P2 噪音清理 / P3 权重分级 / P4 鲁棒性 / P5 实盘 | 📋 |
 
 **当前待办（按优先级）：**
 

@@ -79,7 +79,7 @@
 
 ## 四、美股市场数据
 
-统一下载器：`services/data/bulk_downloader.py`（旧源 yfinance 保留在 `fmp_downloader.py`，CLI `--old-source` 可回退）
+统一下载器：`services/data/bulk_downloader.py`（六源：FMP/UW/Fiscal.ai/Quiver/AlphaVantage/FRED）
 
 ### 4.1 FMP (Financial Modeling Prep) — 主力数据源
 

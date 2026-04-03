@@ -20,42 +20,29 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 → 风控调整（Baseline 禁用） → 回测引擎 / 模拟交易
 ```
 
-### Alpha 策略绩效（2015-2025，$100 万，基准 Russell 1000，含幸存者偏差修正）
+### Alpha v3 策略绩效（基准 S&P 500，含幸存者偏差修正）
 
-| 指标 | Alpha 多空策略 | Russell 1000 |
-|------|---------------|-------------|
-| 年化收益 | **12.79%** | 11.38% |
-| 超额年化 | **+1.41%** | — |
-| 夏普比率 | **0.68** | — |
-| 最大回撤 | **-16.3%** | — |
-| FF5 Alpha (年化) | **+6.69%** | — |
-| FF5 Alpha t-stat | **2.26** (统计显著) | — |
-| β_Mkt | 0.40 | — |
-| 年化换手率 | 324% | — |
+| 区间 | FF5 Alpha | t-stat | Sharpe | β_mkt | β_rmw | 超额年化 | 下行捕获 |
+|------|-----------|--------|--------|-------|-------|---------|---------|
+| 2000-2011（无 analyst 大类） | **6.18%** | **2.19** | 0.51 | 0.37 | -0.05 | +12.33% | 0.30 |
+| 2012-2023（完整 31 因子） | **6.58%** | **2.20** | 0.63 | 0.44 | -0.21 | +0.89% | 0.44 |
 
-### Beta 策略绩效（2015-2025，$100 万，基准 Russell 1000）
+### Beta 策略绩效（基准 S&P 500）
 
-| 指标 | Beta 策略 | Russell 1000 |
-|------|----------|-------------|
-| 年化收益 | **6.9%** | 11.38% |
-| 最大回撤 | **-16.5%** | — |
-| Calmar 比率 | **0.42** | — |
-| Sharpe 比率 | **0.33** | — |
-| 下行捕获率 | **37.3%** | — |
-| 上行捕获率 | **46.3%** | — |
-| 年化波动率 | **8.6%** | ~15% |
-| 年化换手率 | 156% | — |
+| 区间 | FF5 Alpha | t-stat | Sharpe | β_mkt | 超额年化 |
+|------|-----------|--------|--------|-------|---------|
+| 2012-2023 | 1.28% | 0.76 | 0.27 | 0.33 | -5.32% |
 
-> **Alpha 策略：** 31 因子 × 7 大类（两层类别打分，纯线性，trailing 36M 滚动 IC 动态方向）。以下绩效数字基于旧硬编码反转版本，滚动 IC 机制实现后待重跑。ML blend（LightGBM）代码已集成但当前全部结果为纯线性因子。
+> **Alpha 策略：** 31 因子 × 7 大类，分因子滚动 IC 动态方向 + LightGBM ML blend。FF5 Alpha 跨时代一致（~6.2%, t~2.2）。行业内选股 alpha 确认存在（EPS_REVISION 行业内 ICIR=0.43）。
 > **Beta 策略：** 不追求选股 alpha，通过四维 Regime 感知动态调仓（牛市高仓位吃 beta，熊市低仓位 + 现金保护）。
-> **幸存者偏差修正：** 股票池含 227 只历史 S&P 500 成分股。
-> **样本外验证：** IC 权重优化经样本外测试证伪（2015-2019 训练 → 2020-2025 alpha≈0），因此回归等权。
+> **幸存者偏差修正：** 股票池含 227 只历史 S&P 500/NASDAQ 100 退市成分股。
+> **基准：** S&P 500（^GSPC），此前版本使用 S&P 500，已切换。
 
 ---
 
 ## 二、数据源
 
-三家付费 API 为主数据源（旧源 yfinance/EDGAR/SimFin 保留，CLI `--old-source` 可回退）。
+六家 API 数据源：FMP（主力）、Unusual Whales（替代数据）、Fiscal.ai（日频估值）、Quiver（政治/另类）、Alpha Vantage（新闻情绪/期权）、FRED（宏观）。
 
 统一下载器：`services/data/bulk_downloader.py`
 
@@ -488,7 +475,7 @@ python3 cli.py backtest --market us --strategy-type baseline --start 2015-01-01 
 | 涨跌停 | 无 | ±10% |
 | 做空 | 支持（负权重） | 不支持 |
 | 调仓 | 纯月频（20 交易日） | 半月频 + 偏离触发 |
-| 基准 | **Russell 1000 (^RUI)** | CSI 300 |
+| 基准 | **S&P 500 (^GSPC)** | CSI 300 |
 | 借券费 | **1.5% 年化** | — |
 
 ### 订单执行流程
@@ -597,7 +584,7 @@ python3 cli.py data download --market us --target simfin --old-source  # SimFin 
 | `US_SHORT_BORROW_FEE` | `0.015` | 借券费 1.5% 年化 |
 | `US_MAX_SINGLE_WEIGHT` | `0.10` | 个股权重上限 ±10% |
 | `US_MAX_SECTOR_WEIGHT` | `0.25` | 行业权重上限 ±25% |
-| `US_BENCHMARK_INDEX` | `^RUI` | 回测基准（Russell 1000） |
+| `US_BENCHMARK_INDEX` | `^GSPC` | 回测基准（S&P 500） |
 | `US_REGIME_INDEX` | `^GSPC` | Regime 检测基准（S&P 500） |
 | `US_CATEGORY_WEIGHTS` | 全等权 1.0 | 大类权重（等权，不做 IC 引导优化） |
 | `FMP_API_KEY` | — | FMP API Key（主数据源） |
@@ -632,7 +619,7 @@ python3 cli.py data download --market us --target simfin --old-source  # SimFin 
 | 宏观指标 | 中国 PMI/SHIBOR/PPI/M2 | 美国 ISM/FEDFUNDS/CPI/VIX |
 | Regime | CSI 300 均线偏离（单维） | **四维复合**（趋势+VIX+利差+拥挤度）+ Credit Veto |
 | 调仓 | 半月频 + 偏离触发 | **纯月频**（偏离触发已删除） |
-| 基准 | CSI 300 | **Russell 1000** |
+| 基准 | CSI 300 | **S&P 500** |
 | 幸存者偏差 | 未修正 | **已修正**（含 227 只历史成分股） |
 | FF5 回归 | 无 | **有**（Alpha v2: alpha 6.73%，t=2.20） |
 | ML 增强 | 无 | LightGBM 代码已集成但未启用（train 未调用） |
