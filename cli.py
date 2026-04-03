@@ -355,39 +355,108 @@ def data_update(
     db = _get_db()
 
     if market == "us" and not old_source:
-        # 新数据源：FMP bulk + UW + Fiscal
+        # 六源增量更新
         from services.data.bulk_downloader import BulkDownloader
         from services.data.fred_downloader import FREDDownloader
         dl = BulkDownloader(db)
-        console.print("[cyan]增量更新美股数据 (FMP + UW + Fiscal)...[/cyan]")
+        console.print("[cyan]增量更新美股数据（六源：FMP/UW/Fiscal/Quiver/AV/FRED）...[/cyan]")
         t0 = time.time()
         current_year = time.localtime().tm_year
         results = {}
-        # FMP bulk: only current year + last year
-        results["earnings"] = dl.download_fmp_earnings_surprises_bulk(current_year - 1, current_year)
-        results["estimates"] = dl.download_fmp_eps_estimates_bulk(current_year - 1, current_year + 3)
-        results["income"] = dl.download_fmp_income_statement_bulk(current_year - 1, current_year)
-        results["metrics"] = dl.download_fmp_key_metrics_bulk(current_year - 1, current_year)
-        # UW: latest flow
+
+        # --- FMP ---
+        # 日线行情（全 ticker，只拉最近 1 年）
         try:
+            console.print("  [dim]FMP 日线行情...[/dim]")
+            results["prices"] = dl._download_fmp_prices_per_ticker(current_year, current_year)
+        except Exception as e:
+            logger.warning(f"data_update: FMP 日线跳过: {e}")
+            console.print(f"[yellow]FMP 日线跳过: {e}[/yellow]")
+
+        # 季度财报（全 ticker，limit=8 只拉最近 8 个季度）
+        try:
+            console.print("  [dim]FMP 季度财报...[/dim]")
+            results["financial"] = dl.download_fmp_financial_quarterly(limit=8)
+        except Exception as e:
+            logger.warning(f"data_update: FMP 财报跳过: {e}")
+            console.print(f"[yellow]FMP 财报跳过: {e}[/yellow]")
+
+        # 分析师评级
+        try:
+            console.print("  [dim]FMP 分析师评级...[/dim]")
+            results["analyst_grades"] = dl.download_fmp_analyst_grades()
+        except Exception as e:
+            logger.warning(f"data_update: FMP 分析师跳过: {e}")
+            console.print(f"[yellow]FMP 分析师跳过: {e}[/yellow]")
+
+        # Insider 交易
+        try:
+            console.print("  [dim]FMP Insider 交易...[/dim]")
+            results["insider"] = dl.download_fmp_insider_trading()
+        except Exception as e:
+            logger.warning(f"data_update: FMP Insider 跳过: {e}")
+            console.print(f"[yellow]FMP Insider 跳过: {e}[/yellow]")
+
+        # Earnings / Estimates / Metrics (bulk, current year + last year)
+        try:
+            console.print("  [dim]FMP Earnings/Estimates/Metrics...[/dim]")
+            results["earnings"] = dl.download_fmp_earnings_surprises_bulk(current_year - 1, current_year)
+            results["estimates"] = dl.download_fmp_eps_estimates_bulk(current_year - 1, current_year + 3)
+            results["metrics"] = dl.download_fmp_key_metrics_bulk(current_year - 1, current_year)
+        except Exception as e:
+            logger.warning(f"data_update: FMP bulk 跳过: {e}")
+            console.print(f"[yellow]FMP bulk 跳过: {e}[/yellow]")
+
+        # 指数日线
+        try:
+            console.print("  [dim]FMP 指数日线...[/dim]")
+            results["index"] = dl.download_fmp_index_daily(current_year)
+        except Exception as e:
+            logger.warning(f"data_update: FMP 指数跳过: {e}")
+            console.print(f"[yellow]FMP 指数跳过: {e}[/yellow]")
+
+        # --- UW ---
+        try:
+            console.print("  [dim]Unusual Whales...[/dim]")
             results["uw"] = dl.download_uw_all()
         except Exception as e:
-            logger.warning(f"data_update: UW 更新跳过: {e}")
-            console.print(f"[yellow]UW 更新跳过: {e}[/yellow]")
-        # FRED
+            logger.warning(f"data_update: UW 跳过: {e}")
+            console.print(f"[yellow]UW 跳过: {e}[/yellow]")
+
+        # --- Fiscal.ai ---
         try:
-            fred = FREDDownloader(db)
-            results["macro"] = fred.update()
+            console.print("  [dim]Fiscal.ai...[/dim]")
+            results["fiscal"] = dl.download_fiscal_all()
         except Exception as e:
-            logger.warning(f"data_update: FRED 更新跳过: {e}")
-            console.print(f"[yellow]FRED 更新跳过: {e}[/yellow]")
-        # Alpha Vantage: 期权快照（每日增量）+ 新闻情绪
+            logger.warning(f"data_update: Fiscal 跳过: {e}")
+            console.print(f"[yellow]Fiscal 跳过: {e}[/yellow]")
+
+        # --- Quiver ---
         try:
+            console.print("  [dim]Quiver (lobbying/gov/wsb)...[/dim]")
+            results["quiver"] = dl.download_quiver_all()
+        except Exception as e:
+            logger.warning(f"data_update: Quiver 跳过: {e}")
+            console.print(f"[yellow]Quiver 跳过: {e}[/yellow]")
+
+        # --- Alpha Vantage ---
+        try:
+            console.print("  [dim]Alpha Vantage (新闻/期权)...[/dim]")
             results["av_options"] = dl.download_av_options_snapshot()
             results["av_news"] = dl.download_av_news_sentiment()
         except Exception as e:
-            logger.warning(f"data_update: AV 更新跳过: {e}")
-            console.print(f"[yellow]AV 更新跳过: {e}[/yellow]")
+            logger.warning(f"data_update: AV 跳过: {e}")
+            console.print(f"[yellow]AV 跳过: {e}[/yellow]")
+
+        # --- FRED ---
+        try:
+            console.print("  [dim]FRED 宏观...[/dim]")
+            fred = FREDDownloader(db)
+            results["macro"] = fred.update()
+        except Exception as e:
+            logger.warning(f"data_update: FRED 跳过: {e}")
+            console.print(f"[yellow]FRED 跳过: {e}[/yellow]")
+
         elapsed = time.time() - t0
         console.print(f"[green]完成[/green] {elapsed:.1f}s — {results}")
     elif market == "us":
@@ -697,6 +766,14 @@ def backtest(
     trades = result.get("trades")
     if trades is not None and not trades.empty:
         console.print(f"  总交易笔数: {len(trades)}")
+
+    # 存库
+    from services.strategy.backtest_saver import save_backtest_result
+    st = strategy_type if market == "us" else "alpha"
+    if save_backtest_result(db, market, st, start, end, result):
+        console.print("  [dim]回测结果已保存到数据库[/dim]")
+    else:
+        console.print("  [yellow]回测结果保存失败[/yellow]")
 
     console.print(f"\n[green]总耗时: {t2-t0:.1f}s[/green]")
 
