@@ -655,6 +655,7 @@ def backtest(
 
         # 逐年收益 breakdown
         import numpy as np
+        import pandas as pd
         nav_s = nav.copy()
         nav_s.index = pd.to_datetime(nav_s.index)
         yearly = Table(title="逐年收益")
