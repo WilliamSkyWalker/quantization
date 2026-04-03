@@ -380,25 +380,45 @@ class USMultiFactorStrategy:
     _INHERENT_REVERSE_SET = {"TURN_20D", "VOL_20D", "IVOL"}
     # 质量因子永不反转（即使短期 IC 为负，做空优质资产长期自杀）
     _NEVER_REVERSE_SET = {"ROE_TTM", "GROSS_MARGIN", "PROFIT_STB", "MARGIN_TREND", "ACCRUALS"}
-    # 滚动窗口（月数）
-    _ROLLING_IC_MONTHS = 36
+    # 分因子滚动 IC 窗口（月数）：基本面慢、动量快、情绪最快
+    _ROLLING_IC_WINDOW = {
+        # 基本面（价值/质量/成长）：风格切换慢，24-36M
+        "EP": 30, "BP": 30, "DIV_YIELD": 30, "BUYBACK_YIELD": 30,
+        "NET_PROFIT_YOY": 24, "REVENUE_YOY": 24, "NET_PROFIT_CAGR_3Y": 36,
+        # 动量/技术：信号衰减快，6-12M
+        "MOM_1M": 6, "MOM_3M": 9, "MOM_12M": 12, "REV_5D": 6,
+        "PRICE_DEV_60D": 9, "SIZE": 24, "VOL_PRICE_DIV": 12,
+        # 分析师/盈利：中等节奏，12-18M
+        "US_ANALYST_RATING": 18, "US_ANALYST_COVERAGE": 18,
+        "EARNINGS_SURPRISE": 18, "EPS_REVISION": 12, "INSIDER_NET_BUY": 12,
+        # 情绪/另类：信号生命周期短，6M
+        "POLYMARKET_SENT": 6, "LOBBY_INTENSITY": 12, "GOV_CONTRACT": 12,
+        "NEWS_SENTIMENT": 6, "IV_SKEW": 6, "PUT_CALL_RATIO": 6,
+    }
+    _ROLLING_IC_DEFAULT = 18  # 未列出的因子默认 18 个月
 
     def _update_rolling_ic_weights(
         self, date: str, composite: pd.DataFrame, factor_cols: list[str],
     ):
         """
-        根据 trailing 36 个月的截面 Rank IC 方向，动态决定每个因子的权重符号。
+        根据分因子滚动 IC 方向，动态决定每个因子的权重符号。
 
         机制：
         1. 在每个调仓日 T，用上一期的因子快照 + T 的实际收益计算 IC
-        2. 将 IC 追加到滚动窗口（最多 36 个月）
+        2. 将 IC 追加到滚动窗口（按因子类型不同窗口长度）
         3. 用滚动 IC 均值的符号决定本期权重方向
 
+        窗口长度（_ROLLING_IC_WINDOW）：
+        - 基本面（EP/BP/DIV_YIELD 等）：24-36M（风格切换慢）
+        - 动量/技术（MOM_1M/3M/12M 等）：6-12M（信号衰减快）
+        - 分析师/盈利（ANALYST/EPS 等）：12-18M
+        - 情绪/另类（NEWS/WSB/IV 等）：6M（信号生命周期短）
+
         规则：
-        - 固有反转因子（TURN_20D/VOL_20D/IVOL）：始终 -1.0，不受 IC 控制
-        - 质量因子（ROE_TTM/GROSS_MARGIN/PROFIT_STB/MARGIN_TREND/ACCRUALS）：始终 +1.0，永不反转
-        - 其他因子：trailing 36M IC 均值 < -0.01 → -1.0，否则 +1.0
-        - 滚动窗口不足 12 个月时：保持 +1.0（冷启动期）
+        - 固有反转因子（TURN_20D/VOL_20D/IVOL）：始终 -1.0
+        - 质量因子（ROE_TTM/GROSS_MARGIN/PROFIT_STB/MARGIN_TREND/ACCRUALS）：始终 +1.0
+        - 其他因子：滚动 IC 均值 < -0.01 → -1.0，否则 +1.0
+        - 冷启动期（观测数 < 窗口的 1/3）：默认 +1.0
         """
         date_ts = pd.to_datetime(date)
 
@@ -450,10 +470,11 @@ class USMultiFactorStrategy:
                         if fname not in self._rolling_ic_window:
                             self._rolling_ic_window[fname] = []
                         self._rolling_ic_window[fname].append(ic)
-                        # 保持窗口大小
-                        if len(self._rolling_ic_window[fname]) > self._ROLLING_IC_MONTHS:
+                        # 按因子类型保持不同窗口大小
+                        max_window = self._ROLLING_IC_WINDOW.get(fname, self._ROLLING_IC_DEFAULT)
+                        if len(self._rolling_ic_window[fname]) > max_window:
                             self._rolling_ic_window[fname] = \
-                                self._rolling_ic_window[fname][-self._ROLLING_IC_MONTHS:]
+                                self._rolling_ic_window[fname][-max_window:]
 
         # Step 2: 保存本期因子快照（供下一期计算 IC）
         snap_cols = ["ticker"] + [f for f in factor_cols if f in composite.columns]
@@ -467,11 +488,16 @@ class USMultiFactorStrategy:
                 new_dir = -1.0
             elif fname in self._NEVER_REVERSE_SET:
                 new_dir = 1.0
-            elif fname in self._rolling_ic_window and len(self._rolling_ic_window[fname]) >= 12:
-                avg_ic = np.mean(self._rolling_ic_window[fname])
-                new_dir = -1.0 if avg_ic < -0.01 else 1.0
+            elif fname in self._rolling_ic_window:
+                max_window = self._ROLLING_IC_WINDOW.get(fname, self._ROLLING_IC_DEFAULT)
+                min_obs = max(6, max_window // 3)  # 冷启动：至少窗口的 1/3
+                if len(self._rolling_ic_window[fname]) >= min_obs:
+                    avg_ic = np.mean(self._rolling_ic_window[fname])
+                    new_dir = -1.0 if avg_ic < -0.01 else 1.0
+                else:
+                    new_dir = 1.0  # 冷启动期默认正向
             else:
-                new_dir = 1.0  # 冷启动期默认正向
+                new_dir = 1.0
 
             if fname in self.factor_weights:
                 old_dir = self.factor_weights[fname]

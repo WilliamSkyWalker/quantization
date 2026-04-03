@@ -172,9 +172,16 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 |------|--------|------|
 | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND, ACCRUALS | quality | 做空优质资产长期自杀，即使短期 IC 为负也不反转 |
 
-**动态方向（trailing 36M 滚动 IC 自动决定）：**
+**动态方向（分因子滚动 IC 窗口，每月调仓时自动决定）：**
 
-BP、SIZE、DIV_YIELD、BUYBACK_YIELD、EP、LOBBY_INTENSITY、GOV_CONTRACT、NEWS_SENTIMENT 等非固有、非质量因子，每月调仓时根据过去 36 个月截面 Rank IC 均值自动决定方向。冷启动期（< 12 个月 IC 数据）默认 +1.0。
+| 因子类型 | 窗口 | 因子 |
+|---------|------|------|
+| 基本面 | 24-36M | EP, BP, DIV_YIELD, BUYBACK_YIELD, NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y |
+| 动量/技术 | 6-12M | MOM_1M(6), MOM_3M(9), MOM_12M(12), REV_5D(6), PRICE_DEV_60D(9), SIZE(24) |
+| 分析师/盈利 | 12-18M | ANALYST_RATING(18), EPS_REVISION(12), EARNINGS_SURPRISE(18), INSIDER(12) |
+| 情绪/另类 | 6M | NEWS_SENTIMENT, IV_SKEW, PUT_CALL_RATIO, POLYMARKET_SENT |
+
+冷启动期（观测数 < 窗口的 1/3）默认 +1.0。
 
 **IC 参考值（2012-2025 全样本，仅供参考，不用于硬编码决策）：**
 
