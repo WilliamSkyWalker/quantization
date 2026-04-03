@@ -640,8 +640,49 @@ def backtest(
         console.print(t)
 
     nav = result.get("nav")
+    benchmark_nav = result.get("benchmark_nav")
     if nav is not None and not nav.empty:
         console.print(f"\n  NAV 数据点: {len(nav)}, 最终净值: {nav.iloc[-1]:.4f}")
+
+        # 逐年收益 breakdown
+        import numpy as np
+        nav_s = nav.copy()
+        nav_s.index = pd.to_datetime(nav_s.index)
+        yearly = Table(title="逐年收益")
+        yearly.add_column("Year", style="cyan")
+        yearly.add_column("策略", justify="right")
+        yearly.add_column("基准", justify="right")
+        yearly.add_column("超额", justify="right")
+        yearly.add_column("最大回撤", justify="right")
+
+        years = sorted(nav_s.index.year.unique())
+        for yr in years:
+            yr_nav = nav_s[nav_s.index.year == yr]
+            if len(yr_nav) < 2:
+                continue
+            strat_ret = yr_nav.iloc[-1] / yr_nav.iloc[0] - 1
+            # 年内最大回撤
+            peak = yr_nav.cummax()
+            dd = (yr_nav - peak) / peak
+            max_dd = dd.min()
+
+            bm_ret_str = "-"
+            excess_str = "-"
+            if benchmark_nav is not None and not benchmark_nav.empty:
+                bm_s = benchmark_nav.copy()
+                bm_s.index = pd.to_datetime(bm_s.index)
+                yr_bm = bm_s[bm_s.index.year == yr]
+                if len(yr_bm) >= 2:
+                    bm_ret = yr_bm.iloc[-1] / yr_bm.iloc[0] - 1
+                    bm_ret_str = f"{bm_ret:.2%}"
+                    excess = strat_ret - bm_ret
+                    color = "green" if excess > 0 else "red"
+                    excess_str = f"[{color}]{excess:+.2%}[/{color}]"
+
+            yearly.add_row(str(yr), f"{strat_ret:.2%}", bm_ret_str, excess_str, f"{max_dd:.2%}")
+
+        console.print()
+        console.print(yearly)
 
     trades = result.get("trades")
     if trades is not None and not trades.empty:
