@@ -168,7 +168,27 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | 美股 Alpha v3 | 31 因子 + 滚动 IC → IS α=6.66%(t=2.26), OOS 熊市保护强(2022 +27.7%) | ✅ |
 | 数据迁移 | FMP+UW+Fiscal.ai+Quiver+AlphaVantage 六源数据接入 | ✅ |
 | 全项目日志覆盖 | 所有 return/continue/break/except 分支加 logger | ✅ |
-| 待办 | 样本外验证 / 自动化测试 / 券商实盘 | 📋 |
+| 待办 | 行业内选股验证 / β_rmw 约束 / 换手率控制 / 滑点测试 / 实盘接入 | 📋 |
+
+**当前待办（按优先级）：**
+
+P0 — 回答根本问题：
+1. 行业内 long-short 测试（对每个 GICS Sector 单独跑行业内 L/S，验证截面选股是否有 alpha）
+2. EPS_REVISION 单因子行业内测试（ICIR=0.91 是唯一强信号）
+
+P1 — 策略架构决策（取决于 P0）：
+3. 有行业内 alpha → Alpha v4: β_rmw 约束（quality 提权 / 二次规划优化器）
+4. 无行业内 alpha → 放弃多空，转 Beta 策略（低波动 smart beta）
+
+P2 — 回测鲁棒性：
+5. 换手率控制（年化 ~8x 太高，加 buffer zone / 换手惩罚）
+6. 滑点敏感性测试（T+1 VWAP / 10-15bps）
+7. Regime 参数敏感性分析
+8. 空头端重设计（10 只太小，增加数量或放弃空头）
+
+P3 — 工程：
+9. 替代数据每日增量采集
+10. 自动化测试 / 券商实盘接入
 
 
 ## 详细文档
