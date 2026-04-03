@@ -172,23 +172,19 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 
 **当前待办（按优先级）：**
 
-P0 — ✅ 已完成：行业内选股 alpha 确认存在
-- EPS_REVISION 行业内 |ICIR|=0.43（所有行业 >0.29），是真正的选股因子
-- 9 个因子有行业内选股力，弱因子（NET_PROFIT_YOY、IVOL 等）仅有行业间信号
+P0 — 因子优化（最高优先级）：
+1. EPS_REVISION v2 四维复合（方向×幅度×广度×加速度）
+2. ACCRUALS v2 拆分、BP v2 R&D 调整、REV_5D v2 条件反转、ROE_TTM v2 趋势
 
-P1 — Alpha v4 方向（基于 P0 结论）：
-3. EPS_REVISION 提权 + 行业内 L/S 优化 + β_rmw 约束
-4. 弱行业内因子降权或剪枝
+P1 — 空头端重建：独立负向催化剂选股 + 20-25 只分散 + 市值下限 $5B
 
-P2 — 回测鲁棒性：
-5. 换手率控制（年化 ~8x 太高，加 buffer zone / 换手惩罚）
-6. 滑点敏感性测试（T+1 VWAP / 10-15bps）
-7. Regime 参数敏感性分析
-8. 空头端重设计（10 只太小，增加数量或放弃空头）
+P2 — 噪音清理：移除 IV_SKEW/PUT_CALL_RATIO/NEWS_SENTIMENT/POLYMARKET_SENT
 
-P3 — 工程：
-9. 替代数据每日增量采集
-10. 自动化测试 / 券商实盘接入
+P3 — 权重分级：ICIR>0.3→2.0, 0.15-0.3→1.0, <0.15→0.5
+
+P4 — 回测鲁棒性：换手率控制 + 滑点敏感性 + Regime 参数扰动
+
+P5 — 工程与实盘：增量采集自动化 + 券商 API + 模拟 3-6 月
 
 
 ## 详细文档
