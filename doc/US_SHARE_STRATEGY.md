@@ -134,17 +134,87 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
   - 宏观因子：30 天 lag，防止使用尚未发布的经济数据
   - EPS Revision：取 forward 一致预期（分析师当前共识），非实际未来盈利
 
-### 因子清单
+### 因子清单（31 因子 × 7 大类）
 
-| 大类 | 权重 | 因子 | 说明 |
-|------|------|------|------|
-| **value** | 1.0 | EP, BP, DIV_YIELD, BUYBACK_YIELD | 盈利/账面/股息/回购收益率 |
-| **quality** | 1.0 | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND, ACCRUALS | 盈利能力+稳定性+应计异常 |
-| **growth** | 1.0 | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y | 成长性 |
-| **momentum** | 1.0 | MOM_1M, MOM_3M, MOM_12M, REV_5D | 多频率动量+反转 |
-| **technical** | 1.0 | TURN_20D, VOL_20D, IVOL, SIZE, IV_SKEW, PUT_CALL_RATIO | 流动性+波动率+规模+期权 IV 偏斜+看跌看涨比 |
-| **analyst** | 1.0 | US_ANALYST_RATING, US_ANALYST_COVERAGE, EARNINGS_SURPRISE, EPS_REVISION, INSIDER_NET_BUY | 分析师评级+覆盖度+盈利惊喜+预期修正+内部人净买入 |
-| **sentiment** | 1.0 | POLYMARKET_SENT, LOBBY_INTENSITY, GOV_CONTRACT, NEWS_SENTIMENT | Polymarket+游说+政府合同+新闻情绪 |
+#### Value 大类（4 因子）
+
+| 因子 | 代码 | 计算公式 | 数据源 | 回看窗口 | 行业内 |ICIR| |
+|------|------|---------|--------|---------|------------|
+| **EP** | `value.EP` | TTM EPS / adj_close | FMP IS (季度) | 4Q TTM | 0.09 弱 |
+| **BP** | `value.BP` | total_equity / market_cap | FMP BS (季度) | 最新季度 | **0.41** |
+| **DIV_YIELD** | `value.DivYield` | 近12M 股息总额 / adj_close | FMP 分红数据 | 365 天 | 0.16 有效 |
+| **BUYBACK_YIELD** | `accruals.BuybackYield` | 近4Q 回购金额 / market_cap | FMP CF (季度) | 4Q TTM | 0.23 有效 |
+
+EP = Earnings-to-Price，传统盈利收益率。BP = Book-to-Price，账面价值比。两者在 2012-2023 截面 IC 为负（成长 > 价值时代），由滚动 IC 自动反转。DIV_YIELD 为股息率，BUYBACK_YIELD 为回购收益率（share_repurchased / market_cap）。
+
+#### Quality 大类（5 因子，永不反转）
+
+| 因子 | 代码 | 计算公式 | 数据源 | 回看窗口 | 行业内 |ICIR| |
+|------|------|---------|--------|---------|------------|
+| **ROE_TTM** | `quality.RoeTTM` | 最新季度 net_income / total_equity | FMP IS+BS | 最新季度 | 0.07 弱 |
+| **GROSS_MARGIN** | `quality.GrossMargin` | 最新季度 gross_profit / revenue | FMP IS | 最新季度 | 0.09 弱 |
+| **PROFIT_STB** | `quality.ProfitStability` | -CV(近8Q 净利润 YoY 增速) | FMP IS (季度) | 8Q | 0.12 弱 |
+| **MARGIN_TREND** | `quality.MarginTrend` | 最新 gross_margin - 上季度 gross_margin | FMP IS (季度) | 2Q | 0.14 弱 |
+| **ACCRUALS** | `accruals.Accruals` | (net_income - operating_CF) / total_assets | FMP IS+CF+BS | 4Q TTM | **0.17 有效** |
+
+质量因子锁定正向（+1.0），永不反转。PROFIT_STB 内部已取反（-CV，高稳定性 = 高值）。ACCRUALS 为应计异常：净利润与经营现金流的差异越大，盈利质量越差（因子值越低）。
+
+#### Growth 大类（3 因子）
+
+| 因子 | 代码 | 计算公式 | 数据源 | 回看窗口 | 行业内 |ICIR| |
+|------|------|---------|--------|---------|------------|
+| **NET_PROFIT_YOY** | `growth.NetProfitYoY` | 最近季度净利润 / 同期去年净利润 - 1 | FMP IS (季度) | 对比 Q-4 | 0.05 无 |
+| **REVENUE_YOY** | `growth.RevenueYoY` | 最近季度收入 / 同期去年收入 - 1 | FMP IS (季度) | 对比 Q-4 | 0.10 弱 |
+| **NET_PROFIT_CAGR_3Y** | `growth.NetProfitCAGR3Y` | (最近净利润 / 3年前净利润)^(1/3) - 1 | FMP IS (季度) | 12Q | 0.10 弱 |
+
+成长因子衡量盈利和收入的历史增速。NET_PROFIT_YOY 行业内几乎无效（|ICIR|=0.05），信号主要来自行业间差异。
+
+#### Momentum 大类（4 因子）
+
+| 因子 | 代码 | 计算公式 | 数据源 | 回看窗口 | 行业内 |ICIR| |
+|------|------|---------|--------|---------|------------|
+| **MOM_1M** | `momentum.Mom1M` | 近1个月收益率 | 日线价格 | 20 交易日 | 0.13 弱 |
+| **MOM_3M** | `momentum.Mom3M` | 近3个月收益率 | 日线价格 | 60 交易日 | 0.07 弱 |
+| **MOM_12M** | `momentum.Mom12M` | 近12个月收益率（跳过最近1月） | 月末价格 | 12M | 0.11 弱 |
+| **REV_5D** | `momentum.Rev5D` | 近5日累计收益率（短期反转） | 日线价格 | 5 交易日 | **0.15 有效** |
+
+MOM_12M 是经典的 Jegadeesh-Titman 动量（skip-1-month），避免短期反转噪音。REV_5D 是短期反转因子，行业内有效（|ICIR|=0.15），信号衰减快（滚动窗口 6M）。
+
+#### Technical 大类（6 因子）
+
+| 因子 | 代码 | 计算公式 | 数据源 | 回看窗口 | 行业内 |ICIR| |
+|------|------|---------|--------|---------|------------|
+| **TURN_20D** | `technical.Turn20D` | 近20日平均美元成交额 | 日线价格 | 20 交易日 | 0.06 弱 |
+| **VOL_20D** | `technical.Vol20D` | 近20日收益率标准差 | 日线价格 | 20 交易日 | 0.09 弱 |
+| **IVOL** | `technical.Ivol` | 对 S&P500 回归残差的标准差（取反） | 日线 + ^GSPC | 60 交易日 | 0.07 弱 |
+| **SIZE** | `technical.Size` | log(market_cap) | us_stock_basic | 截面 | **0.21 有效** |
+| **IV_SKEW** | `alphavantage.IvSkew` | ATM put IV - call IV 均值 | Alpha Vantage | 5 交易日 | 0.00 无数据 |
+| **PUT_CALL_RATIO** | `alphavantage.PutCallRatio` | 看跌/看涨成交量比均值 | Alpha Vantage | 5 交易日 | 0.00 无数据 |
+
+TURN_20D/VOL_20D/IVOL 为固有反转因子（高值=负信号，权重 -1.0）。IVOL 使用向量化 OLS 回归（numpy 矩阵运算，0.13s/3800 只）。IV_SKEW/PUT_CALL_RATIO 需每日增量采集积累数据。
+
+#### Analyst 大类（5 因子）
+
+| 因子 | 代码 | 计算公式 | 数据源 | 回看窗口 | 行业内 |ICIR| |
+|------|------|---------|--------|---------|------------|
+| **US_ANALYST_RATING** | `analyst.USAnalystRating` | 近120天分析师评级均值（5=Strong Buy → 1=Sell） | FMP v3/grade | 120 天 | **0.15 有效** |
+| **US_ANALYST_COVERAGE** | `analyst.USAnalystCoverage` | log(1 + 近120天不同券商数) | FMP v3/grade | 120 天 | 0.09 弱 |
+| **EARNINGS_SURPRISE** | `earnings.EarningsSurprise` | 近120天 (actual - estimated) / |estimated| 均值 | FMP bulk | 120 天 | 0.14 弱 |
+| **EPS_REVISION** | `earnings.EpsRevision` | forward EPS 一致预期变化方向 | FMP analyst-estimates | 当前 vs 前期 | **0.43 最强** |
+| **INSIDER_NET_BUY** | `insider.InsiderNetBuy` | 近90天内部人净买入金额 / market_cap | FMP v4/insider (filing_date) | 90 天 | 0.10 弱 |
+
+**EPS_REVISION 是整个因子体系中行业内选股力最强的因子**（所有行业 ICIR > 0.29）。它衡量的是分析师对未来 EPS 预期的修正方向——被上调的股票系统性跑赢被下调的。INSIDER_NET_BUY 使用 SEC Form 4 的 filing_date（而非 transaction_date）过滤，防止前视偏差。
+
+#### Sentiment 大类（4 因子）
+
+| 因子 | 代码 | 计算公式 | 数据源 | 回看窗口 | 行业内 |ICIR| |
+|------|------|---------|--------|---------|------------|
+| **POLYMARKET_SENT** | `polymarket.PolymarketSent` | Polymarket 事件影响加权情绪（时间衰减） | Polymarket alerts | 14 天 | 无（2020+才有数据） |
+| **LOBBY_INTENSITY** | `quiver.LobbyIntensity` | 近12月游说支出 / market_cap | Quiver API | 365 天 | 0.16 有效 |
+| **GOV_CONTRACT** | `quiver.GovContract` | 近4季度政府合同金额 / TTM revenue | Quiver API | 4Q | 0.07 弱 |
+| **NEWS_SENTIMENT** | `alphavantage.NewsSentiment` | 近14天 AI 新闻情绪加权均值 | Alpha Vantage | 14 天 | 0.00 无数据 |
+
+LOBBY_INTENSITY 在 Technology 行业内 |ICIR|=0.36（显著），可能反映监管风险/政策敏感度。NEWS_SENTIMENT/POLYMARKET_SENT 历史数据不足，2020 年前因动态分母自动剥离。
 
 **大类等权，因子内 ±1.0 等权。** 因子方向由 trailing 36M 滚动 IC 自动决定（不硬编码）。
 
