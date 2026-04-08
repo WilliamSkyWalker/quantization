@@ -966,50 +966,44 @@ class USMultiFactorStrategy:
             # Compute independent short score
             short_pool["short_score"] = self._compute_short_score(short_pool)
 
-            # INTERSECTION filter:
+            # INTERSECTION filter (3 conditions):
             # 1. short_score > Nth percentile
             score_cutoff = short_pool["short_score"].quantile(
                 1.0 - US_SHORT_SCORE_PCT
             )
             # 2. EPS_REVISION gatekeeper: worst N%
+            # 3. composite score <= 0 (don't short stocks the long model likes)
+            base_mask = (
+                (short_pool["short_score"] >= score_cutoff)
+                & (short_pool["score"] <= 0)
+            )
             if "EPS_REVISION" in short_pool.columns:
                 eps_cutoff = short_pool["EPS_REVISION"].quantile(
                     US_SHORT_EPS_REV_PCT
                 )
                 candidates = short_pool[
-                    (short_pool["short_score"] >= score_cutoff)
-                    & (short_pool["EPS_REVISION"] <= eps_cutoff)
+                    base_mask & (short_pool["EPS_REVISION"] <= eps_cutoff)
                 ]
             else:
                 logger.warning("Short selection: EPS_REVISION not available, using short_score only")
-                candidates = short_pool[
-                    short_pool["short_score"] >= score_cutoff
-                ]
+                candidates = short_pool[base_mask]
 
             candidates = candidates.sort_values("short_score", ascending=False)
-            # Regime-gradual short count: bull fewer, bear more
-            # strength=1.0 → US_SHORT_N * 0.6 (~5), strength=0.0 → US_SHORT_N * 1.3 (~10)
-            effective_short_n = int(US_SHORT_N * (0.6 + 0.7 * (1.0 - strength)))
-            effective_short_n = max(3, min(effective_short_n, len(candidates)))
-
-            short_selected = candidates.head(effective_short_n).copy()
+            short_selected = candidates.head(US_SHORT_N).copy()
 
             logger.info(
                 f"Short selection: {len(short_pool)} pool → "
                     f"{len(candidates)} candidates → {len(short_selected)} selected "
-                    f"(regime={strength:.2f}, target_n={effective_short_n})"
+                    f"(regime={strength:.2f})"
                 )
 
         if len(long_selected) == 0 and len(short_selected) == 0:
             return empty
 
-        # === Weight allocation (regime-gradual) ===
-        # Net exposure interpolates: bull → higher net (more long), bear → lower net (more short)
-        # strength=1.0 → net=US_NET_EXPOSURE(0.6), strength=0.0 → net=0.2
+        # === Weight allocation (fixed net exposure, v3 behavior) ===
         has_shorts = len(short_selected) > 0
         if has_shorts:
-            bear_net = 0.2
-            net_exp = bear_net + (US_NET_EXPOSURE - bear_net) * strength
+            net_exp = US_NET_EXPOSURE  # fixed 0.6 = 80% long / 20% short
             long_total = (1.0 + net_exp) / 2.0
             short_total = (1.0 - net_exp) / 2.0
         else:
@@ -1025,10 +1019,12 @@ class USMultiFactorStrategy:
             long_selected["side"] = "LONG"
 
         if has_shorts:
-            # Equal weight for high-conviction shorts
-            n_shorts = len(short_selected)
-            per_short_w = short_total / n_shorts
-            short_selected["weight"] = -per_short_w
+            # Softmax weights (v3 behavior): worse short_score → higher weight
+            short_scores = short_selected["short_score"].values if "short_score" in short_selected.columns else -short_selected["score"].values
+            short_min_w = 1.0 / (max(US_SHORT_N, 1) * 3)
+            short_selected["weight"] = -self._softmax_weights(
+                short_scores, tau, short_min_w
+            ) * short_total
             short_selected["side"] = "SHORT"
 
         result = pd.concat(

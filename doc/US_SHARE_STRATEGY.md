@@ -892,10 +892,15 @@ v4 催化剂重建回测失败（UNION + 20 只 + always-on → α 从 6.66% 降
 - 滑点：T+1 VWAP + 10bps / 15bps，测 alpha 衰减幅度
 - Regime：Credit Veto / 拥挤度参数 ±50% 扰动测试
 
-**P5 — 工程与实盘（策略稳定后）：**
+**P5 — ML Blend 修复（因子优化之后）：**
+- 当前 LightGBM 50% blend 拖累 alpha 7.6%（过拟合 + 稀释线性信号），已默认关闭
+- 修复方向：降 blend 比例（10-20%）、增加正则化、延长训练窗口（24-36M）、ensemble rank 替代 raw score blend
+- 验证标准：ML on 的 IS alpha 必须高于 ML off，否则不启用
+
+**P6 — 工程与实盘（策略稳定后）：**
 - 替代数据每日增量采集自动化
 - IV_SKEW/PUT_CALL_RATIO 积累日频数据（1-2 年后重评）
-- 券商 API 接入 + 实盘模拟 3-6 个月验证滑点
+- Alpaca 模拟盘接入已完成，实盘模拟 3-6 个月验证滑点
 
 ### 设计原则
 
