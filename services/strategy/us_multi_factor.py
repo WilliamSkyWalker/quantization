@@ -987,23 +987,29 @@ class USMultiFactorStrategy:
                 ]
 
             candidates = candidates.sort_values("short_score", ascending=False)
-            short_selected = candidates.head(US_SHORT_N).copy()
+            # Regime-gradual short count: bull fewer, bear more
+            # strength=1.0 → US_SHORT_N * 0.6 (~5), strength=0.0 → US_SHORT_N * 1.3 (~10)
+            effective_short_n = int(US_SHORT_N * (0.6 + 0.7 * (1.0 - strength)))
+            effective_short_n = max(3, min(effective_short_n, len(candidates)))
+
+            short_selected = candidates.head(effective_short_n).copy()
 
             logger.info(
                 f"Short selection: {len(short_pool)} pool → "
                     f"{len(candidates)} candidates → {len(short_selected)} selected "
-                    f"(regime={strength:.2f}, gate={US_SHORT_REGIME_GATE})"
+                    f"(regime={strength:.2f}, target_n={effective_short_n})"
                 )
 
         if len(long_selected) == 0 and len(short_selected) == 0:
             return empty
 
-        # === Weight allocation ===
-        # Net exposure is FIXED at US_NET_EXPOSURE (v3 behavior, strength=1.0).
-        # Regime strength only controls short gate (on/off) and max short count.
+        # === Weight allocation (regime-gradual) ===
+        # Net exposure interpolates: bull → higher net (more long), bear → lower net (more short)
+        # strength=1.0 → net=US_NET_EXPOSURE(0.6), strength=0.0 → net=0.2
         has_shorts = len(short_selected) > 0
         if has_shorts:
-            net_exp = US_NET_EXPOSURE  # fixed, e.g. 0.6 = 80% long / 20% short
+            bear_net = 0.2
+            net_exp = bear_net + (US_NET_EXPOSURE - bear_net) * strength
             long_total = (1.0 + net_exp) / 2.0
             short_total = (1.0 - net_exp) / 2.0
         else:
