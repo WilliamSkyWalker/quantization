@@ -653,11 +653,32 @@ US_BEAR_HOLDINGS_RATIO = float(os.environ.get("US_BEAR_HOLDINGS_RATIO", "0.6"))
 # 多空对冲
 US_SHORT_ENABLED = os.environ.get("US_SHORT_ENABLED", "1") == "1"
 US_LONG_N = int(os.environ.get("US_LONG_N", "15"))       # 多头持仓数
-US_SHORT_N = int(os.environ.get("US_SHORT_N", "10"))      # 空头持仓数
-US_SHORT_SCORE_THRESHOLD = float(os.environ.get("US_SHORT_SCORE_THRESHOLD", "-0.8"))  # 收紧：只做空信号非常确定的股票
+US_SHORT_N = int(os.environ.get("US_SHORT_N", "8"))       # 空头持仓数上限（熊市）
+US_SHORT_SCORE_THRESHOLD = float(os.environ.get("US_SHORT_SCORE_THRESHOLD", "-0.8"))
 US_NET_EXPOSURE = float(os.environ.get("US_NET_EXPOSURE", "0.6"))       # 净敞口（0.6 = 80%多/20%空）
 US_GROSS_EXPOSURE_CAP = float(os.environ.get("US_GROSS_EXPOSURE_CAP", "1.5"))
-US_SHORT_BORROW_FEE = float(os.environ.get("US_SHORT_BORROW_FEE", "0.015"))  # 年化借券费 1.5%（做空高需求股更高）
+US_SHORT_BORROW_FEE = float(os.environ.get("US_SHORT_BORROW_FEE", "0.015"))  # 年化借券费默认 1.5%（分级费率见 SHORT_BORROW_FEE_TIERS）
+
+# 空头 v5：独立因子模型 + Regime 门控 + 融券约束
+US_SHORT_REGIME_GATE = float(os.environ.get("US_SHORT_REGIME_GATE", "0.55"))  # strength > 此值关闭空头
+US_SHORT_MIN_MCAP = float(os.environ.get("US_SHORT_MIN_MCAP", "1e10"))       # 空头最低市值 $10B
+US_SHORT_MIN_VOLUME = float(os.environ.get("US_SHORT_MIN_VOLUME", "5e7"))    # 空头最低日均成交额 $50M
+US_SHORT_STOP_LOSS = float(os.environ.get("US_SHORT_STOP_LOSS", "0.15"))     # 空头止损阈值 15%
+US_SHORT_EPS_REV_PCT = float(os.environ.get("US_SHORT_EPS_REV_PCT", "0.20")) # EPS_REVISION gatekeeper: worst 20%
+US_SHORT_SCORE_PCT = float(os.environ.get("US_SHORT_SCORE_PCT", "0.30"))     # short_score 前 30% 才入选
+# 空头独立因子权重
+US_SHORT_FACTOR_WEIGHTS = {
+    "EPS_REVISION": 0.40,
+    "ACCRUALS": 0.25,
+    "EARNINGS_SURPRISE": 0.20,
+    "INSIDER_NET_BUY": 0.15,
+    "BORROW_COST": -0.10,
+}
+# 分级融券费率 (市值 → 年化费率)
+US_SHORT_BORROW_FEE_TIERS = {
+    50e9: 0.003,   # ≥$50B → 0.3%
+    10e9: 0.015,   # ≥$10B → 1.5%
+}
 
 # ML 因子合成（LightGBM）
 US_ML_SCORING_ENABLED = os.environ.get("US_ML_SCORING_ENABLED", "1") == "1"

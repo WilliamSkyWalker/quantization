@@ -118,7 +118,7 @@ class USMLScorer:
             # 确定因子列
             if factor_cols is None:
                 factor_cols = [c for c in df.columns if c not in ("ticker", "score", "weight", "side")]
-                self.feature_cols = factor_cols
+            self.feature_cols = factor_cols
 
             # 计算未来 N 日超额收益（标签）
             date_ts = pd.to_datetime(date_str)
@@ -130,8 +130,13 @@ class USMLScorer:
             # S&P 500 同期收益
             spx_ret = spx_fwd.get(date_str, 0.0)
 
+            # 构建特征矩阵（缺失因子填 0，保证列数一致）
+            feature_df = df[["ticker"]].copy()
+            for col in factor_cols:
+                feature_df[col] = df[col] if col in df.columns else 0.0
+
             # 合并特征 + 标签
-            merged = df[["ticker"] + factor_cols].merge(
+            merged = feature_df.merge(
                 fwd_returns, on="ticker", how="inner"
             )
             merged["excess_return"] = merged["fwd_return"] - spx_ret

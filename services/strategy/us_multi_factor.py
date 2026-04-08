@@ -42,8 +42,14 @@ from services.config import (
     US_SHORT_ENABLED,
     US_LONG_N,
     US_SHORT_N,
-    US_SHORT_SCORE_THRESHOLD,
     US_NET_EXPOSURE,
+    US_SHORT_REGIME_GATE,
+    US_SHORT_MIN_MCAP,
+    US_SHORT_MIN_VOLUME,
+    US_SHORT_EPS_REV_PCT,
+    US_SHORT_SCORE_PCT,
+    US_SHORT_FACTOR_WEIGHTS,
+    US_SHORT_BORROW_FEE_TIERS,
     LOG_LEVEL,
 )
 from services.data.database import DatabaseManager
@@ -246,13 +252,10 @@ class USMultiFactorStrategy:
         if self._regime_detector is None:
             return dict(self.CATEGORY_WEIGHTS)
 
-        if not US_REGIME_BEAR_OVERRIDES:
-            return dict(self.CATEGORY_WEIGHTS)
-
         strength = self._regime_detector.detect_strength(date)
         self._last_regime_strength = strength
 
-        if strength >= 1.0:
+        if not US_REGIME_BEAR_OVERRIDES or strength >= 1.0:
             return dict(self.CATEGORY_WEIGHTS)
 
         weights = {}
@@ -787,7 +790,81 @@ class USMultiFactorStrategy:
         if self._ml_enabled:
             self._ml_factor_history[date] = composite.copy()
 
-        return composite[["ticker", "score"]]
+        # 保留空头独立因子列（供 _compute_short_score 使用）
+        keep_cols = ["ticker", "score"]
+        for col in US_SHORT_FACTOR_WEIGHTS:
+            if col != "BORROW_COST" and col in composite.columns:
+                keep_cols.append(col)
+        return composite[keep_cols]
+
+    # ----------------------------------------------------------
+    # Short-side independent scoring
+    # ----------------------------------------------------------
+
+    def _compute_short_score(self, composite: pd.DataFrame) -> pd.Series:
+        """
+        Compute independent short score from dedicated short factors.
+
+        Unlike the long composite score (predicts "will go up"), this predicts
+        "will go down" using a separate factor subset and fixed weights.
+
+        Returns:
+            Series indexed like composite, higher = more suitable for shorting.
+        """
+        weights = US_SHORT_FACTOR_WEIGHTS
+        short_score = pd.Series(0.0, index=composite.index)
+        n_factors = 0
+
+        # Factor direction mapping for short prediction:
+        #   EPS_REVISION: negative revision → short signal → negate
+        #   ACCRUALS: high accruals → short signal → keep positive
+        #   EARNINGS_SURPRISE: miss → short signal → negate
+        #   INSIDER_NET_BUY: net selling → short signal → negate
+        direction = {
+            "EPS_REVISION": -1,
+            "ACCRUALS": 1,
+            "EARNINGS_SURPRISE": -1,
+            "INSIDER_NET_BUY": -1,
+        }
+
+        for factor_name, w in weights.items():
+            if factor_name == "BORROW_COST":
+                continue  # handled separately below
+            if factor_name not in composite.columns:
+                logger.debug(f"_compute_short_score: {factor_name} not in composite, skipping")
+                continue
+
+            raw = composite[factor_name].copy()
+            d = direction.get(factor_name, 1)
+            vals = raw * d
+
+            # Z-score within the short candidate pool
+            mean = vals.mean()
+            std = vals.std()
+            if std > 1e-10:
+                z = (vals - mean) / std
+            else:
+                z = pd.Series(0.0, index=composite.index)
+
+            short_score += w * z
+            n_factors += 1
+
+        if n_factors == 0:
+            logger.warning("_compute_short_score: no valid short factors available")
+            return short_score
+
+        # BORROW_COST factor (negative weight — penalize expensive borrows)
+        if "BORROW_COST" in composite.columns and "BORROW_COST" in weights:
+            bc = composite["BORROW_COST"]
+            bc_mean = bc.mean()
+            bc_std = bc.std()
+            if bc_std > 1e-10:
+                bc_z = (bc - bc_mean) / bc_std
+            else:
+                bc_z = pd.Series(0.0, index=composite.index)
+            short_score += weights["BORROW_COST"] * bc_z
+
+        return short_score
 
     # ----------------------------------------------------------
     # Top-N selection + Softmax weights
@@ -851,23 +928,103 @@ class USMultiFactorStrategy:
                 long_selected["side"] = "LONG"
             return long_selected[["ticker", "score", "weight", "side"]] if len(long_selected) > 0 else empty
 
-        # === Short leg (relaxed threshold for sector diversification) ===
-        short_threshold = -0.3  # relaxed from -0.8 to get more shorts
-        short_qualified = composite[composite["score"] <= short_threshold]
-        short_qualified = short_qualified.sort_values("score", ascending=True)
-        effective_short_n = int(US_SHORT_N * (1.0 + 0.3 * (1.0 - strength)))
-        effective_short_n = min(effective_short_n, len(short_qualified))
-        short_selected = short_qualified.head(effective_short_n).copy()
+        # === Short leg v5: Regime-gated + independent short factor model ===
+        short_selected = pd.DataFrame()
+
+        if strength > US_SHORT_REGIME_GATE:
+            # Bull market: no shorts
+            logger.info(
+                f"Short regime gate: strength={strength:.2f} > {US_SHORT_REGIME_GATE}, "
+                f"shorts OFF"
+            )
+        else:
+            # Build short candidate pool: mcap >= $10B
+            # mktcap_df is cached (not date-dependent, uses us_stock_basic)
+            mktcap_df = self._get_cached_mktcap_df("")
+
+            short_pool = composite.copy()
+            if mktcap_df is not None and not mktcap_df.empty:
+                short_pool = short_pool.merge(
+                    mktcap_df[["ticker", "market_cap"]], on="ticker", how="left"
+                )
+                before_n = len(short_pool)
+                short_pool = short_pool[
+                    short_pool["market_cap"].fillna(0) >= US_SHORT_MIN_MCAP
+                ]
+                logger.debug(
+                    f"Short mcap filter: {before_n} → {len(short_pool)} "
+                    f"(>= ${US_SHORT_MIN_MCAP/1e9:.0f}B)"
+                )
+
+                # Assign tiered borrow cost
+                short_pool["BORROW_COST"] = 0.015  # default
+                for mcap_threshold, rate in sorted(
+                    US_SHORT_BORROW_FEE_TIERS.items(), reverse=True
+                ):
+                    short_pool.loc[
+                        short_pool["market_cap"] >= mcap_threshold, "BORROW_COST"
+                    ] = rate
+            else:
+                logger.debug("Short pool: no mktcap data, using all stocks with default borrow cost")
+                short_pool["BORROW_COST"] = 0.015
+
+            if len(short_pool) < 3:
+                logger.info(f"Short pool too small ({len(short_pool)}), skipping shorts")
+            else:
+                # Compute independent short score
+                short_pool["short_score"] = self._compute_short_score(short_pool)
+
+                # INTERSECTION filter:
+                # 1. short_score > Nth percentile
+                score_cutoff = short_pool["short_score"].quantile(
+                    1.0 - US_SHORT_SCORE_PCT
+                )
+                # 2. EPS_REVISION gatekeeper: worst N%
+                if "EPS_REVISION" in short_pool.columns:
+                    eps_cutoff = short_pool["EPS_REVISION"].quantile(
+                        US_SHORT_EPS_REV_PCT
+                    )
+                    candidates = short_pool[
+                        (short_pool["short_score"] >= score_cutoff)
+                        & (short_pool["EPS_REVISION"] <= eps_cutoff)
+                    ]
+                else:
+                    logger.warning("Short selection: EPS_REVISION not available, using short_score only")
+                    candidates = short_pool[
+                        short_pool["short_score"] >= score_cutoff
+                    ]
+
+                # Regime-dependent max count: bear ≤8, neutral ≤5
+                if strength < 0.30:
+                    max_shorts = US_SHORT_N  # 8
+                else:
+                    max_shorts = max(3, int(US_SHORT_N * 0.6))  # ~5
+
+                candidates = candidates.sort_values("short_score", ascending=False)
+                short_selected = candidates.head(max_shorts).copy()
+
+                logger.info(
+                    f"Short selection: {len(short_pool)} pool → "
+                    f"{len(candidates)} candidates → {len(short_selected)} selected "
+                    f"(regime={strength:.2f}, gate={US_SHORT_REGIME_GATE})"
+                )
 
         if len(long_selected) == 0 and len(short_selected) == 0:
             return empty
 
         # === Weight allocation (Regime-dynamic net exposure) ===
-        base_net = US_NET_EXPOSURE
-        bear_net = 0.2
-        net_exp = bear_net + (base_net - bear_net) * strength
-        long_total = (1.0 + net_exp) / 2.0
-        short_total = (1.0 - net_exp) / 2.0
+        has_shorts = len(short_selected) > 0
+        if has_shorts:
+            base_net = US_NET_EXPOSURE
+            bear_net = 0.2
+            net_exp = bear_net + (base_net - bear_net) * strength
+            long_total = (1.0 + net_exp) / 2.0
+            short_total = (1.0 - net_exp) / 2.0
+        else:
+            # No shorts: all weight to longs
+            net_exp = 1.0
+            long_total = 1.0
+            short_total = 0.0
 
         if len(long_selected) > 0:
             long_selected["weight"] = self._softmax_weights(
@@ -875,15 +1032,17 @@ class USMultiFactorStrategy:
             ) * long_total
             long_selected["side"] = "LONG"
 
-        if len(short_selected) > 0:
-            short_scores = -short_selected["score"].values
-            short_min_w = 1.0 / (max(US_SHORT_N, 1) * 3)
-            short_selected["weight"] = -self._softmax_weights(
-                short_scores, tau, short_min_w
-            ) * short_total
+        if has_shorts:
+            # Equal weight for high-conviction shorts
+            n_shorts = len(short_selected)
+            per_short_w = short_total / n_shorts
+            short_selected["weight"] = -per_short_w
             short_selected["side"] = "SHORT"
 
-        result = pd.concat([long_selected, short_selected], ignore_index=True)
+        result = pd.concat(
+            [long_selected] + ([short_selected] if has_shorts else []),
+            ignore_index=True,
+        )
 
         # === Soft sector cap: clip sectors exceeding MAX_SECTOR_NET_WEIGHT ===
         sector_df = self._get_cached_sector_df()
@@ -927,7 +1086,9 @@ class USMultiFactorStrategy:
             f"L/S selection (sector cap {self.MAX_SECTOR_NET_WEIGHT:.0%}): "
             f"{n_long}L / {n_short}S, net={net_exp:.0%}, regime={strength:.2f}"
         )
-        return result[["ticker", "score", "weight", "side"]]
+        # Drop extra columns, keep only standard output
+        out_cols = ["ticker", "score", "weight", "side"]
+        return result[[c for c in out_cols if c in result.columns]]
 
     # ----------------------------------------------------------
     # Public API: select_stocks
@@ -1132,8 +1293,10 @@ class USMultiFactorStrategy:
                     dt_ts - pd.Timedelta(days=US_ML_FORWARD_DAYS + 5)
                 ).strftime("%Y-%m-%d")
                 try:
+                    all_factors = [f for fs in self.FACTOR_CATEGORIES.values() for f in fs]
                     result_ml = self._ml_scorer.train(
-                        self._ml_factor_history, train_end
+                        self._ml_factor_history, train_end,
+                        factor_cols=all_factors,
                     )
                     if "error" not in result_ml:
                         self._ml_last_train_idx = i

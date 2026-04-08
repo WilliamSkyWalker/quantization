@@ -44,6 +44,8 @@ from services.config import (
     US_STRATEGY_MOM_WINDOW,
     US_STRATEGY_MOM_MIN_SCALE,
     US_SHORT_BORROW_FEE,
+    US_SHORT_BORROW_FEE_TIERS,
+    US_SHORT_STOP_LOSS,
     US_BENCHMARK_INDEX,
     LOG_LEVEL,
     PROJECT_ROOT,
@@ -145,10 +147,24 @@ class USBacktestEngine:
                 "open": px, "close": px, "adj_close": px, "volume": 1e9,
             }
 
+        # Load market cap for tiered borrow fees
+        mktcap_map = {}  # {ticker: market_cap}
+        try:
+            mktcap_df = self.db.query(
+                "SELECT ticker, market_cap FROM us_stock_basic "
+                "WHERE is_active = 1 AND market_cap IS NOT NULL"
+            )
+            if not mktcap_df.empty:
+                mktcap_df["market_cap"] = pd.to_numeric(mktcap_df["market_cap"], errors="coerce")
+                mktcap_map = dict(zip(mktcap_df["ticker"], mktcap_df["market_cap"]))
+        except Exception as e:
+            logger.debug(f"Backtest: failed to load mktcap for borrow fees: {e}")
+
         # Initialize portfolio state
         cash = float(self.initial_capital)
         positions = {}      # {ticker: float_shares}  (lot size = 1, can be fractional for splits)
         last_close = {}     # {ticker: float} for suspended/missing days
+        short_entry_prices = {}  # {ticker: entry_price} for stop-loss tracking
         signal_idx = 0
 
         nav = pd.Series(dtype=float)
@@ -345,6 +361,7 @@ class USBacktestEngine:
 
                     if positions.get(ticker, 0) == 0:
                         del positions[ticker]
+                        short_entry_prices.pop(ticker, None)
 
                     trades.append({
                         "date": today_str, "ticker": ticker,
@@ -384,6 +401,9 @@ class USBacktestEngine:
                         positions[ticker] = positions.get(ticker, 0) - short_vol
                         actual_vol = short_vol
                         direction = "SHORT"
+                        # Track entry price for stop-loss
+                        if ticker not in short_entry_prices:
+                            short_entry_prices[ticker] = exec_price
 
                     day_turnover_amount += amount
                     trades.append({
@@ -406,16 +426,54 @@ class USBacktestEngine:
 
                 signal_idx += 1
 
-            # === Daily borrow fee for short positions ===
-            daily_borrow_rate = US_SHORT_BORROW_FEE / 252.0
-            for ticker, shares in positions.items():
-                if shares < 0:
-                    px = last_close.get(ticker, 0)
-                    info = price_cache.get((ticker, today_str))
-                    if info and info["adj_close"] and not pd.isna(info["adj_close"]):
-                        px = info["adj_close"]
-                    borrow_cost = abs(shares) * px * daily_borrow_rate
-                    cash -= borrow_cost
+            # === Daily borrow fee (tiered by market cap) + stop-loss for shorts ===
+            stop_loss_tickers = []
+            for ticker, shares in list(positions.items()):
+                if shares >= 0:
+                    continue
+                px = last_close.get(ticker, 0)
+                info = price_cache.get((ticker, today_str))
+                if info and info["adj_close"] and not pd.isna(info["adj_close"]):
+                    px = info["adj_close"]
+
+                # Tiered borrow fee
+                mcap = mktcap_map.get(ticker, 0)
+                annual_rate = US_SHORT_BORROW_FEE  # default fallback
+                for mcap_threshold, rate in sorted(
+                    US_SHORT_BORROW_FEE_TIERS.items(), reverse=True
+                ):
+                    if mcap >= mcap_threshold:
+                        annual_rate = rate
+                        break
+                borrow_cost = abs(shares) * px * (annual_rate / 252.0)
+                cash -= borrow_cost
+
+                # Stop-loss check: if price rose > threshold since entry
+                entry_px = short_entry_prices.get(ticker)
+                if entry_px and entry_px > 0 and px > 0:
+                    loss_pct = (px / entry_px) - 1.0
+                    if loss_pct >= US_SHORT_STOP_LOSS:
+                        stop_loss_tickers.append((ticker, shares, px))
+
+            # Execute stop-loss covers
+            for ticker, shares, px in stop_loss_tickers:
+                cover_vol = abs(shares)
+                exec_price = round(px * (1 + self.slippage), 4)
+                amount = cover_vol * exec_price
+                fees = self._calc_fees(amount, "BUY")
+                cash -= amount + fees
+                entry_px = short_entry_prices.pop(ticker, 0)
+                positions.pop(ticker, None)
+                trades.append({
+                    "date": today_str, "ticker": ticker,
+                    "direction": "STOP_COVER",
+                    "volume": cover_vol,
+                    "price": exec_price, "amount": amount, "fees": fees,
+                })
+                logger.debug(
+                    f"Short stop-loss: {ticker} covered at {exec_price:.2f} "
+                    f"(entry={entry_px:.2f}, loss>={US_SHORT_STOP_LOSS:.0%})"
+                )
 
             # === Daily NAV = (cash + position market value) / initial capital ===
             market_value = 0.0
