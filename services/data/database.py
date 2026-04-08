@@ -367,6 +367,8 @@ class BacktestResult(Base):
     __tablename__ = "backtest_result"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    market = Column(String(10), default="cn", comment="市场: cn 或 us")
+    strategy_type = Column(String(20), comment="策略类型: alpha, beta, baseline")
     start_date = Column(Date, nullable=False, comment="回测开始日期")
     end_date = Column(Date, nullable=False, comment="回测结束日期")
     summary = Column(Text, comment="绩效指标 JSON dict")

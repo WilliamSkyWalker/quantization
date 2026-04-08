@@ -7,7 +7,7 @@ import pandas as pd
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from services.data.database import DatabaseManager, SelectionResult, FactorSnapshot, BacktestResult
+from services.data.database import DatabaseManager, SelectionResult, FactorSnapshot
 from tasks.manager import task_manager
 
 logger = logging.getLogger(__name__)
@@ -502,25 +502,9 @@ def _run_backtest(task_id, start_date, end_date):
             })
         signal_data.append({'date': dt, 'stocks': stocks})
 
-    # Persist to DB (skip signals — large and not displayed in saved view)
-    try:
-        with db.get_session() as session:
-            session.add(BacktestResult(
-                start_date=start_date,
-                end_date=end_date,
-                summary=json.dumps(summary_dict, ensure_ascii=False),
-                nav=json.dumps(nav_data, ensure_ascii=False),
-                benchmark=json.dumps(benchmark_data, ensure_ascii=False),
-                trades=json.dumps(trade_data, ensure_ascii=False),
-                monthly=json.dumps(monthly_data, ensure_ascii=False),
-                drawdown=json.dumps(drawdown_data, ensure_ascii=False),
-                attribution=json.dumps(attr_data, ensure_ascii=False),
-                holdings=json.dumps(holdings_data, ensure_ascii=False),
-            ))
-            session.commit()
-        logger.info(f'回测结果已保存: {start_date}~{end_date}')
-    except Exception as e:
-        logger.warning(f'回测结果保存失败: {e}')
+    # Persist to DB
+    from services.strategy.backtest_saver import save_backtest_result
+    save_backtest_result(db, 'cn', 'alpha', start_date, end_date, result)
 
     return {
         'summary': summary_dict,
