@@ -347,7 +347,7 @@ LOBBY_INTENSITY 在 Technology 行业内 |ICIR|=0.36（显著），可能反映�
 - 中性（strength=0.5）：多头 70%，空头 -30%，净 40%
 - 满熊（strength=0.0）：多头 60%，空头 -40%，净 20%
 
-**ML Blend（已启用）：** LightGBM 滚动训练（`us_ml_scorer.py`），`US_ML_SCORING_ENABLED=1`，blend 权重 `US_ML_BLEND_RATIO=0.5`。每 60 个交易日用过去 12 个月因子截面 + 未来 10 日超额收益重训练，预测得分与线性得分按 50/50 混合。训练时显式传入 31 因子列表保证特征数一致。
+**ML Blend（默认关闭）：** LightGBM 滚动训练代码已集成（`us_ml_scorer.py`），但回测验证 ML blend 严重拖累 alpha（开启 α=8.04%，关闭 α=15.63%，吃掉 7.6%）。原因：ML 在有限样本上学到的非线性关系是噪音，稀释了线性因子信号。`US_ML_SCORING_ENABLED` 默认 0，待 ML 模型优化后重评。
 
 ### 4.4 复合 Regime 检测（四维 + Credit Veto）
 
@@ -671,7 +671,7 @@ python3 cli.py data download --market us --target simfin --old-source  # SimFin 
 | 基准 | CSI 300 | **S&P 500** |
 | 幸存者偏差 | 未修正 | **已修正**（含 227 只历史成分股） |
 | FF5 回归 | 无 | **有**（Alpha v2: alpha 6.73%，t=2.20） |
-| ML 增强 | LightGBM 50% blend | 滚动 12M 训练，每 60 交易日重训，与线性得分 50/50 混合 |
+| ML 增强 | 默认关闭 | LightGBM 代码已集成，回测验证拖累 alpha 7.6%，待优化后重启 |
 | 配置前缀 | 无前缀 | `US_` 前缀 |
 
 ---

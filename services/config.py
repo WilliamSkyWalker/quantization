@@ -653,7 +653,7 @@ US_BEAR_HOLDINGS_RATIO = float(os.environ.get("US_BEAR_HOLDINGS_RATIO", "0.6"))
 # 多空对冲
 US_SHORT_ENABLED = os.environ.get("US_SHORT_ENABLED", "1") == "1"
 US_LONG_N = int(os.environ.get("US_LONG_N", "15"))       # 多头持仓数
-US_SHORT_N = int(os.environ.get("US_SHORT_N", "8"))       # 空头持仓数上限（熊市）
+US_SHORT_N = int(os.environ.get("US_SHORT_N", "10"))      # 空头持仓数
 US_SHORT_SCORE_THRESHOLD = float(os.environ.get("US_SHORT_SCORE_THRESHOLD", "-0.8"))
 US_NET_EXPOSURE = float(os.environ.get("US_NET_EXPOSURE", "0.6"))       # 净敞口（0.6 = 80%多/20%空）
 US_GROSS_EXPOSURE_CAP = float(os.environ.get("US_GROSS_EXPOSURE_CAP", "1.5"))
@@ -680,8 +680,8 @@ US_SHORT_BORROW_FEE_TIERS = {
     10e9: 0.015,   # ≥$10B → 1.5%
 }
 
-# ML 因子合成（LightGBM）
-US_ML_SCORING_ENABLED = os.environ.get("US_ML_SCORING_ENABLED", "1") == "1"
+# ML 因子合成（LightGBM）— 默认关闭，回测验证 ML blend 吃掉 7.6% alpha
+US_ML_SCORING_ENABLED = os.environ.get("US_ML_SCORING_ENABLED", "0") == "1"
 US_ML_LOOKBACK_MONTHS = int(os.environ.get("US_ML_LOOKBACK_MONTHS", "12"))
 US_ML_FORWARD_DAYS = int(os.environ.get("US_ML_FORWARD_DAYS", "10"))
 US_ML_RETRAIN_INTERVAL = int(os.environ.get("US_ML_RETRAIN_INTERVAL", "60"))  # 交易日
