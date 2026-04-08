@@ -36,8 +36,7 @@ A股管道:
     → Alpha:    strategy/us_multi_factor.py (多空) → risk/us_risk_manager.py
     → Beta:     strategy/us_beta_strategy.py (Regime→仓位, 质量筛选等权)
     → Baseline: strategy/us_baseline_strategy.py (VQM 3因子, 纯静态 dollar-neutral)
-  → strategy/us_backtest.py (T+0,借券费,risk_controls开关) → strategy/backtest_saver.py (结果存库)
-  → execution/us_paper_trader.py
+  → strategy/us_backtest.py (T+0,借券费,risk_controls开关) | execution/us_paper_trader.py
 ```
 
 **前端页面:**
@@ -189,7 +188,7 @@ P0 — 因子优化（最高优先级）：
 1. EPS_REVISION v2 四维复合（方向×幅度×广度×加速度）
 2. ACCRUALS v2 拆分、BP v2 R&D 调整、REV_5D v2 条件反转、ROE_TTM v2 趋势
 
-P1 — ✅ 空头端已重建：独立催化剂选股(EPS_REVISION+ACCRUALS+INSIDER) + 20只等权 + $5B市值下限，待回测验证
+P1 — 空头端重建：独立负向催化剂选股 + 20-25 只分散 + 市值下限 $5B
 
 P2 — 噪音清理：移除 IV_SKEW/PUT_CALL_RATIO/NEWS_SENTIMENT/POLYMARKET_SENT
 
