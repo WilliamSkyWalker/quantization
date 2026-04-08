@@ -342,7 +342,7 @@ LOBBY_INTENSITY 在 Technology 行业内 |ICIR|=0.36（显著），可能反映�
 **净敞口：** `US_NET_EXPOSURE=0.6`（固定）
 - 多头 80%，空头 -20%，净 60%
 
-**ML Blend（未启用）：** LightGBM 代码已集成（`us_ml_scorer.py`），但 `train()` 未在回测/选股流程中被调用，`model` 始终为 None，`predict()` 不执行。当前全部回测结果为纯线性因子打分。需要实现滚动训练（expanding window）后才能安全启用。
+**ML Blend（已启用）：** LightGBM 滚动训练（`us_ml_scorer.py`），`US_ML_SCORING_ENABLED=1`，blend 权重 `US_ML_BLEND_RATIO=0.5`。每 60 个交易日用过去 12 个月因子截面 + 未来 10 日超额收益重训练，预测得分与线性得分按 50/50 混合。训练时显式传入 31 因子列表保证特征数一致。
 
 ### 4.4 复合 Regime 检测（四维 + Credit Veto）
 
@@ -666,7 +666,7 @@ python3 cli.py data download --market us --target simfin --old-source  # SimFin 
 | 基准 | CSI 300 | **S&P 500** |
 | 幸存者偏差 | 未修正 | **已修正**（含 227 只历史成分股） |
 | FF5 回归 | 无 | **有**（Alpha v2: alpha 6.73%，t=2.20） |
-| ML 增强 | 无 | LightGBM 代码已集成但未启用（train 未调用） |
+| ML 增强 | LightGBM 50% blend | 滚动 12M 训练，每 60 交易日重训，与线性得分 50/50 混合 |
 | 配置前缀 | 无前缀 | `US_` 前缀 |
 
 ---
