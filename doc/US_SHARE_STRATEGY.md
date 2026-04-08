@@ -323,17 +323,25 @@ LOBBY_INTENSITY 在 Technology 行业内 |ICIR|=0.36（显著），可能反映�
 ```
 
 **多头（Long）：** 得分 ≥ `US_MIN_SELECT_SCORE`(0.0) 的 Top-N 股票。
-- 默认 `US_LONG_N=15`，Regime 联动缩减（熊市更少多头）。
+- 固定 `US_LONG_N=15`（不随 Regime 变化）。
 - Softmax 权重分配，`tau=1.5`。
 
-**空头（Short）：** 得分 ≤ `US_SHORT_SCORE_THRESHOLD`(-0.8) 的 Bottom-M 股票。
-- 默认 `US_SHORT_N=10`，熊市增加空头（+30%）。
-- 反向 Softmax（越差的得分权重越高），取负。
+**空头（Short v5）：** 独立因子模型，不复用多头综合得分。
+- **Regime 门控**：`regime_strength > 0.55` 时关闭空头（牛市零空头）
+- **独立 short_score**（4 因子 + 融券成本负向因子）：
+  - EPS_REVISION（40%）：分析师下调
+  - ACCRUALS（25%）：盈利质量差
+  - EARNINGS_SURPRISE（20%）：财报 miss
+  - INSIDER_NET_BUY（15%）：内部人卖出
+  - BORROW_COST（-10%）：融券成本惩罚
+- **INTERSECTION 选股**：short_score 前 30% ∩ EPS_REVISION worst 20%
+- **候选池约束**：市值 ≥ $10B，分级借券费率（$50B+ → 0.3%，$10-50B → 1.5%）
+- 等权，≤8 只（熊市）/ ≤5 只（中性）
+- **止损**：单只空头浮亏 ≥ 15% 逐日强制平仓
 
-**净敞口：** `US_NET_EXPOSURE=0.6`
-- 多头总权重 = (1 + 0.6) / 2 = **80%**
-- 空头总权重 = (1 - 0.6) / 2 = **-20%**
-- Regime 动态调整：牛市 net=0.6，熊市 net→0.2
+**净敞口：** `US_NET_EXPOSURE=0.6`（固定，不随 Regime 变化）
+- 有空头时：多头 80%，空头 -20%，净 60%
+- 无空头时（牛市 gate 关闭）：多头 100%，净 100%
 
 **ML Blend（未启用）：** LightGBM 代码已集成（`us_ml_scorer.py`），但 `train()` 未在回测/选股流程中被调用，`model` 始终为 None，`predict()` 不执行。当前全部回测结果为纯线性因子打分。需要实现滚动训练（expanding window）后才能安全启用。
 
