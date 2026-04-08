@@ -648,11 +648,9 @@ US_BEAR_HOLDINGS_RATIO = float(os.environ.get("US_BEAR_HOLDINGS_RATIO", "0.6"))
 # 多空对冲
 US_SHORT_ENABLED = os.environ.get("US_SHORT_ENABLED", "1") == "1"
 US_LONG_N = int(os.environ.get("US_LONG_N", "15"))       # 多头持仓数
-US_SHORT_N = int(os.environ.get("US_SHORT_N", "20"))      # 空头持仓数（v4: 10→20）
-US_SHORT_SCORE_THRESHOLD = float(os.environ.get("US_SHORT_SCORE_THRESHOLD", "-0.8"))
+US_SHORT_N = int(os.environ.get("US_SHORT_N", "10"))      # 空头持仓数
+US_SHORT_SCORE_THRESHOLD = float(os.environ.get("US_SHORT_SCORE_THRESHOLD", "-0.8"))  # 收紧：只做空信号非常确定的股票
 US_NET_EXPOSURE = float(os.environ.get("US_NET_EXPOSURE", "0.6"))       # 净敞口（0.6 = 80%多/20%空）
-US_SHORT_MIN_MCAP = float(os.environ.get("US_SHORT_MIN_MCAP", "5e9"))  # 空头最低市值 $5B（防轧空）
-US_SHORT_CATALYST_MODE = os.environ.get("US_SHORT_CATALYST_MODE", "1") == "1"  # 空头用独立催化剂选股
 US_GROSS_EXPOSURE_CAP = float(os.environ.get("US_GROSS_EXPOSURE_CAP", "1.5"))
 US_SHORT_BORROW_FEE = float(os.environ.get("US_SHORT_BORROW_FEE", "0.015"))  # 年化借券费 1.5%（做空高需求股更高）
 
