@@ -911,11 +911,11 @@ class USMultiFactorStrategy:
         strength = self._last_regime_strength
 
         # === Long leg ===
+        # Long count is FIXED (not regime-dynamic) to preserve v3 behavior.
+        # Regime strength only controls short gate and short allocation.
         long_qualified = composite[composite["score"] >= self.min_select_score]
         long_n = US_LONG_N if US_SHORT_ENABLED else self.n_holdings
-        bear_n = max(3, int(long_n * US_BEAR_HOLDINGS_RATIO))
-        effective_long_n = int(bear_n + (long_n - bear_n) * strength)
-        effective_long_n = max(bear_n, min(effective_long_n, long_n))
+        effective_long_n = long_n
 
         long_selected = long_qualified.head(effective_long_n).copy()
         min_w = 1.0 / (max(long_n, 1) * 3)
@@ -1012,12 +1012,12 @@ class USMultiFactorStrategy:
         if len(long_selected) == 0 and len(short_selected) == 0:
             return empty
 
-        # === Weight allocation (Regime-dynamic net exposure) ===
+        # === Weight allocation ===
+        # Net exposure is FIXED at US_NET_EXPOSURE (v3 behavior, strength=1.0).
+        # Regime strength only controls short gate (on/off) and max short count.
         has_shorts = len(short_selected) > 0
         if has_shorts:
-            base_net = US_NET_EXPOSURE
-            bear_net = 0.2
-            net_exp = bear_net + (base_net - bear_net) * strength
+            net_exp = US_NET_EXPOSURE  # fixed, e.g. 0.6 = 80% long / 20% short
             long_total = (1.0 + net_exp) / 2.0
             short_total = (1.0 - net_exp) / 2.0
         else:
