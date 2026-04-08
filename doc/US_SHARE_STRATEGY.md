@@ -462,6 +462,7 @@ python3 cli.py backtest --market us --strategy-type baseline --start 2015-01-01 
 ## 六、回测引擎
 
 代码：`services/strategy/us_backtest.py`（USBacktestEngine）
+结果存储：`services/strategy/backtest_saver.py` → `backtest_result` 表（`market` 列区分 cn/us，`strategy_type` 列区分 alpha/beta/baseline）。CLI 和 API 统一调用 `save_backtest_result()` 存库。
 
 ### 执行规则
 
@@ -812,10 +813,15 @@ EPS_REVISION 行业内 ICIR 明细：Basic Materials 0.59、Financial Services 0
 - **ROE_TTM v2**：从水平值改为近 4Q 变化趋势（线性回归斜率）
 - 每个优化后用行业内 ICIR 框架验证，不显著则回滚
 
-**P1 — 空头端重建（P0 完成后，预计 1-2 周）：**
-- 信号改造：从"综合最差"改为独立负向催化剂（EPS_REVISION 强负 + ACCRUALS 高 + INSIDER 净卖出）
-- 组合改造：10→20-25 只，单只 2%→0.8-1%，去 Softmax 改等权，市值下限 $5B
-- 验证：空头单独跑 IS/OOS，不产生负 beta 收益则转纯多头+现金
+**P1 — 空头端重建（✅ 已实现，待回测验证）：**
+- ✅ 信号改造：从"综合得分最差"改为独立负向催化剂选股
+  - EPS_REVISION 截面最差 20%（分析师大幅下调预期）
+  - ACCRUALS 截面最高 20%（盈利质量差，利润靠应计）
+  - INSIDER_NET_BUY 截面最负 20%（内部人净卖出）
+  - 至少 1 个催化剂触发才入选
+- ✅ 组合改造：10→20 只，Softmax→等权（-1%/只），市值下限 $5B（`US_SHORT_MIN_MCAP`）
+- ✅ 配置：`US_SHORT_CATALYST_MODE=1`（可通过设为 0 回退旧模式）
+- 待做：空头单独跑 IS/OOS 验证，不产生负 beta 收益则转纯多头+现金
 
 **P2 — 噪音因子清理（与 P0 并行，2-3 天）：**
 - 直接移除：IV_SKEW、PUT_CALL_RATIO、NEWS_SENTIMENT、POLYMARKET_SENT（无数据/无覆盖，等积累 1-2 年后重评）
