@@ -44,6 +44,8 @@ from services.config import (
     US_SHORT_N,
     US_SHORT_SCORE_THRESHOLD,
     US_NET_EXPOSURE,
+    US_SHORT_MIN_MCAP,
+    US_SHORT_CATALYST_MODE,
     LOG_LEVEL,
 )
 from services.data.database import DatabaseManager
@@ -787,7 +789,12 @@ class USMultiFactorStrategy:
         if self._ml_enabled:
             self._ml_factor_history[date] = composite.copy()
 
-        return composite[["ticker", "score"]]
+        # 保留催化剂因子列（空头选股需要）
+        keep_cols = ["ticker", "score"]
+        for col in ["EPS_REVISION", "ACCRUALS", "INSIDER_NET_BUY"]:
+            if col in composite.columns:
+                keep_cols.append(col)
+        return composite[keep_cols]
 
     # ----------------------------------------------------------
     # Top-N selection + Softmax weights
@@ -810,6 +817,89 @@ class USMultiFactorStrategy:
 
     # Maximum net weight any single GICS sector can have
     MAX_SECTOR_NET_WEIGHT = 0.15
+
+    def _select_short_catalyst(
+        self, composite: pd.DataFrame, regime_strength: float,
+    ) -> pd.DataFrame:
+        """
+        v4 空头选股：独立负向催化剂。
+
+        条件（至少满足 2/3）：
+        1. EPS_REVISION 强负向（< -0.5 标准化后）
+        2. ACCRUALS 高值（> 0.5，盈利质量差）
+        3. INSIDER_NET_BUY 负值（< -0.3，内部人净卖出）
+
+        额外过滤：
+        - 市值 >= US_SHORT_MIN_MCAP（$5B，防轧空）
+        - 排除已在多头的股票
+        """
+        candidates = composite.copy()
+
+        # 市值过滤
+        mktcap_df = self._get_cached_mktcap_df(self._last_date or "")
+        if mktcap_df is not None and not mktcap_df.empty:
+            large_cap = mktcap_df[mktcap_df["market_cap"] >= US_SHORT_MIN_MCAP]["ticker"]
+            candidates = candidates[candidates["ticker"].isin(large_cap)]
+
+        if len(candidates) < 5:
+            logger.debug("_select_short_catalyst: 市值过滤后候选不足5只")
+            return pd.DataFrame(columns=composite.columns)
+
+        # 计算催化剂得分
+        catalyst_score = pd.Series(0.0, index=candidates.index)
+        n_signals = pd.Series(0, index=candidates.index)
+
+        # 催化剂信号：使用截面百分位（不依赖绝对阈值）
+        if "EPS_REVISION" in candidates.columns:
+            eps_rev = candidates["EPS_REVISION"]
+            if eps_rev.notna().sum() >= 30:
+                # 取最差 20%
+                threshold = eps_rev.quantile(0.20)
+                mask = eps_rev.notna() & (eps_rev <= threshold)
+                catalyst_score[mask] += (threshold - eps_rev[mask]).clip(lower=0)
+                n_signals[eps_rev.notna()] += 1
+
+        if "ACCRUALS" in candidates.columns:
+            accruals = candidates["ACCRUALS"]
+            if accruals.notna().sum() >= 30:
+                # 取最高 20%（盈利质量最差）
+                threshold = accruals.quantile(0.80)
+                mask = accruals.notna() & (accruals >= threshold)
+                catalyst_score[mask] += (accruals[mask] - threshold).clip(lower=0)
+                n_signals[accruals.notna()] += 1
+
+        if "INSIDER_NET_BUY" in candidates.columns:
+            insider = candidates["INSIDER_NET_BUY"]
+            if insider.notna().sum() >= 30:
+                # 取最负 20%（内部人净卖出最多）
+                threshold = insider.quantile(0.20)
+                mask = insider.notna() & (insider <= threshold)
+                catalyst_score[mask] += (threshold - insider[mask]).clip(lower=0)
+                n_signals[insider.notna()] += 1
+
+        # 至少有 1 个催化剂触发
+        has_catalyst = catalyst_score > 0
+        candidates = candidates[has_catalyst].copy()
+        candidates["_catalyst_score"] = catalyst_score[has_catalyst]
+
+        if len(candidates) == 0:
+            logger.debug("_select_short_catalyst: 无股票满足催化剂条件")
+            return pd.DataFrame(columns=composite.columns)
+
+        # 按催化剂得分排序，取 top N
+        candidates = candidates.sort_values("_catalyst_score", ascending=False)
+        effective_n = int(US_SHORT_N * (1.0 + 0.3 * (1.0 - regime_strength)))
+        effective_n = min(effective_n, len(candidates))
+        selected = candidates.head(effective_n).copy()
+
+        logger.info(
+            f"Short catalyst: {len(selected)} selected from {len(candidates)} candidates "
+            f"(mcap>=${US_SHORT_MIN_MCAP/1e9:.0f}B)"
+        )
+
+        if "_catalyst_score" in selected.columns:
+            selected = selected.drop(columns=["_catalyst_score"])
+        return selected
 
     def _select_from_scores(
         self, composite: pd.DataFrame, prev_holdings: set[str],
@@ -851,13 +941,18 @@ class USMultiFactorStrategy:
                 long_selected["side"] = "LONG"
             return long_selected[["ticker", "score", "weight", "side"]] if len(long_selected) > 0 else empty
 
-        # === Short leg (relaxed threshold for sector diversification) ===
-        short_threshold = -0.3  # relaxed from -0.8 to get more shorts
-        short_qualified = composite[composite["score"] <= short_threshold]
-        short_qualified = short_qualified.sort_values("score", ascending=True)
-        effective_short_n = int(US_SHORT_N * (1.0 + 0.3 * (1.0 - strength)))
-        effective_short_n = min(effective_short_n, len(short_qualified))
-        short_selected = short_qualified.head(effective_short_n).copy()
+        # === Short leg ===
+        if US_SHORT_CATALYST_MODE:
+            # v4: 独立负向催化剂选股
+            short_selected = self._select_short_catalyst(composite, strength)
+        else:
+            # 旧模式：综合得分最低
+            short_threshold = -0.3
+            short_qualified = composite[composite["score"] <= short_threshold]
+            short_qualified = short_qualified.sort_values("score", ascending=True)
+            effective_short_n = int(US_SHORT_N * (1.0 + 0.3 * (1.0 - strength)))
+            effective_short_n = min(effective_short_n, len(short_qualified))
+            short_selected = short_qualified.head(effective_short_n).copy()
 
         if len(long_selected) == 0 and len(short_selected) == 0:
             return empty
@@ -876,11 +971,9 @@ class USMultiFactorStrategy:
             long_selected["side"] = "LONG"
 
         if len(short_selected) > 0:
-            short_scores = -short_selected["score"].values
-            short_min_w = 1.0 / (max(US_SHORT_N, 1) * 3)
-            short_selected["weight"] = -self._softmax_weights(
-                short_scores, tau, short_min_w
-            ) * short_total
+            # v4: 等权分配（去掉 Softmax 集中风险）
+            n_short = len(short_selected)
+            short_selected["weight"] = -short_total / n_short
             short_selected["side"] = "SHORT"
 
         result = pd.concat([long_selected, short_selected], ignore_index=True)
