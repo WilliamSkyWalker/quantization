@@ -111,4 +111,12 @@ urlpatterns = [
     path('us/paper/nav', us_strategy.paper_nav),
     path('us/paper/trade', us_strategy.paper_trade),
     path('us/paper/reset', us_strategy.paper_reset),
+
+    # Alpaca Trading
+    path('us/alpaca/account', us_strategy.alpaca_account),
+    path('us/alpaca/positions', us_strategy.alpaca_positions),
+    path('us/alpaca/orders', us_strategy.alpaca_orders),
+    path('us/alpaca/trade', us_strategy.alpaca_trade),
+    path('us/alpaca/reconcile', us_strategy.alpaca_reconcile),
+    path('us/alpaca/reset', us_strategy.alpaca_reset),
 ]

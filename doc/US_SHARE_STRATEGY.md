@@ -502,6 +502,8 @@ NAV = (cash + Σ(shares × price)) / initial_capital
 
 ## 七、模拟交易
 
+### 7.1 本地模拟盘
+
 代码：`services/execution/us_paper_trader.py`（USPaperTrader）
 
 4 张 DB 表：`us_paper_account`, `us_paper_position`, `us_paper_transaction`, `us_paper_nav`
@@ -509,6 +511,41 @@ NAV = (cash + Σ(shares × price)) / initial_capital
 - T+0 结算，支持做空（负 volume）
 - 默认初始资金 $100,000
 - `sync_position(target_weights)` 自动调仓到目标权重
+
+### 7.2 Alpaca 模拟盘（实盘 API）
+
+代码：`services/execution/alpaca_trader.py`（AlpacaTrader）
+
+通过 Alpaca Markets API 连接真实模拟盘，使用 IEX 实时行情驱动撮合。
+
+**配置**（`.env`）：
+```
+ALPACA_API_KEY=xxx
+ALPACA_SECRET_KEY=xxx
+ALPACA_PAPER=true
+```
+
+**CLI 命令**：
+```bash
+python3 cli.py paper status --market alpaca    # 查看账户 + 持仓
+python3 cli.py paper trade --market alpaca     # 选股 + 提交订单
+python3 cli.py paper reset --market alpaca     # 平仓 + 取消挂单
+```
+
+**API 端点**：
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/us/alpaca/account` | GET | 账户信息 |
+| `/api/us/alpaca/positions` | GET | 持仓列表 |
+| `/api/us/alpaca/orders` | GET | 订单（?status=open/closed） |
+| `/api/us/alpaca/trade` | POST | 选股 + 调仓 |
+| `/api/us/alpaca/reconcile` | POST | 对账（目标 vs 实际） |
+| `/api/us/alpaca/reset` | POST | 平仓 + 取消挂单 |
+
+**与本地模拟盘的区别**：
+- 本地模拟盘用数据库中的历史收盘价模拟成交，Alpaca 用实时行情
+- Alpaca 零佣金、不模拟滑点（但有真实 bid/ask spread）
+- NAV 快照写入本地 `us_paper_nav`（account_id=-1），便于与本地模拟盘对比
 
 ---
 
@@ -779,7 +816,7 @@ Step 3.5 通过 leave-one-out 分析剪除 6 个因子（VOL_PRICE_DIV、RESIDUA
 - **FF5 Alpha 跨时代一致**：2000-2011 α=6.18%(t=2.19)，2012-2023 α=6.58%(t=2.20)
 - **熊市保护是策略核心优势**：2002 +36%、2008 +32%、2022 +17% 超额
 - **2025 +108% 是 AI 泡沫风格红利**（β_rmw=-1.01），不是常态表现
-- **空头端仍需重建**（P1），当前 10 只太集中，信号用综合最差而非针对性催化剂
+- **空头端催化剂重建已回滚**（P1 回测验证失败，2021-2025 连续负超额），保留 v3 综合得分最差模式
 
 **P0 — 行业内选股验证（已完成 2026-04-03）：**
 
@@ -812,10 +849,12 @@ EPS_REVISION 行业内 ICIR 明细：Basic Materials 0.59、Financial Services 0
 - **ROE_TTM v2**：从水平值改为近 4Q 变化趋势（线性回归斜率）
 - 每个优化后用行业内 ICIR 框架验证，不显著则回滚
 
-**P1 — 空头端重建（P0 完成后，预计 1-2 周）：**
-- 信号改造：从"综合最差"改为独立负向催化剂（EPS_REVISION 强负 + ACCRUALS 高 + INSIDER 净卖出）
-- 组合改造：10→20-25 只，单只 2%→0.8-1%，去 Softmax 改等权，市值下限 $5B
-- 验证：空头单独跑 IS/OOS，不产生负 beta 收益则转纯多头+现金
+**P1 — 空头端重建（❌ 已回滚 2026-04-08）：**
+- 已实现并回测：独立负向催化剂（EPS_REVISION/ACCRUALS/INSIDER）+ 20 只等权 + 市值下限 $5B
+- 回测结果（2012-2025）：FF5 α=3.01%(t=1.16)，Sharpe 0.42，2021-2025 连续 5 年负超额
+- 对比 v3（无空头重建）：α 从 6.66%(t=2.26) 降至 3.01%(t=1.16)，显著性丢失
+- **结论：空头催化剂选股在牛市反噬严重，已回滚至 v3（10 只、综合得分最差）**
+- 后续方向：暂搁空头优化，优先 P0 因子优化提升截面选股力
 
 **P2 — 噪音因子清理（与 P0 并行，2-3 天）：**
 - 直接移除：IV_SKEW、PUT_CALL_RATIO、NEWS_SENTIMENT、POLYMARKET_SENT（无数据/无覆盖，等积累 1-2 年后重评）

@@ -1273,12 +1273,19 @@ app.add_typer(paper_app, name="paper")
 
 @paper_app.command("status")
 def paper_status(
-    market: str = typer.Option("cn", help="市场: cn 或 us"),
+    market: str = typer.Option("cn", help="市场: cn, us 或 alpaca"),
 ):
     """查看模拟账户状态"""
     db = _get_db()
 
-    if market == "us":
+    if market == "alpaca":
+        from services.execution.alpaca_trader import AlpacaTrader
+        trader = AlpacaTrader(db)
+        trader.connect()
+        console.print(f"\n[cyan]Alpaca 模拟账户[/cyan]")
+        console.print(trader.get_position_report())
+        return
+    elif market == "us":
         from services.execution.us_paper_trader import USPaperTrader
         trader = USPaperTrader(db)
         trader.connect()
@@ -1305,7 +1312,7 @@ def paper_status(
 
 @paper_app.command("trade")
 def paper_trade(
-    market: str = typer.Option("cn", help="市场: cn 或 us"),
+    market: str = typer.Option("cn", help="市场: cn, us 或 alpaca"),
     date: str = typer.Option("", help="交易日期"),
 ):
     """执行模拟交易（选股+调仓）"""
@@ -1318,15 +1325,21 @@ def paper_trade(
     console.print(f"[cyan]执行 {market.upper()} 模拟交易: {date}[/cyan]")
     t0 = time.time()
 
-    if market == "us":
+    if market in ("us", "alpaca"):
         from services.strategy.us_multi_factor import USMultiFactorStrategy
-        from services.execution.us_paper_trader import USPaperTrader
         strategy = USMultiFactorStrategy(db)
         result = strategy.select_stocks(date)
         if result is None or result.empty:
             console.print("[yellow]无选股结果，跳过交易[/yellow]")
             return
-        trader = USPaperTrader(db)
+
+        if market == "alpaca":
+            from services.execution.alpaca_trader import AlpacaTrader
+            trader = AlpacaTrader(db)
+        else:
+            from services.execution.us_paper_trader import USPaperTrader
+            trader = USPaperTrader(db)
+
         trader.connect()
         n = trader.sync_position(result[["ticker", "weight"]])
         trader.update_nav()
@@ -1348,12 +1361,17 @@ def paper_trade(
 
 @paper_app.command("reset")
 def paper_reset(
-    market: str = typer.Option("cn", help="市场: cn 或 us"),
+    market: str = typer.Option("cn", help="市场: cn, us 或 alpaca"),
 ):
     """重置模拟账户"""
     db = _get_db()
 
-    if market == "us":
+    if market == "alpaca":
+        from services.execution.alpaca_trader import AlpacaTrader
+        trader = AlpacaTrader(db)
+        trader.connect()
+        trader.reset()
+    elif market == "us":
         from services.execution.us_paper_trader import USPaperTrader
         trader = USPaperTrader(db)
         trader.connect()

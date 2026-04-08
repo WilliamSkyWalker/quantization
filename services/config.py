@@ -223,7 +223,12 @@ for _pair in _raw_index_map.split(","):
 
 PAPER_INITIAL_CAPITAL = float(os.environ.get("PAPER_INITIAL_CAPITAL", "500000"))
 PAPER_ACCOUNT_NAME = os.environ.get("PAPER_ACCOUNT_NAME", "default")
-TRADER_TYPE = os.environ.get("TRADER_TYPE", "paper")  # paper / qmt / ptrade
+TRADER_TYPE = os.environ.get("TRADER_TYPE", "paper")  # paper / qmt / ptrade / alpaca
+
+# Alpaca Markets API
+ALPACA_API_KEY = os.environ.get("ALPACA_API_KEY", "")
+ALPACA_SECRET_KEY = os.environ.get("ALPACA_SECRET_KEY", "")
+ALPACA_PAPER = os.environ.get("ALPACA_PAPER", "true").lower() == "true"
 
 # 回测初始资金（独立于模拟盘）
 BACKTEST_INITIAL_CAPITAL = float(os.environ.get("BACKTEST_INITIAL_CAPITAL", "500000"))

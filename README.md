@@ -36,7 +36,9 @@ A股管道:
     → Alpha:    strategy/us_multi_factor.py (多空) → risk/us_risk_manager.py
     → Beta:     strategy/us_beta_strategy.py (Regime→仓位, 质量筛选等权)
     → Baseline: strategy/us_baseline_strategy.py (VQM 3因子, 纯静态 dollar-neutral)
-  → strategy/us_backtest.py (T+0,借券费,risk_controls开关) | execution/us_paper_trader.py
+  → strategy/us_backtest.py (T+0,借券费,risk_controls开关) → strategy/backtest_saver.py (结果存库)
+  → execution/us_paper_trader.py (本地模拟盘)
+  → execution/alpaca_trader.py (Alpaca API 模拟盘/实盘)
 ```
 
 **前端页面:**
@@ -180,7 +182,8 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | 数据迁移 | FMP+UW+Fiscal.ai+Quiver+AlphaVantage 六源数据接入 | ✅ |
 | 全项目日志覆盖 | 106 个 Python 文件所有 return/continue/break/except 分支加 logger | ✅ |
 | P0 行业内验证 | EPS_REVISION 行业内 ICIR=0.43，确认截面选股 alpha 存在 | ✅ |
-| 待办 | P0 因子优化 / P1 空头重建 / P2 噪音清理 / P3 权重分级 / P4 鲁棒性 / P5 实盘 | 📋 |
+| P1 空头重建 | 催化剂选股回测失败（2021-2025 连续负超额），已回滚 | ❌ |
+| 待办 | P0 因子优化 / P2 噪音清理 / P3 权重分级 / P4 鲁棒性 / P5 实盘 | 📋 |
 
 **当前待办（按优先级）：**
 
@@ -188,7 +191,7 @@ P0 — 因子优化（最高优先级）：
 1. EPS_REVISION v2 四维复合（方向×幅度×广度×加速度）
 2. ACCRUALS v2 拆分、BP v2 R&D 调整、REV_5D v2 条件反转、ROE_TTM v2 趋势
 
-P1 — 空头端重建：独立负向催化剂选股 + 20-25 只分散 + 市值下限 $5B
+P1 — 空头端重建：❌ 已回滚（催化剂选股回测验证失败）
 
 P2 — 噪音清理：移除 IV_SKEW/PUT_CALL_RATIO/NEWS_SENTIMENT/POLYMARKET_SENT
 
