@@ -182,7 +182,7 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | 数据迁移 | FMP+UW+Fiscal.ai+Quiver+AlphaVantage 六源数据接入 | ✅ |
 | 全项目日志覆盖 | 106 个 Python 文件所有 return/continue/break/except 分支加 logger | ✅ |
 | P0 行业内验证 | EPS_REVISION 行业内 ICIR=0.43，确认截面选股 alpha 存在 | ✅ |
-| P1 空头 v5 | 独立因子模型 + Regime 门控 + 融券约束 + 止损，待回测 | 🔄 |
+| P1 空头 v5 | 独立因子模型 + 融券约束 + 止损（always-on），待回测 | 🔄 |
 | 待办 | P0 因子优化 / P2 噪音清理 / P3 权重分级 / P4 鲁棒性 / P5 实盘 | 📋 |
 
 **当前待办（按优先级）：**
@@ -191,7 +191,7 @@ P0 — 因子优化（最高优先级）：
 1. EPS_REVISION v2 四维复合（方向×幅度×广度×加速度）
 2. ACCRUALS v2 拆分、BP v2 R&D 调整、REV_5D v2 条件反转、ROE_TTM v2 趋势
 
-P1 — 空头 v5：独立因子模型 + Regime gate + 融券成本 + 15% 止损（待回测）
+P1 — 空头 v5：独立因子模型 + 融券约束 + 15% 止损，always-on（待回测）
 
 P2 — 噪音清理：移除 IV_SKEW/PUT_CALL_RATIO/NEWS_SENTIMENT/POLYMARKET_SENT
 

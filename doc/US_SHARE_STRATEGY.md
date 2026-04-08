@@ -326,8 +326,7 @@ LOBBY_INTENSITY 在 Technology 行业内 |ICIR|=0.36（显著），可能反映�
 - 固定 `US_LONG_N=15`（不随 Regime 变化）。
 - Softmax 权重分配，`tau=1.5`。
 
-**空头（Short v5）：** 独立因子模型，不复用多头综合得分。
-- **Regime 门控**：`regime_strength > 0.55` 时关闭空头（牛市零空头）
+**空头（Short v5）：** 独立因子模型，不复用多头综合得分，**始终开启**。
 - **独立 short_score**（4 因子 + 融券成本负向因子）：
   - EPS_REVISION（40%）：分析师下调
   - ACCRUALS（25%）：盈利质量差
@@ -336,12 +335,12 @@ LOBBY_INTENSITY 在 Technology 行业内 |ICIR|=0.36（显著），可能反映�
   - BORROW_COST（-10%）：融券成本惩罚
 - **INTERSECTION 选股**：short_score 前 30% ∩ EPS_REVISION worst 20%
 - **候选池约束**：市值 ≥ $10B，分级借券费率（$50B+ → 0.3%，$10-50B → 1.5%）
-- 等权，≤8 只（熊市）/ ≤5 只（中性）
+- 等权，≤8 只（`US_SHORT_N`）
 - **止损**：单只空头浮亏 ≥ 15% 逐日强制平仓
+- **无 Regime 门控**：始终保持 60% 净敞口提供永久性下行保护（Regime gate 回测验证失败：reactive 本质导致满仓挨跌，下行捕获从 0.39 恶化到 0.61）
 
-**净敞口：** `US_NET_EXPOSURE=0.6`（固定，不随 Regime 变化）
-- 有空头时：多头 80%，空头 -20%，净 60%
-- 无空头时（牛市 gate 关闭）：多头 100%，净 100%
+**净敞口：** `US_NET_EXPOSURE=0.6`（固定）
+- 多头 80%，空头 -20%，净 60%
 
 **ML Blend（未启用）：** LightGBM 代码已集成（`us_ml_scorer.py`），但 `train()` 未在回测/选股流程中被调用，`model` 始终为 None，`predict()` 不执行。当前全部回测结果为纯线性因子打分。需要实现滚动训练（expanding window）后才能安全启用。
 
@@ -824,7 +823,7 @@ Step 3.5 通过 leave-one-out 分析剪除 6 个因子（VOL_PRICE_DIV、RESIDUA
 - **FF5 Alpha 跨时代一致**：2000-2011 α=6.18%(t=2.19)，2012-2023 α=6.58%(t=2.20)
 - **熊市保护是策略核心优势**：2002 +36%、2008 +32%、2022 +17% 超额
 - **2025 +108% 是 AI 泡沫风格红利**（β_rmw=-1.01），不是常态表现
-- **空头端 v5 重设计**（独立因子模型 + Regime 门控 + 融券约束 + 止损），替代 v3/v4 的综合得分反面选股
+- **空头端 v5 重设计**（独立因子模型 + 融券约束 + 止损，always-on），替代 v3/v4 的综合得分反面选股
 
 **P0 — 行业内选股验证（已完成 2026-04-03）：**
 
@@ -867,7 +866,7 @@ v4 催化剂重建回测失败（UNION + 20 只 + always-on → α 从 6.66% 降
   - EARNINGS_SURPRISE（20%）：财报 miss → 后续下修
   - INSIDER_NET_BUY（15%）：内部人净卖出
   - BORROW_COST（-10%）：融券成本作为负向因子自然惩罚
-- **Regime 门控**：strength > 0.55 关闭空头（牛市零空头）
+- **无 Regime 门控**：always-on（回测验证 gate 导致下行捕获恶化 0.39→0.61）
 - **INTERSECTION 选股**：short_score 前 30% ∩ EPS_REVISION worst 20%（双重确认）
 - **融券约束**：市值 ≥ $10B，分级借券费率（$50B+ → 0.3%，$10-50B → 1.5%）
 - **止损**：单只空头浮亏 ≥ 15% 强制平仓，不等月度调仓

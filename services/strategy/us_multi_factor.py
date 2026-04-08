@@ -928,83 +928,69 @@ class USMultiFactorStrategy:
                 long_selected["side"] = "LONG"
             return long_selected[["ticker", "score", "weight", "side"]] if len(long_selected) > 0 else empty
 
-        # === Short leg v5: Regime-gated + independent short factor model ===
+        # === Short leg v5: independent short factor model (always-on) ===
         short_selected = pd.DataFrame()
 
-        if strength > US_SHORT_REGIME_GATE:
-            # Bull market: no shorts
-            logger.info(
-                f"Short regime gate: strength={strength:.2f} > {US_SHORT_REGIME_GATE}, "
-                f"shorts OFF"
+        # Build short candidate pool: mcap >= $10B
+        mktcap_df = self._get_cached_mktcap_df("")
+
+        short_pool = composite.copy()
+        if mktcap_df is not None and not mktcap_df.empty:
+            short_pool = short_pool.merge(
+                mktcap_df[["ticker", "market_cap"]], on="ticker", how="left"
             )
+            before_n = len(short_pool)
+            short_pool = short_pool[
+                short_pool["market_cap"].fillna(0) >= US_SHORT_MIN_MCAP
+            ]
+            logger.debug(
+                f"Short mcap filter: {before_n} → {len(short_pool)} "
+                f"(>= ${US_SHORT_MIN_MCAP/1e9:.0f}B)"
+            )
+
+            # Assign tiered borrow cost
+            short_pool["BORROW_COST"] = 0.015  # default
+            for mcap_threshold, rate in sorted(
+                US_SHORT_BORROW_FEE_TIERS.items(), reverse=True
+            ):
+                short_pool.loc[
+                    short_pool["market_cap"] >= mcap_threshold, "BORROW_COST"
+                ] = rate
         else:
-            # Build short candidate pool: mcap >= $10B
-            # mktcap_df is cached (not date-dependent, uses us_stock_basic)
-            mktcap_df = self._get_cached_mktcap_df("")
+            logger.debug("Short pool: no mktcap data, using all stocks with default borrow cost")
+            short_pool["BORROW_COST"] = 0.015
 
-            short_pool = composite.copy()
-            if mktcap_df is not None and not mktcap_df.empty:
-                short_pool = short_pool.merge(
-                    mktcap_df[["ticker", "market_cap"]], on="ticker", how="left"
+        if len(short_pool) < 3:
+            logger.info(f"Short pool too small ({len(short_pool)}), skipping shorts")
+        else:
+            # Compute independent short score
+            short_pool["short_score"] = self._compute_short_score(short_pool)
+
+            # INTERSECTION filter:
+            # 1. short_score > Nth percentile
+            score_cutoff = short_pool["short_score"].quantile(
+                1.0 - US_SHORT_SCORE_PCT
+            )
+            # 2. EPS_REVISION gatekeeper: worst N%
+            if "EPS_REVISION" in short_pool.columns:
+                eps_cutoff = short_pool["EPS_REVISION"].quantile(
+                    US_SHORT_EPS_REV_PCT
                 )
-                before_n = len(short_pool)
-                short_pool = short_pool[
-                    short_pool["market_cap"].fillna(0) >= US_SHORT_MIN_MCAP
+                candidates = short_pool[
+                    (short_pool["short_score"] >= score_cutoff)
+                    & (short_pool["EPS_REVISION"] <= eps_cutoff)
                 ]
-                logger.debug(
-                    f"Short mcap filter: {before_n} → {len(short_pool)} "
-                    f"(>= ${US_SHORT_MIN_MCAP/1e9:.0f}B)"
-                )
-
-                # Assign tiered borrow cost
-                short_pool["BORROW_COST"] = 0.015  # default
-                for mcap_threshold, rate in sorted(
-                    US_SHORT_BORROW_FEE_TIERS.items(), reverse=True
-                ):
-                    short_pool.loc[
-                        short_pool["market_cap"] >= mcap_threshold, "BORROW_COST"
-                    ] = rate
             else:
-                logger.debug("Short pool: no mktcap data, using all stocks with default borrow cost")
-                short_pool["BORROW_COST"] = 0.015
+                logger.warning("Short selection: EPS_REVISION not available, using short_score only")
+                candidates = short_pool[
+                    short_pool["short_score"] >= score_cutoff
+                ]
 
-            if len(short_pool) < 3:
-                logger.info(f"Short pool too small ({len(short_pool)}), skipping shorts")
-            else:
-                # Compute independent short score
-                short_pool["short_score"] = self._compute_short_score(short_pool)
+            candidates = candidates.sort_values("short_score", ascending=False)
+            short_selected = candidates.head(US_SHORT_N).copy()
 
-                # INTERSECTION filter:
-                # 1. short_score > Nth percentile
-                score_cutoff = short_pool["short_score"].quantile(
-                    1.0 - US_SHORT_SCORE_PCT
-                )
-                # 2. EPS_REVISION gatekeeper: worst N%
-                if "EPS_REVISION" in short_pool.columns:
-                    eps_cutoff = short_pool["EPS_REVISION"].quantile(
-                        US_SHORT_EPS_REV_PCT
-                    )
-                    candidates = short_pool[
-                        (short_pool["short_score"] >= score_cutoff)
-                        & (short_pool["EPS_REVISION"] <= eps_cutoff)
-                    ]
-                else:
-                    logger.warning("Short selection: EPS_REVISION not available, using short_score only")
-                    candidates = short_pool[
-                        short_pool["short_score"] >= score_cutoff
-                    ]
-
-                # Regime-dependent max count: bear ≤8, neutral ≤5
-                if strength < 0.30:
-                    max_shorts = US_SHORT_N  # 8
-                else:
-                    max_shorts = max(3, int(US_SHORT_N * 0.6))  # ~5
-
-                candidates = candidates.sort_values("short_score", ascending=False)
-                short_selected = candidates.head(max_shorts).copy()
-
-                logger.info(
-                    f"Short selection: {len(short_pool)} pool → "
+            logger.info(
+                f"Short selection: {len(short_pool)} pool → "
                     f"{len(candidates)} candidates → {len(short_selected)} selected "
                     f"(regime={strength:.2f}, gate={US_SHORT_REGIME_GATE})"
                 )
