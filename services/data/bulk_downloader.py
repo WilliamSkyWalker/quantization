@@ -2262,13 +2262,8 @@ class BulkDownloader:
         results["esg_ratings"] = self.download_fmp_esg_ratings()
         results["employee_count"] = self.download_fmp_employee_count()
 
-        # Phase 3.5: 只有最新快照的数据（无历史，增量更新即可，全量导入也跑一次）
-        logger.info("=== Phase 3.5: 最新快照数据 ===")
-        results["shares_float"] = self.download_fmp_shares_float()
-        results["financial_scores"] = self.download_fmp_financial_scores()
-        results["price_targets"] = self.download_fmp_price_targets()
-        results["dcf_valuations"] = self.download_fmp_dcf_valuations()
-        results["stock_peers"] = self.download_fmp_stock_peers()
+        # 注意：shares_float/financial_scores/price_targets/dcf_valuations/stock_peers
+        # 只有最新快照无历史数据，不在全量导入中跑，仅在增量更新(data update)中跑
 
         # Phase 4: 指数/商品/宏观
         logger.info("=== Phase 4: 指数/商品/宏观 ===")
