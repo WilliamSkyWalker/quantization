@@ -145,6 +145,7 @@ class USFactorBase(ABC):
             "revenue", "net_income", "eps", "gross_margin",
             "operating_margin", "roe", "total_equity", "total_assets",
             "total_debt", "free_cash_flow", "pe_ratio", "pb_ratio",
+            "weighted_avg_shares",
         ]
         df_fin = cls._fast_mysql_read(db, fin_cols, "us_financial_data")
         if not df_fin.empty:
