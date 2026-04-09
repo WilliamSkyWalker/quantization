@@ -55,19 +55,22 @@ def get_us_clean_universe(db: DatabaseManager, date: str) -> pd.DataFrame:
 
     initial = len(df)
 
-    # 历史市值过滤（shares × price 季度精度，消除前瞻偏差）
+    # 历史市值过滤（us_key_metric 年度 forward-fill，消除前瞻偏差）
     from services.us_factors.base import USFactorBase
-    try:
-        # 用任意因子实例获取历史市值（内部走 _bulk_shares × _bulk_daily）
-        from services.us_factors.value import EP
-        _factor = EP(db)
-        hist_mktcap = _factor.get_market_cap(date)
-        if not hist_mktcap.empty:
-            df = df.merge(hist_mktcap[["ticker", "market_cap"]], on="ticker", how="left")
+    bulk_mktcap = USFactorBase._static_cache.get("_bulk_mktcap")
+    if bulk_mktcap is not None and not bulk_mktcap.empty:
+        valid = bulk_mktcap[bulk_mktcap["date"] <= date_dt]
+        if not valid.empty:
+            hist_mktcap = (
+                valid.sort_values("date")
+                .drop_duplicates(subset=["ticker"], keep="last")
+                [["ticker", "market_cap"]]
+            )
+            df = df.merge(hist_mktcap, on="ticker", how="left")
         else:
             df["market_cap"] = float("nan")
-    except Exception as e:
-        logger.debug(f"get_us_clean_universe: 历史市值获取失败: {e}, 回退静态快照")
+    else:
+        # 非回测模式回退静态快照
         static_mktcap = db.query(
             "SELECT ticker, market_cap FROM us_stock_basic WHERE market_cap IS NOT NULL"
         )

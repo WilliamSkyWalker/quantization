@@ -879,6 +879,16 @@ v4 催化剂重建回测失败（UNION + 20 只 + always-on → α 从 6.66% 降
 - **对照基准**：个股空头须跑赢"做空 SPX 指数"baseline，否则不值得
 - 待回测验证
 
+**数据治理（阻塞项，优先于所有策略优化）：**
+- **us_key_metric 季度市值缺失**：FMP bulk endpoint 只返回 FY end（Q1），Q2/Q3/Q4 从未入库
+  - 需要用 FMP stable `/stable/key-metrics?period=quarter` 逐 ticker 补拉全部季度数据
+  - 影响：市值前瞻偏差修复依赖季度精度，当前只有年度 forward-fill
+  - 预计 ~13000 ticker × 限流 = 1-2 小时
+- **市值前瞻偏差**：get_market_cap() 已改用 us_key_metric 历史数据，但年度精度不够
+  - 季度数据补全后自动生效（代码已就绪，只缺数据）
+- **shares × close 方案有拆股 bug**：weighted_avg_shares 是财报期股数，close 是当日价，
+  拆股后两者不匹配导致市值计算爆炸。已放弃此方案，改用 FMP 直接提供的季度 market_cap
+
 **P2 — 噪音因子清理（与 P0 并行，2-3 天）：**
 - 直接移除：IV_SKEW、PUT_CALL_RATIO、NEWS_SENTIMENT、POLYMARKET_SENT（无数据/无覆盖，等积累 1-2 年后重评）
 - 观察降权（0.5）：NET_PROFIT_YOY(ICIR 0.05)、TURN_20D(0.06)、US_ANALYST_COVERAGE(0.09)
