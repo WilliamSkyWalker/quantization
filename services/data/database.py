@@ -3101,6 +3101,11 @@ class DatabaseManager:
                     df[col] = df[col].apply(lambda x: x.to_pydatetime() if pd.notna(x) else None)
         df["updated_at"] = datetime.now()
 
+        # PostgreSQL: bool → int（PG Integer 列不接受 Python bool）
+        for col in df.columns:
+            if df[col].dtype == bool or str(df[col].dtype) == "boolean":
+                df[col] = df[col].astype(int)
+
         # Only keep columns that exist in the table
         try:
             table_cols_df = self.query(
