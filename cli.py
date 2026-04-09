@@ -211,8 +211,8 @@ def data_bulk_import(
         ("fmp", "estimates"): lambda: dl.download_fmp_eps_estimates_bulk(start_year),
         ("fmp", "income"): lambda: dl.download_fmp_income_statement_bulk(start_year),
         ("fmp", "financial-quarterly"): lambda: dl.download_fmp_financial_quarterly(),
-        ("fmp", "metrics"): lambda: dl.download_fmp_key_metrics_bulk(start_year),
-        ("fmp", "ratios"): lambda: dl.download_fmp_ratios_bulk(start_year),
+        ("fmp", "metrics"): lambda: dl.download_fmp_key_metrics(),
+        ("fmp", "ratios"): lambda: dl.download_fmp_ratios(),
         ("fmp", "prices"): lambda: dl._download_fmp_prices_per_ticker(start_year, 2026),
         ("fmp", "profiles"): dl.download_fmp_profiles,
         ("fmp", "insider"): dl.download_fmp_insider_trading,
@@ -402,7 +402,7 @@ def data_update(
             console.print("  [dim]FMP Earnings/Estimates/Metrics...[/dim]")
             results["earnings"] = dl.download_fmp_earnings_surprises_bulk(current_year - 1, current_year)
             results["estimates"] = dl.download_fmp_eps_estimates_bulk(current_year - 1, current_year + 3)
-            results["metrics"] = dl.download_fmp_key_metrics_bulk(current_year - 1, current_year)
+            results["metrics"] = dl.download_fmp_key_metrics()
         except Exception as e:
             logger.warning(f"data_update: FMP bulk 跳过: {e}")
             console.print(f"[yellow]FMP bulk 跳过: {e}[/yellow]")

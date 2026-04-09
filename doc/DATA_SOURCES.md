@@ -91,8 +91,8 @@
 | SP500 + NASDAQ 100 成分 + 历史变更 | sp500_constituent, nasdaq_constituent + historical | per-ticker | us_stock_basic |
 | 日线行情 | historical-price-full | per-ticker 5/批 | us_daily_price |
 | 季度财报 (IS+BS+CF) | stable/income-statement + balance-sheet + cash-flow | **per-ticker** 季度 | us_financial_data |
-| Key Metrics | key-metrics-bulk | **bulk 按年** | us_key_metric |
-| Financial Ratios | ratios-bulk | **bulk 按年** | us_key_metric |
+| Key Metrics | stable/key-metrics | **per-ticker** 季度 | us_key_metric |
+| Financial Ratios | stable/ratios | **per-ticker** 季度 | us_key_metric |
 | Earnings Surprise | earnings-surprises-bulk | **bulk 按年** | us_earnings_surprise |
 | EPS Consensus | analyst-estimates-bulk | **bulk 按年** | us_eps_estimate |
 | Insider Trading (Form 4) | insider-trading (v4) | per-ticker 分页 2003+ | us_insider_trade |

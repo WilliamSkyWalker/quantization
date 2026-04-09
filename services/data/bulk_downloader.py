@@ -569,104 +569,192 @@ class BulkDownloader:
         logger.info(f"FMP quarterly financials 总计: {total} 条")
         return total
 
-    def download_fmp_key_metrics_bulk(self, start_year: int = 1995, end_year: int = None) -> int:
-        """FMP bulk: key metrics by year, 每年立即写入。"""
-        if end_year is None:
-            end_year = datetime.now().year
-        years = list(range(start_year, end_year + 1))
+    # camelCase → snake_case 映射（FMP key-metrics + ratios 端点共用）
+    _KEY_METRIC_COL_MAP = {
+        "symbol": "ticker", "period": "period",
+        "calendarYear": "calendar_year",
+        "marketCap": "market_cap", "enterpriseValue": "enterprise_value",
+        "peRatio": "pe_ratio", "pbRatio": "pb_ratio",
+        "priceToSalesRatio": "ps_ratio",
+        "priceToFreeCashFlowsRatio": "price_to_fcf",
+        "priceEarningsToGrowthRatio": "peg_ratio",
+        "evToEBITDA": "ev_to_ebitda", "evToSales": "ev_to_sales",
+        "evToFreeCashFlow": "ev_to_fcf",
+        "evToOperatingCashFlow": "ev_to_ocf",
+        "enterpriseValueOverEBITDA": "ev_to_ebitda",
+        "returnOnEquity": "roe", "returnOnAssets": "roa",
+        "returnOnInvestedCapital": "roic", "returnOnCapitalEmployed": "roce",
+        "grossProfitMargin": "gross_profit_margin",
+        "operatingProfitMargin": "operating_profit_margin",
+        "netProfitMargin": "net_profit_margin",
+        "pretaxProfitMargin": "pretax_profit_margin",
+        "effectiveTaxRate": "effective_tax_rate",
+        "currentRatio": "current_ratio", "quickRatio": "quick_ratio",
+        "cashRatio": "cash_ratio",
+        "debtToEquityRatio": "debt_to_equity",
+        "debtToEquity": "debt_to_equity",
+        "debtToAssets": "debt_to_assets",
+        "debtToAssetsRatio": "debt_to_assets",
+        "totalDebtToCapitalization": "debt_to_capitalization",
+        "longTermDebtToCapitalization": "lt_debt_to_capitalization",
+        "interestCoverage": "interest_coverage",
+        "netDebtToEBITDA": "net_debt_to_ebitda",
+        "interestDebtPerShare": "interest_debt_per_share",
+        "debtRatio": "debt_ratio",
+        "freeCashFlowPerShare": "free_cash_flow_per_share",
+        "freeCashFlowYield": "fcf_yield",
+        "earningsYield": "earnings_yield",
+        "dividendYield": "dividend_yield",
+        "dividendPerShare": "dividend_per_share",
+        "payoutRatio": "payout_ratio",
+        "dividendPayoutRatio": "payout_ratio",
+        "bookValuePerShare": "book_value_per_share",
+        "cashPerShare": "cash_per_share",
+        "tangibleBookValuePerShare": "tangible_book_value_per_share",
+        "revenuePerShare": "revenue_per_share",
+        "netIncomePerShare": "net_income_per_share",
+        "operatingCashFlowPerShare": "operating_cash_flow_per_share",
+        "shareholdersEquityPerShare": "shareholders_equity_per_share",
+        "inventoryTurnover": "inventory_turnover",
+        "receivablesTurnover": "receivables_turnover",
+        "payablesTurnover": "payables_turnover",
+        "fixedAssetTurnover": "fixed_asset_turnover",
+        "assetTurnover": "asset_turnover",
+        "operatingCycle": "operating_cycle",
+        "cashConversionCycle": "cash_conversion_cycle",
+        "daysOfSalesOutstanding": "days_sales_outstanding",
+        "daysOfInventoryOutstanding": "days_inventory_outstanding",
+        "daysOfPayablesOutstanding": "days_payables_outstanding",
+        "capexToRevenue": "capex_to_revenue",
+        "capexToDepreciation": "capex_to_depreciation",
+        "capexToOperatingCashFlow": "capex_to_ocf",
+        "capexPerShare": "capex_per_share",
+        "stockBasedCompensationToRevenue": "sbc_to_revenue",
+        "incomeQuality": "income_quality",
+        "grahamNumber": "graham_number",
+        "grahamNetNet": "graham_net_net",
+        "workingCapital": "working_capital",
+        "tangibleAssetValue": "tangible_asset_value",
+        "netCurrentAssetValue": "net_current_asset_value",
+        "investedCapital": "invested_capital",
+        "averageReceivables": "average_receivables",
+        "averagePayables": "average_payables",
+        "averageInventory": "average_inventory",
+        "researchAndDevelopementToRevenue": "rd_to_revenue",
+        "researchAndDdevelopementToRevenue": "rd_to_revenue",
+        "intangiblesToTotalAssets": "intangibles_to_total_assets",
+        "salesGeneralAndAdministrativeToRevenue": "sga_to_revenue",
+        # ratios 端点特有
+        "priceToEarningsRatio": "pe_ratio",
+        "priceToBookRatio": "pb_ratio",
+        "priceToSaleRatio": "ps_ratio",
+        "priceToOperatingCashFlowsRatio": "price_to_ocf",
+        "shortTermCoverageRatios": "short_term_coverage",
+        "operatingCashFlowSalesRatio": "ocf_to_sales",
+        "freeCashFlowOperatingCashFlowRatio": "fcf_to_ocf",
+        "cashFlowCoverageRatios": "cash_flow_coverage",
+        "cashFlowToDebtRatio": "cash_flow_to_debt",
+        "companyEquityMultiplier": "equity_multiplier",
+        "ebtPerEbit": "ebt_per_ebit",
+        "priceToEarningsToGrowthRatio": "peg_ratio",
+        "longTermDebtToTotalAsset": "lt_debt_to_total_asset",
+    }
 
-        def _on_data(df):
-            col_map = {
-                "symbol": "ticker", "period": "period",
-                "marketCap": "market_cap", "enterpriseValue": "enterprise_value",
-                "peRatio": "pe_ratio", "pbRatio": "pb_ratio",
-                "priceToSalesRatio": "ps_ratio",
-                "evToEBITDA": "ev_to_ebitda", "evToSales": "ev_to_sales",
-                "enterpriseValueOverEBITDA": "ev_to_ebitda",
-                "returnOnEquity": "roe", "returnOnAssets": "roa",
-                "returnOnInvestedCapital": "roic",
-                "grossProfitMargin": "gross_profit_margin",
-                "operatingProfitMargin": "operating_profit_margin",
-                "netProfitMargin": "net_profit_margin",
-                "currentRatio": "current_ratio",
-                "debtToEquityRatio": "debt_to_equity",
-                "debtToEquity": "debt_to_equity",
-                "debtToAssets": "debt_to_assets",
-                "debtToAssetsRatio": "debt_to_assets",
-                "interestCoverage": "interest_coverage",
-                "netDebtToEBITDA": "net_debt_to_ebitda",
-                "freeCashFlowPerShare": "free_cash_flow_per_share",
-                "freeCashFlowYield": "fcf_yield",
-                "earningsYield": "earnings_yield",
-                "dividendYield": "dividend_yield",
-                "payoutRatio": "payout_ratio",
-                "bookValuePerShare": "book_value_per_share",
-                "cashPerShare": "cash_per_share",
-                "revenuePerShare": "revenue_per_share",
-                "netIncomePerShare": "net_income_per_share",
-                "inventoryTurnover": "inventory_turnover",
-                "receivablesTurnover": "receivables_turnover",
-                "capexToRevenue": "capex_to_revenue",
-                "stockBasedCompensationToRevenue": "sbc_to_revenue",
-                "incomeQuality": "income_quality",
-            }
-            df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
-            df = df[df["ticker"].notna()].copy()
+    def _map_key_metric_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """统一映射 FMP key-metrics / ratios 的 camelCase → snake_case。"""
+        df = df.rename(columns={k: v for k, v in self._KEY_METRIC_COL_MAP.items() if k in df.columns})
+        df = df[df["ticker"].notna()].copy()
+        # 获取 us_key_metric 表的实际列，只保留 DB 有的列
+        try:
+            table_cols_df = self.db.query("SHOW COLUMNS FROM us_key_metric")
+            valid_cols = set(table_cols_df["Field"].tolist()) - {"id", "updated_at"}
+        except Exception:
+            valid_cols = None
+        if valid_cols:
+            keep = [c for c in df.columns if c in valid_cols]
+            df = df[keep]
+        return df
 
-            keep = [c for c in [
-                "ticker", "date", "period", "market_cap", "enterprise_value",
-                "pe_ratio", "pb_ratio", "ps_ratio", "ev_to_ebitda", "ev_to_sales",
-                "earnings_yield", "fcf_yield", "dividend_yield", "payout_ratio",
-                "roe", "roa", "roic", "gross_profit_margin", "operating_profit_margin", "net_profit_margin",
-                "revenue_per_share", "net_income_per_share", "free_cash_flow_per_share",
-                "book_value_per_share", "cash_per_share",
-                "current_ratio", "debt_to_equity", "debt_to_assets",
-                "interest_coverage", "net_debt_to_ebitda",
-                "inventory_turnover", "receivables_turnover",
-                "capex_to_revenue", "sbc_to_revenue", "income_quality",
-            ] if c in df.columns]
-            self.db.upsert_us_key_metric(df[keep])
+    def download_fmp_key_metrics(self, tickers: list[str] = None, limit: int = 400) -> int:
+        """FMP per-ticker: /stable/key-metrics (季度) → us_key_metric.
+
+        替代已废弃的 key-metrics-bulk 端点。全量导入 API 返回字段。
+        """
+        if tickers is None:
+            tickers = self.db.get_us_tickers()
+        if not tickers:
+            logger.warning("download_fmp_key_metrics: 无 ticker")
+            return 0
+
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._fmp_get_stable_json(
+                "key-metrics",
+                params={"symbol": ticker, "period": "quarter", "limit": limit},
+            )
+            if not data:
+                logger.debug(f"key_metrics: {ticker} 无数据")
+                return 0
+            df = pd.DataFrame(data)
+            df = self._map_key_metric_df(df)
+            if df.empty:
+                logger.debug(f"key_metrics: {ticker} 映射后无有效数据")
+                return 0
+            self.db.upsert_us_key_metric(df)
             return len(df)
 
-        total = self._fmp_bulk_by_year(
-            "key-metrics-bulk", years,
-            extra_params={"period": "quarter"},
-            desc="FMP Key Metrics", on_data=_on_data,
-        )
-        logger.info(f"FMP key metrics bulk 总计: {total} 条")
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures),
+                               desc="FMP Key Metrics"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Key metrics 失败 {futures[future]}: {e}")
+
+        logger.info(f"FMP key metrics 总计: {total} 条")
         return total
 
-    def download_fmp_ratios_bulk(self, start_year: int = 1995, end_year: int = None) -> int:
-        """FMP bulk: financial ratios by year → us_key_metric, 每年立即写入。"""
-        if end_year is None:
-            end_year = datetime.now().year
-        years = list(range(start_year, end_year + 1))
+    def download_fmp_ratios(self, tickers: list[str] = None, limit: int = 400) -> int:
+        """FMP per-ticker: /stable/ratios (季度) → us_key_metric.
 
-        def _on_data(df):
-            col_map = {
-                "symbol": "ticker", "period": "period",
-                "returnOnEquity": "roe", "returnOnAssets": "roa",
-                "currentRatio": "current_ratio",
-                "debtToEquityRatio": "debt_to_equity",
-                "priceToEarningsRatio": "pe_ratio",
-                "priceToBookRatio": "pb_ratio",
-                "dividendYield": "dividend_yield",
-                "earningsYield": "earnings_yield",
-            }
-            df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
-            df = df[df["ticker"].notna()].copy()
-            keep = [c for c in ["ticker", "date", "period", "pe_ratio", "pb_ratio",
-                                 "roe", "roa", "current_ratio", "debt_to_equity",
-                                 "dividend_yield", "earnings_yield"] if c in df.columns]
-            self.db.upsert_us_key_metric(df[keep])
+        替代已废弃的 ratios-bulk 端点。与 key-metrics 共享同一张表。
+        """
+        if tickers is None:
+            tickers = self.db.get_us_tickers()
+        if not tickers:
+            logger.warning("download_fmp_ratios: 无 ticker")
+            return 0
+
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._fmp_get_stable_json(
+                "ratios",
+                params={"symbol": ticker, "period": "quarter", "limit": limit},
+            )
+            if not data:
+                logger.debug(f"ratios: {ticker} 无数据")
+                return 0
+            df = pd.DataFrame(data)
+            df = self._map_key_metric_df(df)
+            if df.empty:
+                logger.debug(f"ratios: {ticker} 映射后无有效数据")
+                return 0
+            self.db.upsert_us_key_metric(df)
             return len(df)
 
-        total = self._fmp_bulk_by_year(
-            "ratios-bulk", years,
-            extra_params={"period": "quarter"},
-            desc="FMP Ratios", on_data=_on_data,
-        )
-        logger.info(f"FMP ratios bulk 总计: {total} 条")
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures),
+                               desc="FMP Ratios"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Ratios 失败 {futures[future]}: {e}")
+
+        logger.info(f"FMP ratios 总计: {total} 条")
         return total
 
     def download_fmp_eod_bulk(self, start_year: int = 2015, end_year: int = None) -> int:
@@ -1733,8 +1821,8 @@ class BulkDownloader:
         results["earnings_surprises"] = self.download_fmp_earnings_surprises_bulk(start_year)
         results["eps_estimates"] = self.download_fmp_eps_estimates_bulk(start_year)
         results["income_statement"] = self.download_fmp_income_statement_bulk(start_year)
-        results["key_metrics"] = self.download_fmp_key_metrics_bulk(start_year)
-        results["ratios"] = self.download_fmp_ratios_bulk(start_year)
+        results["key_metrics"] = self.download_fmp_key_metrics()
+        results["ratios"] = self.download_fmp_ratios()
         # Per-ticker
         results["prices"] = self._download_fmp_prices_per_ticker(start_year, datetime.now().year)
         results["profiles"] = self.download_fmp_profiles()

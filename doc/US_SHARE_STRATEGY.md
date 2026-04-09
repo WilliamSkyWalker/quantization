@@ -54,8 +54,8 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 | SP500 + NASDAQ 100 成分 | sp500_constituent, nasdaq_constituent | per-ticker | 含历史变更（幸存者偏差修正）|
 | 日线行情 | historical-price-full | per-ticker | OHLCV + adjClose，5 ticker/批 |
 | 季度财报 | income-statement-bulk | **bulk 按年** | 全市场 1995+，含 filingDate |
-| Key Metrics | key-metrics-bulk | **bulk 按年** | PE/PB/ROE/EV 等 60+ 指标 |
-| Financial Ratios | ratios-bulk | **bulk 按年** | 60+ 比率 |
+| Key Metrics | stable/key-metrics | **per-ticker** 季度 | PE/PB/ROE/EV 等 80+ 指标（全量导入）|
+| Financial Ratios | stable/ratios | **per-ticker** 季度 | 60+ 比率（全量导入）|
 | Earnings Surprise | earnings-surprises-bulk | **bulk 按年** | actual vs estimated EPS, 1995+ |
 | EPS Consensus | analyst-estimates-bulk | **bulk 按年** | 分析师共识预期 |
 | Insider Trading | insider-trading (v4) | per-ticker 分页 | SEC Form 4，2003+ |
