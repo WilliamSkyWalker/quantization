@@ -859,6 +859,10 @@ class USInsiderTrade(Base):
     security_name = Column(String(200), comment="证券名称 (Common Stock / RSU 等)")
     form_type = Column(String(10), comment="表格类型 (4/4A)")
     link = Column(String(500), comment="SEC 文件链接")
+    url = Column(String(500), comment="SEC 文件链接 (FMP 字段名)")
+    reporting_cik = Column(String(20), comment="报告人 CIK")
+    company_cik = Column(String(20), comment="公司 CIK")
+    direct_or_indirect = Column(String(5), comment="D=直接/I=间接")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     __table_args__ = (
@@ -1066,6 +1070,16 @@ class USCongressTrade(Base):
     trade_type = Column(String(50), comment="purchase/sale")
     amount = Column(String(50), comment="金额区间")
     asset_description = Column(String(500), comment="资产描述")
+    # FMP senate/house-trading 额外字段
+    first_name = Column(String(100), comment="议员名")
+    last_name = Column(String(100), comment="议员姓")
+    district = Column(String(10), comment="州代码")
+    link = Column(String(500), comment="披露链接")
+    comment = Column(String(500), comment="备注")
+    asset_type = Column(String(50), comment="资产类型 (Stock/Option 等)")
+    owner = Column(String(50), comment="持有人类型 (Self/Joint/Child 等)")
+    capital_gains_over_200_usd = Column(String(10), comment="资本利得超过$200")
+    source = Column(String(20), comment="数据源 (uw/fmp_senate/fmp_house)")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     __table_args__ = (
@@ -1520,6 +1534,8 @@ class USESGRating(Base):
     social_score = Column(Float, comment="社会分数")
     governance_score = Column(Float, comment="治理分数")
     esg_risk_rating = Column(String(50), comment="ESG 风险评级")
+    industry_rank = Column(String(50), comment="行业排名 (如 '4 out of 6')")
+    fiscal_year = Column(Integer, comment="财年（FMP 用 fiscalYear）")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     __table_args__ = (
