@@ -446,8 +446,8 @@ class USStockBasic(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     ticker = Column(String(20), nullable=False, comment="股票代码 (AAPL)")
-    name = Column(String(200), comment="公司名")
-    exchange = Column(String(20), comment="交易所 (NYSE/NASDAQ)")
+    name = Column(String(500), comment="公司名")
+    exchange = Column(String(50), comment="交易所 (NYSE/NASDAQ)")
     sector = Column(String(100), comment="GICS 行业大类")
     industry = Column(String(200), comment="GICS 子行业")
     ipo_date = Column(Date, comment="IPO 日期")
@@ -1316,7 +1316,7 @@ class USSharesFloat(Base):
     free_float = Column(Float, comment="自由流通比例")
     float_shares = Column(Float, comment="流通股数")
     outstanding_shares = Column(Float, comment="总股本")
-    source = Column(String(100), comment="数据来源")
+    source = Column(String(500), comment="数据来源 (SEC URL)")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     __table_args__ = (
