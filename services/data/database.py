@@ -1833,8 +1833,8 @@ class DatabaseManager:
         # 连接池参数仅适用于 MySQL 等数据库，SQLite 不支持
         if not db_url.startswith("sqlite"):
             engine_kwargs.update(
-                pool_size=25,
-                max_overflow=15,
+                pool_size=30,
+                max_overflow=20,
                 pool_recycle=3600,
                 pool_pre_ping=True,  # 使用前检测连接是否存活，防止远程 PG 超时断开
             )
@@ -3183,7 +3183,7 @@ class DatabaseManager:
         # 异步写入线程池（多线程并行写 DB）
         if not hasattr(self, '_write_pool'):
             from concurrent.futures import ThreadPoolExecutor as _TPE
-            self._write_pool = _TPE(max_workers=12)
+            self._write_pool = _TPE(max_workers=20)
             self._write_futures = []
 
         for i in range(0, len(records), batch_size):
@@ -3192,9 +3192,9 @@ class DatabaseManager:
             fut = self._write_pool.submit(_do_write, sql_str, values, table_name, batch_size)
             self._write_futures.append(fut)
 
-        # 清理已完成的 future + 背压：待写任务超 50 个时等待一批完成
+        # 清理已完成的 future + 背压：待写任务超 200 个时等待一批完成
         self._write_futures = [f for f in self._write_futures if not f.done()]
-        if len(self._write_futures) > 50:
+        if len(self._write_futures) > 200:
             from concurrent.futures import wait, FIRST_COMPLETED
             done, self._write_futures = wait(self._write_futures, return_when=FIRST_COMPLETED)
             self._write_futures = list(self._write_futures)
