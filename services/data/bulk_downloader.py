@@ -150,45 +150,6 @@ def _request_with_retry(method: str, url: str, max_retries: int = 3, **kwargs) -
 # BulkDownloader
 # ============================================================
 
-class _AsyncWriter:
-    """异步写入队列：API 拉取和 DB 写入分离，避免写库阻塞 API 调用。"""
-
-    def __init__(self, max_queue: int = 50):
-        import queue
-        import threading
-        self._queue = queue.Queue(maxsize=max_queue)
-        self._thread = threading.Thread(target=self._worker, daemon=True)
-        self._thread.start()
-        self._error = None
-
-    def _worker(self):
-        while True:
-            item = self._queue.get()
-            if item is None:
-                break
-            fn, args = item
-            try:
-                fn(*args)
-                logger.info(f"AsyncWriter 写入成功: {fn.__name__}")
-            except Exception as e:
-                logger.warning(f"AsyncWriter 写入失败 ({fn.__name__}): {e}")
-                self._error = e
-            self._queue.task_done()
-
-    def submit(self, fn, *args):
-        """提交写入任务到队列。"""
-        self._queue.put((fn, args))
-
-    def wait(self):
-        """等待所有写入完成。"""
-        self._queue.join()
-
-    def close(self):
-        """关闭写入线程。"""
-        self._queue.put(None)
-        self._thread.join(timeout=30)
-
-
 class BulkDownloader:
     """四家 API 统一批量下载器"""
 
@@ -197,7 +158,6 @@ class BulkDownloader:
         self._fmp_limiter = RateLimiter(FMP_RATE_LIMIT)
         self._uw_limiter = RateLimiter(UW_RATE_LIMIT)
         self._fiscal_limiter = RateLimiter(FISCAL_RATE_LIMIT)
-        self._writer = _AsyncWriter()
 
     # ==============================================================
     # 断点续跑
@@ -296,16 +256,16 @@ class BulkDownloader:
         df = df.drop_duplicates(subset=["ticker"])
 
         # 异步写入 us_stock_basic
-        self._writer.submit(self.db.upsert_us_stock_basic, df)
+        self.db.upsert_us_stock_basic(df)
 
-        # 异步写入 industry classification
+        # 写入 industry classification
         if "sector" in df.columns:
             ind_df = df[["ticker", "sector", "industry"]].dropna(subset=["sector"])
             if not ind_df.empty:
-                self._writer.submit(self.db.upsert_us_industry_class, ind_df)
+                self.db.upsert_us_industry_class(ind_df)
 
-        # 等待写入完成（后续端点依赖 ticker 列表）
-        self._writer.wait()
+        # 等待异步写入完成（后续端点依赖 ticker 列表）
+        self.db.flush_writes()
         logger.info(f"FMP 全市场股票列表: {len(df)} 只")
         return len(df)
 

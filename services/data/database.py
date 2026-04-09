@@ -3094,7 +3094,7 @@ class DatabaseManager:
     def _fast_bulk_upsert(self, table_name: str, df: pd.DataFrame,
                           unique_keys: list[str], date_cols: list[str] = None,
                           datetime_cols: list[str] = None,
-                          batch_size: int = 500):
+                          batch_size: int = 2000):
         """通用快速 bulk upsert — PostgreSQL INSERT ... ON CONFLICT DO UPDATE。"""
         if df.empty:
             logger.debug(f"{table_name}: DataFrame 为空，跳过写入")
@@ -3180,35 +3180,33 @@ class DatabaseManager:
                         continue
                     raise
 
-        # 异步写入队列（如果存在）
-        if not hasattr(self, '_write_queue'):
-            import queue, threading
-            self._write_queue = queue.Queue(maxsize=100)
-            def _writer_worker():
-                while True:
-                    item = self._write_queue.get()
-                    if item is None:
-                        break
-                    try:
-                        item()
-                    except Exception as e:
-                        logger.warning(f"异步写入失败: {e}")
-                    self._write_queue.task_done()
-            self._write_thread = threading.Thread(target=_writer_worker, daemon=True)
-            self._write_thread.start()
+        # 异步写入线程池（多线程并行写 DB）
+        if not hasattr(self, '_write_pool'):
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+            self._write_pool = _TPE(max_workers=4)
+            self._write_futures = []
 
         for i in range(0, len(records), batch_size):
             batch = records[i:i + batch_size]
             values = [tuple(rec.get(c) for c in cols) for rec in batch]
-            # 提交到异步写入队列
-            self._write_queue.put(lambda s=sql_str, v=values, t=table_name, b=batch_size: _do_write(s, v, t, b))
+            fut = self._write_pool.submit(_do_write, sql_str, values, table_name, batch_size)
+            self._write_futures.append(fut)
+
+        # 清理已完成的 future，避免内存泄漏
+        self._write_futures = [f for f in self._write_futures if not f.done()]
 
         logger.info(f"{table_name}: 批量upsert {len(records)} 条记录")
 
     def flush_writes(self):
         """等待所有异步写入完成。"""
-        if hasattr(self, '_write_queue'):
-            self._write_queue.join()
+        if hasattr(self, '_write_futures'):
+            from concurrent.futures import wait
+            wait(self._write_futures)
+            # 检查是否有失败的
+            for f in self._write_futures:
+                if f.exception():
+                    logger.warning(f"异步写入有失败: {f.exception()}")
+            self._write_futures.clear()
 
     def _fast_bulk_upsert_sync(self, table_name: str, df: pd.DataFrame,
                           unique_keys: list[str], date_cols: list[str] = None,
