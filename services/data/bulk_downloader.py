@@ -2234,10 +2234,9 @@ class BulkDownloader:
         results["index_constituents"] = self.download_fmp_index_constituents()
         results["delisted"] = self.download_fmp_delisted_companies()
         results["symbol_changes"] = self.download_fmp_symbol_changes()
-        results["shares_float"] = self.download_fmp_shares_float()
         self.db.flush_writes()  # Phase 1 写入完成后再继续（后续依赖 ticker 列表）
 
-        # Phase 2: Per-ticker 核心数据（只跑普通股）
+        # Phase 2: Per-ticker 核心数据（有历史序列的）
         logger.info("=== Phase 2: Per-ticker 核心数据 ===")
         results["company_profiles"] = self.download_fmp_company_profiles()
         results["prices"] = self._download_fmp_prices_per_ticker(start_year, datetime.now().year)
@@ -2246,13 +2245,12 @@ class BulkDownloader:
         results["income_statement"] = self.download_fmp_income_statement_bulk()
         results["key_metrics"] = self.download_fmp_key_metrics()
         results["ratios"] = self.download_fmp_ratios()
-        results["financial_scores"] = self.download_fmp_financial_scores()
         results["financial_growth"] = self.download_fmp_financial_growth()
         results["enterprise_values"] = self.download_fmp_enterprise_values()
         results["owner_earnings"] = self.download_fmp_owner_earnings()
         self.db.flush_writes()
 
-        # Phase 3: Per-ticker 辅助数据
+        # Phase 3: Per-ticker 辅助数据（有历史序列的）
         logger.info("=== Phase 3: Per-ticker 辅助数据 ===")
         results["earnings_surprises"] = self.download_fmp_earnings_surprises_bulk()
         results["eps_estimates"] = self.download_fmp_eps_estimates_bulk()
@@ -2260,12 +2258,17 @@ class BulkDownloader:
         results["insider"] = self.download_fmp_insider_trading()
         results["insider_statistics"] = self.download_fmp_insider_statistics()
         results["analyst_grades"] = self.download_fmp_analyst_grades()
-        results["price_targets"] = self.download_fmp_price_targets()
         results["dividends_splits"] = self.download_fmp_dividends_splits()
-        results["dcf_valuations"] = self.download_fmp_dcf_valuations()
-        results["stock_peers"] = self.download_fmp_stock_peers()
         results["esg_ratings"] = self.download_fmp_esg_ratings()
         results["employee_count"] = self.download_fmp_employee_count()
+
+        # Phase 3.5: 只有最新快照的数据（无历史，增量更新即可，全量导入也跑一次）
+        logger.info("=== Phase 3.5: 最新快照数据 ===")
+        results["shares_float"] = self.download_fmp_shares_float()
+        results["financial_scores"] = self.download_fmp_financial_scores()
+        results["price_targets"] = self.download_fmp_price_targets()
+        results["dcf_valuations"] = self.download_fmp_dcf_valuations()
+        results["stock_peers"] = self.download_fmp_stock_peers()
 
         # Phase 4: 指数/商品/宏观
         logger.info("=== Phase 4: 指数/商品/宏观 ===")
