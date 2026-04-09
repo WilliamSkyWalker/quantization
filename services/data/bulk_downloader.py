@@ -122,10 +122,10 @@ class RateLimiter:
             self._last_call = time.time()
 
 
-_429_WAITS = [5, 10, 20]  # 429 重试等待秒数
+_429_WAITS = [5, 10, 20, 30, 60]  # 429 重试等待秒数
 
 
-def _request_with_retry(method: str, url: str, max_retries: int = 3, **kwargs) -> requests.Response:
+def _request_with_retry(method: str, url: str, max_retries: int = 5, **kwargs) -> requests.Response:
     """HTTP request with exponential backoff on 429/5xx."""
     kwargs.setdefault("timeout", 60)
     for attempt in range(max_retries):
