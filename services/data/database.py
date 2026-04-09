@@ -1818,6 +1818,7 @@ class DatabaseManager:
                 pool_size=15,
                 max_overflow=20,
                 pool_recycle=3600,
+                pool_pre_ping=True,  # 使用前检测连接是否存活，防止远程 PG 超时断开
             )
         self.engine = create_engine(db_url, **engine_kwargs)
         self.SessionLocal = sessionmaker(bind=self.engine)
