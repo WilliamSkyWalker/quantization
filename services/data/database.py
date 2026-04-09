@@ -1833,8 +1833,8 @@ class DatabaseManager:
         # 连接池参数仅适用于 MySQL 等数据库，SQLite 不支持
         if not db_url.startswith("sqlite"):
             engine_kwargs.update(
-                pool_size=15,
-                max_overflow=20,
+                pool_size=25,
+                max_overflow=15,
                 pool_recycle=3600,
                 pool_pre_ping=True,  # 使用前检测连接是否存活，防止远程 PG 超时断开
             )
@@ -3183,7 +3183,7 @@ class DatabaseManager:
         # 异步写入线程池（多线程并行写 DB）
         if not hasattr(self, '_write_pool'):
             from concurrent.futures import ThreadPoolExecutor as _TPE
-            self._write_pool = _TPE(max_workers=4)
+            self._write_pool = _TPE(max_workers=12)
             self._write_futures = []
 
         for i in range(0, len(records), batch_size):
