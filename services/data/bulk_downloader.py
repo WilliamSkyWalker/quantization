@@ -169,8 +169,9 @@ class _AsyncWriter:
             fn, args = item
             try:
                 fn(*args)
+                logger.info(f"AsyncWriter 写入成功: {fn.__name__}")
             except Exception as e:
-                logger.warning(f"AsyncWriter 写入失败: {e}")
+                logger.warning(f"AsyncWriter 写入失败 ({fn.__name__}): {e}")
                 self._error = e
             self._queue.task_done()
 
