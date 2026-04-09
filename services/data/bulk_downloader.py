@@ -1824,19 +1824,37 @@ class BulkDownloader:
         logger.info(f"FMP historical market cap 总计: {total} 条")
         return total
 
-    def download_fmp_shares_float(self) -> int:
-        """FMP bulk: all-shares-float → us_shares_float (一次全市场)."""
-        data = self._fmp_get_stable_json("shares-float/all")
-        if not data:
-            # 尝试备用路径
-            data = self._fmp_get_json("shares_float/all")
-        if not data:
-            logger.warning("download_fmp_shares_float: 无数据")
+    def download_fmp_shares_float(self, tickers: list[str] = None) -> int:
+        """FMP per-ticker: shares-float → us_shares_float."""
+        if tickers is None:
+            tickers = self.db.get_us_tickers(stocks_only=True)
+        if not tickers:
+            logger.warning("download_fmp_shares_float: 无 ticker")
             return 0
-        df = _fmp_df_to_snake(pd.DataFrame(data))
-        self.db.upsert_us_shares_float(df)
-        logger.info(f"FMP shares float 总计: {len(df)} 条")
-        return len(df)
+        tickers = self._skip_done_tickers("us_shares_float", tickers)
+        if not tickers:
+            logger.info("download_fmp_shares_float: 所有 ticker 已完成")
+            return 0
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._fmp_get_stable_json("shares-float", params={"symbol": ticker})
+            if not data:
+                logger.debug(f"shares_float: {ticker} 无数据")
+                return 0
+            df = _fmp_df_to_snake(pd.DataFrame(data if isinstance(data, list) else [data]))
+            self.db.upsert_us_shares_float(df)
+            return len(df)
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Shares Float"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Shares float 失败 {futures[future]}: {e}")
+        logger.info(f"FMP shares float 总计: {total} 条")
+        return total
 
     def download_fmp_financial_scores(self, tickers: list[str] = None) -> int:
         """FMP per-ticker: financial-scores → us_financial_score."""
