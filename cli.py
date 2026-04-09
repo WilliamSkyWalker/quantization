@@ -29,6 +29,24 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+# 配置 logging 输出到 stdout（避免和 tqdm stderr 冲突导致换行错乱）
+import tqdm
+class _TqdmLoggingHandler(logging.StreamHandler):
+    """让 logger 通过 tqdm.write 输出，避免和进度条交叉。"""
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            tqdm.tqdm.write(msg)
+        except Exception:
+            self.handleError(record)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[_TqdmLoggingHandler()],
+)
+
 logger = logging.getLogger(__name__)
 
 console = Console()
