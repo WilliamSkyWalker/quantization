@@ -1,4 +1,5 @@
 .env
+.env.local.bak
 /quant_system/.env
 twitter_cookies.json
 .claude/settings.local.json
