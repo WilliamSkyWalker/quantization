@@ -168,12 +168,9 @@ class BulkDownloader:
 
     def _skip_done_tickers(self, table: str, tickers: list[str],
                             ticker_col: str = "ticker") -> list[str]:
-        """断点续跑：排除目标表中已有数据的 ticker。"""
+        """断点续跑：查 import_progress 表，排除已完成的 ticker。"""
         try:
-            result = self.db.query(
-                f'SELECT DISTINCT "{ticker_col}" FROM "{table}"'
-            )
-            done = set(result[ticker_col].tolist()) if not result.empty else set()
+            done = self.db.get_import_done_tickers(table)
             remaining = [t for t in tickers if t not in done]
             if done:
                 logger.info(f"断点续跑 {table}: 全部 {len(tickers)}, "
@@ -182,6 +179,13 @@ class BulkDownloader:
         except Exception as e:
             logger.debug(f"_skip_done_tickers ({table}): {e}")
             return tickers
+
+    def _wrap_fetch(self, table: str, fetch_fn, ticker: str):
+        """包装 fetch 函数：成功后标记 import_progress。"""
+        count = fetch_fn(ticker)
+        if count > 0:
+            self.db.mark_import_done(table, ticker)
+        return count
 
     # ==============================================================
     # FMP Helpers
@@ -380,7 +384,7 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_earnings_surprise", _fetch_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures),
                                desc="FMP Earnings Surprises"):
                 try:
@@ -431,7 +435,7 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_fetch_estimates_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_eps_estimate", _fetch_estimates_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP EPS Estimates"):
                 try:
                     total += future.result()
@@ -486,7 +490,7 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_financial_data", _fetch_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures),
                                desc="FMP Income Statement"):
                 try:
@@ -635,7 +639,7 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_key_metric", _fetch_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures),
                                desc="FMP Key Metrics"):
                 try:
@@ -730,7 +734,7 @@ class BulkDownloader:
             return count
 
         with ThreadPoolExecutor(max_workers=12) as pool:
-            futures = {pool.submit(_fetch_price_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_daily_price", _fetch_price_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Daily Prices"):
                 try:
                     total += future.result()
@@ -825,7 +829,7 @@ class BulkDownloader:
             return count
 
         with ThreadPoolExecutor(max_workers=12) as pool:
-            futures = {pool.submit(_fetch_insider_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_insider_trade", _fetch_insider_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Insider Trading"):
                 try:
                     total += future.result()
@@ -877,7 +881,7 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_fetch_grade_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_analyst_recommendation", _fetch_grade_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures),
                                desc="FMP Analyst Grades"):
                 try:
@@ -937,7 +941,7 @@ class BulkDownloader:
             return count
 
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_fetch_div_split_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_corporate_action", _fetch_div_split_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Dividends & Splits"):
                 try:
                     total += future.result()
@@ -1778,7 +1782,7 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=12) as pool:
-            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_historical_market_cap", _fetch_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Historical Market Cap"):
                 try:
                     total += future.result()
@@ -1810,7 +1814,7 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_shares_float", _fetch_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Shares Float"):
                 try:
                     total += future.result()
@@ -1842,7 +1846,7 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=6) as pool:
-            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_financial_score", _fetch_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Financial Scores"):
                 try:
                     total += future.result()
@@ -1877,7 +1881,7 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_financial_growth", _fetch_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Financial Growth"):
                 try:
                     total += future.result()
@@ -1912,7 +1916,7 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_enterprise_value", _fetch_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Enterprise Values"):
                 try:
                     total += future.result()
@@ -1944,7 +1948,7 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=6) as pool:
-            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_owner_earnings", _fetch_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Owner Earnings"):
                 try:
                     total += future.result()
@@ -1979,7 +1983,7 @@ class BulkDownloader:
             return count
 
         with ThreadPoolExecutor(max_workers=6) as pool:
-            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_dcf_valuation", _fetch_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP DCF Valuations"):
                 try:
                     total += future.result()
@@ -2016,7 +2020,7 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=6) as pool:
-            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_stock_peer", _fetch_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Stock Peers"):
                 try:
                     total += future.result()
@@ -2048,7 +2052,7 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=6) as pool:
-            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_esg_rating", _fetch_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP ESG Ratings"):
                 try:
                     total += future.result()
@@ -2080,7 +2084,7 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=6) as pool:
-            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_price_target", _fetch_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Price Targets"):
                 try:
                     total += future.result()
@@ -2112,7 +2116,7 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_insider_statistic", _fetch_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Insider Statistics"):
                 try:
                     total += future.result()
@@ -2144,7 +2148,7 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            futures = {pool.submit(self._wrap_fetch, "us_employee_count", _fetch_single, t): t for t in tickers}
             for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Employee Count"):
                 try:
                     total += future.result()

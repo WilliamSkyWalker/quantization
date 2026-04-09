@@ -1715,6 +1715,21 @@ class USDelisted(Base):
     )
 
 
+class ImportProgress(Base):
+    """导入进度表：记录每个 (table, ticker) 是否完整导入"""
+    __tablename__ = "import_progress"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    table_name = Column(String(50), nullable=False, comment="目标表名")
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    completed_at = Column(DateTime, default=datetime.now, comment="完成时间")
+
+    __table_args__ = (
+        UniqueConstraint("table_name", "ticker", name="uq_import_progress"),
+        Index("idx_import_progress_table", "table_name"),
+    )
+
+
 class Watchlist(Base):
     """自选股表"""
     __tablename__ = "watchlist"
@@ -3214,6 +3229,28 @@ class DatabaseManager:
                 if f.exception():
                     logger.warning(f"异步写入有失败: {f.exception()}")
             self._write_futures.clear()
+
+    def mark_import_done(self, table_name: str, ticker: str):
+        """标记某个 (table, ticker) 导入完成。"""
+        from sqlalchemy import text
+        sql = text(
+            'INSERT INTO "import_progress" ("table_name", "ticker", "completed_at") '
+            'VALUES (:table_name, :ticker, :completed_at) '
+            'ON CONFLICT ("table_name", "ticker") DO UPDATE SET "completed_at" = EXCLUDED."completed_at"'
+        )
+        with self.engine.begin() as conn:
+            conn.execute(sql, {"table_name": table_name, "ticker": ticker, "completed_at": datetime.now()})
+
+    def get_import_done_tickers(self, table_name: str) -> set[str]:
+        """获取某个表已完成导入的 ticker 集合。"""
+        try:
+            result = self.query(
+                "SELECT ticker FROM import_progress WHERE table_name = :t",
+                params={"t": table_name},
+            )
+            return set(result["ticker"].tolist()) if not result.empty else set()
+        except Exception:
+            return set()
 
     def _fast_bulk_upsert_sync(self, table_name: str, df: pd.DataFrame,
                           unique_keys: list[str], date_cols: list[str] = None,
