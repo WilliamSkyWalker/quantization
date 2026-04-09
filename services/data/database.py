@@ -3078,7 +3078,7 @@ class DatabaseManager:
     def _fast_bulk_upsert(self, table_name: str, df: pd.DataFrame,
                           unique_keys: list[str], date_cols: list[str] = None,
                           datetime_cols: list[str] = None,
-                          batch_size: int = 2000):
+                          batch_size: int = 500):
         """通用快速 bulk upsert — PostgreSQL INSERT ... ON CONFLICT DO UPDATE。"""
         if df.empty:
             logger.debug(f"{table_name}: DataFrame 为空，跳过写入")
