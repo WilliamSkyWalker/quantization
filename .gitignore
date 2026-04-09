@@ -3,6 +3,7 @@
 /quant_system/.env
 twitter_cookies.json
 .claude/settings.local.json
+.mcp.json
 /logs/backend.log
 __pycache__/
 output/

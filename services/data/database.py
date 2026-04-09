@@ -451,11 +451,19 @@ class USStockBasic(Base):
     market_cap = Column(Float, comment="市值")
     country = Column(String(10), comment="国家")
     is_active = Column(Integer, default=1, comment="是否活跃 (1/0)")
+    is_etf = Column(Integer, default=0, comment="是否ETF (FMP isEtf)")
+    is_fund = Column(Integer, default=0, comment="是否基金 (FMP isFund)")
+    is_actively_trading = Column(Integer, default=1, comment="是否活跃交易 (FMP isActivelyTrading)")
+    beta = Column(Float, comment="Beta 系数")
+    price = Column(Float, comment="最新价格")
+    last_annual_dividend = Column(Float, comment="最近年度股息")
+    volume = Column(Float, comment="成交量")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     __table_args__ = (
         UniqueConstraint("ticker", name="uq_us_stock_basic_ticker"),
         Index("idx_us_stock_sector", "sector"),
+        Index("idx_us_stock_is_etf", "is_etf"),
     )
 
 
@@ -2438,11 +2446,22 @@ class DatabaseManager:
         """批量写入/更新美股基本信息（快速 raw SQL）。"""
         self._fast_bulk_upsert("us_stock_basic", df, ["ticker"])
 
-    def get_us_tickers(self, active_only: bool = True) -> list[str]:
-        """获取美股代码列表。"""
-        sql = "SELECT ticker FROM us_stock_basic"
+    def get_us_tickers(self, active_only: bool = True, stocks_only: bool = False) -> list[str]:
+        """获取美股代码列表。
+
+        Args:
+            active_only: 只返回活跃 ticker
+            stocks_only: 只返回普通股（排除 ETF/基金，用 FMP 的 isEtf/isFund 标记）
+        """
+        conditions = []
         if active_only:
-            sql += " WHERE is_active = 1"
+            conditions.append("is_active = 1")
+        if stocks_only:
+            conditions.append("(is_etf = 0 OR is_etf IS NULL)")
+            conditions.append("(is_fund = 0 OR is_fund IS NULL)")
+        sql = "SELECT ticker FROM us_stock_basic"
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
         df = self.query(sql)
         return df["ticker"].tolist() if not df.empty else []
 

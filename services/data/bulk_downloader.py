@@ -6,14 +6,15 @@
     - Unusual Whales — 期权 flow/暗池/国会交易/新闻
     - Fiscal.ai — 日频估值比率/业务分部
 
-所有 bulk 端点按年下载 CSV，自动重试 + rate limit。
+原则：API 返回什么就存什么，不做字段过滤。
 """
 
 import io
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import requests
@@ -29,6 +30,76 @@ from services.data.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
+
+
+# ============================================================
+# 通用 camelCase → snake_case 转换器
+# ============================================================
+
+# FMP 常见缩写，转换时保持为整体（不拆成单字母）
+_ABBREVIATIONS = {
+    "EBITDA": "ebitda", "EBIT": "ebit", "EPS": "eps",
+    "EBT": "ebt", "ROE": "roe", "ROA": "roa",
+    "ROIC": "roic", "ROCE": "roce", "SGA": "sga",
+    "OCF": "ocf", "FCF": "fcf", "DCF": "dcf",
+    "TTM": "ttm", "IPO": "ipo", "CEO": "ceo",
+    "CFO": "cfo", "CIK": "cik", "SIC": "sic",
+    "ESG": "esg", "ETF": "etf", "WACC": "wacc",
+    "USD": "usd", "PE": "pe", "PB": "pb",
+}
+
+# symbol → ticker 固定映射
+_FMP_RENAMES = {"symbol": "ticker"}
+
+
+def _camel_to_snake(name: str) -> str:
+    """Convert camelCase/PascalCase to snake_case.
+
+    Handles FMP abbreviations correctly:
+      evToEBITDA → ev_to_ebitda (not ev_to_e_b_i_t_d_a)
+      epsDiluted → eps_diluted
+      returnOnEquity → return_on_equity
+    """
+    # 固定重命名
+    if name in _FMP_RENAMES:
+        return _FMP_RENAMES[name]
+
+    # 处理连续大写缩写：在缩写和后续小写之间插入下划线
+    # "evToEBITDA" → "evTo_EBITDA" → 后续处理
+    # "netIncomePerEBT" → "netIncomePer_EBT"
+    result = name
+
+    # 1. 将已知缩写替换为 _缩写_ 形式（带边界标记）
+    for abbr in sorted(_ABBREVIATIONS.keys(), key=len, reverse=True):
+        # 匹配缩写在字符串中的位置
+        idx = result.find(abbr)
+        while idx != -1:
+            before = result[idx - 1] if idx > 0 else ""
+            after = result[idx + len(abbr):idx + len(abbr) + 1] if idx + len(abbr) < len(result) else ""
+            # 在缩写前后加下划线（如果相邻是小写字母）
+            prefix = "_" if before and before.islower() else ""
+            suffix = "_" if after and after.islower() else ""
+            replacement = prefix + _ABBREVIATIONS[abbr] + suffix
+            result = result[:idx] + replacement + result[idx + len(abbr):]
+            idx = result.find(abbr)
+
+    # 2. 标准 camelCase 拆分（处理剩余的大写字母）
+    result = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", result)
+    result = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", result)
+    result = result.lower()
+
+    # 3. 清理连续下划线
+    result = re.sub(r"_+", "_", result).strip("_")
+    return result
+
+
+def _fmp_df_to_snake(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert all camelCase column names to snake_case."""
+    col_map = {}
+    for col in df.columns:
+        new_name = _camel_to_snake(col)
+        col_map[col] = new_name
+    return df.rename(columns=col_map)
 
 
 # ============================================================
