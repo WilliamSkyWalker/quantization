@@ -3108,13 +3108,22 @@ class DatabaseManager:
             if df[col].dtype == bool or str(df[col].dtype) == "boolean":
                 df[col] = df[col].astype(int)
 
-        # Only keep columns that exist in the table
+        # Only keep columns that exist in the table (缓存避免重复查 information_schema)
+        if not hasattr(self, '_table_cols_cache'):
+            self._table_cols_cache = {}
+        if table_name not in self._table_cols_cache:
+            try:
+                table_cols_df = self.query(
+                    "SELECT column_name FROM information_schema.columns "
+                    f"WHERE table_name = '{table_name}'"
+                )
+                self._table_cols_cache[table_name] = set(table_cols_df["column_name"].tolist())
+            except Exception:
+                self._table_cols_cache[table_name] = None
         try:
-            table_cols_df = self.query(
-                "SELECT column_name FROM information_schema.columns "
-                f"WHERE table_name = '{table_name}'"
-            )
-            valid_cols = set(table_cols_df["column_name"].tolist())
+            valid_cols = self._table_cols_cache[table_name]
+            if valid_cols is None:
+                raise Exception("cached None")
         except Exception:
             valid_cols = set(df.columns)
         cols = [c for c in df.columns if c in valid_cols and c != "id"]
@@ -3125,23 +3134,29 @@ class DatabaseManager:
         records = _sanitize_records(df[cols].to_dict("records"))
 
         update_cols = [c for c in cols if c not in unique_keys and c != "id"]
-        placeholders = ", ".join([f":{c}" for c in cols])
         col_names = ", ".join([f'"{c}"' for c in cols])
-        # PostgreSQL: ON CONFLICT (keys) DO UPDATE SET col = EXCLUDED.col
         conflict_keys = ", ".join([f'"{c}"' for c in unique_keys])
         update_clause = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in update_cols])
 
-        sql = text(
-            f'INSERT INTO "{table_name}" ({col_names}) VALUES ({placeholders}) '
+        # 使用 psycopg2 execute_values 批量写入（比 executemany 快 10-50 倍）
+        from psycopg2.extras import execute_values
+        sql_str = (
+            f'INSERT INTO "{table_name}" ({col_names}) VALUES %s '
             f"ON CONFLICT ({conflict_keys}) DO UPDATE SET {update_clause}"
         )
 
         for i in range(0, len(records), batch_size):
             batch = records[i:i + batch_size]
+            values = [tuple(rec.get(c) for c in cols) for rec in batch]
             for attempt in range(3):
                 try:
-                    with self.engine.begin() as conn:
-                        conn.execute(sql, batch)
+                    raw_conn = self.engine.raw_connection()
+                    try:
+                        cursor = raw_conn.cursor()
+                        execute_values(cursor, sql_str, values, page_size=batch_size)
+                        raw_conn.commit()
+                    finally:
+                        raw_conn.close()
                     logger.debug(f"_fast_bulk_upsert: {table_name} 批次写入成功")
                     break
                 except Exception as e:
