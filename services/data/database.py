@@ -3192,8 +3192,15 @@ class DatabaseManager:
             fut = self._write_pool.submit(_do_write, sql_str, values, table_name, batch_size)
             self._write_futures.append(fut)
 
-        # 清理已完成的 future，避免内存泄漏
+        # 清理已完成的 future + 背压：待写任务超 50 个时等待一批完成
         self._write_futures = [f for f in self._write_futures if not f.done()]
+        if len(self._write_futures) > 50:
+            from concurrent.futures import wait, FIRST_COMPLETED
+            done, self._write_futures = wait(self._write_futures, return_when=FIRST_COMPLETED)
+            self._write_futures = list(self._write_futures)
+            for f in done:
+                if f.exception():
+                    logger.warning(f"异步写入失败: {f.exception()}")
 
         logger.info(f"{table_name}: 批量upsert {len(records)} 条记录")
 
