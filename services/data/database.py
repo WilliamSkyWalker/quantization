@@ -3145,28 +3145,63 @@ class DatabaseManager:
             f"ON CONFLICT ({conflict_keys}) DO UPDATE SET {update_clause}"
         )
 
-        for i in range(0, len(records), batch_size):
-            batch = records[i:i + batch_size]
-            values = [tuple(rec.get(c) for c in cols) for rec in batch]
+        def _do_write(sql, vals, tbl, bs):
             for attempt in range(3):
                 try:
                     raw_conn = self.engine.raw_connection()
                     try:
                         cursor = raw_conn.cursor()
-                        execute_values(cursor, sql_str, values, page_size=batch_size)
+                        execute_values(cursor, sql, vals, page_size=bs)
                         raw_conn.commit()
                     finally:
                         raw_conn.close()
-                    logger.debug(f"_fast_bulk_upsert: {table_name} 批次写入成功")
-                    break
+                    logger.debug(f"_fast_bulk_upsert: {tbl} 批次写入成功")
+                    return
                 except Exception as e:
                     if "deadlock" in str(e).lower() and attempt < 2:
                         import time as _time
                         _time.sleep(0.5 * (attempt + 1))
-                        logger.debug(f"_fast_bulk_upsert: {table_name} 死锁重试 (attempt {attempt+1})")
                         continue
                     raise
+
+        # 异步写入队列（如果存在）
+        if not hasattr(self, '_write_queue'):
+            import queue, threading
+            self._write_queue = queue.Queue(maxsize=100)
+            def _writer_worker():
+                while True:
+                    item = self._write_queue.get()
+                    if item is None:
+                        break
+                    try:
+                        item()
+                    except Exception as e:
+                        logger.warning(f"异步写入失败: {e}")
+                    self._write_queue.task_done()
+            self._write_thread = threading.Thread(target=_writer_worker, daemon=True)
+            self._write_thread.start()
+
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i + batch_size]
+            values = [tuple(rec.get(c) for c in cols) for rec in batch]
+            # 提交到异步写入队列
+            self._write_queue.put(lambda s=sql_str, v=values, t=table_name, b=batch_size: _do_write(s, v, t, b))
+
         logger.info(f"{table_name}: 批量upsert {len(records)} 条记录")
+
+    def flush_writes(self):
+        """等待所有异步写入完成。"""
+        if hasattr(self, '_write_queue'):
+            self._write_queue.join()
+
+    def _fast_bulk_upsert_sync(self, table_name: str, df: pd.DataFrame,
+                          unique_keys: list[str], date_cols: list[str] = None,
+                          datetime_cols: list[str] = None,
+                          batch_size: int = 500):
+        """同步版 _fast_bulk_upsert，用于需要立即确认写入的场景。"""
+        # 调用异步版本后立即 flush
+        self._fast_bulk_upsert(table_name, df, unique_keys, date_cols, datetime_cols, batch_size)
+        self.flush_writes()
 
     def _bulk_upsert_generic(self, model_class, df: pd.DataFrame, unique_keys: list[str],
                                 date_cols: list[str] = None):
