@@ -35,7 +35,8 @@ from sqlalchemy import (
     create_engine,
     text,
 )
-from sqlalchemy.dialects.mysql import MEDIUMTEXT
+# PostgreSQL 兼容：MEDIUMTEXT → Text
+MEDIUMTEXT = Text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from services.config import DB_URL, LOG_LEVEL
@@ -1242,6 +1243,21 @@ class DatabaseManager:
         创建所有表。如果表已存在则跳过。
         对已有表自动补齐新增列（如 adj_factor）。
         """
+        # PostgreSQL: 检查 schema 是否存在（不尝试创建，避免权限问题）
+        from services.config import DB_SCHEMA
+        if DB_SCHEMA:
+            try:
+                result = self.query(
+                    "SELECT 1 FROM information_schema.schemata WHERE schema_name = :s",
+                    params={"s": DB_SCHEMA},
+                )
+                if result.empty:
+                    logger.warning(f"Schema '{DB_SCHEMA}' 不存在，请让 DBA 创建: "
+                                   f"CREATE SCHEMA {DB_SCHEMA} AUTHORIZATION <user>")
+                    return
+            except Exception as e:
+                logger.warning(f"检查 schema 失败: {e}")
+
         # 确保舆情模型注册到 Base.metadata
         global _sentiment_models_loaded, _polymarket_models_loaded
         if not _sentiment_models_loaded:
@@ -1276,14 +1292,10 @@ class DatabaseManager:
         """已有 daily_price 表自动补齐 adj_factor 列。"""
         try:
             with self.engine.connect() as conn:
-                # 检查列是否存在
-                if str(self.engine.url).startswith("sqlite"):
-                    cols = [r[1] for r in conn.execute(text("PRAGMA table_info(daily_price)")).fetchall()]
-                else:
-                    cols = [r[0] for r in conn.execute(text(
-                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
-                        "WHERE TABLE_NAME='daily_price' AND TABLE_SCHEMA=DATABASE()"
-                    )).fetchall()]
+                cols = [r[0] for r in conn.execute(text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'daily_price'"
+                )).fetchall()]
                 if "adj_factor" not in cols:
                     conn.execute(text("ALTER TABLE daily_price ADD COLUMN adj_factor FLOAT"))
                     conn.commit()
@@ -1299,19 +1311,16 @@ class DatabaseManager:
             ("stock_basic", "float_share", "FLOAT"),
             ("industry_class", "l2_industry_code", "VARCHAR(20)"),
             ("industry_class", "l2_industry_name", "VARCHAR(50)"),
-            ("policy_article", "content", "LONGTEXT"),
+            ("policy_article", "content", "TEXT"),
             ("policy_analysis", "impact_type", "VARCHAR(30)"),
         ]
         try:
             with self.engine.connect() as conn:
                 for table, col_name, col_type in migrations:
-                    if str(self.engine.url).startswith("sqlite"):
-                        cols = [r[1] for r in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()]
-                    else:
-                        cols = [r[0] for r in conn.execute(text(
-                            f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
-                            f"WHERE TABLE_NAME='{table}' AND TABLE_SCHEMA=DATABASE()"
-                        )).fetchall()]
+                    cols = [r[0] for r in conn.execute(text(
+                        f"SELECT column_name FROM information_schema.columns "
+                        f"WHERE table_name = '{table}'"
+                    )).fetchall()]
                     if col_name not in cols:
                         conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}"))
                         conn.commit()
@@ -1487,10 +1496,8 @@ class DatabaseManager:
 
     def bulk_upsert_daily_price(self, df: pd.DataFrame):
         """
-        批量 upsert 日线行情（MySQL ON DUPLICATE KEY UPDATE）。
+        批量 upsert 日线行情（PostgreSQL ON CONFLICT DO UPDATE）。
         适用于增量更新场景，遇到重复自动更新，比逐条 ORM upsert 快 50-100 倍。
-
-        SQLite 回退到 bulk_insert（忽略重复）。
 
         Args:
             df: 日线行情 DataFrame。
@@ -1505,49 +1512,34 @@ class DatabaseManager:
         df = df.copy()
         df["updated_at"] = datetime.now()
 
-        is_mysql = not str(self.engine.url).startswith("sqlite")
+        cols = [
+            "ts_code", "trade_date", "open", "high", "low", "close",
+            "volume", "amount", "turnover_rate", "pct_chg",
+            "adj_factor", "dv_ttm", "pe_ttm", "pb", "ps_ttm",
+            "total_mv", "circ_mv", "turnover_rate_f", "volume_ratio",
+            "is_limit_up", "is_limit_down", "updated_at",
+        ]
+        existing_cols = [c for c in cols if c in df.columns]
+        update_cols = [c for c in existing_cols if c not in ("ts_code", "trade_date")]
 
-        if is_mysql:
-            # MySQL: INSERT ... ON DUPLICATE KEY UPDATE
-            cols = [
-                "ts_code", "trade_date", "open", "high", "low", "close",
-                "volume", "amount", "turnover_rate", "pct_chg",
-                "adj_factor", "dv_ttm", "pe_ttm", "pb", "ps_ttm",
-                "total_mv", "circ_mv", "turnover_rate_f", "volume_ratio",
-                "is_limit_up", "is_limit_down", "updated_at",
-            ]
-            existing_cols = [c for c in cols if c in df.columns]
-            update_cols = [c for c in existing_cols if c not in ("ts_code", "trade_date")]
+        placeholders = ", ".join([f":{c}" for c in existing_cols])
+        # open 是 PostgreSQL 保留字，需要双引号
+        col_names = ", ".join([f'"{c}"' for c in existing_cols])
+        update_clause = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in update_cols])
 
-            placeholders = ", ".join([f":{c}" for c in existing_cols])
-            # open 是 MySQL 保留字，需要反引号
-            col_names = ", ".join([f"`{c}`" for c in existing_cols])
-            update_clause = ", ".join([f"`{c}` = VALUES(`{c}`)" for c in update_cols])
+        sql = text(
+            f"INSERT INTO daily_price ({col_names}) VALUES ({placeholders}) "
+            f'ON CONFLICT ("ts_code", "trade_date") DO UPDATE SET {update_clause}'
+        )
 
-            sql = text(
-                f"INSERT INTO daily_price ({col_names}) VALUES ({placeholders}) "
-                f"ON DUPLICATE KEY UPDATE {update_clause}"
-            )
+        records = _sanitize_records(df[existing_cols].to_dict("records"))
+        batch_size = 1000
+        with self.engine.begin() as conn:
+            for i in range(0, len(records), batch_size):
+                batch = records[i:i + batch_size]
+                conn.execute(sql, batch)
 
-            records = _sanitize_records(df[existing_cols].to_dict("records"))
-            batch_size = 1000
-            with self.engine.begin() as conn:
-                for i in range(0, len(records), batch_size):
-                    batch = records[i:i + batch_size]
-                    conn.execute(sql, batch)
-
-            logger.info(f"daily_price: 批量upsert {len(records)} 条记录")
-        else:
-            # SQLite: 回退到 INSERT OR IGNORE
-            try:
-                df.to_sql(
-                    "daily_price", self.engine,
-                    if_exists="append", index=False, method="multi",
-                )
-            except Exception as e:
-                # 忽略重复键错误
-                logger.debug(f"bulk_upsert_daily_price: SQLite 插入忽略重复: {e}")
-            logger.info(f"daily_price: 批量插入(SQLite) {len(df)} 条记录")
+        logger.info(f"daily_price: 批量upsert {len(records)} 条记录")
 
     def batch_update_financial(self, updates: list[dict], end_date: str = None):
         """
@@ -1564,50 +1556,38 @@ class DatabaseManager:
             logger.debug("batch_update_financial: 更新列表为空，跳过")
             return
 
-        is_mysql = not str(self.engine.url).startswith("sqlite")
+        value_cols = ["pe_ttm", "pb", "total_mv", "circ_mv"]
+        ts_codes = [u["ts_code"] for u in updates]
+        codes_str = "','".join(ts_codes)
 
-        if is_mysql:
-            value_cols = ["pe_ttm", "pb", "total_mv", "circ_mv"]
-            ts_codes = [u["ts_code"] for u in updates]
-            codes_str = "','".join(ts_codes)
+        set_parts = []
+        for col in value_cols:
+            cases = []
+            for u in updates:
+                val = u.get(col)
+                if val is not None:
+                    cases.append(f"WHEN f.ts_code = '{u['ts_code']}' THEN {val}")
+            if cases:
+                case_sql = " ".join(cases)
+                set_parts.append(f"f.{col} = CASE {case_sql} ELSE f.{col} END")
 
-            set_parts = []
-            for col in value_cols:
-                cases = []
-                for u in updates:
-                    val = u.get(col)
-                    if val is not None:
-                        cases.append(f"WHEN f.ts_code = '{u['ts_code']}' THEN {val}")
-                if cases:
-                    case_sql = " ".join(cases)
-                    set_parts.append(f"f.{col} = CASE {case_sql} ELSE f.{col} END")
-
-            if set_parts:
-                sql = (
-                    f"UPDATE financial_data f "
-                    f"INNER JOIN ("
-                    f"  SELECT ts_code, MAX(end_date) AS latest_end "
-                    f"  FROM financial_data "
-                    f"  WHERE ts_code IN ('{codes_str}') "
-                    f"  GROUP BY ts_code"
-                    f") sub ON f.ts_code = sub.ts_code AND f.end_date = sub.latest_end "
-                    f"SET {', '.join(set_parts)}"
-                )
-                with self.engine.begin() as conn:
-                    conn.execute(text(sql))
-                logger.info(f"financial_data: 批量更新 {len(updates)} 条估值数据")
+        if set_parts:
+            sql = (
+                f"UPDATE financial_data AS f "
+                f"SET {', '.join(set_parts)} "
+                f"FROM ("
+                f"  SELECT ts_code, MAX(end_date) AS latest_end "
+                f"  FROM financial_data "
+                f"  WHERE ts_code IN ('{codes_str}') "
+                f"  GROUP BY ts_code"
+                f") sub "
+                f"WHERE f.ts_code = sub.ts_code AND f.end_date = sub.latest_end"
+            )
+            with self.engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info(f"financial_data: 批量更新 {len(updates)} 条估值数据")
         else:
-            # SQLite 逐条：取每只股票最新报告期的记录
-            with self.get_session() as session:
-                for u in updates:
-                    existing = session.query(FinancialData).filter_by(
-                        ts_code=u["ts_code"],
-                    ).order_by(FinancialData.end_date.desc()).first()
-                    if existing:
-                        for col in ["pe_ttm", "pb", "total_mv", "circ_mv"]:
-                            if col in u and u[col] is not None:
-                                setattr(existing, col, u[col])
-                session.commit()
+            logger.debug("batch_update_financial: 无有效估值数据需更新，跳过")
 
     def get_daily_price(
         self,
@@ -1803,54 +1783,32 @@ class DatabaseManager:
             df = df.copy()
             df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
 
-        is_mysql = not str(self.engine.url).startswith("sqlite")
+        cols = [
+            "commodity_code", "trade_date", "ts_code",
+            "open", "high", "low", "close", "settle",
+            "volume", "amount", "oi", "updated_at",
+        ]
+        df = df.copy()
+        df["updated_at"] = datetime.now()
+        existing_cols = [c for c in cols if c in df.columns]
+        update_cols = [c for c in existing_cols if c not in ("commodity_code", "trade_date")]
 
-        if is_mysql:
-            cols = [
-                "commodity_code", "trade_date", "ts_code",
-                "open", "high", "low", "close", "settle",
-                "volume", "amount", "oi", "updated_at",
-            ]
-            df = df.copy()
-            df["updated_at"] = datetime.now()
-            existing_cols = [c for c in cols if c in df.columns]
-            update_cols = [c for c in existing_cols if c not in ("commodity_code", "trade_date")]
+        placeholders = ", ".join([f":{c}" for c in existing_cols])
+        col_names = ", ".join([f'"{c}"' for c in existing_cols])
+        update_clause = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in update_cols])
 
-            placeholders = ", ".join([f":{c}" for c in existing_cols])
-            col_names = ", ".join([f"`{c}`" for c in existing_cols])
-            update_clause = ", ".join([f"`{c}` = VALUES(`{c}`)" for c in update_cols])
+        sql = text(
+            f"INSERT INTO commodity_price ({col_names}) VALUES ({placeholders}) "
+            f'ON CONFLICT ("commodity_code", "trade_date") DO UPDATE SET {update_clause}'
+        )
 
-            sql = text(
-                f"INSERT INTO commodity_price ({col_names}) VALUES ({placeholders}) "
-                f"ON DUPLICATE KEY UPDATE {update_clause}"
-            )
-
-            records = _sanitize_records(df[existing_cols].to_dict("records"))
-            batch_size = 1000
-            with self.engine.begin() as conn:
-                for i in range(0, len(records), batch_size):
-                    batch = records[i:i + batch_size]
-                    conn.execute(sql, batch)
-            logger.info(f"commodity_price: 批量upsert {len(records)} 条记录")
-        else:
-            # SQLite: 逐条 upsert
-            records = _sanitize_records(df.to_dict("records"))
-            with self.get_session() as session:
-                for record in records:
-                    existing = session.query(CommodityPrice).filter_by(
-                        commodity_code=record["commodity_code"],
-                        trade_date=record["trade_date"],
-                    ).first()
-                    if existing:
-                        for key, value in record.items():
-                            if key not in ("commodity_code", "trade_date") and hasattr(existing, key):
-                                setattr(existing, key, value)
-                    else:
-                        session.add(CommodityPrice(**{
-                            k: v for k, v in record.items() if hasattr(CommodityPrice, k)
-                        }))
-                session.commit()
-            logger.info(f"commodity_price: 写入/更新 {len(records)} 条记录")
+        records = _sanitize_records(df[existing_cols].to_dict("records"))
+        batch_size = 1000
+        with self.engine.begin() as conn:
+            for i in range(0, len(records), batch_size):
+                batch = records[i:i + batch_size]
+                conn.execute(sql, batch)
+        logger.info(f"commodity_price: 批量upsert {len(records)} 条记录")
 
     def get_commodity_price_history(
         self,
@@ -1916,49 +1874,28 @@ class DatabaseManager:
             df = df.copy()
             df["report_date"] = pd.to_datetime(df["report_date"]).dt.date
 
-        is_mysql = not str(self.engine.url).startswith("sqlite")
+        cols = ["indicator_code", "report_date", "value", "updated_at"]
+        df = df.copy()
+        df["updated_at"] = datetime.now()
+        existing_cols = [c for c in cols if c in df.columns]
+        update_cols = [c for c in existing_cols if c not in ("indicator_code", "report_date")]
 
-        if is_mysql:
-            cols = ["indicator_code", "report_date", "value", "updated_at"]
-            df = df.copy()
-            df["updated_at"] = datetime.now()
-            existing_cols = [c for c in cols if c in df.columns]
-            update_cols = [c for c in existing_cols if c not in ("indicator_code", "report_date")]
+        placeholders = ", ".join([f":{c}" for c in existing_cols])
+        col_names = ", ".join([f'"{c}"' for c in existing_cols])
+        update_clause = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in update_cols])
 
-            placeholders = ", ".join([f":{c}" for c in existing_cols])
-            col_names = ", ".join([f"`{c}`" for c in existing_cols])
-            update_clause = ", ".join([f"`{c}` = VALUES(`{c}`)" for c in update_cols])
+        sql = text(
+            f"INSERT INTO macro_indicator ({col_names}) VALUES ({placeholders}) "
+            f'ON CONFLICT ("indicator_code", "report_date") DO UPDATE SET {update_clause}'
+        )
 
-            sql = text(
-                f"INSERT INTO macro_indicator ({col_names}) VALUES ({placeholders}) "
-                f"ON DUPLICATE KEY UPDATE {update_clause}"
-            )
-
-            records = _sanitize_records(df[existing_cols].to_dict("records"))
-            batch_size = 1000
-            with self.engine.begin() as conn:
-                for i in range(0, len(records), batch_size):
-                    batch = records[i:i + batch_size]
-                    conn.execute(sql, batch)
-            logger.info(f"macro_indicator: 批量upsert {len(records)} 条记录")
-        else:
-            # SQLite: 逐条 upsert
-            records = _sanitize_records(df.to_dict("records"))
-            with self.get_session() as session:
-                for record in records:
-                    existing = session.query(MacroIndicator).filter_by(
-                        indicator_code=record["indicator_code"],
-                        report_date=record["report_date"],
-                    ).first()
-                    if existing:
-                        if "value" in record:
-                            existing.value = record["value"]
-                    else:
-                        session.add(MacroIndicator(**{
-                            k: v for k, v in record.items() if hasattr(MacroIndicator, k)
-                        }))
-                session.commit()
-            logger.info(f"macro_indicator: 写入/更新 {len(records)} 条记录")
+        records = _sanitize_records(df[existing_cols].to_dict("records"))
+        batch_size = 1000
+        with self.engine.begin() as conn:
+            for i in range(0, len(records), batch_size):
+                batch = records[i:i + batch_size]
+                conn.execute(sql, batch)
+        logger.info(f"macro_indicator: 批量upsert {len(records)} 条记录")
 
     def get_macro_indicator_history(
         self,
@@ -2220,7 +2157,7 @@ class DatabaseManager:
 
     def bulk_upsert_policy_articles(self, articles: list[dict]) -> int:
         """
-        批量 upsert 政策文章（MySQL ON DUPLICATE KEY UPDATE）。
+        批量 upsert 政策文章（PostgreSQL ON CONFLICT DO UPDATE）。
 
         Args:
             articles: 文章字典列表。
@@ -2232,40 +2169,35 @@ class DatabaseManager:
             logger.debug("bulk_upsert_policy_articles: 文章列表为空，跳过")
             return 0
 
-        is_mysql = not str(self.engine.url).startswith("sqlite")
+        cols = [
+            "source", "tier", "title", "url", "publish_date",
+            "category", "summary", "content", "content_hash", "scraped_at", "updated_at",
+        ]
+        existing_cols = [c for c in cols if c in articles[0]]
+        # 确保有 scraped_at 和 updated_at
+        now = datetime.now()
+        for a in articles:
+            a.setdefault("scraped_at", now)
+            a["updated_at"] = now
 
-        if is_mysql:
-            cols = [
-                "source", "tier", "title", "url", "publish_date",
-                "category", "summary", "content", "content_hash", "scraped_at", "updated_at",
-            ]
-            existing_cols = [c for c in cols if c in articles[0]]
-            # 确保有 scraped_at 和 updated_at
-            now = datetime.now()
-            for a in articles:
-                a.setdefault("scraped_at", now)
-                a["updated_at"] = now
+        update_cols = [c for c in existing_cols if c != "url"]
+        placeholders = ", ".join([f":{c}" for c in existing_cols])
+        col_names = ", ".join([f'"{c}"' for c in existing_cols])
+        update_clause = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in update_cols])
 
-            update_cols = [c for c in existing_cols if c != "url"]
-            placeholders = ", ".join([f":{c}" for c in existing_cols])
-            col_names = ", ".join([f"`{c}`" for c in existing_cols])
-            update_clause = ", ".join([f"`{c}` = VALUES(`{c}`)" for c in update_cols])
+        sql = text(
+            f"INSERT INTO policy_article ({col_names}) VALUES ({placeholders}) "
+            f'ON CONFLICT ("url") DO UPDATE SET {update_clause}'
+        )
 
-            sql = text(
-                f"INSERT INTO policy_article ({col_names}) VALUES ({placeholders}) "
-                f"ON DUPLICATE KEY UPDATE {update_clause}"
-            )
+        batch_size = 500
+        with self.engine.begin() as conn:
+            for i in range(0, len(articles), batch_size):
+                batch = articles[i:i + batch_size]
+                conn.execute(sql, batch)
 
-            batch_size = 500
-            with self.engine.begin() as conn:
-                for i in range(0, len(articles), batch_size):
-                    batch = articles[i:i + batch_size]
-                    conn.execute(sql, batch)
-
-            logger.info(f"policy_article: 批量upsert {len(articles)} 条")
-            return len(articles)  # 近似值
-        else:
-            return self.upsert_policy_articles(articles)
+        logger.info(f"policy_article: 批量upsert {len(articles)} 条")
+        return len(articles)  # 近似值
 
     def get_articles_without_content(
         self,
@@ -2534,7 +2466,7 @@ class DatabaseManager:
                           unique_keys: list[str], date_cols: list[str] = None,
                           datetime_cols: list[str] = None,
                           batch_size: int = 2000):
-        """通用快速 bulk upsert — MySQL INSERT ... ON DUPLICATE KEY UPDATE。"""
+        """通用快速 bulk upsert — PostgreSQL INSERT ... ON CONFLICT DO UPDATE。"""
         if df.empty:
             logger.debug(f"{table_name}: DataFrame 为空，跳过写入")
             return
@@ -2544,11 +2476,10 @@ class DatabaseManager:
             if col in df.columns:
                 converted = pd.to_datetime(df[col], errors="coerce")
                 df[col] = converted.apply(lambda x: x.date() if pd.notna(x) else None)
-        # Datetime columns → MySQL compatible format (strip T/Z from ISO 8601)
+        # Datetime columns → Python datetime
         for col in (datetime_cols or []):
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
-                # Convert to Python datetime (MySQL compatible)
                 df[col] = df[col].apply(lambda x: x.to_pydatetime() if pd.notna(x) else None)
         # Auto-detect: any remaining string columns with ISO datetime patterns
         for col in df.columns:
@@ -2561,8 +2492,11 @@ class DatabaseManager:
 
         # Only keep columns that exist in the table
         try:
-            table_cols_df = self.query(f"SHOW COLUMNS FROM `{table_name}`")
-            valid_cols = set(table_cols_df["Field"].tolist())
+            table_cols_df = self.query(
+                "SELECT column_name FROM information_schema.columns "
+                f"WHERE table_name = '{table_name}'"
+            )
+            valid_cols = set(table_cols_df["column_name"].tolist())
         except Exception:
             valid_cols = set(df.columns)
         cols = [c for c in df.columns if c in valid_cols and c != "id"]
@@ -2574,12 +2508,14 @@ class DatabaseManager:
 
         update_cols = [c for c in cols if c not in unique_keys and c != "id"]
         placeholders = ", ".join([f":{c}" for c in cols])
-        col_names = ", ".join([f"`{c}`" for c in cols])
-        update_clause = ", ".join([f"`{c}` = VALUES(`{c}`)" for c in update_cols])
+        col_names = ", ".join([f'"{c}"' for c in cols])
+        # PostgreSQL: ON CONFLICT (keys) DO UPDATE SET col = EXCLUDED.col
+        conflict_keys = ", ".join([f'"{c}"' for c in unique_keys])
+        update_clause = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in update_cols])
 
         sql = text(
-            f"INSERT INTO `{table_name}` ({col_names}) VALUES ({placeholders}) "
-            f"ON DUPLICATE KEY UPDATE {update_clause}"
+            f'INSERT INTO "{table_name}" ({col_names}) VALUES ({placeholders}) '
+            f"ON CONFLICT ({conflict_keys}) DO UPDATE SET {update_clause}"
         )
 
         for i in range(0, len(records), batch_size):
@@ -2591,7 +2527,7 @@ class DatabaseManager:
                     logger.debug(f"_fast_bulk_upsert: {table_name} 批次写入成功")
                     break
                 except Exception as e:
-                    if "Deadlock" in str(e) and attempt < 2:
+                    if "deadlock" in str(e).lower() and attempt < 2:
                         import time as _time
                         _time.sleep(0.5 * (attempt + 1))
                         logger.debug(f"_fast_bulk_upsert: {table_name} 死锁重试 (attempt {attempt+1})")
@@ -2638,8 +2574,11 @@ class DatabaseManager:
         df["updated_at"] = datetime.now()
         # Get valid columns
         try:
-            table_cols_df = self.query("SHOW COLUMNS FROM us_dark_pool")
-            valid_cols = set(table_cols_df["Field"].tolist())
+            table_cols_df = self.query(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'us_dark_pool'"
+            )
+            valid_cols = set(table_cols_df["column_name"].tolist())
         except Exception as e:
             logger.debug(f"upsert_us_dark_pool: 获取 us_dark_pool 表结构失败，使用 DataFrame 列名: {e}")
             valid_cols = set(df.columns)
@@ -2652,7 +2591,7 @@ class DatabaseManager:
                 elif isinstance(value, float) and (pd.isna(value) or value == float('inf') or value == float('-inf')):
                     record[key] = None
         placeholders = ", ".join([f":{c}" for c in cols])
-        col_names = ", ".join([f"`{c}`" for c in cols])
+        col_names = ", ".join([f'"{c}"' for c in cols])
         sql = text(f"INSERT INTO us_dark_pool ({col_names}) VALUES ({placeholders})")
         for i in range(0, len(records), 2000):
             batch = records[i:i + 2000]

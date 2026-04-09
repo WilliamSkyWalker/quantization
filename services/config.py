@@ -23,20 +23,28 @@ LOG_DIR = PROJECT_ROOT / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
 # ============================================================
-# MySQL 数据库配置
+# 数据库配置（PostgreSQL）
 # ============================================================
 
-MYSQL_HOST = os.environ.get("MYSQL_HOST", "127.0.0.1")
-MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "3306"))
-MYSQL_USER = os.environ.get("MYSQL_USER", "root")
-MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", "123456")
-MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE", "quant")
+DB_HOST = os.environ.get("DB_HOST", "")
+DB_PORT = int(os.environ.get("DB_PORT", "5432"))
+DB_USER = os.environ.get("DB_USER", "")
+DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
+DB_DATABASE = os.environ.get("DB_DATABASE", "")
+DB_SCHEMA = os.environ.get("DB_SCHEMA", "quant")
 
 DB_URL = (
-    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}"
-    f"@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}"
-    f"?charset=utf8mb4"
+    f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}"
+    f"@{DB_HOST}:{DB_PORT}/{DB_DATABASE}"
+    f"?options=-c search_path={DB_SCHEMA}"
 )
+
+# 兼容旧变量名（逐步废弃）
+MYSQL_HOST = DB_HOST
+MYSQL_PORT = DB_PORT
+MYSQL_USER = DB_USER
+MYSQL_PASSWORD = DB_PASSWORD
+MYSQL_DATABASE = DB_DATABASE
 
 # PostgreSQL 外部数据源（只读）
 PG_HOST = os.environ.get("PG_HOST", "")
