@@ -1833,7 +1833,7 @@ class DatabaseManager:
         # 连接池参数仅适用于 MySQL 等数据库，SQLite 不支持
         if not db_url.startswith("sqlite"):
             engine_kwargs.update(
-                pool_size=50,
+                pool_size=70,
                 max_overflow=20,
                 pool_recycle=3600,
                 pool_pre_ping=True,  # 使用前检测连接是否存活，防止远程 PG 超时断开
