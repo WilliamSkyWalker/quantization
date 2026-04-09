@@ -57,12 +57,14 @@ _FLOAT_MAX = 3.4e38  # MySQL FLOAT upper bound
 
 
 def _sanitize_records(records: list[dict]) -> list[dict]:
-    """将 records 中的 NaN/NaT/inf/溢出值替换为 None，避免 pymysql 报错。"""
+    """将 records 中的 NaN/NaT/inf/溢出值替换为 None，bool 转 int（PG 兼容）。"""
     for rec in records:
         for k, v in rec.items():
             if v is None:
-                continue  # None 无需清理
-            if isinstance(v, float):
+                continue
+            if isinstance(v, bool):
+                rec[k] = int(v)  # PG Integer 列不接受 Python bool
+            elif isinstance(v, float):
                 if math.isnan(v) or math.isinf(v) or abs(v) > _FLOAT_MAX:
                     rec[k] = None
             elif isinstance(v, pd.Timestamp) and pd.isna(v):

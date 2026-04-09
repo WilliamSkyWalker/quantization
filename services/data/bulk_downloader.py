@@ -348,9 +348,9 @@ class BulkDownloader:
         total = 0
 
         def _fetch_single(ticker):
-            data = self._fmp_get_stable_json(
-                "earnings-surprises",
-                params={"symbol": ticker, "limit": limit},
+            data = self._fmp_get_json(
+                f"earnings-surprises/{ticker}",
+                params={"limit": limit},
             )
             if not data:
                 logger.debug(f"earnings_surprises: {ticker} 无数据")
@@ -1810,7 +1810,7 @@ class BulkDownloader:
         total = 0
 
         def _fetch_single(ticker):
-            data = self._fmp_get_stable_json("score", params={"symbol": ticker})
+            data = self._fmp_get_json(f"score/{ticker}", version="v4")
             if not data:
                 logger.debug(f"financial_scores: {ticker} 无数据")
                 return 0
@@ -2080,7 +2080,7 @@ class BulkDownloader:
         total = 0
 
         def _fetch_single(ticker):
-            data = self._fmp_get_stable_json("insider-trading-statistics", params={"symbol": ticker})
+            data = self._fmp_get_json(f"insider-trading-statistics/{ticker}", version="v4")
             if not data:
                 logger.debug(f"insider_statistics: {ticker} 无数据")
                 return 0
