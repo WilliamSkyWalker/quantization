@@ -207,9 +207,9 @@ def data_bulk_import(
         ("fmp", "all-ticker"): lambda: dl.download_fmp_all_per_ticker(start_year),
         ("fmp", "stock-list"): dl.download_fmp_stock_list,
         ("fmp", "sp500"): dl.download_fmp_index_constituents,
-        ("fmp", "earnings"): lambda: dl.download_fmp_earnings_surprises_bulk(start_year),
-        ("fmp", "estimates"): lambda: dl.download_fmp_eps_estimates_bulk(start_year),
-        ("fmp", "income"): lambda: dl.download_fmp_income_statement_bulk(start_year),
+        ("fmp", "earnings"): lambda: dl.download_fmp_earnings_surprises_bulk(),
+        ("fmp", "estimates"): lambda: dl.download_fmp_eps_estimates_bulk(),
+        ("fmp", "income"): lambda: dl.download_fmp_income_statement_bulk(),
         ("fmp", "financial-quarterly"): lambda: dl.download_fmp_financial_quarterly(),
         ("fmp", "metrics"): lambda: dl.download_fmp_key_metrics(),
         ("fmp", "ratios"): lambda: dl.download_fmp_ratios(),
@@ -272,10 +272,10 @@ def data_download(
             "all": lambda: dl.download_fmp_all_bulk(1995),
             "list": dl.download_fmp_stock_list,
             "daily": lambda: dl._download_fmp_prices_per_ticker(2015, 2026),
-            "financial": lambda: dl.download_fmp_income_statement_bulk(1995),
+            "financial": lambda: dl.download_fmp_income_statement_bulk(),
             "industry": dl.download_fmp_profiles,
-            "analyst": lambda: dl.download_fmp_eps_estimates_bulk(1995),
-            "earnings": lambda: dl.download_fmp_earnings_surprises_bulk(1995),
+            "analyst": lambda: dl.download_fmp_eps_estimates_bulk(),
+            "earnings": lambda: dl.download_fmp_earnings_surprises_bulk(),
             "insider": dl.download_fmp_insider_trading,
             "macro": lambda: _download_fred(db),
         }
@@ -400,8 +400,8 @@ def data_update(
         # Earnings / Estimates / Metrics (bulk, current year + last year)
         try:
             console.print("  [dim]FMP Earnings/Estimates/Metrics...[/dim]")
-            results["earnings"] = dl.download_fmp_earnings_surprises_bulk(current_year - 1, current_year)
-            results["estimates"] = dl.download_fmp_eps_estimates_bulk(current_year - 1, current_year + 3)
+            results["earnings"] = dl.download_fmp_earnings_surprises_bulk()
+            results["estimates"] = dl.download_fmp_eps_estimates_bulk()
             results["metrics"] = dl.download_fmp_key_metrics()
         except Exception as e:
             logger.warning(f"data_update: FMP bulk 跳过: {e}")

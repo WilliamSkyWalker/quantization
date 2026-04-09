@@ -9,7 +9,6 @@
 原则：API 返回什么就存什么，不做字段过滤。
 """
 
-import io
 import logging
 import re
 import time
@@ -21,7 +20,7 @@ import requests
 from tqdm import tqdm
 
 from services.config import (
-    FMP_API_KEY, FMP_RATE_LIMIT, FMP_BULK_INTERVAL,
+    FMP_API_KEY, FMP_RATE_LIMIT,
     UW_API_KEY, UW_RATE_LIMIT,
     FISCAL_API_KEY, FISCAL_RATE_LIMIT,
     LOG_LEVEL,
@@ -204,57 +203,6 @@ class BulkDownloader:
             return []
         return data
 
-    def _fmp_get_bulk_csv(self, endpoint: str, params: dict = None) -> pd.DataFrame:
-        """FMP bulk CSV endpoint — /stable/xxx-bulk?year=..."""
-        if not FMP_API_KEY:
-            logger.warning("FMP_API_KEY 未设置")
-            return pd.DataFrame()
-        url = f"https://financialmodelingprep.com/stable/{endpoint}"
-        p = {"apikey": FMP_API_KEY}
-        if params:
-            p.update(params)
-        resp = _request_with_retry("GET", url, params=p)
-        if resp.status_code != 200:
-            logger.warning(f"FMP bulk {endpoint}: HTTP {resp.status_code}")
-            return pd.DataFrame()
-        text = resp.text.strip()
-        if not text or text.startswith("{"):
-            logger.warning(f"FMP bulk {endpoint} 非CSV响应: {text[:200]}")
-            return pd.DataFrame()
-        try:
-            return pd.read_csv(io.StringIO(text))
-        except Exception as e:
-            logger.warning(f"FMP bulk CSV 解析失败 {endpoint}: {e}")
-            return pd.DataFrame()
-
-    def _fmp_bulk_by_year(self, endpoint: str, years: list[int],
-                           extra_params: dict = None, desc: str = "",
-                           on_data=None) -> int:
-        """按年循环调用 FMP bulk 端点，拉到一年立即回调写入。
-        on_data: callable(df) -> int，每年数据就绪时回调，返回写入条数。
-        """
-        total = 0
-        for year in tqdm(years, desc=desc or f"FMP {endpoint}"):
-            params = {"year": year}
-            if extra_params:
-                params.update(extra_params)
-
-            for attempt in range(3):
-                df = self._fmp_get_bulk_csv(endpoint, params)
-                if not df.empty:
-                    if on_data:
-                        total += on_data(df)
-                    logger.debug(f"_fmp_bulk_by_year: 结束循环 (total += on_data(df))")
-
-                    break
-                if attempt < 2:
-                    wait = FMP_BULK_INTERVAL * (attempt + 2)
-                    logger.info(f"  year={year} 空结果, 等待 {wait}s 重试...")
-                    time.sleep(wait)
-
-            time.sleep(FMP_BULK_INTERVAL)
-        return total
-
     # ==============================================================
     # FMP Bulk Downloads
     # ==============================================================
@@ -281,25 +229,19 @@ class BulkDownloader:
         # 先删掉原始 exchange 列（长名如 "New York Stock Exchange"），保留 exchangeShortName
         if "exchange" in df.columns and "exchangeShortName" in df.columns:
             df = df.drop(columns=["exchange"])
-        col_map = {
-            "symbol": "ticker", "companyName": "name",
-            "marketCap": "market_cap", "sector": "sector",
-            "industry": "industry", "exchangeShortName": "exchange",
-            "country": "country",
-        }
-        df = df.rename(columns=col_map)
+        df = _fmp_df_to_snake(df)
+        df = df.rename(columns={"exchange_short_name": "exchange", "company_name": "name"})
         df["is_active"] = 1
-        keep = [c for c in ["ticker", "name", "market_cap", "sector", "industry",
-                             "exchange", "country", "is_active"] if c in df.columns]
-        df = df[keep].drop_duplicates(subset=["ticker"])
+        df = df.drop_duplicates(subset=["ticker"])
 
         # Upsert to us_stock_basic
         self.db.upsert_us_stock_basic(df)
 
         # Also upsert industry classification
-        ind_df = df[["ticker", "sector", "industry"]].dropna(subset=["sector"])
-        if not ind_df.empty:
-            self.db.upsert_us_industry_class(ind_df)
+        if "sector" in df.columns:
+            ind_df = df[["ticker", "sector", "industry"]].dropna(subset=["sector"])
+            if not ind_df.empty:
+                self.db.upsert_us_industry_class(ind_df)
 
         logger.info(f"FMP 全市场股票列表: {len(df)} 只")
         return len(df)
@@ -367,37 +309,65 @@ class BulkDownloader:
         logger.info(f"SP500+NASDAQ100 合并: {len(all_tickers)} 只 (含历史退出)")
         return total
 
-    def download_fmp_earnings_surprises_bulk(self, start_year: int = 1995, end_year: int = None) -> int:
-        """FMP bulk: earnings surprises by year, 每年立即写入。"""
-        if end_year is None:
-            end_year = datetime.now().year
-        years = list(range(start_year, end_year + 1))
+    def download_fmp_earnings_surprises_bulk(self, tickers: list[str] = None, limit: int = 400) -> int:
+        """FMP per-ticker: earnings surprises → us_earnings_surprise.
 
-        def _on_data(df):
-            col_map = {"symbol": "ticker", "epsActual": "actual_eps", "epsEstimated": "estimated_eps"}
-            df = df.rename(columns=col_map)
-            df = df[df["ticker"].notna()].copy()
-            df["surprise"] = df["actual_eps"] - df["estimated_eps"]
-            df["surprise_pct"] = df.apply(
-                lambda r: r["surprise"] / abs(r["estimated_eps"]) if r["estimated_eps"] != 0 else None,
-                axis=1,
+        /stable/earnings-surprises 端点，逐 ticker 下载。
+        """
+        if tickers is None:
+            tickers = self.db.get_us_tickers()
+        if not tickers:
+            logger.warning("download_fmp_earnings_surprises_bulk: 无 ticker")
+            return 0
+
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._fmp_get_stable_json(
+                "earnings-surprises",
+                params={"symbol": ticker, "limit": limit},
             )
-            keep = ["ticker", "date", "actual_eps", "estimated_eps", "surprise", "surprise_pct"]
-            self.db.upsert_us_earnings_surprise(df[keep])
+            if not data:
+                logger.debug(f"earnings_surprises: {ticker} 无数据")
+                return 0
+            df = _fmp_df_to_snake(pd.DataFrame(data))
+            df = df[df["ticker"].notna()].copy()
+            # FMP returns epsActual/epsEstimated → eps_actual/eps_estimated; DB has actual_eps/estimated_eps
+            df = df.rename(columns={"eps_actual": "actual_eps", "eps_estimated": "estimated_eps"})
+            # Compute derived fields
+            if "actual_eps" in df.columns and "estimated_eps" in df.columns:
+                df["actual_eps"] = pd.to_numeric(df["actual_eps"], errors="coerce")
+                df["estimated_eps"] = pd.to_numeric(df["estimated_eps"], errors="coerce")
+                df["surprise"] = df["actual_eps"] - df["estimated_eps"]
+                df["surprise_pct"] = df.apply(
+                    lambda r: r["surprise"] / abs(r["estimated_eps"]) if pd.notna(r["estimated_eps"]) and r["estimated_eps"] != 0 else None,
+                    axis=1,
+                )
+            if df.empty:
+                logger.debug(f"earnings_surprises: {ticker} 转换后无有效数据")
+                return 0
+            self.db.upsert_us_earnings_surprise(df)
             return len(df)
 
-        total = self._fmp_bulk_by_year("earnings-surprises-bulk", years,
-                                        desc="FMP Earnings Surprises", on_data=_on_data)
-        logger.info(f"FMP earnings surprises bulk 总计: {total} 条")
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures),
+                               desc="FMP Earnings Surprises"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Earnings surprise 失败 {futures[future]}: {e}")
+
+        logger.info(f"FMP earnings surprises 总计: {total} 条")
         return total
 
-    def download_fmp_eps_estimates_bulk(self, start_year: int = 1995, end_year: int = None) -> int:
+    def download_fmp_eps_estimates_bulk(self, tickers: list[str] = None, limit: int = 200) -> int:
         """FMP per-ticker: analyst estimates (EPS consensus), 多线程。
-        Bulk 端点不稳定，改用 per-ticker /api/v3/analyst-estimates。"""
-        tickers = self.db.get_us_tickers()
+        使用 /api/v3/analyst-estimates 端点。"""
+        if tickers is None:
+            tickers = self.db.get_us_tickers()
         if not tickers:
-            logger.debug(f"download_fmp_eps_estimates_bulk: 空返回 (not tickers)")
-
+            logger.warning("download_fmp_eps_estimates_bulk: 无 ticker")
             return 0
 
         total = 0
@@ -405,33 +375,26 @@ class BulkDownloader:
         def _fetch_estimates_single(ticker):
             data = self._fmp_get_json(
                 f"analyst-estimates/{ticker}",
-                params={"period": "quarter", "limit": 200},
+                params={"period": "quarter", "limit": limit},
             )
             if not data:
-                logger.debug(f"_fetch_estimates_single: 空返回 (not data)")
-
+                logger.debug(f"eps_estimates: {ticker} 无数据")
                 return 0
-            records = []
-            for item in data:
-                eps_avg = item.get("estimatedEpsAvg")
-                if eps_avg is None:
-                    logger.debug(f"_fetch_estimates_single: 跳过 (eps_avg is None)")
-
-                    continue
-                records.append({
-                    "ticker": ticker,
-                    "date": item["date"],
-                    "eps_avg": eps_avg,
-                    "eps_low": item.get("estimatedEpsLow"),
-                    "eps_high": item.get("estimatedEpsHigh"),
-                    "num_analysts": item.get("numberAnalystsEstimatedEps"),
-                    "revenue_avg": item.get("estimatedRevenueAvg"),
-                    "net_income_avg": item.get("estimatedNetIncomeAvg"),
-                })
-            if records:
-                df = pd.DataFrame(records)
-                self.db.upsert_us_eps_estimate(df)
-            return len(records)
+            df = _fmp_df_to_snake(pd.DataFrame(data))
+            if df.empty or "ticker" not in df.columns:
+                logger.debug(f"eps_estimates: {ticker} 转换后无有效数据")
+                return 0
+            # DB column names differ from FMP snake_case: rename to match DB
+            df = df.rename(columns={
+                "estimated_eps_avg": "eps_avg",
+                "estimated_eps_low": "eps_low",
+                "estimated_eps_high": "eps_high",
+                "number_analysts_estimated_eps": "num_analysts",
+                "estimated_revenue_avg": "revenue_avg",
+                "estimated_net_income_avg": "net_income_avg",
+            })
+            self.db.upsert_us_eps_estimate(df)
+            return len(df)
 
         with ThreadPoolExecutor(max_workers=8) as pool:
             futures = {pool.submit(_fetch_estimates_single, t): t for t in tickers}
@@ -444,62 +407,63 @@ class BulkDownloader:
         logger.info(f"FMP EPS estimates 总计: {total} 条")
         return total
 
-    def download_fmp_income_statement_bulk(self, start_year: int = 1995, end_year: int = None) -> int:
-        """FMP bulk: income statement by year → us_financial_data, 每年立即写入。"""
-        if end_year is None:
-            end_year = datetime.now().year
-        years = list(range(start_year, end_year + 1))
+    def download_fmp_income_statement_bulk(self, tickers: list[str] = None, limit: int = 400) -> int:
+        """FMP per-ticker: income statement (季度) → us_financial_data.
 
-        def _on_data(df):
-            df = df.rename(columns={"symbol": "ticker"})
+        使用 /stable/income-statement 端点逐 ticker 下载。
+        """
+        if tickers is None:
+            tickers = self.db.get_us_tickers()
+        if not tickers:
+            logger.warning("download_fmp_income_statement_bulk: 无 ticker")
+            return 0
+
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._fmp_get_stable_json(
+                "income-statement",
+                params={"symbol": ticker, "period": "quarter", "limit": limit},
+            )
+            if not data:
+                logger.debug(f"income_statement: {ticker} 无数据")
+                return 0
+            df = _fmp_df_to_snake(pd.DataFrame(data))
             df = df[df["ticker"].notna()].copy()
-            if "period" in df.columns and "fiscalYear" in df.columns:
-                df["period_label"] = df["fiscalYear"].astype(str) + "-" + df["period"]
+            # Build period_label
+            if "fiscal_year" in df.columns and "period" in df.columns:
+                df["period_label"] = df["fiscal_year"].astype(str) + "-" + df["period"].astype(str)
             elif "date" in df.columns:
                 df["period_label"] = df["date"].apply(
                     lambda d: f"{str(d)[:4]}-Q{(int(str(d)[5:7])-1)//3+1}" if pd.notna(d) else None
                 )
-            result = pd.DataFrame({
-                "ticker": df["ticker"],
-                "period": df.get("period_label"),
-                "date": df["date"],
-                "filing_date": df.get("filingDate", df.get("fillingDate", df.get("acceptedDate"))),
-                "revenue": df.get("revenue"),
-                "cost_of_revenue": df.get("costOfRevenue"),
-                "gross_profit": df.get("grossProfit"),
-                "operating_income": df.get("operatingIncome"),
-                "net_income": df.get("netIncome"),
-                "eps": df.get("eps"),
-                "eps_diluted": df.get("epsDiluted", df.get("epsdiluted")),
-                "ebitda": df.get("ebitda"),
-                "gross_margin": df.get("grossProfitRatio"),
-                "operating_margin": df.get("operatingIncomeRatio"),
-                "net_margin": df.get("netIncomeRatio"),
-                "rd_expenses": df.get("researchAndDevelopmentExpenses"),
-                "sga_expenses": df.get("sellingGeneralAndAdministrativeExpenses"),
-                "weighted_avg_shares": df.get("weightedAverageShsOutDil", df.get("weightedAverageShsOut")),
-            })
-            result = result.dropna(subset=["ticker", "date"])
-            if not result.empty:
-                self.db.upsert_us_financial_data(result)
-                return len(result)
-            logger.debug(f"_on_data: 空返回 (return len(result))")
+            if "period_label" in df.columns:
+                df["period"] = df["period_label"]
+                df = df.drop(columns=["period_label"])
+            df = df.dropna(subset=["ticker", "date"])
+            if df.empty:
+                logger.debug(f"income_statement: {ticker} 转换后无有效数据")
+                return 0
+            self.db.upsert_us_financial_data(df)
+            return len(df)
 
-            return 0
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures),
+                               desc="FMP Income Statement"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Income statement 失败 {futures[future]}: {e}")
 
-        total = self._fmp_bulk_by_year(
-            "income-statement-bulk", years,
-            extra_params={"period": "quarter"},
-            desc="FMP Income Statement", on_data=_on_data,
-        )
-        logger.info(f"FMP income statement bulk 总计: {total} 条")
+        logger.info(f"FMP income statement 总计: {total} 条")
         return total
 
     def download_fmp_financial_quarterly(self, tickers: list[str] = None, limit: int = 400) -> int:
         """FMP per-ticker: 季度财报 (IS+BS+CF 三表合并) → us_financial_data.
 
         使用 /stable/ 端点逐 ticker 下载季度数据，合并三张报表后 upsert。
-        替代已失效的 bulk 端点。
+        API 返回什么就存什么，不做字段过滤。
 
         Args:
             tickers: 要下载的 ticker 列表，None=全部
@@ -523,9 +487,7 @@ class BulkDownloader:
                 logger.debug(f"financial_quarterly: {ticker} IS 无数据")
                 return 0
 
-            # 构建 IS DataFrame
             is_df = pd.DataFrame(is_data)
-            is_df = is_df.rename(columns={"symbol": "ticker"})
 
             # 2. Balance Sheet
             bs_data = self._fmp_get_stable_json(
@@ -533,8 +495,6 @@ class BulkDownloader:
                 params={"symbol": ticker, "period": "quarter", "limit": limit},
             )
             bs_df = pd.DataFrame(bs_data) if bs_data else pd.DataFrame()
-            if not bs_df.empty:
-                bs_df = bs_df.rename(columns={"symbol": "ticker"})
 
             # 3. Cash Flow
             cf_data = self._fmp_get_stable_json(
@@ -542,11 +502,9 @@ class BulkDownloader:
                 params={"symbol": ticker, "period": "quarter", "limit": limit},
             )
             cf_df = pd.DataFrame(cf_data) if cf_data else pd.DataFrame()
-            if not cf_df.empty:
-                cf_df = cf_df.rename(columns={"symbol": "ticker"})
 
-            # 合并三表（以 IS 为基础，按 ticker+date 左连接 BS 和 CF）
-            merge_keys = ["ticker", "date"]
+            # 合并三表（以 IS 为基础，按 symbol+date 左连接 BS 和 CF）
+            merge_keys = ["symbol", "date"]
             merged = is_df.copy()
             if not bs_df.empty:
                 bs_cols = merge_keys + [c for c in bs_df.columns if c not in merged.columns]
@@ -555,75 +513,40 @@ class BulkDownloader:
                 cf_cols = merge_keys + [c for c in cf_df.columns if c not in merged.columns]
                 merged = merged.merge(cf_df[cf_cols], on=merge_keys, how="left")
 
+            # 转换 camelCase → snake_case
+            merged = _fmp_df_to_snake(merged)
+
             # 构造 period_label
-            if "fiscalYear" in merged.columns and "period" in merged.columns:
-                merged["period_label"] = merged["fiscalYear"].astype(str) + "-" + merged["period"].astype(str)
+            if "fiscal_year" in merged.columns and "period" in merged.columns:
+                merged["period_label"] = merged["fiscal_year"].astype(str) + "-" + merged["period"].astype(str)
             elif "date" in merged.columns:
                 merged["period_label"] = merged["date"].apply(
                     lambda d: f"{str(d)[:4]}-Q{(int(str(d)[5:7])-1)//3+1}" if pd.notna(d) else None
                 )
+            if "period_label" in merged.columns:
+                merged["period"] = merged["period_label"]
+                merged = merged.drop(columns=["period_label"])
 
-            # 映射到 us_financial_data 表字段
-            result = pd.DataFrame({
-                "ticker": merged["ticker"],
-                "period": merged.get("period_label"),
-                "date": merged["date"],
-                "filing_date": merged.get("filingDate", merged.get("acceptedDate")),
-                "revenue": merged.get("revenue"),
-                "cost_of_revenue": merged.get("costOfRevenue"),
-                "gross_profit": merged.get("grossProfit"),
-                "operating_income": merged.get("operatingIncome"),
-                "net_income": merged.get("netIncome"),
-                "eps": merged.get("eps"),
-                "eps_diluted": merged.get("epsDiluted"),
-                "ebitda": merged.get("ebitda"),
-                "gross_margin": merged.get("grossProfitRatio"),
-                "operating_margin": merged.get("operatingIncomeRatio"),
-                "net_margin": merged.get("netIncomeRatio"),
-                "rd_expenses": merged.get("researchAndDevelopmentExpenses"),
-                "sga_expenses": merged.get("sellingGeneralAndAdministrativeExpenses"),
-                "weighted_avg_shares": merged.get("weightedAverageShsOutDil",
-                                                   merged.get("weightedAverageShsOut")),
-                # BS 字段
-                "total_assets": merged.get("totalAssets"),
-                "total_equity": merged.get("totalStockholdersEquity",
-                                           merged.get("totalEquity")),
-                "total_debt": merged.get("totalDebt"),
-                "total_current_assets": merged.get("totalCurrentAssets"),
-                "total_current_liabilities": merged.get("totalCurrentLiabilities"),
-                "cash_and_equivalents": merged.get("cashAndCashEquivalents"),
-                "net_receivables": merged.get("netReceivables"),
-                "inventory": merged.get("inventory"),
-                "long_term_debt": merged.get("longTermDebt"),
-                "retained_earnings": merged.get("retainedEarnings"),
-                # CF 字段
-                "operating_cash_flow": merged.get("operatingCashFlow",
-                                                   merged.get("netCashProvidedByOperatingActivities")),
-                "capital_expenditure": merged.get("capitalExpenditure"),
-                "free_cash_flow": merged.get("freeCashFlow"),
-                "dividends_paid": merged.get("commonDividendsPaid",
-                                              merged.get("netDividendsPaid")),
-                "share_repurchased": merged.get("commonStockRepurchased"),
-            })
-            result = result.dropna(subset=["ticker", "date"])
+            merged = merged.dropna(subset=["ticker", "date"])
 
-            # FMP stable API 不再返回比率字段，需自行计算
-            for col in ["revenue", "gross_profit", "net_income", "total_equity",
+            # 计算比率字段（API 可能不返回，作为 fallback）
+            for col in ["revenue", "gross_profit", "net_income", "total_stockholders_equity",
                          "operating_income"]:
-                if col in result.columns:
-                    result[col] = pd.to_numeric(result[col], errors="coerce")
-            if result["gross_margin"].isna().all() and "gross_profit" in result.columns:
-                result["gross_margin"] = result["gross_profit"] / result["revenue"].replace(0, pd.NA)
-            if result["operating_margin"].isna().all() and "operating_income" in result.columns:
-                result["operating_margin"] = result["operating_income"] / result["revenue"].replace(0, pd.NA)
-            if result["net_margin"].isna().all() and "net_income" in result.columns:
-                result["net_margin"] = result["net_income"] / result["revenue"].replace(0, pd.NA)
-            if "roe" not in result.columns or result.get("roe") is None or result["roe"].isna().all():
-                result["roe"] = result["net_income"] / result["total_equity"].replace(0, pd.NA)
+                if col in merged.columns:
+                    merged[col] = pd.to_numeric(merged[col], errors="coerce")
+            if "gross_profit_ratio" not in merged.columns or merged.get("gross_profit_ratio") is None or merged["gross_profit_ratio"].isna().all():
+                if "gross_profit" in merged.columns and "revenue" in merged.columns:
+                    merged["gross_profit_ratio"] = merged["gross_profit"] / merged["revenue"].replace(0, pd.NA)
+            if "operating_income_ratio" not in merged.columns or merged.get("operating_income_ratio") is None or merged["operating_income_ratio"].isna().all():
+                if "operating_income" in merged.columns and "revenue" in merged.columns:
+                    merged["operating_income_ratio"] = merged["operating_income"] / merged["revenue"].replace(0, pd.NA)
+            if "net_income_ratio" not in merged.columns or merged.get("net_income_ratio") is None or merged["net_income_ratio"].isna().all():
+                if "net_income" in merged.columns and "revenue" in merged.columns:
+                    merged["net_income_ratio"] = merged["net_income"] / merged["revenue"].replace(0, pd.NA)
 
-            if not result.empty:
-                self.db.upsert_us_financial_data(result)
-                return len(result)
+            if not merged.empty:
+                self.db.upsert_us_financial_data(merged)
+                return len(merged)
 
             logger.debug(f"financial_quarterly: {ticker} 合并后无有效数据")
             return 0
@@ -640,116 +563,10 @@ class BulkDownloader:
         logger.info(f"FMP quarterly financials 总计: {total} 条")
         return total
 
-    # camelCase → snake_case 映射（FMP key-metrics + ratios 端点共用）
-    _KEY_METRIC_COL_MAP = {
-        "symbol": "ticker", "period": "period",
-        "calendarYear": "calendar_year",
-        "marketCap": "market_cap", "enterpriseValue": "enterprise_value",
-        "peRatio": "pe_ratio", "pbRatio": "pb_ratio",
-        "priceToSalesRatio": "ps_ratio",
-        "priceToFreeCashFlowsRatio": "price_to_fcf",
-        "priceEarningsToGrowthRatio": "peg_ratio",
-        "evToEBITDA": "ev_to_ebitda", "evToSales": "ev_to_sales",
-        "evToFreeCashFlow": "ev_to_fcf",
-        "evToOperatingCashFlow": "ev_to_ocf",
-        "enterpriseValueOverEBITDA": "ev_to_ebitda",
-        "returnOnEquity": "roe", "returnOnAssets": "roa",
-        "returnOnInvestedCapital": "roic", "returnOnCapitalEmployed": "roce",
-        "grossProfitMargin": "gross_profit_margin",
-        "operatingProfitMargin": "operating_profit_margin",
-        "netProfitMargin": "net_profit_margin",
-        "pretaxProfitMargin": "pretax_profit_margin",
-        "effectiveTaxRate": "effective_tax_rate",
-        "currentRatio": "current_ratio", "quickRatio": "quick_ratio",
-        "cashRatio": "cash_ratio",
-        "debtToEquityRatio": "debt_to_equity",
-        "debtToEquity": "debt_to_equity",
-        "debtToAssets": "debt_to_assets",
-        "debtToAssetsRatio": "debt_to_assets",
-        "totalDebtToCapitalization": "debt_to_capitalization",
-        "longTermDebtToCapitalization": "lt_debt_to_capitalization",
-        "interestCoverage": "interest_coverage",
-        "netDebtToEBITDA": "net_debt_to_ebitda",
-        "interestDebtPerShare": "interest_debt_per_share",
-        "debtRatio": "debt_ratio",
-        "freeCashFlowPerShare": "free_cash_flow_per_share",
-        "freeCashFlowYield": "fcf_yield",
-        "earningsYield": "earnings_yield",
-        "dividendYield": "dividend_yield",
-        "dividendPerShare": "dividend_per_share",
-        "payoutRatio": "payout_ratio",
-        "dividendPayoutRatio": "payout_ratio",
-        "bookValuePerShare": "book_value_per_share",
-        "cashPerShare": "cash_per_share",
-        "tangibleBookValuePerShare": "tangible_book_value_per_share",
-        "revenuePerShare": "revenue_per_share",
-        "netIncomePerShare": "net_income_per_share",
-        "operatingCashFlowPerShare": "operating_cash_flow_per_share",
-        "shareholdersEquityPerShare": "shareholders_equity_per_share",
-        "inventoryTurnover": "inventory_turnover",
-        "receivablesTurnover": "receivables_turnover",
-        "payablesTurnover": "payables_turnover",
-        "fixedAssetTurnover": "fixed_asset_turnover",
-        "assetTurnover": "asset_turnover",
-        "operatingCycle": "operating_cycle",
-        "cashConversionCycle": "cash_conversion_cycle",
-        "daysOfSalesOutstanding": "days_sales_outstanding",
-        "daysOfInventoryOutstanding": "days_inventory_outstanding",
-        "daysOfPayablesOutstanding": "days_payables_outstanding",
-        "capexToRevenue": "capex_to_revenue",
-        "capexToDepreciation": "capex_to_depreciation",
-        "capexToOperatingCashFlow": "capex_to_ocf",
-        "capexPerShare": "capex_per_share",
-        "stockBasedCompensationToRevenue": "sbc_to_revenue",
-        "incomeQuality": "income_quality",
-        "grahamNumber": "graham_number",
-        "grahamNetNet": "graham_net_net",
-        "workingCapital": "working_capital",
-        "tangibleAssetValue": "tangible_asset_value",
-        "netCurrentAssetValue": "net_current_asset_value",
-        "investedCapital": "invested_capital",
-        "averageReceivables": "average_receivables",
-        "averagePayables": "average_payables",
-        "averageInventory": "average_inventory",
-        "researchAndDevelopementToRevenue": "rd_to_revenue",
-        "researchAndDdevelopementToRevenue": "rd_to_revenue",
-        "intangiblesToTotalAssets": "intangibles_to_total_assets",
-        "salesGeneralAndAdministrativeToRevenue": "sga_to_revenue",
-        # ratios 端点特有
-        "priceToEarningsRatio": "pe_ratio",
-        "priceToBookRatio": "pb_ratio",
-        "priceToSaleRatio": "ps_ratio",
-        "priceToOperatingCashFlowsRatio": "price_to_ocf",
-        "shortTermCoverageRatios": "short_term_coverage",
-        "operatingCashFlowSalesRatio": "ocf_to_sales",
-        "freeCashFlowOperatingCashFlowRatio": "fcf_to_ocf",
-        "cashFlowCoverageRatios": "cash_flow_coverage",
-        "cashFlowToDebtRatio": "cash_flow_to_debt",
-        "companyEquityMultiplier": "equity_multiplier",
-        "ebtPerEbit": "ebt_per_ebit",
-        "priceToEarningsToGrowthRatio": "peg_ratio",
-        "longTermDebtToTotalAsset": "lt_debt_to_total_asset",
-    }
-
-    def _map_key_metric_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        """统一映射 FMP key-metrics / ratios 的 camelCase → snake_case。"""
-        df = df.rename(columns={k: v for k, v in self._KEY_METRIC_COL_MAP.items() if k in df.columns})
-        df = df[df["ticker"].notna()].copy()
-        # 获取 us_key_metric 表的实际列，只保留 DB 有的列
-        try:
-            table_cols_df = self.db.query("SHOW COLUMNS FROM us_key_metric")
-            valid_cols = set(table_cols_df["Field"].tolist()) - {"id", "updated_at"}
-        except Exception:
-            valid_cols = None
-        if valid_cols:
-            keep = [c for c in df.columns if c in valid_cols]
-            df = df[keep]
-        return df
-
     def download_fmp_key_metrics(self, tickers: list[str] = None, limit: int = 400) -> int:
         """FMP per-ticker: /stable/key-metrics (季度) → us_key_metric.
 
-        替代已废弃的 key-metrics-bulk 端点。全量导入 API 返回字段。
+        API 返回什么就存什么，_fast_bulk_upsert 自动过滤到 DB 列。
         """
         if tickers is None:
             tickers = self.db.get_us_tickers()
@@ -767,10 +584,10 @@ class BulkDownloader:
             if not data:
                 logger.debug(f"key_metrics: {ticker} 无数据")
                 return 0
-            df = pd.DataFrame(data)
-            df = self._map_key_metric_df(df)
+            df = _fmp_df_to_snake(pd.DataFrame(data))
+            df = df[df["ticker"].notna()].copy()
             if df.empty:
-                logger.debug(f"key_metrics: {ticker} 映射后无有效数据")
+                logger.debug(f"key_metrics: {ticker} 转换后无有效数据")
                 return 0
             self.db.upsert_us_key_metric(df)
             return len(df)
@@ -790,7 +607,7 @@ class BulkDownloader:
     def download_fmp_ratios(self, tickers: list[str] = None, limit: int = 400) -> int:
         """FMP per-ticker: /stable/ratios (季度) → us_key_metric.
 
-        替代已废弃的 ratios-bulk 端点。与 key-metrics 共享同一张表。
+        与 key-metrics 共享同一张表。API 返回什么就存什么。
         """
         if tickers is None:
             tickers = self.db.get_us_tickers()
@@ -808,10 +625,10 @@ class BulkDownloader:
             if not data:
                 logger.debug(f"ratios: {ticker} 无数据")
                 return 0
-            df = pd.DataFrame(data)
-            df = self._map_key_metric_df(df)
+            df = _fmp_df_to_snake(pd.DataFrame(data))
+            df = df[df["ticker"].notna()].copy()
             if df.empty:
-                logger.debug(f"ratios: {ticker} 映射后无有效数据")
+                logger.debug(f"ratios: {ticker} 转换后无有效数据")
                 return 0
             self.db.upsert_us_key_metric(df)
             return len(df)
@@ -827,26 +644,6 @@ class BulkDownloader:
 
         logger.info(f"FMP ratios 总计: {total} 条")
         return total
-
-    def download_fmp_eod_bulk(self, start_year: int = 2015, end_year: int = None) -> int:
-        """FMP bulk: EOD prices by date. 如果 bulk 端点不可用，自动回退 per-ticker。"""
-        if end_year is None:
-            end_year = datetime.now().year
-
-        # Test if bulk EOD endpoint works
-        test_df = self._fmp_get_bulk_csv("historical-price-eod/bulk", {"date": "2025-01-15"})
-        if test_df.empty:
-            logger.info("FMP EOD bulk 端点不可用，使用 per-ticker 下载")
-            return self._download_fmp_prices_per_ticker(start_year, end_year)
-
-        # Bulk works — download by date (generate trading dates)
-        total = 0
-        start_date = datetime(start_year, 1, 1)
-        end_date = datetime(end_year, 12, 31)
-        # For bulk EOD we'd need to iterate every trading day - too many requests
-        # Prefer per-ticker for price data
-        logger.info("FMP EOD bulk 按日下载效率低，改用 per-ticker")
-        return self._download_fmp_prices_per_ticker(start_year, end_year)
 
     def _download_fmp_prices_per_ticker(self, start_year: int, end_year: int) -> int:
         """FMP per-ticker: historical daily prices (多线程).
@@ -877,21 +674,13 @@ class BulkDownloader:
                 if not data:
                     logger.debug(f"_fetch_price_single: {ticker} 段 {seg_start}~{seg_end} 无数据，跳过")
                     continue
-                rows = [{
-                    "ticker": item.get("symbol", ticker),
-                    "trade_date": item["date"],
-                    "open": item.get("open"), "high": item.get("high"),
-                    "low": item.get("low"), "close": item.get("close"),
-                    "adj_close": item.get("adjClose"),
-                    "volume": item.get("volume"),
-                    "change_pct": item.get("changePercent"),
-                    "vwap": item.get("vwap"),
-                    "unadjusted_volume": item.get("unadjustedVolume"),
-                } for item in data if item.get("date")]
-                if rows:
-                    df = pd.DataFrame(rows)
+                df = _fmp_df_to_snake(pd.DataFrame(data))
+                # DB column: trade_date (not date), change_pct (not change_percent)
+                df = df.rename(columns={"date": "trade_date", "change_percent": "change_pct"})
+                df = df[df["trade_date"].notna()]
+                if not df.empty:
                     self.db.bulk_upsert_us_daily_price(df)
-                    count += len(rows)
+                    count += len(df)
             return count
 
         with ThreadPoolExecutor(max_workers=8) as pool:
@@ -923,17 +712,14 @@ class BulkDownloader:
             data = self._fmp_get_json(f"profile/{symbols}")
             if not data:
                 logger.debug(f"_fetch_profile_batch: 空返回 (not data)")
-
                 return 0
-            records = [{"ticker": item.get("symbol"), "sector": item.get("sector"),
-                        "industry": item.get("industry")} for item in data]
-            if records:
-                df = pd.DataFrame(records).dropna(subset=["ticker"])
-                self.db.upsert_us_industry_class(df)
-                return len(df)
-            logger.debug(f"_fetch_profile_batch: 空返回 (return len(df))")
-
-            return 0
+            df = _fmp_df_to_snake(pd.DataFrame(data))
+            df = df[df["ticker"].notna()]
+            if df.empty:
+                logger.debug(f"_fetch_profile_batch: 转换后无有效数据")
+                return 0
+            self.db.upsert_us_industry_class(df)
+            return len(df)
 
         with ThreadPoolExecutor(max_workers=8) as pool:
             futures = {pool.submit(_fetch_profile_batch, b): b for b in batches}
@@ -970,25 +756,15 @@ class BulkDownloader:
                     logger.debug(f"_fetch_insider_single: 结束循环 (not data)")
 
                     break
-                records = [{
-                    "ticker": ticker,
-                    "filing_date": item.get("filingDate"),
-                    "transaction_date": item.get("transactionDate"),
-                    "reporting_name": item.get("reportingName"),
-                    "type_of_owner": item.get("typeOfOwner"),
-                    "transaction_type": item.get("transactionType"),
-                    "acquisition_or_disposition": item.get("acquistionOrDisposition"),
-                    "securities_transacted": item.get("securitiesTransacted"),
-                    "price": item.get("price"),
-                    "securities_owned": item.get("securitiesOwned"),
-                    "security_name": item.get("securityName"),
-                    "form_type": item.get("formType"),
-                    "link": item.get("link"),
-                } for item in data]
-                if records:
-                    df = pd.DataFrame(records)
+                df = _fmp_df_to_snake(pd.DataFrame(data))
+                # FMP has typo: acquistionOrDisposition → acquistion_or_disposition
+                # DB column: acquisition_or_disposition
+                df = df.rename(columns={"acquistion_or_disposition": "acquisition_or_disposition"})
+                if "ticker" not in df.columns:
+                    df["ticker"] = ticker
+                if not df.empty:
                     self.db.upsert_us_insider_trade(df)
-                    count += len(records)
+                    count += len(df)
                 if len(data) < 100:
                     logger.debug(f"_fetch_insider_single: 结束循环 (len(data) < 100)")
 
@@ -1025,19 +801,22 @@ class BulkDownloader:
             if not data:
                 logger.debug(f"analyst_grades: {ticker} 无评级数据")
                 return 0
-            records = [{
-                "ticker": item.get("symbol", ticker),
-                "date": item.get("date", "")[:10],
-                "analyst_company": item.get("gradingCompany", ""),
-                "analyst_name": "",
-                "rating": item.get("newGrade", ""),
-                "price_target": None,
-            } for item in data if item.get("date") and item.get("newGrade")]
-            if not records:
+            df = _fmp_df_to_snake(pd.DataFrame(data))
+            # Rename FMP fields to match DB columns
+            df = df.rename(columns={
+                "grading_company": "analyst_company",
+                "new_grade": "rating",
+            })
+            # Truncate date to YYYY-MM-DD
+            if "date" in df.columns:
+                df["date"] = df["date"].astype(str).str[:10]
+            # Filter: must have date and rating
+            df = df[df["date"].notna() & df["rating"].notna() & (df["rating"] != "")]
+            if df.empty:
                 logger.debug(f"analyst_grades: {ticker} 过滤后无有效记录")
                 return 0
-            df = pd.DataFrame(records)
-            df = df.drop_duplicates(subset=["ticker", "date", "analyst_company"], keep="last")
+            if "analyst_company" in df.columns:
+                df = df.drop_duplicates(subset=["ticker", "date", "analyst_company"], keep="last")
             self.db.upsert_us_analyst_recommendation(df)
             return len(df)
 
@@ -1071,25 +850,31 @@ class BulkDownloader:
             # us_corporate_action 表已有 61 万行历史数据，暂不影响使用。
             div_data = self._fmp_get_json(f"historical-price-full/stock_dividend/{ticker}")
             if isinstance(div_data, dict) and "historical" in div_data:
-                records = [{
-                    "ticker": ticker, "date": h.get("date"),
-                    "action_type": "dividend", "label": h.get("label"),
-                    "value": h.get("adjDividend") or h.get("dividend"),
-                } for h in div_data["historical"]]
-                if records:
-                    self.db.upsert_us_corporate_action(pd.DataFrame(records))
-                    count += len(records)
+                df = _fmp_df_to_snake(pd.DataFrame(div_data["historical"]))
+                df["ticker"] = ticker
+                df["action_type"] = "dividend"
+                # adjDividend → adj_dividend; use as value, fallback to dividend
+                if "adj_dividend" in df.columns:
+                    df["value"] = df["adj_dividend"].fillna(df.get("dividend"))
+                elif "dividend" in df.columns:
+                    df["value"] = df["dividend"]
+                if not df.empty:
+                    self.db.upsert_us_corporate_action(df)
+                    count += len(df)
             # Splits
             split_data = self._fmp_get_json(f"historical-price-full/stock_split/{ticker}")
             if isinstance(split_data, dict) and "historical" in split_data:
-                records = [{
-                    "ticker": ticker, "date": h.get("date"),
-                    "action_type": "split", "label": h.get("label"),
-                    "value": h.get("numerator", 0) / max(h.get("denominator", 1), 1),
-                } for h in split_data["historical"]]
-                if records:
-                    self.db.upsert_us_corporate_action(pd.DataFrame(records))
-                    count += len(records)
+                df = _fmp_df_to_snake(pd.DataFrame(split_data["historical"]))
+                df["ticker"] = ticker
+                df["action_type"] = "split"
+                # Compute split ratio from numerator/denominator
+                if "numerator" in df.columns and "denominator" in df.columns:
+                    df["numerator"] = pd.to_numeric(df["numerator"], errors="coerce").fillna(0)
+                    df["denominator"] = pd.to_numeric(df["denominator"], errors="coerce").clip(lower=1)
+                    df["value"] = df["numerator"] / df["denominator"]
+                if not df.empty:
+                    self.db.upsert_us_corporate_action(df)
+                    count += len(df)
             return count
 
         with ThreadPoolExecutor(max_workers=8) as pool:
@@ -1125,19 +910,15 @@ class BulkDownloader:
                 if not data:
                     logger.debug(f"download_fmp_index_daily: {symbol} 段 {seg_start}~{seg_end} 无数据，跳过")
                     continue
-                rows = [{
-                    "index_code": item.get("symbol", symbol),
-                    "trade_date": item["date"],
-                    "open": item.get("open"),
-                    "high": item.get("high"),
-                    "low": item.get("low"),
-                    "close": item.get("close"),
-                    "volume": item.get("volume"),
-                } for item in data if item.get("date")]
-                if rows:
-                    df = pd.DataFrame(rows)
+                df = _fmp_df_to_snake(pd.DataFrame(data))
+                # DB uses index_code + trade_date, not ticker + date
+                df = df.rename(columns={"ticker": "index_code", "date": "trade_date"})
+                if "index_code" not in df.columns:
+                    df["index_code"] = symbol
+                df = df[df["trade_date"].notna()]
+                if not df.empty:
                     self.db.bulk_upsert_us_index_daily(df)
-                    total += len(rows)
+                    total += len(df)
 
         logger.info(f"FMP index daily 总计: {total} 条")
         return total
@@ -1172,19 +953,14 @@ class BulkDownloader:
                 if not data:
                     logger.debug(f"download_fmp_commodity_prices: {fmp_sym} 段 {seg_start}~{seg_end} 无数据，跳过")
                     continue
-                rows = [{
-                    "symbol": yf_sym,  # 保持 yfinance 符号兼容
-                    "trade_date": item["date"],
-                    "open": item.get("open"),
-                    "high": item.get("high"),
-                    "low": item.get("low"),
-                    "close": item.get("close"),
-                    "volume": item.get("volume"),
-                } for item in data if item.get("date")]
-                if rows:
-                    df = pd.DataFrame(rows)
+                df = _fmp_df_to_snake(pd.DataFrame(data))
+                df = df.rename(columns={"ticker": "symbol", "date": "trade_date"})
+                # 保持 yfinance 符号兼容
+                df["symbol"] = yf_sym
+                df = df[df["trade_date"].notna()]
+                if not df.empty:
                     self.db.bulk_upsert_us_commodity_price(df)
-                    total += len(rows)
+                    total += len(df)
 
         logger.info(f"FMP commodity prices 总计: {total} 条")
         return total
@@ -1889,9 +1665,9 @@ class BulkDownloader:
         # Bulk by year
         results["stock_list"] = self.download_fmp_stock_list()
         results["index_constituents"] = self.download_fmp_index_constituents()
-        results["earnings_surprises"] = self.download_fmp_earnings_surprises_bulk(start_year)
-        results["eps_estimates"] = self.download_fmp_eps_estimates_bulk(start_year)
-        results["income_statement"] = self.download_fmp_income_statement_bulk(start_year)
+        results["earnings_surprises"] = self.download_fmp_earnings_surprises_bulk()
+        results["eps_estimates"] = self.download_fmp_eps_estimates_bulk()
+        results["income_statement"] = self.download_fmp_income_statement_bulk()
         results["key_metrics"] = self.download_fmp_key_metrics()
         results["ratios"] = self.download_fmp_ratios()
         # Per-ticker
