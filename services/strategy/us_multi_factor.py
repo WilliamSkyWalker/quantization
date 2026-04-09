@@ -207,31 +207,13 @@ class USMultiFactorStrategy:
         return None
 
     def _get_cached_mktcap_df(self, date: str) -> pd.DataFrame | None:
-        """Get market cap data for a given date (cached per date)."""
-        cache_key = ("us_mktcap", date)
-        cached = USFactorBase._date_cache.get(cache_key)
-        if cached is not None:
-            return cached
+        """Get historical market cap for a given date (delegates to USFactorBase)."""
         try:
-            # Try preloaded bulk daily data first
-            bulk_daily = USFactorBase._static_cache.get("_bulk_daily")
-            if bulk_daily is not None and not bulk_daily.empty:
-                date_ts = pd.to_datetime(date)
-                day = bulk_daily[bulk_daily["trade_date"] == date_ts]
-                if not day.empty:
-                    # Use close * volume as proxy; but we need actual market_cap
-                    # from us_stock_basic
-                    pass
-
-            # Query market cap from us_stock_basic
-            df = self.db.query(
-                "SELECT ticker, market_cap FROM us_stock_basic "
-                "WHERE is_active = 1 AND market_cap IS NOT NULL"
-            )
+            # Use a temporary factor instance to access get_market_cap()
+            factor_instance = self.factors[0] if self.factors else USFactorBase.__new__(USFactorBase)
+            factor_instance.db = self.db
+            df = factor_instance.get_market_cap(date)
             if not df.empty:
-                df["market_cap"] = pd.to_numeric(df["market_cap"], errors="coerce")
-                df = df.dropna(subset=["market_cap"])
-                USFactorBase._date_cache[cache_key] = df
                 return df
             logger.debug(f"_get_cached_mktcap_df: {date} 市值数据为空")
         except Exception as e:
@@ -931,8 +913,9 @@ class USMultiFactorStrategy:
         # === Short leg v5: independent short factor model (always-on) ===
         short_selected = pd.DataFrame()
 
-        # Build short candidate pool: mcap >= $10B
-        mktcap_df = self._get_cached_mktcap_df("")
+        # Build short candidate pool: mcap >= $10B (historical market cap)
+        short_date = getattr(self, '_last_date', '')
+        mktcap_df = self._get_cached_mktcap_df(short_date)
 
         short_pool = composite.copy()
         if mktcap_df is not None and not mktcap_df.empty:

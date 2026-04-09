@@ -40,7 +40,7 @@ def get_us_clean_universe(db: DatabaseManager, date: str) -> pd.DataFrame:
     # - is_active=1（当前成分股）：直接入选
     # - is_active=0（历史成分股）：需有行业数据才入选（无 sector 的退市股无法中性化）
     sql = (
-        "SELECT b.ticker, b.name, b.market_cap, b.ipo_date, "
+        "SELECT b.ticker, b.name, b.ipo_date, "
         "       c.sector, c.industry "
         "FROM us_stock_basic b "
         "LEFT JOIN us_industry_class c ON b.ticker = c.ticker "
@@ -55,7 +55,31 @@ def get_us_clean_universe(db: DatabaseManager, date: str) -> pd.DataFrame:
 
     initial = len(df)
 
-    # 市值过滤（market_cap 为 NULL 时放行，稍后靠流动性过滤兜底）
+    # 历史市值过滤（使用 us_key_metric 历史数据，消除前瞻偏差）
+    from services.us_factors.base import USFactorBase
+    bulk_mktcap = USFactorBase._static_cache.get("_bulk_mktcap")
+    if bulk_mktcap is not None and not bulk_mktcap.empty:
+        valid = bulk_mktcap[bulk_mktcap["date"] <= date_dt]
+        if not valid.empty:
+            hist_mktcap = (
+                valid.sort_values("date")
+                .drop_duplicates(subset=["ticker"], keep="last")
+                [["ticker", "market_cap"]]
+            )
+            df = df.merge(hist_mktcap, on="ticker", how="left")
+        else:
+            df["market_cap"] = float("nan")
+    else:
+        # 回退：非回测模式用静态快照
+        static_mktcap = db.query(
+            "SELECT ticker, market_cap FROM us_stock_basic WHERE market_cap IS NOT NULL"
+        )
+        if not static_mktcap.empty:
+            static_mktcap["market_cap"] = pd.to_numeric(static_mktcap["market_cap"], errors="coerce")
+            df = df.merge(static_mktcap[["ticker", "market_cap"]], on="ticker", how="left")
+        else:
+            df["market_cap"] = float("nan")
+
     df["market_cap"] = pd.to_numeric(df["market_cap"], errors="coerce")
     df = df[(df["market_cap"] >= US_MIN_MARKET_CAP) | df["market_cap"].isna()]
 

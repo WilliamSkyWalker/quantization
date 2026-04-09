@@ -265,7 +265,24 @@ class USFactorBase(ABC):
         cls._static_cache["_bulk_dividends"] = df_ca
         logger.info(f"US 预加载 dividends: {len(df_ca)} 行, {time.time()-t0:.1f}s")
 
-        # 8. 预加载 us_insider_trade（INSIDER_NET_BUY 因子用，按 filing_date）
+        # 8. 预加载 us_key_metric.market_cap（历史市值，消除前瞻偏差）
+        t0 = time.time()
+        try:
+            df_mktcap = db.query(
+                "SELECT ticker, date, market_cap FROM us_key_metric "
+                "WHERE market_cap IS NOT NULL AND market_cap > 0 "
+                "ORDER BY ticker, date"
+            )
+            if not df_mktcap.empty:
+                df_mktcap["date"] = pd.to_datetime(df_mktcap["date"])
+                df_mktcap["market_cap"] = pd.to_numeric(df_mktcap["market_cap"], errors="coerce")
+            cls._static_cache["_bulk_mktcap"] = df_mktcap
+            logger.info(f"US 预加载 us_key_metric (market_cap): {len(df_mktcap)} 行, {time.time()-t0:.1f}s")
+        except Exception as e:
+            logger.warning(f"预加载 market_cap 失败: {e}")
+            cls._static_cache["_bulk_mktcap"] = pd.DataFrame()
+
+        # 9. 预加载 us_insider_trade（INSIDER_NET_BUY 因子用，按 filing_date）
         t0 = time.time()
         insider_start = (
             pd.to_datetime(start_date) - pd.Timedelta(days=120)
@@ -753,21 +770,63 @@ class USFactorBase(ABC):
         universe_tickers: Optional[list[str]] = None,
     ) -> pd.DataFrame:
         """
-        获取市值。使用 us_stock_basic.market_cap（静态快照，更新频率较低）。
+        获取历史市值（消除前瞻偏差）。
+
+        优先使用 us_key_metric 的历史季度 market_cap（forward-fill 到目标日期），
+        回退到 us_stock_basic 静态快照。
 
         Returns:
             DataFrame[ticker, market_cap]
         """
-        cached = self._static_cache.get("market_cap")
+        cache_key = ("mktcap_hist", date)
+        cached = self._date_cache.get(cache_key)
         if cached is not None:
             df = cached
             if universe_tickers:
                 df = df[df["ticker"].isin(universe_tickers)]
             return df.copy()
 
+        date_ts = pd.to_datetime(date)
+
+        # 1. Try historical market cap from preloaded us_key_metric
+        bulk_mktcap = self._static_cache.get("_bulk_mktcap")
+        if bulk_mktcap is not None and not bulk_mktcap.empty:
+            # Forward-fill: for each ticker, take the latest market_cap where date <= target
+            valid = bulk_mktcap[bulk_mktcap["date"] <= date_ts]
+            if not valid.empty:
+                df = (
+                    valid.sort_values("date")
+                    .drop_duplicates(subset=["ticker"], keep="last")
+                    [["ticker", "market_cap"]]
+                )
+                self._date_cache[cache_key] = df
+                if universe_tickers:
+                    df = df[df["ticker"].isin(universe_tickers)]
+                return df.copy()
+            else:
+                logger.debug(f"get_market_cap: no historical mktcap data before {date}")
+
+        # 2. Fallback: SQL query for non-preloaded mode
+        try:
+            df = self.db.query(
+                "SELECT ticker, market_cap FROM us_key_metric "
+                "WHERE date <= :date AND market_cap IS NOT NULL AND market_cap > 0 "
+                "ORDER BY date DESC",
+                params={"date": date},
+            )
+            if not df.empty:
+                df = df.drop_duplicates(subset=["ticker"], keep="first")[["ticker", "market_cap"]]
+                self._date_cache[cache_key] = df
+                if universe_tickers:
+                    df = df[df["ticker"].isin(universe_tickers)]
+                return df.copy()
+        except Exception as e:
+            logger.debug(f"get_market_cap: SQL fallback failed: {e}")
+
+        # 3. Last resort: static snapshot (look-ahead, but better than nothing)
+        logger.warning(f"get_market_cap: falling back to static us_stock_basic for {date}")
         df = self.db.query("SELECT ticker, market_cap FROM us_stock_basic WHERE is_active = 1")
         df["market_cap"] = pd.to_numeric(df["market_cap"], errors="coerce")
-        self._static_cache["market_cap"] = df
         if universe_tickers:
             df = df[df["ticker"].isin(universe_tickers)]
         return df.copy()
