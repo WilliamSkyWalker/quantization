@@ -1234,6 +1234,469 @@ class USOptionsSnapshot(Base):
     )
 
 
+# ============================================================
+# FMP 新增数据表
+# ============================================================
+
+class USCompanyProfile(Base):
+    """美股公司概况表（FMP: profile）"""
+    __tablename__ = "us_company_profile"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    price = Column(Float, comment="当前价格")
+    market_cap = Column(Float, comment="市值")
+    beta = Column(Float, comment="Beta 系数")
+    last_dividend = Column(Float, comment="最近一次股息")
+    price_range = Column(String(100), comment="52周价格区间")
+    change = Column(Float, comment="价格变动")
+    change_percentage = Column(Float, comment="价格变动百分比")
+    volume = Column(Float, comment="成交量")
+    average_volume = Column(Float, comment="平均成交量")
+    company_name = Column(String(300), comment="公司名称")
+    currency = Column(String(10), comment="货币")
+    cik = Column(String(20), comment="CIK 编号")
+    isin = Column(String(20), comment="ISIN 编号")
+    cusip = Column(String(20), comment="CUSIP 编号")
+    exchange_full_name = Column(String(100), comment="交易所全称")
+    exchange = Column(String(20), comment="交易所简称")
+    industry = Column(String(200), comment="行业")
+    website = Column(String(500), comment="官网")
+    description = Column(Text, comment="公司描述")
+    ceo = Column(String(200), comment="CEO")
+    sector = Column(String(100), comment="板块")
+    country = Column(String(10), comment="国家")
+    full_time_employees = Column(Integer, comment="全职员工数")
+    phone = Column(String(50), comment="电话")
+    address = Column(String(300), comment="地址")
+    city = Column(String(100), comment="城市")
+    state = Column(String(50), comment="州")
+    zip = Column(String(20), comment="邮编")
+    image = Column(String(500), comment="Logo 图片链接")
+    ipo_date = Column(Date, comment="IPO 日期")
+    default_image = Column(Integer, comment="是否默认图片")
+    is_etf = Column(Integer, comment="是否 ETF")
+    is_actively_trading = Column(Integer, comment="是否活跃交易")
+    is_adr = Column(Integer, comment="是否 ADR")
+    is_fund = Column(Integer, comment="是否基金")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", name="uq_us_company_profile_ticker"),
+        Index("idx_us_company_profile_sector", "sector"),
+    )
+
+
+class USHistoricalMarketCap(Base):
+    """美股历史市值表（FMP: historical-market-cap）"""
+    __tablename__ = "us_historical_market_cap"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="日期")
+    market_cap = Column(Float, comment="市值")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", name="uq_us_hist_mktcap_ticker_date"),
+        Index("idx_us_hist_mktcap_ticker", "ticker"),
+        Index("idx_us_hist_mktcap_date", "date"),
+    )
+
+
+class USSharesFloat(Base):
+    """美股流通股数据表（FMP: shares-float）"""
+    __tablename__ = "us_shares_float"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="日期")
+    free_float = Column(Float, comment="自由流通比例")
+    float_shares = Column(Float, comment="流通股数")
+    outstanding_shares = Column(Float, comment="总股本")
+    source = Column(String(100), comment="数据来源")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", name="uq_us_shares_float_ticker_date"),
+        Index("idx_us_shares_float_ticker", "ticker"),
+    )
+
+
+class USFinancialScore(Base):
+    """美股财务评分表（FMP: financial-scores）"""
+    __tablename__ = "us_financial_score"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    reported_currency = Column(String(10), comment="报告货币")
+    altman_z_score = Column(Float, comment="Altman Z-Score")
+    piotroski_score = Column(Float, comment="Piotroski F-Score")
+    working_capital = Column(Float, comment="营运资本")
+    total_assets = Column(Float, comment="总资产")
+    retained_earnings = Column(Float, comment="留存收益")
+    ebit = Column(Float, comment="息税前利润")
+    market_cap = Column(Float, comment="市值")
+    total_liabilities = Column(Float, comment="总负债")
+    revenue = Column(Float, comment="营收")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", name="uq_us_financial_score_ticker"),
+        Index("idx_us_financial_score_ticker", "ticker"),
+    )
+
+
+class USFinancialGrowth(Base):
+    """美股财务增长率表（FMP: financial-statement-growth）"""
+    __tablename__ = "us_financial_growth"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="报告日期")
+    fiscal_year = Column(Integer, comment="财年")
+    period = Column(String(10), comment="期间（Q1/Q2/Q3/Q4/FY）")
+    reported_currency = Column(String(10), comment="报告货币")
+    revenue_growth = Column(Float, comment="营收增长率")
+    gross_profit_growth = Column(Float, comment="毛利润增长率")
+    ebit_growth = Column(Float, comment="EBIT 增长率")
+    operating_income_growth = Column(Float, comment="营业利润增长率")
+    net_income_growth = Column(Float, comment="净利润增长率")
+    eps_growth = Column(Float, comment="EPS 增长率")
+    eps_diluted_growth = Column(Float, comment="稀释 EPS 增长率")
+    weighted_average_shares_growth = Column(Float, comment="加权平均股数增长率")
+    weighted_average_shares_diluted_growth = Column(Float, comment="稀释加权平均股数增长率")
+    dividends_per_share_growth = Column(Float, comment="每股股息增长率")
+    operating_cash_flow_growth = Column(Float, comment="经营现金流增长率")
+    receivables_growth = Column(Float, comment="应收账款增长率")
+    inventory_growth = Column(Float, comment="存货增长率")
+    asset_growth = Column(Float, comment="资产增长率")
+    book_value_per_share_growth = Column(Float, comment="每股账面价值增长率")
+    debt_growth = Column(Float, comment="负债增长率")
+    rd_expense_growth = Column(Float, comment="研发费用增长率")
+    sga_expenses_growth = Column(Float, comment="销售管理费用增长率")
+    free_cash_flow_growth = Column(Float, comment="自由现金流增长率")
+    ten_y_revenue_growth_per_share = Column(Float, comment="10年每股营收增长率")
+    five_y_revenue_growth_per_share = Column(Float, comment="5年每股营收增长率")
+    three_y_revenue_growth_per_share = Column(Float, comment="3年每股营收增长率")
+    ten_y_operating_cf_growth_per_share = Column(Float, comment="10年每股经营现金流增长率")
+    five_y_operating_cf_growth_per_share = Column(Float, comment="5年每股经营现金流增长率")
+    three_y_operating_cf_growth_per_share = Column(Float, comment="3年每股经营现金流增长率")
+    ten_y_net_income_growth_per_share = Column(Float, comment="10年每股净利润增长率")
+    five_y_net_income_growth_per_share = Column(Float, comment="5年每股净利润增长率")
+    three_y_net_income_growth_per_share = Column(Float, comment="3年每股净利润增长率")
+    ten_y_shareholders_equity_growth_per_share = Column(Float, comment="10年每股股东权益增长率")
+    five_y_shareholders_equity_growth_per_share = Column(Float, comment="5年每股股东权益增长率")
+    three_y_shareholders_equity_growth_per_share = Column(Float, comment="3年每股股东权益增长率")
+    ten_y_dividend_per_share_growth_per_share = Column(Float, comment="10年每股股息增长率")
+    five_y_dividend_per_share_growth_per_share = Column(Float, comment="5年每股股息增长率")
+    three_y_dividend_per_share_growth_per_share = Column(Float, comment="3年每股股息增长率")
+    ebitda_growth = Column(Float, comment="EBITDA 增长率")
+    growth_capital_expenditure = Column(Float, comment="资本支出增长率")
+    ten_y_bottom_line_net_income_growth_per_share = Column(Float, comment="10年每股底线净利润增长率")
+    five_y_bottom_line_net_income_growth_per_share = Column(Float, comment="5年每股底线净利润增长率")
+    three_y_bottom_line_net_income_growth_per_share = Column(Float, comment="3年每股底线净利润增长率")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", name="uq_us_fin_growth_ticker_date"),
+        Index("idx_us_fin_growth_ticker", "ticker"),
+        Index("idx_us_fin_growth_date", "date"),
+    )
+
+
+class USEnterpriseValue(Base):
+    """美股企业价值表（FMP: enterprise-values）"""
+    __tablename__ = "us_enterprise_value"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="日期")
+    stock_price = Column(Float, comment="股价")
+    number_of_shares = Column(Float, comment="股数")
+    market_capitalization = Column(Float, comment="市值")
+    minus_cash_and_cash_equivalents = Column(Float, comment="减：现金及等价物")
+    add_total_debt = Column(Float, comment="加：总负债")
+    enterprise_value = Column(Float, comment="企业价值")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", name="uq_us_ev_ticker_date"),
+        Index("idx_us_ev_ticker", "ticker"),
+        Index("idx_us_ev_date", "date"),
+    )
+
+
+class USOwnerEarnings(Base):
+    """美股所有者收益表（FMP: owner-earnings）"""
+    __tablename__ = "us_owner_earnings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="日期")
+    reported_currency = Column(String(10), comment="报告货币")
+    fiscal_year = Column(Integer, comment="财年")
+    period = Column(String(10), comment="期间")
+    average_ppe = Column(Float, comment="平均 PPE")
+    maintenance_capex = Column(Float, comment="维护性资本支出")
+    owners_earnings = Column(Float, comment="所有者收益")
+    growth_capex = Column(Float, comment="成长性资本支出")
+    owners_earnings_per_share = Column(Float, comment="每股所有者收益")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", name="uq_us_owner_earnings_ticker_date"),
+        Index("idx_us_owner_earnings_ticker", "ticker"),
+    )
+
+
+class USRevenueSegment(Base):
+    """美股营收分部表（FMP: revenue-geographic/product-segmentation）"""
+    __tablename__ = "us_revenue_segment"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="日期")
+    segment_type = Column(String(20), nullable=False, comment="分部类型：geographic/product")
+    segment_name = Column(String(200), nullable=False, comment="分部名称")
+    revenue = Column(Float, comment="营收")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", "segment_type", "segment_name",
+                         name="uq_us_rev_segment"),
+        Index("idx_us_rev_segment_ticker", "ticker"),
+        Index("idx_us_rev_segment_date", "date"),
+    )
+
+
+class USDCFValuation(Base):
+    """美股 DCF 估值表（FMP: dcf-advanced/dcf-levered）"""
+    __tablename__ = "us_dcf_valuation"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="日期")
+    dcf_type = Column(String(20), nullable=False, comment="DCF 类型：standard/levered")
+    dcf = Column(Float, comment="DCF 估值")
+    stock_price = Column(Float, comment="当前股价")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", "dcf_type", name="uq_us_dcf_ticker_date_type"),
+        Index("idx_us_dcf_ticker", "ticker"),
+    )
+
+
+class USStockPeer(Base):
+    """美股同行公司表（FMP: peers）"""
+    __tablename__ = "us_stock_peer"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    peer_ticker = Column(String(20), nullable=False, comment="同行股票代码")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "peer_ticker", name="uq_us_stock_peer"),
+        Index("idx_us_stock_peer_ticker", "ticker"),
+    )
+
+
+class USESGRating(Base):
+    """美股 ESG 评级表（FMP: esg-ratings）"""
+    __tablename__ = "us_esg_rating"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    cik = Column(String(20), comment="CIK 编号")
+    company_name = Column(String(300), comment="公司名称")
+    industry = Column(String(200), comment="行业")
+    year = Column(Integer, nullable=False, comment="年份")
+    esg_score = Column(Float, comment="ESG 综合分数")
+    environment_score = Column(Float, comment="环境分数")
+    social_score = Column(Float, comment="社会分数")
+    governance_score = Column(Float, comment="治理分数")
+    esg_risk_rating = Column(String(50), comment="ESG 风险评级")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "year", name="uq_us_esg_rating_ticker_year"),
+        Index("idx_us_esg_rating_ticker", "ticker"),
+    )
+
+
+class USInstitutionalHolding(Base):
+    """美股机构持仓表（FMP: form13F filings-extract）"""
+    __tablename__ = "us_institutional_holding"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    cik = Column(String(20), nullable=False, comment="机构 CIK 编号")
+    filing_date = Column(Date, nullable=False, comment="申报日期")
+    investor_name = Column(String(300), comment="投资者名称")
+    security_name = Column(String(300), comment="证券名称")
+    shares_number = Column(Float, comment="持股数量")
+    total_invested_value = Column(Float, comment="总投资价值")
+    ownership_percent = Column(Float, comment="持股比例")
+    change_in_shares_number_percentage = Column(Float, comment="持股数量变化百分比")
+    change_in_shares_number = Column(Float, comment="持股数量变化")
+    is_new = Column(Integer, comment="是否新建仓")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "cik", "filing_date",
+                         name="uq_us_inst_holding_ticker_cik_date"),
+        Index("idx_us_inst_holding_ticker", "ticker"),
+        Index("idx_us_inst_holding_filing_date", "filing_date"),
+    )
+
+
+class USPriceTarget(Base):
+    """美股分析师目标价共识表（FMP: price-target-consensus/summary）"""
+    __tablename__ = "us_price_target"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    target_high = Column(Float, comment="最高目标价")
+    target_low = Column(Float, comment="最低目标价")
+    target_consensus = Column(Float, comment="共识目标价")
+    target_median = Column(Float, comment="中位数目标价")
+    last_month = Column(Integer, comment="近一个月分析师数")
+    last_month_avg_price_target = Column(Float, comment="近一个月平均目标价")
+    last_quarter = Column(Integer, comment="近一季度分析师数")
+    last_quarter_avg_price_target = Column(Float, comment="近一季度平均目标价")
+    last_year = Column(Integer, comment="近一年分析师数")
+    last_year_avg_price_target = Column(Float, comment="近一年平均目标价")
+    all_time = Column(Integer, comment="历史总分析师数")
+    all_time_avg_price_target = Column(Float, comment="历史平均目标价")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", name="uq_us_price_target_ticker"),
+        Index("idx_us_price_target_ticker", "ticker"),
+    )
+
+
+class USPressRelease(Base):
+    """美股新闻稿表（FMP: search-press-releases）"""
+    __tablename__ = "us_press_release"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="日期")
+    title = Column(String(500), nullable=False, comment="标题")
+    text = Column(Text, comment="正文内容")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", "title", name="uq_us_press_release"),
+        Index("idx_us_press_release_ticker", "ticker"),
+        Index("idx_us_press_release_date", "date"),
+    )
+
+
+class USInsiderStatistic(Base):
+    """美股内部人交易统计表（FMP: insider-trade-statistics）"""
+    __tablename__ = "us_insider_statistic"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    year = Column(Integer, nullable=False, comment="年份")
+    quarter = Column(Integer, nullable=False, comment="季度")
+    purchases = Column(Integer, comment="买入次数")
+    sales = Column(Integer, comment="卖出次数")
+    buy_sell_ratio = Column(Float, comment="买卖比")
+    total_bought = Column(Float, comment="总买入金额")
+    total_sold = Column(Float, comment="总卖出金额")
+    average_bought = Column(Float, comment="平均买入金额")
+    average_sold = Column(Float, comment="平均卖出金额")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "year", "quarter", name="uq_us_insider_stat"),
+        Index("idx_us_insider_stat_ticker", "ticker"),
+    )
+
+
+class USEmployeeCount(Base):
+    """美股员工数量历史表（FMP: historical-employee-count）"""
+    __tablename__ = "us_employee_count"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    period_of_report = Column(Date, nullable=False, comment="报告期")
+    employee_count = Column(Integer, comment="员工数量")
+    filing_date = Column(Date, comment="申报日期")
+    accepted_date = Column(DateTime, comment="受理日期")
+    source = Column(String(500), comment="数据来源")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "period_of_report", name="uq_us_employee_count"),
+        Index("idx_us_employee_count_ticker", "ticker"),
+    )
+
+
+class USIndexConstituent(Base):
+    """美股指数成分股历史表（FMP: historical-sp-500 等）"""
+    __tablename__ = "us_index_constituent"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    index_name = Column(String(20), nullable=False, comment="指数名称：sp500/nasdaq/dow")
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    date = Column(Date, nullable=False, comment="日期")
+    date_added = Column(Date, comment="加入日期")
+    added_security = Column(String(300), comment="加入的证券名称")
+    removed_ticker = Column(String(20), comment="被移除的股票代码")
+    removed_security = Column(String(300), comment="被移除的证券名称")
+    reason = Column(String(500), comment="变更原因")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("index_name", "ticker", "date",
+                         name="uq_us_index_constituent"),
+        Index("idx_us_index_constituent_index", "index_name"),
+        Index("idx_us_index_constituent_ticker", "ticker"),
+    )
+
+
+class USSymbolChange(Base):
+    """美股代码变更表（FMP: symbol-changes-list）"""
+    __tablename__ = "us_symbol_change"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(Date, nullable=False, comment="变更日期")
+    name = Column(String(300), comment="公司名称")
+    old_symbol = Column(String(20), nullable=False, comment="旧代码")
+    new_symbol = Column(String(20), nullable=False, comment="新代码")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("old_symbol", "new_symbol", "date",
+                         name="uq_us_symbol_change"),
+        Index("idx_us_symbol_change_date", "date"),
+    )
+
+
+class USDelisted(Base):
+    """美股退市公司表（FMP: delisted-companies）"""
+    __tablename__ = "us_delisted"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, comment="股票代码")
+    company_name = Column(String(300), comment="公司名称")
+    exchange = Column(String(50), comment="交易所")
+    ipo_date = Column(Date, comment="IPO 日期")
+    delisted_date = Column(Date, comment="退市日期")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", name="uq_us_delisted_ticker"),
+        Index("idx_us_delisted_date", "delisted_date"),
+    )
+
+
 class Watchlist(Base):
     """自选股表"""
     __tablename__ = "watchlist"
@@ -2787,6 +3250,105 @@ class DatabaseManager:
 
     def upsert_us_options_snapshot(self, df: pd.DataFrame):
         self._bulk_upsert_generic(USOptionsSnapshot, df, ["ticker", "date"], date_cols=["date"])
+
+    # ----------------------------------------------------------
+    # FMP 新增表 upsert 方法
+    # ----------------------------------------------------------
+
+    def upsert_us_company_profile(self, df: pd.DataFrame):
+        """批量写入/更新美股公司概况。"""
+        self._fast_bulk_upsert("us_company_profile", df, ["ticker"],
+                               date_cols=["ipo_date"])
+
+    def upsert_us_historical_market_cap(self, df: pd.DataFrame):
+        """批量写入/更新美股历史市值。"""
+        self._fast_bulk_upsert("us_historical_market_cap", df, ["ticker", "date"],
+                               date_cols=["date"])
+
+    def upsert_us_shares_float(self, df: pd.DataFrame):
+        """批量写入/更新美股流通股数据。"""
+        self._fast_bulk_upsert("us_shares_float", df, ["ticker", "date"],
+                               date_cols=["date"])
+
+    def upsert_us_financial_score(self, df: pd.DataFrame):
+        """批量写入/更新美股财务评分。"""
+        self._fast_bulk_upsert("us_financial_score", df, ["ticker"])
+
+    def upsert_us_financial_growth(self, df: pd.DataFrame):
+        """批量写入/更新美股财务增长率。"""
+        self._fast_bulk_upsert("us_financial_growth", df, ["ticker", "date"],
+                               date_cols=["date"])
+
+    def upsert_us_enterprise_value(self, df: pd.DataFrame):
+        """批量写入/更新美股企业价值。"""
+        self._fast_bulk_upsert("us_enterprise_value", df, ["ticker", "date"],
+                               date_cols=["date"])
+
+    def upsert_us_owner_earnings(self, df: pd.DataFrame):
+        """批量写入/更新美股所有者收益。"""
+        self._fast_bulk_upsert("us_owner_earnings", df, ["ticker", "date"],
+                               date_cols=["date"])
+
+    def upsert_us_revenue_segment(self, df: pd.DataFrame):
+        """批量写入/更新美股营收分部数据。"""
+        self._fast_bulk_upsert("us_revenue_segment", df,
+                               ["ticker", "date", "segment_type", "segment_name"],
+                               date_cols=["date"])
+
+    def upsert_us_dcf_valuation(self, df: pd.DataFrame):
+        """批量写入/更新美股 DCF 估值。"""
+        self._fast_bulk_upsert("us_dcf_valuation", df, ["ticker", "date", "dcf_type"],
+                               date_cols=["date"])
+
+    def upsert_us_stock_peer(self, df: pd.DataFrame):
+        """批量写入/更新美股同行公司。"""
+        self._fast_bulk_upsert("us_stock_peer", df, ["ticker", "peer_ticker"])
+
+    def upsert_us_esg_rating(self, df: pd.DataFrame):
+        """批量写入/更新美股 ESG 评级。"""
+        self._fast_bulk_upsert("us_esg_rating", df, ["ticker", "year"])
+
+    def upsert_us_institutional_holding(self, df: pd.DataFrame):
+        """批量写入/更新美股机构持仓。"""
+        self._fast_bulk_upsert("us_institutional_holding", df,
+                               ["ticker", "cik", "filing_date"],
+                               date_cols=["filing_date"])
+
+    def upsert_us_price_target(self, df: pd.DataFrame):
+        """批量写入/更新美股分析师目标价共识。"""
+        self._fast_bulk_upsert("us_price_target", df, ["ticker"])
+
+    def upsert_us_press_release(self, df: pd.DataFrame):
+        """批量写入/更新美股新闻稿。"""
+        self._fast_bulk_upsert("us_press_release", df, ["ticker", "date", "title"],
+                               date_cols=["date"])
+
+    def upsert_us_insider_statistic(self, df: pd.DataFrame):
+        """批量写入/更新美股内部人交易统计。"""
+        self._fast_bulk_upsert("us_insider_statistic", df, ["ticker", "year", "quarter"])
+
+    def upsert_us_employee_count(self, df: pd.DataFrame):
+        """批量写入/更新美股员工数量历史。"""
+        self._fast_bulk_upsert("us_employee_count", df, ["ticker", "period_of_report"],
+                               date_cols=["period_of_report", "filing_date"],
+                               datetime_cols=["accepted_date"])
+
+    def upsert_us_index_constituent(self, df: pd.DataFrame):
+        """批量写入/更新美股指数成分股历史。"""
+        self._fast_bulk_upsert("us_index_constituent", df,
+                               ["index_name", "ticker", "date"],
+                               date_cols=["date", "date_added"])
+
+    def upsert_us_symbol_change(self, df: pd.DataFrame):
+        """批量写入/更新美股代码变更。"""
+        self._fast_bulk_upsert("us_symbol_change", df,
+                               ["old_symbol", "new_symbol", "date"],
+                               date_cols=["date"])
+
+    def upsert_us_delisted(self, df: pd.DataFrame):
+        """批量写入/更新美股退市公司。"""
+        self._fast_bulk_upsert("us_delisted", df, ["ticker"],
+                               date_cols=["ipo_date", "delisted_date"])
 
     def get_latest_us_trade_date(self, ticker: Optional[str] = None) -> Optional[str]:
         """获取美股日线最新交易日期。"""

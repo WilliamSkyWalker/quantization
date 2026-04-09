@@ -1656,28 +1656,494 @@ class BulkDownloader:
         return results
 
     # ==============================================================
+    # FMP 新增数据端点（Sprint 3）
+    # ==============================================================
+
+    def download_fmp_company_profiles(self, tickers: list[str] = None) -> int:
+        """FMP per-ticker: /stable/profile → us_company_profile (全量公司信息)."""
+        if tickers is None:
+            tickers = self.db.get_us_tickers(stocks_only=False)
+        if not tickers:
+            logger.warning("download_fmp_company_profiles: 无 ticker")
+            return 0
+        total = 0
+        batch_size = 50
+
+        def _fetch_batch(batch):
+            symbols = ",".join(batch)
+            data = self._fmp_get_json(f"profile/{symbols}")
+            if not data:
+                return 0
+            df = _fmp_df_to_snake(pd.DataFrame(data))
+            self.db.upsert_us_company_profile(df)
+            return len(df)
+
+        batches = [tickers[i:i + batch_size] for i in range(0, len(tickers), batch_size)]
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_batch, b): b for b in batches}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Company Profiles"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Profile batch 失败: {e}")
+        logger.info(f"FMP company profiles 总计: {total} 条")
+        return total
+
+    def download_fmp_historical_market_cap(self, tickers: list[str] = None, limit: int = 5000) -> int:
+        """FMP per-ticker: historical-market-cap → us_historical_market_cap."""
+        if tickers is None:
+            tickers = self.db.get_us_tickers(stocks_only=True)
+        if not tickers:
+            logger.warning("download_fmp_historical_market_cap: 无 ticker")
+            return 0
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._fmp_get_stable_json(
+                "historical-market-capitalization",
+                params={"symbol": ticker, "limit": limit},
+            )
+            if not data:
+                logger.debug(f"historical_market_cap: {ticker} 无数据")
+                return 0
+            df = _fmp_df_to_snake(pd.DataFrame(data))
+            self.db.upsert_us_historical_market_cap(df)
+            return len(df)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Historical Market Cap"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Historical market cap 失败 {futures[future]}: {e}")
+        logger.info(f"FMP historical market cap 总计: {total} 条")
+        return total
+
+    def download_fmp_shares_float(self) -> int:
+        """FMP bulk: all-shares-float → us_shares_float (一次全市场)."""
+        data = self._fmp_get_stable_json("shares-float/all")
+        if not data:
+            # 尝试备用路径
+            data = self._fmp_get_json("shares_float/all")
+        if not data:
+            logger.warning("download_fmp_shares_float: 无数据")
+            return 0
+        df = _fmp_df_to_snake(pd.DataFrame(data))
+        self.db.upsert_us_shares_float(df)
+        logger.info(f"FMP shares float 总计: {len(df)} 条")
+        return len(df)
+
+    def download_fmp_financial_scores(self, tickers: list[str] = None) -> int:
+        """FMP per-ticker: financial-scores → us_financial_score."""
+        if tickers is None:
+            tickers = self.db.get_us_tickers(stocks_only=True)
+        if not tickers:
+            logger.warning("download_fmp_financial_scores: 无 ticker")
+            return 0
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._fmp_get_stable_json("score", params={"symbol": ticker})
+            if not data:
+                logger.debug(f"financial_scores: {ticker} 无数据")
+                return 0
+            df = _fmp_df_to_snake(pd.DataFrame(data if isinstance(data, list) else [data]))
+            self.db.upsert_us_financial_score(df)
+            return len(df)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Financial Scores"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Financial scores 失败 {futures[future]}: {e}")
+        logger.info(f"FMP financial scores 总计: {total} 条")
+        return total
+
+    def download_fmp_financial_growth(self, tickers: list[str] = None, limit: int = 400) -> int:
+        """FMP per-ticker: financial-growth → us_financial_growth."""
+        if tickers is None:
+            tickers = self.db.get_us_tickers(stocks_only=True)
+        if not tickers:
+            logger.warning("download_fmp_financial_growth: 无 ticker")
+            return 0
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._fmp_get_stable_json(
+                "financial-growth",
+                params={"symbol": ticker, "period": "quarter", "limit": limit},
+            )
+            if not data:
+                logger.debug(f"financial_growth: {ticker} 无数据")
+                return 0
+            df = _fmp_df_to_snake(pd.DataFrame(data))
+            self.db.upsert_us_financial_growth(df)
+            return len(df)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Financial Growth"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Financial growth 失败 {futures[future]}: {e}")
+        logger.info(f"FMP financial growth 总计: {total} 条")
+        return total
+
+    def download_fmp_enterprise_values(self, tickers: list[str] = None, limit: int = 400) -> int:
+        """FMP per-ticker: enterprise-values → us_enterprise_value."""
+        if tickers is None:
+            tickers = self.db.get_us_tickers(stocks_only=True)
+        if not tickers:
+            logger.warning("download_fmp_enterprise_values: 无 ticker")
+            return 0
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._fmp_get_stable_json(
+                "enterprise-values",
+                params={"symbol": ticker, "period": "quarter", "limit": limit},
+            )
+            if not data:
+                logger.debug(f"enterprise_values: {ticker} 无数据")
+                return 0
+            df = _fmp_df_to_snake(pd.DataFrame(data))
+            self.db.upsert_us_enterprise_value(df)
+            return len(df)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Enterprise Values"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Enterprise values 失败 {futures[future]}: {e}")
+        logger.info(f"FMP enterprise values 总计: {total} 条")
+        return total
+
+    def download_fmp_owner_earnings(self, tickers: list[str] = None) -> int:
+        """FMP per-ticker: owner-earnings → us_owner_earnings."""
+        if tickers is None:
+            tickers = self.db.get_us_tickers(stocks_only=True)
+        if not tickers:
+            logger.warning("download_fmp_owner_earnings: 无 ticker")
+            return 0
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._fmp_get_stable_json("owner-earnings", params={"symbol": ticker})
+            if not data:
+                logger.debug(f"owner_earnings: {ticker} 无数据")
+                return 0
+            df = _fmp_df_to_snake(pd.DataFrame(data if isinstance(data, list) else [data]))
+            self.db.upsert_us_owner_earnings(df)
+            return len(df)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Owner Earnings"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Owner earnings 失败 {futures[future]}: {e}")
+        logger.info(f"FMP owner earnings 总计: {total} 条")
+        return total
+
+    def download_fmp_dcf_valuations(self, tickers: list[str] = None) -> int:
+        """FMP per-ticker: dcf → us_dcf_valuation."""
+        if tickers is None:
+            tickers = self.db.get_us_tickers(stocks_only=True)
+        if not tickers:
+            logger.warning("download_fmp_dcf_valuations: 无 ticker")
+            return 0
+        total = 0
+
+        def _fetch_single(ticker):
+            count = 0
+            for dcf_type, endpoint in [("standard", "discounted-cash-flow"), ("levered", "levered-dcf")]:
+                data = self._fmp_get_stable_json(endpoint, params={"symbol": ticker})
+                if not data:
+                    continue
+                df = _fmp_df_to_snake(pd.DataFrame(data if isinstance(data, list) else [data]))
+                df["dcf_type"] = dcf_type
+                self.db.upsert_us_dcf_valuation(df)
+                count += len(df)
+            return count
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="FMP DCF Valuations"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"DCF 失败 {futures[future]}: {e}")
+        logger.info(f"FMP DCF valuations 总计: {total} 条")
+        return total
+
+    def download_fmp_stock_peers(self, tickers: list[str] = None) -> int:
+        """FMP per-ticker: peers → us_stock_peer."""
+        if tickers is None:
+            tickers = self.db.get_us_tickers(stocks_only=True)
+        if not tickers:
+            logger.warning("download_fmp_stock_peers: 无 ticker")
+            return 0
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._fmp_get_stable_json("stock-peers", params={"symbol": ticker})
+            if not data:
+                logger.debug(f"stock_peers: {ticker} 无数据")
+                return 0
+            # API returns list of peer tickers
+            peers = data[0].get("peersList", []) if isinstance(data, list) and data else []
+            if not peers:
+                return 0
+            records = [{"ticker": ticker, "peer_ticker": p} for p in peers if p]
+            df = pd.DataFrame(records)
+            self.db.upsert_us_stock_peer(df)
+            return len(df)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Stock Peers"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Peers 失败 {futures[future]}: {e}")
+        logger.info(f"FMP stock peers 总计: {total} 条")
+        return total
+
+    def download_fmp_esg_ratings(self, tickers: list[str] = None) -> int:
+        """FMP per-ticker: esg-ratings → us_esg_rating."""
+        if tickers is None:
+            tickers = self.db.get_us_tickers(stocks_only=True)
+        if not tickers:
+            logger.warning("download_fmp_esg_ratings: 无 ticker")
+            return 0
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._fmp_get_stable_json("esg-rating", params={"symbol": ticker})
+            if not data:
+                logger.debug(f"esg_ratings: {ticker} 无数据")
+                return 0
+            df = _fmp_df_to_snake(pd.DataFrame(data if isinstance(data, list) else [data]))
+            self.db.upsert_us_esg_rating(df)
+            return len(df)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="FMP ESG Ratings"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"ESG 失败 {futures[future]}: {e}")
+        logger.info(f"FMP ESG ratings 总计: {total} 条")
+        return total
+
+    def download_fmp_price_targets(self, tickers: list[str] = None) -> int:
+        """FMP per-ticker: price-target-consensus → us_price_target."""
+        if tickers is None:
+            tickers = self.db.get_us_tickers(stocks_only=True)
+        if not tickers:
+            logger.warning("download_fmp_price_targets: 无 ticker")
+            return 0
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._fmp_get_stable_json("price-target-consensus", params={"symbol": ticker})
+            if not data:
+                logger.debug(f"price_targets: {ticker} 无数据")
+                return 0
+            df = _fmp_df_to_snake(pd.DataFrame(data if isinstance(data, list) else [data]))
+            self.db.upsert_us_price_target(df)
+            return len(df)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Price Targets"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Price targets 失败 {futures[future]}: {e}")
+        logger.info(f"FMP price targets 总计: {total} 条")
+        return total
+
+    def download_fmp_insider_statistics(self, tickers: list[str] = None) -> int:
+        """FMP per-ticker: insider-trade-statistics → us_insider_statistic."""
+        if tickers is None:
+            tickers = self.db.get_us_tickers(stocks_only=True)
+        if not tickers:
+            logger.warning("download_fmp_insider_statistics: 无 ticker")
+            return 0
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._fmp_get_stable_json("insider-trading-statistics", params={"symbol": ticker})
+            if not data:
+                logger.debug(f"insider_statistics: {ticker} 无数据")
+                return 0
+            df = _fmp_df_to_snake(pd.DataFrame(data if isinstance(data, list) else [data]))
+            self.db.upsert_us_insider_statistic(df)
+            return len(df)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Insider Statistics"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Insider stats 失败 {futures[future]}: {e}")
+        logger.info(f"FMP insider statistics 总计: {total} 条")
+        return total
+
+    def download_fmp_employee_count(self, tickers: list[str] = None) -> int:
+        """FMP per-ticker: historical-employee-count → us_employee_count."""
+        if tickers is None:
+            tickers = self.db.get_us_tickers(stocks_only=True)
+        if not tickers:
+            logger.warning("download_fmp_employee_count: 无 ticker")
+            return 0
+        total = 0
+
+        def _fetch_single(ticker):
+            data = self._fmp_get_stable_json("employee-count", params={"symbol": ticker})
+            if not data:
+                logger.debug(f"employee_count: {ticker} 无数据")
+                return 0
+            df = _fmp_df_to_snake(pd.DataFrame(data))
+            self.db.upsert_us_employee_count(df)
+            return len(df)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_single, t): t for t in tickers}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="FMP Employee Count"):
+                try:
+                    total += future.result()
+                except Exception as e:
+                    logger.warning(f"Employee count 失败 {futures[future]}: {e}")
+        logger.info(f"FMP employee count 总计: {total} 条")
+        return total
+
+    def download_fmp_index_constituents_history(self) -> int:
+        """FMP: 指数历史成分变更 → us_index_constituent."""
+        total = 0
+        index_map = {
+            "sp500": "historical/sp500_constituent",
+            "nasdaq": "historical/nasdaq_constituent",
+            "dowjones": "historical/dowjones_constituent",
+        }
+        for index_name, path in index_map.items():
+            data = self._fmp_get_json(path)
+            if not data:
+                logger.debug(f"index_constituents_history: {index_name} 无数据")
+                continue
+            df = _fmp_df_to_snake(pd.DataFrame(data))
+            df["index_name"] = index_name
+            self.db.upsert_us_index_constituent(df)
+            total += len(df)
+            logger.info(f"FMP {index_name} 历史成分: {len(df)} 条")
+        logger.info(f"FMP index constituents history 总计: {total} 条")
+        return total
+
+    def download_fmp_delisted_companies(self) -> int:
+        """FMP bulk: delisted-companies → us_delisted (一次全量)."""
+        data = self._fmp_get_stable_json("delisted-companies")
+        if not data:
+            logger.warning("download_fmp_delisted_companies: 无数据")
+            return 0
+        df = _fmp_df_to_snake(pd.DataFrame(data))
+        self.db.upsert_us_delisted(df)
+        logger.info(f"FMP delisted companies 总计: {len(df)} 条")
+        return len(df)
+
+    def download_fmp_symbol_changes(self) -> int:
+        """FMP bulk: symbol-changes → us_symbol_change (一次全量)."""
+        data = self._fmp_get_stable_json("symbol-change")
+        if not data:
+            logger.warning("download_fmp_symbol_changes: 无数据")
+            return 0
+        df = _fmp_df_to_snake(pd.DataFrame(data))
+        self.db.upsert_us_symbol_change(df)
+        logger.info(f"FMP symbol changes 总计: {len(df)} 条")
+        return len(df)
+
+    def download_fmp_senate_trading(self) -> int:
+        """FMP: senate + house trading → us_congress_trade."""
+        total = 0
+        for chamber, endpoint in [("senate", "senate-trading"), ("house", "house-disclosure")]:
+            page = 0
+            while True:
+                data = self._fmp_get_stable_json(endpoint, params={"page": page})
+                if not data:
+                    logger.debug(f"congress_trading: {chamber} page {page} 无数据，结束")
+                    break
+                df = _fmp_df_to_snake(pd.DataFrame(data))
+                df["source"] = f"fmp_{chamber}"
+                self.db.upsert_us_congress_trade(df)
+                total += len(df)
+                if len(data) < 100:
+                    break
+                page += 1
+        logger.info(f"FMP congress trading 总计: {total} 条")
+        return total
+
+    # ==============================================================
     # 全量导入调度
     # ==============================================================
 
     def download_fmp_all_bulk(self, start_year: int = 1995) -> dict:
-        """FMP: 全量下载 (bulk + per-ticker)。"""
+        """FMP: 全量下载（所有端点）。"""
         results = {}
-        # Bulk by year
+
+        # Phase 1: Bulk 端点（一次全市场）
+        logger.info("=== Phase 1: Bulk 端点 ===")
         results["stock_list"] = self.download_fmp_stock_list()
         results["index_constituents"] = self.download_fmp_index_constituents()
-        results["earnings_surprises"] = self.download_fmp_earnings_surprises_bulk()
-        results["eps_estimates"] = self.download_fmp_eps_estimates_bulk()
+        results["delisted"] = self.download_fmp_delisted_companies()
+        results["symbol_changes"] = self.download_fmp_symbol_changes()
+        results["shares_float"] = self.download_fmp_shares_float()
+
+        # Phase 2: Per-ticker 核心数据（只跑普通股）
+        logger.info("=== Phase 2: Per-ticker 核心数据 ===")
+        results["company_profiles"] = self.download_fmp_company_profiles()
+        results["prices"] = self._download_fmp_prices_per_ticker(start_year, datetime.now().year)
+        results["historical_market_cap"] = self.download_fmp_historical_market_cap()
+        results["financial_quarterly"] = self.download_fmp_financial_quarterly()
         results["income_statement"] = self.download_fmp_income_statement_bulk()
         results["key_metrics"] = self.download_fmp_key_metrics()
         results["ratios"] = self.download_fmp_ratios()
-        # Per-ticker
-        results["prices"] = self._download_fmp_prices_per_ticker(start_year, datetime.now().year)
+        results["financial_scores"] = self.download_fmp_financial_scores()
+        results["financial_growth"] = self.download_fmp_financial_growth()
+        results["enterprise_values"] = self.download_fmp_enterprise_values()
+        results["owner_earnings"] = self.download_fmp_owner_earnings()
+
+        # Phase 3: Per-ticker 辅助数据
+        logger.info("=== Phase 3: Per-ticker 辅助数据 ===")
+        results["earnings_surprises"] = self.download_fmp_earnings_surprises_bulk()
+        results["eps_estimates"] = self.download_fmp_eps_estimates_bulk()
         results["profiles"] = self.download_fmp_profiles()
         results["insider"] = self.download_fmp_insider_trading()
+        results["insider_statistics"] = self.download_fmp_insider_statistics()
+        results["analyst_grades"] = self.download_fmp_analyst_grades()
+        results["price_targets"] = self.download_fmp_price_targets()
         results["dividends_splits"] = self.download_fmp_dividends_splits()
+        results["dcf_valuations"] = self.download_fmp_dcf_valuations()
+        results["stock_peers"] = self.download_fmp_stock_peers()
+        results["esg_ratings"] = self.download_fmp_esg_ratings()
+        results["employee_count"] = self.download_fmp_employee_count()
+
+        # Phase 4: 指数/商品/宏观
+        logger.info("=== Phase 4: 指数/商品/宏观 ===")
         results["index_daily"] = self.download_fmp_index_daily(start_year)
+        results["index_history"] = self.download_fmp_index_constituents_history()
         results["commodities"] = self.download_fmp_commodity_prices(start_year)
         results["macro"] = self.download_fmp_macro()
+        results["congress"] = self.download_fmp_senate_trading()
+
         return results
 
     def download_fmp_all_per_ticker(self, start_year: int = 2015) -> dict:
