@@ -160,6 +160,27 @@ class BulkDownloader:
         self._fiscal_limiter = RateLimiter(FISCAL_RATE_LIMIT)
 
     # ==============================================================
+    # 断点续跑
+    # ==============================================================
+
+    def _skip_done_tickers(self, table: str, tickers: list[str],
+                            ticker_col: str = "ticker") -> list[str]:
+        """断点续跑：排除目标表中已有数据的 ticker。"""
+        try:
+            result = self.db.query(
+                f'SELECT DISTINCT "{ticker_col}" FROM "{table}"'
+            )
+            done = set(result[ticker_col].tolist()) if not result.empty else set()
+            remaining = [t for t in tickers if t not in done]
+            if done:
+                logger.info(f"断点续跑 {table}: 全部 {len(tickers)}, "
+                           f"已完成 {len(done)}, 待跑 {len(remaining)}")
+            return remaining
+        except Exception as e:
+            logger.debug(f"_skip_done_tickers ({table}): {e}")
+            return tickers
+
+    # ==============================================================
     # FMP Helpers
     # ==============================================================
 
@@ -319,6 +340,10 @@ class BulkDownloader:
         if not tickers:
             logger.warning("download_fmp_earnings_surprises_bulk: 无 ticker")
             return 0
+        tickers = self._skip_done_tickers("us_earnings_surprise", tickers)
+        if not tickers:
+            logger.info("download_fmp_earnings_surprises_bulk: 所有 ticker 已完成")
+            return 0
 
         total = 0
 
@@ -369,6 +394,10 @@ class BulkDownloader:
         if not tickers:
             logger.warning("download_fmp_eps_estimates_bulk: 无 ticker")
             return 0
+        tickers = self._skip_done_tickers("us_eps_estimate", tickers)
+        if not tickers:
+            logger.info("download_fmp_eps_estimates_bulk: 所有 ticker 已完成")
+            return 0
 
         total = 0
 
@@ -416,6 +445,10 @@ class BulkDownloader:
             tickers = self.db.get_us_tickers()
         if not tickers:
             logger.warning("download_fmp_income_statement_bulk: 无 ticker")
+            return 0
+        tickers = self._skip_done_tickers("us_financial_data", tickers)
+        if not tickers:
+            logger.info("download_fmp_income_statement_bulk: 所有 ticker 已完成")
             return 0
 
         total = 0
@@ -573,6 +606,10 @@ class BulkDownloader:
         if not tickers:
             logger.warning("download_fmp_key_metrics: 无 ticker")
             return 0
+        tickers = self._skip_done_tickers("us_key_metric", tickers)
+        if not tickers:
+            logger.info("download_fmp_key_metrics: 所有 ticker 已完成")
+            return 0
 
         total = 0
 
@@ -655,6 +692,10 @@ class BulkDownloader:
         if not tickers:
             logger.warning("无 ticker 可下载行情，请先下载股票列表")
             return 0
+        tickers = self._skip_done_tickers("us_daily_price", tickers)
+        if not tickers:
+            logger.info("_download_fmp_prices_per_ticker: 所有 ticker 已完成")
+            return 0
 
         # 按 10 年分段，确保每段不超过 5000 行
         segments = []
@@ -700,7 +741,10 @@ class BulkDownloader:
             tickers = self.db.get_us_tickers()
         if not tickers:
             logger.debug(f"download_fmp_profiles: 空返回 (not tickers)")
-
+            return 0
+        tickers = self._skip_done_tickers("us_industry_class", tickers)
+        if not tickers:
+            logger.info("download_fmp_profiles: 所有 ticker 已完成")
             return 0
 
         total = 0
@@ -738,7 +782,10 @@ class BulkDownloader:
             tickers = self.db.get_us_tickers()
         if not tickers:
             logger.debug(f"download_fmp_insider_trading: 空返回 (not tickers)")
-
+            return 0
+        tickers = self._skip_done_tickers("us_insider_trade", tickers)
+        if not tickers:
+            logger.info("download_fmp_insider_trading: 所有 ticker 已完成")
             return 0
 
         total = 0
@@ -793,6 +840,10 @@ class BulkDownloader:
         if not tickers:
             logger.warning("download_fmp_analyst_grades: 无 ticker")
             return 0
+        tickers = self._skip_done_tickers("us_analyst_recommendation", tickers)
+        if not tickers:
+            logger.info("download_fmp_analyst_grades: 所有 ticker 已完成")
+            return 0
 
         total = 0
 
@@ -838,7 +889,10 @@ class BulkDownloader:
             tickers = self.db.get_us_tickers()
         if not tickers:
             logger.debug(f"download_fmp_dividends_splits: 空返回 (not tickers)")
-
+            return 0
+        tickers = self._skip_done_tickers("us_corporate_action", tickers)
+        if not tickers:
+            logger.info("download_fmp_dividends_splits: 所有 ticker 已完成")
             return 0
 
         total = 0
@@ -1666,6 +1720,10 @@ class BulkDownloader:
         if not tickers:
             logger.warning("download_fmp_company_profiles: 无 ticker")
             return 0
+        tickers = self._skip_done_tickers("us_company_profile", tickers)
+        if not tickers:
+            logger.info("download_fmp_company_profiles: 所有 ticker 已完成")
+            return 0
         total = 0
         batch_size = 50
 
@@ -1695,6 +1753,10 @@ class BulkDownloader:
             tickers = self.db.get_us_tickers(stocks_only=True)
         if not tickers:
             logger.warning("download_fmp_historical_market_cap: 无 ticker")
+            return 0
+        tickers = self._skip_done_tickers("us_historical_market_cap", tickers)
+        if not tickers:
+            logger.info("download_fmp_historical_market_cap: 所有 ticker 已完成")
             return 0
         total = 0
 
@@ -1741,6 +1803,10 @@ class BulkDownloader:
         if not tickers:
             logger.warning("download_fmp_financial_scores: 无 ticker")
             return 0
+        tickers = self._skip_done_tickers("us_financial_score", tickers)
+        if not tickers:
+            logger.info("download_fmp_financial_scores: 所有 ticker 已完成")
+            return 0
         total = 0
 
         def _fetch_single(ticker):
@@ -1768,6 +1834,10 @@ class BulkDownloader:
             tickers = self.db.get_us_tickers(stocks_only=True)
         if not tickers:
             logger.warning("download_fmp_financial_growth: 无 ticker")
+            return 0
+        tickers = self._skip_done_tickers("us_financial_growth", tickers)
+        if not tickers:
+            logger.info("download_fmp_financial_growth: 所有 ticker 已完成")
             return 0
         total = 0
 
@@ -1800,6 +1870,10 @@ class BulkDownloader:
         if not tickers:
             logger.warning("download_fmp_enterprise_values: 无 ticker")
             return 0
+        tickers = self._skip_done_tickers("us_enterprise_value", tickers)
+        if not tickers:
+            logger.info("download_fmp_enterprise_values: 所有 ticker 已完成")
+            return 0
         total = 0
 
         def _fetch_single(ticker):
@@ -1831,6 +1905,10 @@ class BulkDownloader:
         if not tickers:
             logger.warning("download_fmp_owner_earnings: 无 ticker")
             return 0
+        tickers = self._skip_done_tickers("us_owner_earnings", tickers)
+        if not tickers:
+            logger.info("download_fmp_owner_earnings: 所有 ticker 已完成")
+            return 0
         total = 0
 
         def _fetch_single(ticker):
@@ -1858,6 +1936,10 @@ class BulkDownloader:
             tickers = self.db.get_us_tickers(stocks_only=True)
         if not tickers:
             logger.warning("download_fmp_dcf_valuations: 无 ticker")
+            return 0
+        tickers = self._skip_done_tickers("us_dcf_valuation", tickers)
+        if not tickers:
+            logger.info("download_fmp_dcf_valuations: 所有 ticker 已完成")
             return 0
         total = 0
 
@@ -1889,6 +1971,10 @@ class BulkDownloader:
             tickers = self.db.get_us_tickers(stocks_only=True)
         if not tickers:
             logger.warning("download_fmp_stock_peers: 无 ticker")
+            return 0
+        tickers = self._skip_done_tickers("us_stock_peer", tickers)
+        if not tickers:
+            logger.info("download_fmp_stock_peers: 所有 ticker 已完成")
             return 0
         total = 0
 
@@ -1923,6 +2009,10 @@ class BulkDownloader:
         if not tickers:
             logger.warning("download_fmp_esg_ratings: 无 ticker")
             return 0
+        tickers = self._skip_done_tickers("us_esg_rating", tickers)
+        if not tickers:
+            logger.info("download_fmp_esg_ratings: 所有 ticker 已完成")
+            return 0
         total = 0
 
         def _fetch_single(ticker):
@@ -1950,6 +2040,10 @@ class BulkDownloader:
             tickers = self.db.get_us_tickers(stocks_only=True)
         if not tickers:
             logger.warning("download_fmp_price_targets: 无 ticker")
+            return 0
+        tickers = self._skip_done_tickers("us_price_target", tickers)
+        if not tickers:
+            logger.info("download_fmp_price_targets: 所有 ticker 已完成")
             return 0
         total = 0
 
@@ -1979,6 +2073,10 @@ class BulkDownloader:
         if not tickers:
             logger.warning("download_fmp_insider_statistics: 无 ticker")
             return 0
+        tickers = self._skip_done_tickers("us_insider_statistic", tickers)
+        if not tickers:
+            logger.info("download_fmp_insider_statistics: 所有 ticker 已完成")
+            return 0
         total = 0
 
         def _fetch_single(ticker):
@@ -2006,6 +2104,10 @@ class BulkDownloader:
             tickers = self.db.get_us_tickers(stocks_only=True)
         if not tickers:
             logger.warning("download_fmp_employee_count: 无 ticker")
+            return 0
+        tickers = self._skip_done_tickers("us_employee_count", tickers)
+        if not tickers:
+            logger.info("download_fmp_employee_count: 所有 ticker 已完成")
             return 0
         total = 0
 
