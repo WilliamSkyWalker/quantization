@@ -122,44 +122,63 @@ app.add_typer(data_app, name="data")
 
 def _clean_tables_for_import(db, source: str, target: str):
     """导入前清空对应表。"""
+    # 所有 FMP 美股表（含新增）
+    _ALL_FMP_TABLES = [
+        "us_stock_basic", "us_industry_class", "us_company_profile",
+        "us_daily_price", "us_historical_market_cap",
+        "us_financial_data", "us_key_metric",
+        "us_financial_score", "us_financial_growth", "us_enterprise_value",
+        "us_owner_earnings", "us_revenue_segment", "us_dcf_valuation",
+        "us_earnings_surprise", "us_eps_estimate",
+        "us_analyst_recommendation", "us_price_target",
+        "us_insider_trade", "us_insider_statistic",
+        "us_corporate_action", "us_shares_float",
+        "us_stock_peer", "us_esg_rating", "us_employee_count",
+        "us_index_daily", "us_index_constituent",
+        "us_commodity_price", "us_macro_indicator",
+        "us_symbol_change", "us_delisted", "us_congress_trade",
+    ]
     table_map = {
-        ("fmp", "all"): [
-            "us_stock_basic", "us_industry_class", "us_earnings_surprise",
-            "us_eps_estimate", "us_financial_data", "us_key_metric",
-            "us_daily_price", "us_insider_trade", "us_corporate_action",
-            "us_index_daily", "us_commodity_price", "us_macro_indicator",
-        ],
+        ("fmp", "all"): _ALL_FMP_TABLES,
         ("fmp", "stock-list"): ["us_stock_basic", "us_industry_class"],
+        ("fmp", "profiles"): ["us_industry_class", "us_company_profile"],
         ("fmp", "earnings"): ["us_earnings_surprise"],
         ("fmp", "estimates"): ["us_eps_estimate"],
         ("fmp", "income"): ["us_financial_data"],
+        ("fmp", "financial-quarterly"): ["us_financial_data"],
         ("fmp", "metrics"): ["us_key_metric"],
         ("fmp", "ratios"): ["us_key_metric"],
         ("fmp", "prices"): ["us_daily_price"],
-        ("fmp", "profiles"): ["us_industry_class"],
+        ("fmp", "market-cap"): ["us_historical_market_cap"],
         ("fmp", "insider"): ["us_insider_trade"],
+        ("fmp", "insider-stats"): ["us_insider_statistic"],
+        ("fmp", "analyst-grades"): ["us_analyst_recommendation"],
+        ("fmp", "price-targets"): ["us_price_target"],
         ("fmp", "dividends"): ["us_corporate_action"],
-        ("fmp", "index"): ["us_index_daily"],
+        ("fmp", "scores"): ["us_financial_score"],
+        ("fmp", "growth"): ["us_financial_growth"],
+        ("fmp", "ev"): ["us_enterprise_value"],
+        ("fmp", "owner-earnings"): ["us_owner_earnings"],
+        ("fmp", "dcf"): ["us_dcf_valuation"],
+        ("fmp", "peers"): ["us_stock_peer"],
+        ("fmp", "esg"): ["us_esg_rating"],
+        ("fmp", "float"): ["us_shares_float"],
+        ("fmp", "employee"): ["us_employee_count"],
+        ("fmp", "index"): ["us_index_daily", "us_index_constituent"],
         ("fmp", "commodity"): ["us_commodity_price"],
         ("fmp", "macro"): ["us_macro_indicator"],
-        ("fmp", "all-ticker"): [
-            "us_daily_price", "us_industry_class", "us_insider_trade", "us_corporate_action",
-            "us_index_daily", "us_commodity_price", "us_macro_indicator",
-        ],
+        ("fmp", "delisted"): ["us_delisted"],
+        ("fmp", "symbol-changes"): ["us_symbol_change"],
+        ("fmp", "congress"): ["us_congress_trade"],
         ("uw", "all"): ["us_options_flow", "us_dark_pool", "us_congress_trade"],
         ("uw", "options"): ["us_options_flow"],
         ("uw", "darkpool"): ["us_dark_pool"],
         ("uw", "congress"): ["us_congress_trade"],
-        ("uw", "news"): [],  # us_news 按 source 过滤，不全清
+        ("uw", "news"): [],
         ("fiscal", "all"): ["us_daily_ratio"],
         ("fiscal", "ratios"): ["us_daily_ratio"],
-        ("all", "all"): [
-            "us_stock_basic", "us_industry_class", "us_earnings_surprise",
-            "us_eps_estimate", "us_financial_data", "us_key_metric",
-            "us_daily_price", "us_insider_trade", "us_corporate_action",
-            "us_index_daily", "us_commodity_price", "us_macro_indicator",
-            "us_options_flow", "us_dark_pool", "us_congress_trade",
-            "us_daily_ratio",
+        ("all", "all"): _ALL_FMP_TABLES + [
+            "us_options_flow", "us_dark_pool", "us_daily_ratio",
         ],
     }
     tables = table_map.get((source, target), [])
@@ -171,7 +190,7 @@ def _clean_tables_for_import(db, source: str, target: str):
     with db.get_session() as session:
         for table in tables:
             try:
-                session.execute(sa_text(f"TRUNCATE TABLE `{table}`"))
+                session.execute(sa_text(f'TRUNCATE TABLE "{table}" CASCADE'))
                 console.print(f"  [dim]✓ {table} 已清空[/dim]")
             except Exception as e:
                 logger.warning(f"_clean_tables_for_import: 清空表 {table} 失败: {e}")
@@ -217,8 +236,25 @@ def data_bulk_import(
         ("fmp", "profiles"): dl.download_fmp_profiles,
         ("fmp", "insider"): dl.download_fmp_insider_trading,
         ("fmp", "analyst-grades"): dl.download_fmp_analyst_grades,
+        ("fmp", "price-targets"): dl.download_fmp_price_targets,
         ("fmp", "dividends"): dl.download_fmp_dividends_splits,
+        ("fmp", "scores"): dl.download_fmp_financial_scores,
+        ("fmp", "growth"): dl.download_fmp_financial_growth,
+        ("fmp", "ev"): dl.download_fmp_enterprise_values,
+        ("fmp", "owner-earnings"): dl.download_fmp_owner_earnings,
+        ("fmp", "dcf"): dl.download_fmp_dcf_valuations,
+        ("fmp", "peers"): dl.download_fmp_stock_peers,
+        ("fmp", "esg"): dl.download_fmp_esg_ratings,
+        ("fmp", "float"): dl.download_fmp_shares_float,
+        ("fmp", "market-cap"): dl.download_fmp_historical_market_cap,
+        ("fmp", "company-profiles"): dl.download_fmp_company_profiles,
+        ("fmp", "insider-stats"): dl.download_fmp_insider_statistics,
+        ("fmp", "employee"): dl.download_fmp_employee_count,
+        ("fmp", "delisted"): dl.download_fmp_delisted_companies,
+        ("fmp", "symbol-changes"): dl.download_fmp_symbol_changes,
+        ("fmp", "congress"): dl.download_fmp_senate_trading,
         ("fmp", "index"): lambda: dl.download_fmp_index_daily(start_year),
+        ("fmp", "index-history"): dl.download_fmp_index_constituents_history,
         ("fmp", "commodity"): lambda: dl.download_fmp_commodity_prices(start_year),
         ("fmp", "macro"): dl.download_fmp_macro,
         # Unusual Whales
@@ -365,55 +401,28 @@ def data_update(
         results = {}
 
         # --- FMP ---
-        # 日线行情（全 ticker，只拉最近 1 年）
-        try:
-            console.print("  [dim]FMP 日线行情...[/dim]")
-            results["prices"] = dl._download_fmp_prices_per_ticker(current_year, current_year)
-        except Exception as e:
-            logger.warning(f"data_update: FMP 日线跳过: {e}")
-            console.print(f"[yellow]FMP 日线跳过: {e}[/yellow]")
+        def _try(name, fn):
+            try:
+                console.print(f"  [dim]FMP {name}...[/dim]")
+                results[name] = fn()
+            except Exception as e:
+                logger.warning(f"data_update: FMP {name} 跳过: {e}")
+                console.print(f"[yellow]FMP {name} 跳过: {e}[/yellow]")
 
-        # 季度财报（全 ticker，limit=8 只拉最近 8 个季度）
-        try:
-            console.print("  [dim]FMP 季度财报...[/dim]")
-            results["financial"] = dl.download_fmp_financial_quarterly(limit=8)
-        except Exception as e:
-            logger.warning(f"data_update: FMP 财报跳过: {e}")
-            console.print(f"[yellow]FMP 财报跳过: {e}[/yellow]")
-
-        # 分析师评级
-        try:
-            console.print("  [dim]FMP 分析师评级...[/dim]")
-            results["analyst_grades"] = dl.download_fmp_analyst_grades()
-        except Exception as e:
-            logger.warning(f"data_update: FMP 分析师跳过: {e}")
-            console.print(f"[yellow]FMP 分析师跳过: {e}[/yellow]")
-
-        # Insider 交易
-        try:
-            console.print("  [dim]FMP Insider 交易...[/dim]")
-            results["insider"] = dl.download_fmp_insider_trading()
-        except Exception as e:
-            logger.warning(f"data_update: FMP Insider 跳过: {e}")
-            console.print(f"[yellow]FMP Insider 跳过: {e}[/yellow]")
-
-        # Earnings / Estimates / Metrics (bulk, current year + last year)
-        try:
-            console.print("  [dim]FMP Earnings/Estimates/Metrics...[/dim]")
-            results["earnings"] = dl.download_fmp_earnings_surprises_bulk()
-            results["estimates"] = dl.download_fmp_eps_estimates_bulk()
-            results["metrics"] = dl.download_fmp_key_metrics()
-        except Exception as e:
-            logger.warning(f"data_update: FMP bulk 跳过: {e}")
-            console.print(f"[yellow]FMP bulk 跳过: {e}[/yellow]")
-
-        # 指数日线
-        try:
-            console.print("  [dim]FMP 指数日线...[/dim]")
-            results["index"] = dl.download_fmp_index_daily(current_year)
-        except Exception as e:
-            logger.warning(f"data_update: FMP 指数跳过: {e}")
-            console.print(f"[yellow]FMP 指数跳过: {e}[/yellow]")
+        _try("stock_list", dl.download_fmp_stock_list)
+        _try("prices", lambda: dl._download_fmp_prices_per_ticker(current_year, current_year))
+        _try("financial", lambda: dl.download_fmp_financial_quarterly(limit=8))
+        _try("key_metrics", dl.download_fmp_key_metrics)
+        _try("ratios", dl.download_fmp_ratios)
+        _try("earnings", dl.download_fmp_earnings_surprises_bulk)
+        _try("estimates", dl.download_fmp_eps_estimates_bulk)
+        _try("analyst_grades", dl.download_fmp_analyst_grades)
+        _try("price_targets", dl.download_fmp_price_targets)
+        _try("insider", dl.download_fmp_insider_trading)
+        _try("profiles", dl.download_fmp_profiles)
+        _try("dividends", dl.download_fmp_dividends_splits)
+        _try("financial_scores", dl.download_fmp_financial_scores)
+        _try("index", lambda: dl.download_fmp_index_daily(current_year))
 
         # --- UW ---
         try:
