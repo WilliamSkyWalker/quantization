@@ -265,22 +265,27 @@ class USFactorBase(ABC):
         cls._static_cache["_bulk_dividends"] = df_ca
         logger.info(f"US 预加载 dividends: {len(df_ca)} 行, {time.time()-t0:.1f}s")
 
-        # 8. 预加载 us_key_metric.market_cap（历史市值，消除前瞻偏差）
+        # 8. 预计算历史市值（weighted_avg_shares × adj_close，季度精度，消除前瞻偏差）
+        # 数据源：_bulk_financial（已预加载）+ _bulk_daily（已预加载）
+        # 方法：每 ticker 取 filing_date <= date 的最新 weighted_avg_shares，
+        #       与 adj_close 相乘得到当日市值。预计算所有调仓日的市值表。
         t0 = time.time()
         try:
-            df_mktcap = db.query(
-                "SELECT ticker, date, market_cap FROM us_key_metric "
-                "WHERE market_cap IS NOT NULL AND market_cap > 0 "
-                "ORDER BY ticker, date"
-            )
-            if not df_mktcap.empty:
-                df_mktcap["date"] = pd.to_datetime(df_mktcap["date"])
-                df_mktcap["market_cap"] = pd.to_numeric(df_mktcap["market_cap"], errors="coerce")
-            cls._static_cache["_bulk_mktcap"] = df_mktcap
-            logger.info(f"US 预加载 us_key_metric (market_cap): {len(df_mktcap)} 行, {time.time()-t0:.1f}s")
+            shares_df = pd.DataFrame()
+            if df_fin is not None and not df_fin.empty:
+                s = df_fin[["ticker", "filing_date", "weighted_avg_shares"]].dropna(
+                    subset=["weighted_avg_shares"]
+                )
+                s = s[s["weighted_avg_shares"] > 0]
+                s = s.sort_values("filing_date").drop_duplicates(
+                    subset=["ticker", "filing_date"], keep="last"
+                )
+                shares_df = s
+            cls._static_cache["_bulk_shares"] = shares_df
+            logger.info(f"US 预加载 shares outstanding: {len(shares_df)} 行, {time.time()-t0:.1f}s")
         except Exception as e:
-            logger.warning(f"预加载 market_cap 失败: {e}")
-            cls._static_cache["_bulk_mktcap"] = pd.DataFrame()
+            logger.warning(f"预加载 shares 失败: {e}")
+            cls._static_cache["_bulk_shares"] = pd.DataFrame()
 
         # 9. 预加载 us_insider_trade（INSIDER_NET_BUY 因子用，按 filing_date）
         t0 = time.time()
@@ -772,8 +777,8 @@ class USFactorBase(ABC):
         """
         获取历史市值（消除前瞻偏差）。
 
-        优先使用 us_key_metric 的历史季度 market_cap（forward-fill 到目标日期），
-        回退到 us_stock_basic 静态快照。
+        方法：weighted_avg_shares（季度，filing_date <= date）× adj_close（当日）。
+        回退链：预加载计算 → SQL 查 us_key_metric → us_stock_basic 静态快照。
 
         Returns:
             DataFrame[ticker, market_cap]
@@ -788,25 +793,48 @@ class USFactorBase(ABC):
 
         date_ts = pd.to_datetime(date)
 
-        # 1. Try historical market cap from preloaded us_key_metric
-        bulk_mktcap = self._static_cache.get("_bulk_mktcap")
-        if bulk_mktcap is not None and not bulk_mktcap.empty:
-            # Forward-fill: for each ticker, take the latest market_cap where date <= target
-            valid = bulk_mktcap[bulk_mktcap["date"] <= date_ts]
-            if not valid.empty:
-                df = (
-                    valid.sort_values("date")
+        # 1. Compute from preloaded shares × price (季度精度)
+        bulk_shares = self._static_cache.get("_bulk_shares")
+        bulk_daily = self._static_cache.get("_bulk_daily")
+        if (
+            bulk_shares is not None and not bulk_shares.empty
+            and bulk_daily is not None and not bulk_daily.empty
+        ):
+            # Latest shares where filing_date <= target date (防前瞻)
+            valid_shares = bulk_shares[bulk_shares["filing_date"] <= date_ts]
+            if not valid_shares.empty:
+                latest_shares = (
+                    valid_shares.sort_values("filing_date")
                     .drop_duplicates(subset=["ticker"], keep="last")
-                    [["ticker", "market_cap"]]
+                    [["ticker", "weighted_avg_shares"]]
                 )
-                self._date_cache[cache_key] = df
-                if universe_tickers:
-                    df = df[df["ticker"].isin(universe_tickers)]
-                return df.copy()
-            else:
-                logger.debug(f"get_market_cap: no historical mktcap data before {date}")
 
-        # 2. Fallback: SQL query for non-preloaded mode
+                # Get adj_close on or before target date
+                valid_prices = bulk_daily[bulk_daily["trade_date"] <= date_ts]
+                if not valid_prices.empty:
+                    latest_prices = (
+                        valid_prices.sort_values("trade_date")
+                        .drop_duplicates(subset=["ticker"], keep="last")
+                        [["ticker", "adj_close"]]
+                    )
+                    latest_prices["adj_close"] = pd.to_numeric(
+                        latest_prices["adj_close"], errors="coerce"
+                    )
+
+                    merged = latest_shares.merge(latest_prices, on="ticker", how="inner")
+                    merged["market_cap"] = merged["weighted_avg_shares"] * merged["adj_close"]
+                    df = merged[["ticker", "market_cap"]].dropna(subset=["market_cap"])
+                    df = df[df["market_cap"] > 0]
+
+                    if not df.empty:
+                        self._date_cache[cache_key] = df
+                        if universe_tickers:
+                            df = df[df["ticker"].isin(universe_tickers)]
+                        return df.copy()
+
+            logger.debug(f"get_market_cap: shares×price failed for {date}, trying fallback")
+
+        # 2. Fallback: SQL query us_key_metric (年度精度)
         try:
             df = self.db.query(
                 "SELECT ticker, market_cap FROM us_key_metric "
@@ -821,9 +849,9 @@ class USFactorBase(ABC):
                     df = df[df["ticker"].isin(universe_tickers)]
                 return df.copy()
         except Exception as e:
-            logger.debug(f"get_market_cap: SQL fallback failed: {e}")
+            logger.debug(f"get_market_cap: us_key_metric fallback failed: {e}")
 
-        # 3. Last resort: static snapshot (look-ahead, but better than nothing)
+        # 3. Last resort: static snapshot (前瞻偏差，但好过无数据)
         logger.warning(f"get_market_cap: falling back to static us_stock_basic for {date}")
         df = self.db.query("SELECT ticker, market_cap FROM us_stock_basic WHERE is_active = 1")
         df["market_cap"] = pd.to_numeric(df["market_cap"], errors="coerce")
