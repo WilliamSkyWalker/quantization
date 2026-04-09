@@ -122,6 +122,9 @@ class RateLimiter:
             self._last_call = time.time()
 
 
+_429_WAITS = [5, 10, 20]  # 429 重试等待秒数
+
+
 def _request_with_retry(method: str, url: str, max_retries: int = 3, **kwargs) -> requests.Response:
     """HTTP request with exponential backoff on 429/5xx."""
     kwargs.setdefault("timeout", 60)
@@ -129,7 +132,7 @@ def _request_with_retry(method: str, url: str, max_retries: int = 3, **kwargs) -
         try:
             resp = requests.request(method, url, **kwargs)
             if resp.status_code == 429:
-                wait = 2 ** (attempt + 2)  # 4s, 8s, 16s
+                wait = _429_WAITS[min(attempt, len(_429_WAITS) - 1)]
                 logger.warning(f"Rate limited (429), waiting {wait}s (attempt {attempt+1}/{max_retries})...")
                 time.sleep(wait)
                 continue
