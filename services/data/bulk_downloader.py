@@ -2080,7 +2080,7 @@ class BulkDownloader:
         total = 0
 
         def _fetch_single(ticker):
-            data = self._fmp_get_json(f"insider-trading-statistics/{ticker}", version="v4")
+            data = self._fmp_get_stable_json("insider-trading/statistics", params={"symbol": ticker})
             if not data:
                 logger.debug(f"insider_statistics: {ticker} 无数据")
                 return 0
