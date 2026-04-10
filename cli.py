@@ -240,61 +240,38 @@ def data_bulk_import(
 
     dispatch = {
         # FMP
-        ("fmp", "all"): lambda: dl.download_fmp_all_bulk(start_year),
-        ("fmp", "all-ticker"): lambda: dl.download_fmp_all_per_ticker(start_year),
+        ("fmp", "all"): lambda: dl.download_fmp_all(start_year),
         ("fmp", "stock-list"): dl.download_fmp_stock_list,
-        ("fmp", "sp500"): dl.download_fmp_index_constituents,
-        ("fmp", "earnings"): lambda: dl.download_fmp_earnings_surprises_bulk(),
-        ("fmp", "estimates"): lambda: dl.download_fmp_eps_estimates_bulk(),
-        ("fmp", "income"): lambda: dl.download_fmp_income_statement_bulk(),
-        ("fmp", "financial-quarterly"): lambda: dl.download_fmp_financial_quarterly(),
-        ("fmp", "metrics"): lambda: dl.download_fmp_key_metrics(),
-        ("fmp", "ratios"): lambda: dl.download_fmp_ratios(),
-        ("fmp", "prices"): lambda: dl._download_fmp_prices_per_ticker(start_year, 2026),
-        ("fmp", "profiles"): dl.download_fmp_profiles,
+        ("fmp", "company-profiles"): dl.download_fmp_company_profiles,
+        ("fmp", "prices"): lambda: dl.download_fmp_daily_prices(start_year),
+        ("fmp", "market-cap"): dl.download_fmp_historical_market_cap,
+        ("fmp", "financial-quarterly"): dl.download_fmp_financial_quarterly,
+        ("fmp", "metrics"): dl.download_fmp_key_metrics,
+        ("fmp", "ratios"): dl.download_fmp_ratios,
+        ("fmp", "growth"): dl.download_fmp_financial_growth,
+        ("fmp", "ev"): dl.download_fmp_enterprise_values,
+        ("fmp", "owner-earnings"): dl.download_fmp_owner_earnings,
+        ("fmp", "earnings"): dl.download_fmp_earnings_surprises,
+        ("fmp", "estimates"): dl.download_fmp_eps_estimates,
         ("fmp", "insider"): dl.download_fmp_insider_trading,
+        ("fmp", "insider-stats"): dl.download_fmp_insider_statistics,
         ("fmp", "analyst-grades"): dl.download_fmp_analyst_grades,
         ("fmp", "price-targets"): dl.download_fmp_price_targets,
         ("fmp", "dividends"): dl.download_fmp_dividends_splits,
         ("fmp", "scores"): dl.download_fmp_financial_scores,
-        ("fmp", "growth"): dl.download_fmp_financial_growth,
-        ("fmp", "ev"): dl.download_fmp_enterprise_values,
-        ("fmp", "owner-earnings"): dl.download_fmp_owner_earnings,
+        ("fmp", "float"): dl.download_fmp_shares_float,
+        ("fmp", "esg"): dl.download_fmp_esg_ratings,
         ("fmp", "dcf"): dl.download_fmp_dcf_valuations,
         ("fmp", "peers"): dl.download_fmp_stock_peers,
-        ("fmp", "esg"): dl.download_fmp_esg_ratings,
-        ("fmp", "float"): dl.download_fmp_shares_float,
-        ("fmp", "market-cap"): dl.download_fmp_historical_market_cap,
-        ("fmp", "company-profiles"): dl.download_fmp_company_profiles,
-        ("fmp", "insider-stats"): dl.download_fmp_insider_statistics,
         ("fmp", "employee"): dl.download_fmp_employee_count,
-        ("fmp", "delisted"): dl.download_fmp_delisted_companies,
-        ("fmp", "symbol-changes"): dl.download_fmp_symbol_changes,
-        ("fmp", "congress"): dl.download_fmp_senate_trading,
         ("fmp", "index"): lambda: dl.download_fmp_index_daily(start_year),
         ("fmp", "index-history"): dl.download_fmp_index_constituents_history,
         ("fmp", "commodity"): lambda: dl.download_fmp_commodity_prices(start_year),
         ("fmp", "macro"): dl.download_fmp_macro,
-        # Unusual Whales
-        ("uw", "all"): dl.download_uw_all,
-        ("uw", "options"): dl.download_uw_options_flow,
-        ("uw", "darkpool"): dl.download_uw_dark_pool,
-        ("uw", "congress"): dl.download_uw_congress_trades,
-        ("uw", "news"): dl.download_uw_news,
-        # Fiscal.ai
-        ("fiscal", "all"): dl.download_fiscal_all,
-        ("fiscal", "ratios"): dl.download_fiscal_daily_ratios,
-        # Alpha Vantage
-        ("av", "all"): dl.download_av_all,
-        ("av", "news-sentiment"): dl.download_av_news_sentiment,
-        ("av", "options"): dl.download_av_options_snapshot,
-        # Quiver
-        ("quiver", "all"): dl.download_quiver_all,
-        ("quiver", "lobbying"): dl.download_quiver_lobbying,
-        ("quiver", "gov-contracts"): dl.download_quiver_gov_contracts,
-        ("quiver", "wsb"): dl.download_quiver_wsb_sentiment,
-        # 全部
-        ("all", "all"): lambda: dl.download_all(start_year),
+        ("fmp", "delisted"): dl.download_fmp_delisted_companies,
+        ("fmp", "symbol-changes"): dl.download_fmp_symbol_changes,
+        ("fmp", "congress"): dl.download_fmp_congress_trading,
+        # TODO: UW/Fiscal/AV/Quiver 需要迁移到新架构
     }
 
     key = (source, target)
@@ -428,18 +405,21 @@ def data_update(
                 console.print(f"[yellow]FMP {name} 跳过: {e}[/yellow]")
 
         _try("stock_list", dl.download_fmp_stock_list)
-        _try("prices", lambda: dl._download_fmp_prices_per_ticker(current_year, current_year))
+        _try("prices", lambda: dl.download_fmp_daily_prices(current_year))
         _try("financial", lambda: dl.download_fmp_financial_quarterly(limit=8))
         _try("key_metrics", dl.download_fmp_key_metrics)
         _try("ratios", dl.download_fmp_ratios)
-        _try("earnings", dl.download_fmp_earnings_surprises_bulk)
-        _try("estimates", dl.download_fmp_eps_estimates_bulk)
+        _try("earnings", dl.download_fmp_earnings_surprises)
+        _try("estimates", dl.download_fmp_eps_estimates)
         _try("analyst_grades", dl.download_fmp_analyst_grades)
         _try("price_targets", dl.download_fmp_price_targets)
         _try("insider", dl.download_fmp_insider_trading)
-        _try("profiles", dl.download_fmp_profiles)
+        _try("company_profiles", dl.download_fmp_company_profiles)
         _try("dividends", dl.download_fmp_dividends_splits)
         _try("financial_scores", dl.download_fmp_financial_scores)
+        _try("shares_float", dl.download_fmp_shares_float)
+        _try("dcf", dl.download_fmp_dcf_valuations)
+        _try("peers", dl.download_fmp_stock_peers)
         _try("index", lambda: dl.download_fmp_index_daily(current_year))
 
         # --- UW ---

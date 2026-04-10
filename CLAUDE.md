@@ -40,13 +40,21 @@ Claude Code 编码规范。所有代码变更必须遵守。
 - **所有修改必须系统性检查** — `grep` 找全、逐一改、`grep` 确认零残留
 - **所有修改必须测试** — 用实际数据运行验证，涉及 DB 写入的必须 `SELECT COUNT(*)` 确认入库
 - **不用 pytest** — 测试用端到端自动化脚本（真实 API + 真实 DB），不用 mock
-- 数据库批量写入统一使用 `_fast_bulk_upsert`（`INSERT ... ON DUPLICATE KEY UPDATE`），禁止逐条 ORM
+- **数据库读写必须使用 SQLAlchemy ORM**，禁止手写 raw SQL。写入用 `sqlalchemy.dialects.postgresql.insert` + `on_conflict_do_update`，查询用 ORM query 或 `session.query()`
+- **FMP 数据导入禁止 rename 列名** — DB 列名必须和 `_camel_to_snake()` 转换结果完全一致，不允许手动起别名（如 `roe`/`rd_expenses`）。唯一例外是 `date→trade_date`（避免和 unique key 冲突）
+- **禁止使用 Agent 子进程** — 所有工作在主会话中完成
 - Matplotlib 必须在导入 `pyplot` 前调用 `matplotlib.use("Agg")`
 - 因子计算始终为截面（同一日期，全部股票）
 - MySQL 列名 `open` 是保留字，原生 SQL 需用反引号转义
 - A股因子在 `services/factors/`，美股因子在 `services/us_factors/`（独立，不共享基类）
 - A股配置无前缀（`MAX_HOLDINGS`），美股配置带 `US_` 前缀（`US_MAX_HOLDINGS`）
 - 使用 `python3` 而非 `python`
+
+### 数据治理重写待办
+- [ ] `cli.py` — 更新 `data_bulk_import` 和 `data_update` 命令适配新方法名
+- [ ] 端到端测试 — 用 AAPL 测试每个端点写入
+- [ ] 删除旧的 `fmp_downloader.py`（yfinance 版）或标记废弃
+- [ ] 其他数据源（UW/Fiscal/Quiver/AV）的下载逻辑需要迁移或重写
 
 ### 文档同步规则
 
