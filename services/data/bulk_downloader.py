@@ -180,6 +180,27 @@ class BulkDownloader:
             logger.debug(f"_skip_done_tickers ({table}): {e}")
             return tickers
 
+    def _skip_if_table_has_data(self, table: str, min_rows: int = 10) -> bool:
+        """Bulk 端点跳过检查：表里数据量 >= min_rows 就跳过。
+
+        Args:
+            table: 表名
+            min_rows: 最少行数，低于此值认为数据不完整需要重跑
+        Returns:
+            True 表示跳过
+        """
+        try:
+            r = self.db.query(f'SELECT COUNT(*) as cnt FROM "{table}"')
+            cnt = int(r["cnt"].iloc[0])
+            if cnt >= min_rows:
+                logger.info(f"{table} 已有 {cnt} 条数据（>={min_rows}），跳过")
+                return True
+            elif cnt > 0:
+                logger.info(f"{table} 仅有 {cnt} 条数据（<{min_rows}），数据不完整，重新导入")
+        except Exception:
+            pass
+        return False
+
     def _wrap_fetch(self, table: str, fetch_fn, ticker: str):
         """包装 fetch 函数：数据写入完成后标记 import_progress。
 
@@ -242,6 +263,8 @@ class BulkDownloader:
 
     def download_fmp_stock_list(self) -> int:
         """下载全市场美股列表 (FMP stock-screener)."""
+        if self._skip_if_table_has_data("us_stock_basic"):
+            return 0
         all_records = []
         for exchange in ["NYSE", "NASDAQ", "AMEX"]:
             data = self._fmp_get_json(
@@ -751,6 +774,8 @@ class BulkDownloader:
 
     def download_fmp_profiles(self, tickers: list[str] = None) -> int:
         """FMP per-ticker: company profiles (GICS sector/industry, 多线程)."""
+        if self._skip_if_table_has_data("us_industry_class", min_rows=5000):
+            return 0
         if tickers is None:
             tickers = self.db.get_us_tickers()
         if not tickers:
@@ -1729,6 +1754,8 @@ class BulkDownloader:
 
     def download_fmp_company_profiles(self, tickers: list[str] = None) -> int:
         """FMP per-ticker: /stable/profile → us_company_profile (全量公司信息)."""
+        if self._skip_if_table_has_data("us_company_profile", min_rows=5000):
+            return 0
         if tickers is None:
             tickers = self.db.get_us_tickers(stocks_only=False)
         if not tickers:
@@ -2164,6 +2191,8 @@ class BulkDownloader:
 
     def download_fmp_index_constituents_history(self) -> int:
         """FMP: 指数历史成分变更 → us_index_constituent."""
+        if self._skip_if_table_has_data("us_index_constituent", min_rows=100):
+            return 0
         total = 0
         index_map = {
             "sp500": "historical/sp500_constituent",
@@ -2185,6 +2214,8 @@ class BulkDownloader:
 
     def download_fmp_delisted_companies(self) -> int:
         """FMP bulk: delisted-companies → us_delisted (一次全量)."""
+        if self._skip_if_table_has_data("us_delisted", min_rows=50):
+            return 0
         data = self._fmp_get_stable_json("delisted-companies")
         if not data:
             logger.warning("download_fmp_delisted_companies: 无数据")
@@ -2196,6 +2227,8 @@ class BulkDownloader:
 
     def download_fmp_symbol_changes(self) -> int:
         """FMP bulk: symbol-changes → us_symbol_change (一次全量)."""
+        if self._skip_if_table_has_data("us_symbol_change", min_rows=50):
+            return 0
         data = self._fmp_get_stable_json("symbol-change")
         if not data:
             logger.warning("download_fmp_symbol_changes: 无数据")
@@ -2207,6 +2240,8 @@ class BulkDownloader:
 
     def download_fmp_senate_trading(self) -> int:
         """FMP: senate + house trading → us_congress_trade."""
+        if self._skip_if_table_has_data("us_congress_trade", min_rows=100):
+            return 0
         total = 0
         for chamber, endpoint in [("senate", "senate-trading"), ("house", "house-disclosure")]:
             page = 0
