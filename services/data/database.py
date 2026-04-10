@@ -1006,6 +1006,15 @@ class USKeyMetric(Base):
     price_to_fair_value = Column(Float, comment="价格/公允价值")
     debt_to_market_cap = Column(Float, comment="负债/市值")
     enterprise_value_multiple = Column(Float, comment="企业价值倍数")
+    # --- FMP ratios: 别名字段（ratios 端点命名与 key-metrics 不同）---
+    debt_to_assets_ratio = Column(Float, comment="负债/总资产 (ratios 端点)")
+    debt_to_equity_ratio = Column(Float, comment="负债/股东权益 (ratios 端点)")
+    dividend_payout_ratio = Column(Float, comment="分红比例 (ratios 端点)")
+    free_cash_flow_operating_cash_flow_ratio = Column(Float, comment="FCF/OCF (ratios 端点)")
+    operating_cash_flow_sales_ratio = Column(Float, comment="OCF/Sales (ratios 端点)")
+    price_to_book_ratio = Column(Float, comment="PB (ratios 端点)")
+    price_to_earnings_ratio = Column(Float, comment="PE (ratios 端点)")
+    price_to_sales_ratio = Column(Float, comment="PS (ratios 端点)")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     __table_args__ = (
