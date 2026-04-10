@@ -1183,13 +1183,18 @@ class DatabaseManager:
             return pd.read_sql(text(sql), conn, params=params)
 
     # --- ORM 批量 upsert ---
+    def _get_write_pool(self):
+        """懒初始化异步写入线程池。"""
+        if not hasattr(self, "_write_pool"):
+            from concurrent.futures import ThreadPoolExecutor
+            self._write_pool = ThreadPoolExecutor(max_workers=50)
+            self._write_futures = []
+        return self._write_pool
+
     def upsert(self, model_class, records: list[dict], unique_keys: list[str]):
         """通用 ORM upsert — PostgreSQL INSERT ON CONFLICT DO UPDATE。
 
-        Args:
-            model_class: SQLAlchemy model class
-            records: list of dicts
-            unique_keys: unique constraint 列名列表
+        数据准备同步，写 DB 异步（提交到写入线程池）。
         """
         if not records:
             return
@@ -1197,10 +1202,9 @@ class DatabaseManager:
         from sqlalchemy.dialects.postgresql import insert
 
         table = model_class.__table__
-        # 只保留 model 中存在的列
         valid_cols = {c.name for c in table.columns} - {"id"}
 
-        # 清理数据
+        # 清理数据（同步）
         cleaned = []
         for rec in records:
             clean = {}
@@ -1217,19 +1221,29 @@ class DatabaseManager:
             clean["updated_at"] = datetime.now()
             cleaned.append(clean)
 
-        # 构建 upsert
         update_cols = {c: getattr(insert(table).excluded, c)
                        for c in valid_cols if c not in unique_keys and c != "id"}
 
+        # 异步写入
+        pool = self._get_write_pool()
         batch_size = 2000
         for i in range(0, len(cleaned), batch_size):
             batch = cleaned[i:i + batch_size]
-            stmt = insert(table).values(batch).on_conflict_do_update(
-                index_elements=unique_keys,
-                set_=update_cols,
-            )
-            with self.engine.begin() as conn:
-                conn.execute(stmt)
+            def _do_write(b=batch, t=table, uk=unique_keys, uc=update_cols):
+                stmt = insert(t).values(b).on_conflict_do_update(
+                    index_elements=uk, set_=uc,
+                )
+                with self.engine.begin() as conn:
+                    conn.execute(stmt)
+            fut = pool.submit(_do_write)
+            self._write_futures.append(fut)
+
+        # 清理已完成 future + 背压
+        self._write_futures = [f for f in self._write_futures if not f.done()]
+        if len(self._write_futures) > 1000:
+            from concurrent.futures import wait, FIRST_COMPLETED
+            done, self._write_futures = wait(self._write_futures, return_when=FIRST_COMPLETED)
+            self._write_futures = list(self._write_futures)
 
         logger.info(f"{model_class.__tablename__}: upsert {len(cleaned)} 条")
 
@@ -1273,8 +1287,14 @@ class DatabaseManager:
             return {r[0] for r in results}
 
     def flush_writes(self):
-        """兼容接口（ORM 是同步的，无需 flush）。"""
-        pass
+        """等待所有异步写入完成。"""
+        if hasattr(self, "_write_futures"):
+            from concurrent.futures import wait
+            wait(self._write_futures)
+            for f in self._write_futures:
+                if f.exception():
+                    logger.warning(f"异步写入失败: {f.exception()}")
+            self._write_futures.clear()
 
 
 # ============================================================
