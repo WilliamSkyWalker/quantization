@@ -181,9 +181,11 @@ class BulkDownloader:
             return tickers
 
     def _wrap_fetch(self, table: str, fetch_fn, ticker: str):
-        """包装 fetch 函数：成功后标记 import_progress。"""
+        """包装 fetch 函数：等异步写入完成后才标记 import_progress。"""
         count = fetch_fn(ticker)
         if count > 0:
+            # 等待该 ticker 的异步写入全部完成，确保数据落盘
+            self.db.flush_writes()
             self.db.mark_import_done(table, ticker)
         return count
 
