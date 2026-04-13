@@ -1123,24 +1123,36 @@ class BulkDownloader:
         logger.info(f"FMP symbol changes 总计: {len(df)} 条")
         return len(df)
 
-    # --- 30. congress_trading ---
-    def download_fmp_congress_trading(self) -> int:
-        if self._skip_if_table_has_data("us_congress_trade", min_rows=100):
+    # --- 30. congress_trading (per-ticker, /stable/senate-trades + /stable/house-trades) ---
+    def download_fmp_congress_trading(self, tickers: list[str] = None) -> int:
+        if tickers is None:
+            tickers = self.db.get_us_tickers(stocks_only=True)
+        if not tickers:
+            return 0
+        tickers = self._skip_done_tickers("us_congress_trade", tickers)
+        if not tickers:
             return 0
         total = 0
-        for chamber, endpoint in [("senate", "senate-trading"), ("house", "house-disclosure")]:
-            page = 0
-            while True:
-                data = self._fmp_get_stable(endpoint, params={"page": page})
+
+        def _fetch(ticker):
+            count = 0
+            for chamber, endpoint in [("senate", "senate-trades"), ("house", "house-trades")]:
+                data = self._fmp_get_stable(endpoint, params={"symbol": ticker})
                 if not data:
-                    break
+                    continue
                 df = _fmp_df_to_snake(pd.DataFrame(data))
                 df["source"] = f"fmp_{chamber}"
                 self.db.upsert_df(USCongressTrade, df, ["ticker", "transaction_date", "first_name", "last_name", "type"])
-                total += len(df)
-                if len(data) < 100:
-                    break
-                page += 1
+                count += len(df)
+            return count
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {pool.submit(self._mark_done, "us_congress_trade", _fetch, t): t for t in tickers}
+            for f in tqdm(as_completed(futures), total=len(futures), desc="FMP Congress Trading"):
+                try:
+                    total += f.result()
+                except Exception as e:
+                    logger.warning(f"Congress 失败 {futures[f]}: {e}")
         logger.info(f"FMP congress trading 总计: {total} 条")
         return total
 
