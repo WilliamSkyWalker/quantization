@@ -209,10 +209,9 @@ class BulkDownloader:
         return False
 
     def _mark_done(self, table: str, fetch_fn, ticker: str):
-        """包装 fetch：成功后标记 import_progress。"""
+        """包装 fetch：无论有无数据都标记完成，避免重跑浪费 API。"""
         count = fetch_fn(ticker)
-        if count > 0:
-            self.db.mark_import_done(table, ticker)
+        self.db.mark_import_done(table, ticker)
         return count
 
     # ============================================================
