@@ -267,7 +267,8 @@ class USKeyMetric(Base):
     period = Column(String(10))
     reported_currency = Column(String(10))
     # --- key-metrics 端点 ---
-    market_cap = Column(Float)
+    # NOTE: market_cap 列已删除（FMP key-metrics 端点不返回该字段，全部 NULL）
+    # 历史市值数据请查 us_enterprise_value.market_capitalization（季度时序，1983-至今）
     enterprise_value = Column(Float)
     ev_to_sales = Column(Float)
     ev_to_operating_cash_flow = Column(Float)
@@ -435,7 +436,8 @@ class USEpsEstimate(Base):
     # FMP 还返回更多 estimates 字段
     estimated_revenue_low = Column(Float)
     estimated_revenue_high = Column(Float)
-    number_analysts_estimated_revenue = Column(Integer)
+    # NOTE: API typo — v3 返回 'numberAnalystEstimatedRevenue'（无 s），列名按 _camel_to_snake 必须无 s
+    number_analyst_estimated_revenue = Column(Integer)
     estimated_ebitda_avg = Column(Float)
     estimated_ebitda_low = Column(Float)
     estimated_ebitda_high = Column(Float)
@@ -447,10 +449,7 @@ class USEpsEstimate(Base):
     estimated_sga_expense_avg = Column(Float)
     estimated_sga_expense_low = Column(Float)
     estimated_sga_expense_high = Column(Float)
-    number_analysts_estimated_ebitda = Column(Integer)
-    number_analysts_estimated_ebit = Column(Integer)
-    number_analysts_estimated_net_income = Column(Integer)
-    number_analysts_estimated_sga_expense = Column(Integer)
+    # NOTE: 以下 4 个列已删除 — FMP analyst-estimates 端点不返回 num_analysts for ebitda/ebit/net_income/sga，只有 eps 和 revenue 有
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     __table_args__ = (
@@ -678,21 +677,9 @@ class USCompanyProfile(Base):
     )
 
 
-# --- 16. us_historical_market_cap ---
-class USHistoricalMarketCap(Base):
-    """美股日频历史市值表"""
-    __tablename__ = "us_historical_market_cap"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    ticker = Column(String(20), nullable=False)
-    date = Column(Date, nullable=False)
-    market_cap = Column(Float)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-    __table_args__ = (
-        UniqueConstraint("ticker", "date", name="uq_us_hist_mktcap_ticker_date"),
-        Index("idx_us_hist_mktcap_ticker", "ticker"),
-    )
+# --- 16. us_historical_market_cap (DELETED) ---
+# FMP Ultimate plan 该端点只返回 ~90 天，from/to 需 Enterprise plan（402）。
+# 已迁移到 us_enterprise_value.market_capitalization（季度精度，全历史）。
 
 
 # --- 17. us_shares_float ---
@@ -1119,7 +1106,47 @@ class USNews(Base):
     )
 
 
-# --- 35. import_progress (断点续跑标记) ---
+# --- 35. us_lobbying (Quiver) ---
+class USLobbying(Base):
+    """美股企业游说活动表 (Quiver Quantitative)"""
+    __tablename__ = "us_lobbying"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False)
+    date = Column(Date, nullable=False)
+    amount = Column(Float)
+    client = Column(String(500))
+    registrant = Column(String(500))
+    issue = Column(Text)
+    specific_issue = Column(Text)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", "registrant", "client", name="uq_us_lobbying"),
+        Index("idx_us_lobbying_ticker", "ticker"),
+        Index("idx_us_lobbying_date", "date"),
+    )
+
+
+# --- 36. us_gov_contract (Quiver) ---
+class USGovContract(Base):
+    """美股政府合同表 (Quiver Quantitative)"""
+    __tablename__ = "us_gov_contract"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False)
+    year = Column(Integer, nullable=False)
+    quarter = Column(Integer, nullable=False)
+    amount = Column(Float)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "year", "quarter", name="uq_us_gov_contract"),
+        Index("idx_us_gov_contract_ticker", "ticker"),
+    )
+
+
+# --- 37. import_progress (断点续跑标记) ---
 class ImportProgress(Base):
     """导入进度表"""
     __tablename__ = "import_progress"
@@ -1221,8 +1248,20 @@ class DatabaseManager:
             clean["updated_at"] = datetime.now()
             cleaned.append(clean)
 
-        update_cols = {c: getattr(insert(table).excluded, c)
-                       for c in valid_cols if c not in unique_keys and c != "id"}
+        # COALESCE: 新值非 NULL 才覆盖。
+        # 必要性：多端点共享同一表（如 us_key_metric 同时被 key-metrics 和 ratios 写入），
+        # 后者 INSERT 不含前者的字段时 EXCLUDED.col=NULL，会把已有数据清空。
+        # updated_at 必须始终更新（不走 COALESCE）。
+        from sqlalchemy import func
+        update_cols = {}
+        for c in valid_cols:
+            if c in unique_keys or c == "id":
+                continue
+            excluded_val = getattr(insert(table).excluded, c)
+            if c == "updated_at":
+                update_cols[c] = excluded_val
+            else:
+                update_cols[c] = func.coalesce(excluded_val, getattr(table.c, c))
 
         # 异步写入
         pool = self._get_write_pool()

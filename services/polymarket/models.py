@@ -20,12 +20,13 @@ from sqlalchemy import (
     UniqueConstraint,
     Index,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 
 from services.data.database import Base
 
 
 class PolymarketEvent(Base):
-    """Polymarket 监控事件/市场"""
+    """Polymarket 监控事件/市场（一行 = 一个 market，多 markets 共享 event_id）"""
     __tablename__ = "polymarket_event"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -43,6 +44,45 @@ class PolymarketEvent(Base):
     is_excluded = Column(Boolean, default=False, comment="软删除：排除的分类(sports/pop-culture等)")
     slug = Column(String(500), comment="Polymarket URL slug")
     gamma_market_id = Column(String(100), comment="Gamma API market ID")
+    # ===== 扩展字段 (Gamma API 全字段) =====
+    # Event 层
+    event_id = Column(String(50), comment="Gamma event ID（多 market 共享）")
+    event_ticker = Column(String(200), comment="Event ticker/slug")
+    title = Column(String(1000), comment="Event 标题")
+    tags = Column(JSONB, comment="JSON: event tags")
+    open_interest = Column(Float, comment="未平仓金额 (USD)")
+    volume_1wk = Column(Float, comment="近 1 周成交量")
+    volume_1mo = Column(Float, comment="近 1 月成交量")
+    volume_1yr = Column(Float, comment="近 1 年成交量")
+    neg_risk = Column(Boolean, comment="是否 neg risk")
+    neg_risk_market_id = Column(String(100), comment="Neg risk market ID")
+    comment_count = Column(Integer, comment="评论数")
+    closed_time = Column(DateTime, comment="实际关闭时间")
+    start_date = Column(DateTime, comment="开始时间")
+    restricted = Column(Boolean, comment="是否受限")
+    archived = Column(Boolean, comment="是否归档")
+    # Market 层
+    outcomes = Column(JSONB, comment="JSON: outcome 名称列表 ['Yes','No']")
+    outcome_prices = Column(JSONB, comment="JSON: outcome 价格列表 ['1','0']")
+    best_bid = Column(Float, comment="最佳买价")
+    best_ask = Column(Float, comment="最佳卖价")
+    spread = Column(Float, comment="买卖价差")
+    last_trade_price = Column(Float, comment="最近成交价")
+    volume_clob = Column(Float, comment="CLOB 真实成交量")
+    volume_num = Column(Float, comment="数值化 volume")
+    one_day_price_change = Column(Float, comment="近 1 天价格变动")
+    one_hour_price_change = Column(Float, comment="近 1 小时价格变动")
+    one_week_price_change = Column(Float, comment="近 1 周价格变动")
+    one_month_price_change = Column(Float, comment="近 1 月价格变动")
+    one_year_price_change = Column(Float, comment="近 1 年价格变动")
+    uma_bond = Column(String(50), comment="UMA 押金")
+    uma_reward = Column(String(50), comment="UMA 奖励")
+    maker_base_fee = Column(Float, comment="Maker 基础手续费")
+    taker_base_fee = Column(Float, comment="Taker 基础手续费")
+    market_type = Column(String(50), comment="market type")
+    market_closed = Column(Boolean, comment="market 是否关闭")
+    market_active = Column(Boolean, comment="market 是否活跃")
+    # ===== 时间戳 =====
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 

@@ -107,11 +107,13 @@ def main():
     logger.info("回填完成!")
     logger.info("=" * 60)
 
-    # Step 3: 验证
-    result = db.query("SELECT COUNT(*) as cnt, COUNT(market_cap) as has_mc FROM us_key_metric")
+    # Step 3: 验证（market_cap 数据源切到 us_enterprise_value）
+    result = db.query("SELECT COUNT(*) as cnt FROM us_key_metric")
     total = result["cnt"].iloc[0]
-    has_mc = result["has_mc"].iloc[0]
-    logger.info(f"验证: us_key_metric 总行数={total}, market_cap 非空={has_mc} ({has_mc/max(total,1)*100:.1f}%)")
+    logger.info(f"验证: us_key_metric 总行数={total}")
+    result = db.query("SELECT COUNT(*) as cnt FROM us_enterprise_value WHERE market_capitalization > 0")
+    has_mc = result["cnt"].iloc[0]
+    logger.info(f"验证: us_enterprise_value 有市值行数={has_mc}")
 
 
 if __name__ == "__main__":

@@ -266,21 +266,26 @@ class USFactorBase(ABC):
         cls._static_cache["_bulk_dividends"] = df_ca
         logger.info(f"US 预加载 dividends: {len(df_ca)} 行, {time.time()-t0:.1f}s")
 
-        # 8. 预加载 us_key_metric.market_cap（年度精度，消除前瞻偏差）
-        # FMP bulk key-metrics 只有年度数据（Q1=FY end），forward-fill 到目标日期。
-        # 精度不如季度，但无拆股 bug（shares×close 有拆股不匹配问题）。
+        # 8. 预加载 us_enterprise_value.market_capitalization（季度精度）
+        # 数据源切换：us_key_metric.market_cap 已弃用（FMP key-metrics 端点不返回该字段）
+        # us_historical_market_cap 表已删除，改用 us_enterprise_value（季度时间序列）
         t0 = time.time()
         try:
+            mktcap_start = (
+                pd.to_datetime(start_date) - pd.Timedelta(days=120)
+            ).strftime("%Y-%m-%d")
             df_mktcap = db.query(
-                "SELECT ticker, date, market_cap FROM us_key_metric "
-                "WHERE market_cap IS NOT NULL AND market_cap > 0 "
+                "SELECT ticker, date, market_capitalization as market_cap "
+                "FROM us_enterprise_value "
+                f"WHERE date >= '{mktcap_start}' AND date <= '{end_date}' "
+                "  AND market_capitalization IS NOT NULL AND market_capitalization > 0 "
                 "ORDER BY ticker, date"
             )
             if not df_mktcap.empty:
                 df_mktcap["date"] = pd.to_datetime(df_mktcap["date"])
                 df_mktcap["market_cap"] = pd.to_numeric(df_mktcap["market_cap"], errors="coerce")
             cls._static_cache["_bulk_mktcap"] = df_mktcap
-            logger.info(f"US 预加载 us_key_metric (market_cap): {len(df_mktcap)} 行, {time.time()-t0:.1f}s")
+            logger.info(f"US 预加载 us_enterprise_value: {len(df_mktcap)} 行, {time.time()-t0:.1f}s")
         except Exception as e:
             logger.warning(f"预加载 market_cap 失败: {e}")
             cls._static_cache["_bulk_mktcap"] = pd.DataFrame()
@@ -775,8 +780,8 @@ class USFactorBase(ABC):
         """
         获取历史市值（消除前瞻偏差）。
 
-        方法：us_key_metric 年度 market_cap forward-fill 到目标日期。
-        回退链：预加载 _bulk_mktcap → SQL 查 us_key_metric → us_stock_basic 静态快照。
+        方法：us_enterprise_value 季度 market_cap，取 <= date 最近一条。
+        回退链：预加载 _bulk_mktcap → SQL 查 us_enterprise_value → us_stock_basic 静态快照。
 
         Returns:
             DataFrame[ticker, market_cap]
@@ -791,7 +796,7 @@ class USFactorBase(ABC):
 
         date_ts = pd.to_datetime(date)
 
-        # 1. Try historical market cap from preloaded us_key_metric (年度, forward-fill)
+        # 1. Try historical market cap from preloaded us_enterprise_value (季度, take last <= date)
         bulk_mktcap = self._static_cache.get("_bulk_mktcap")
         if bulk_mktcap is not None and not bulk_mktcap.empty:
             valid = bulk_mktcap[bulk_mktcap["date"] <= date_ts]
@@ -808,11 +813,13 @@ class USFactorBase(ABC):
             else:
                 logger.debug(f"get_market_cap: no historical mktcap data before {date}")
 
-        # 2. Fallback: SQL query us_key_metric (年度精度)
+        # 2. Fallback: SQL query us_enterprise_value (季度精度)
         try:
             df = self.db.query(
-                "SELECT ticker, market_cap FROM us_key_metric "
-                "WHERE date <= :date AND market_cap IS NOT NULL AND market_cap > 0 "
+                "SELECT ticker, market_capitalization AS market_cap "
+                "FROM us_enterprise_value "
+                "WHERE date <= :date AND market_capitalization IS NOT NULL "
+                "  AND market_capitalization > 0 "
                 "ORDER BY date DESC",
                 params={"date": date},
             )
@@ -823,7 +830,7 @@ class USFactorBase(ABC):
                     df = df[df["ticker"].isin(universe_tickers)]
                 return df.copy()
         except Exception as e:
-            logger.debug(f"get_market_cap: us_key_metric fallback failed: {e}")
+            logger.debug(f"get_market_cap: us_enterprise_value fallback failed: {e}")
 
         # 3. Last resort: static snapshot (前瞻偏差，但好过无数据)
         logger.warning(f"get_market_cap: falling back to static us_stock_basic for {date}")

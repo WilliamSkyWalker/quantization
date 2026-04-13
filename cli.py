@@ -143,7 +143,7 @@ def _clean_tables_for_import(db, source: str, target: str):
     # 所有 FMP 美股表（含新增）
     _ALL_FMP_TABLES = [
         "us_stock_basic", "us_industry_class", "us_company_profile",
-        "us_daily_price", "us_historical_market_cap",
+        "us_daily_price",
         "us_financial_data", "us_key_metric",
         "us_financial_score", "us_financial_growth", "us_enterprise_value",
         "us_owner_earnings", "us_revenue_segment", "us_dcf_valuation",
@@ -167,7 +167,7 @@ def _clean_tables_for_import(db, source: str, target: str):
         ("fmp", "metrics"): ["us_key_metric"],
         ("fmp", "ratios"): ["us_key_metric"],
         ("fmp", "prices"): ["us_daily_price"],
-        ("fmp", "market-cap"): ["us_historical_market_cap"],
+        # market-cap 已废弃（数据源切到 us_enterprise_value）
         ("fmp", "insider"): ["us_insider_trade"],
         ("fmp", "insider-stats"): ["us_insider_statistic"],
         ("fmp", "analyst-grades"): ["us_analyst_recommendation"],
@@ -195,6 +195,9 @@ def _clean_tables_for_import(db, source: str, target: str):
         ("uw", "news"): [],
         ("fiscal", "all"): ["us_daily_ratio"],
         ("fiscal", "ratios"): ["us_daily_ratio"],
+        ("quiver", "all"): ["us_lobbying", "us_gov_contract"],
+        ("quiver", "lobbying"): ["us_lobbying"],
+        ("quiver", "gov-contracts"): ["us_gov_contract"],
         ("all", "all"): _ALL_FMP_TABLES + [
             "us_options_flow", "us_dark_pool", "us_daily_ratio",
         ],
@@ -225,7 +228,7 @@ def _clean_tables_for_import(db, source: str, target: str):
 
 @data_app.command("bulk-import")
 def data_bulk_import(
-    source: str = typer.Option("fmp", help="数据源: fmp, uw, fiscal, all"),
+    source: str = typer.Option("fmp", help="数据源: fmp, uw, fiscal, quiver, all"),
     target: str = typer.Option("all", help="下载目标 (fmp: all/stock-list/earnings/estimates/income/metrics/ratios/prices/profiles/insider/dividends; uw: all/options/darkpool/congress/news; fiscal: all/ratios)"),
     start_year: int = typer.Option(1995, help="起始年份 (FMP bulk)"),
     clean: bool = typer.Option(False, "--clean", help="导入前清空对应表（全量替换旧数据）"),
@@ -244,7 +247,7 @@ def data_bulk_import(
         ("fmp", "stock-list"): dl.download_fmp_stock_list,
         ("fmp", "company-profiles"): dl.download_fmp_company_profiles,
         ("fmp", "prices"): lambda: dl.download_fmp_daily_prices(start_year),
-        ("fmp", "market-cap"): dl.download_fmp_historical_market_cap,
+        # ("fmp", "market-cap") 已废弃 —— us_enterprise_value 已含全历史季度市值
         ("fmp", "financial-quarterly"): dl.download_fmp_financial_quarterly,
         ("fmp", "metrics"): dl.download_fmp_key_metrics,
         ("fmp", "ratios"): dl.download_fmp_ratios,
@@ -271,7 +274,11 @@ def data_bulk_import(
         ("fmp", "delisted"): dl.download_fmp_delisted_companies,
         ("fmp", "symbol-changes"): dl.download_fmp_symbol_changes,
         ("fmp", "congress"): dl.download_fmp_congress_trading,
-        # TODO: UW/Fiscal/AV/Quiver 需要迁移到新架构
+        # Quiver
+        ("quiver", "all"): dl.download_quiver_all,
+        ("quiver", "lobbying"): dl.download_quiver_lobbying,
+        ("quiver", "gov-contracts"): dl.download_quiver_gov_contracts,
+        # TODO: UW/Fiscal/AV 需要迁移到新架构
     }
 
     key = (source, target)
@@ -283,6 +290,45 @@ def data_bulk_import(
     console.print(f"[cyan]批量导入 {source.upper()} {target}...[/cyan]")
     t0 = time.time()
     result = dispatch[key]()
+    elapsed = time.time() - t0
+    console.print(f"[green]完成[/green]，耗时 {elapsed:.1f}s，结果: {result}")
+
+
+# ============================================================
+# polymarket: 历史数据下载
+# ============================================================
+
+polymarket_app = typer.Typer(help="Polymarket 历史数据")
+app.add_typer(polymarket_app, name="polymarket")
+
+
+@polymarket_app.command("history")
+def polymarket_history(
+    limit: int = typer.Option(0, help="最大下载市场数, 0=全部"),
+    min_volume: int = typer.Option(0, help="最低交易量过滤"),
+    fidelity: int = typer.Option(60, help="价格快照粒度（分钟）"),
+    skip_existing: bool = typer.Option(True, help="跳过已有快照的市场"),
+    concurrency: int = typer.Option(50, help="并发下载线程数"),
+    discover_only: bool = typer.Option(False, help="只发现市场，不下价格"),
+):
+    """从 Gamma + CLOB 下载 Polymarket 已结算市场历史（events + price snapshots）"""
+    from services.polymarket.history import PolymarketHistoryDownloader
+    dl = PolymarketHistoryDownloader()
+
+    task_id = f"cli_polymarket_{int(time.time())}"
+    console.print(f"[cyan]发现已结算市场 (limit={limit}, min_volume={min_volume})...[/cyan]")
+    markets = dl.discover_resolved_markets(task_id, limit=limit, min_volume=min_volume)
+    console.print(f"[green]发现 {len(markets)} 个市场[/green]")
+
+    if discover_only:
+        return
+
+    console.print(f"[cyan]批量下载历史价格 (fidelity={fidelity}min, concurrency={concurrency})...[/cyan]")
+    t0 = time.time()
+    result = dl.download_batch(
+        task_id, markets=markets, limit=limit, fidelity=fidelity,
+        skip_existing=skip_existing, concurrency=concurrency,
+    )
     elapsed = time.time() - t0
     console.print(f"[green]完成[/green]，耗时 {elapsed:.1f}s，结果: {result}")
 

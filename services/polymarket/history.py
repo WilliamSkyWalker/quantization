@@ -30,6 +30,112 @@ CLOB_BASE = "https://clob.polymarket.com"
 CLOB_REQUEST_INTERVAL = 0.05  # 50ms between requests
 
 
+def _safe_float(v):
+    try:
+        return float(v) if v is not None and v != "" else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_int(v):
+    try:
+        return int(v) if v is not None and v != "" else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_bool(v):
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.lower() in ("true", "1", "yes")
+    return bool(v)
+
+
+def _safe_dt(v):
+    if not v:
+        return None
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_json_field(v):
+    """API 字段可能是 JSON 字符串，也可能已经是 list/dict。"""
+    if v is None or v == "":
+        return None
+    if isinstance(v, (list, dict)):
+        return v
+    if isinstance(v, str):
+        import json as _json
+        try:
+            return _json.loads(v)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _build_full_event_payload(event: dict, market: dict, category: str, excluded: bool, condition_id: str, token_id: str, yes_price: float, volume: float) -> dict:
+    """从 Gamma event + market 构建 PolymarketEvent 完整字段字典。"""
+    return {
+        # 核心字段
+        "condition_id": condition_id,
+        "token_id": token_id,
+        "question": (market.get("question") or event.get("title") or "")[:1000],
+        "description": (market.get("description") or event.get("description") or "")[:5000],
+        "category": category,
+        "outcome_yes_price": yes_price,
+        "outcome_no_price": 1.0 - yes_price if yes_price is not None else None,
+        "volume": volume,
+        "liquidity": _safe_float(market.get("liquidity")),
+        "end_date": _safe_dt(market.get("endDate")),
+        "is_active": False,
+        "is_excluded": excluded,
+        "slug": event.get("slug", ""),
+        "gamma_market_id": str(market.get("id", "")),
+        # Event 层
+        "event_id": str(event.get("id", "")),
+        "event_ticker": event.get("ticker"),
+        "title": (event.get("title") or "")[:1000],
+        "tags": event.get("tags"),
+        "open_interest": _safe_float(event.get("openInterest")),
+        "volume_1wk": _safe_float(event.get("volume1wk")),
+        "volume_1mo": _safe_float(event.get("volume1mo")),
+        "volume_1yr": _safe_float(event.get("volume1yr")),
+        "neg_risk": _safe_bool(event.get("negRisk")),
+        "neg_risk_market_id": event.get("negRiskMarketID"),
+        "comment_count": _safe_int(event.get("commentCount")),
+        "closed_time": _safe_dt(event.get("closedTime")),
+        "start_date": _safe_dt(event.get("startDate")),
+        "restricted": _safe_bool(event.get("restricted")),
+        "archived": _safe_bool(event.get("archived")),
+        # Market 层
+        "outcomes": _parse_json_field(market.get("outcomes")),
+        "outcome_prices": _parse_json_field(market.get("outcomePrices")),
+        "best_bid": _safe_float(market.get("bestBid")),
+        "best_ask": _safe_float(market.get("bestAsk")),
+        "spread": _safe_float(market.get("spread")),
+        "last_trade_price": _safe_float(market.get("lastTradePrice")),
+        "volume_clob": _safe_float(market.get("volumeClob")),
+        "volume_num": _safe_float(market.get("volumeNum")),
+        "one_day_price_change": _safe_float(market.get("oneDayPriceChange")),
+        "one_hour_price_change": _safe_float(market.get("oneHourPriceChange")),
+        "one_week_price_change": _safe_float(market.get("oneWeekPriceChange")),
+        "one_month_price_change": _safe_float(market.get("oneMonthPriceChange")),
+        "one_year_price_change": _safe_float(market.get("oneYearPriceChange")),
+        "uma_bond": str(market.get("umaBond")) if market.get("umaBond") else None,
+        "uma_reward": str(market.get("umaReward")) if market.get("umaReward") else None,
+        "maker_base_fee": _safe_float(market.get("makerBaseFee")),
+        "taker_base_fee": _safe_float(market.get("takerBaseFee")),
+        "market_type": market.get("marketType"),
+        "market_closed": _safe_bool(market.get("closed")),
+        "market_active": _safe_bool(market.get("active")),
+    }
+
+
 class PolymarketHistoryDownloader:
     """下载 Polymarket 已结算市场的历史赔率数据。"""
 
@@ -107,50 +213,46 @@ class PolymarketHistoryDownloader:
 
         logger.info(f"[发现] Gamma API 共返回 {len(all_events)} 个已结算事件")
 
+        # ===== Pass 1: 内存中过滤 + 构建 payload（不写 DB）=====
+        import json as _json
         results = []
         seen_condition_ids = set()
-        session: Session = self._db.get_session()
+        all_payloads = []  # [(condition_id, payload), ...]
 
-        try:
-            import json as _json
+        for event in all_events:
+            category = category_from_tags(event.get("tags", []))
+            event_slug = event.get("slug", "")
+            excluded = bool(category and category in exclude_categories) or is_noise_slug(event_slug)
 
-            for event in all_events:
-                category = category_from_tags(event.get("tags", []))
-                event_slug = event.get("slug", "")
-                excluded = bool(category and category in exclude_categories) or is_noise_slug(event_slug)
+            for market in event.get("markets", []):
+                volume = float(market.get("volume", 0) or 0)
+                if volume < vol_threshold:
+                    continue
 
-                for market in event.get("markets", []):
-                    volume = float(market.get("volume", 0) or 0)
-                    if volume < vol_threshold:
-                        logger.debug(f"discover_resolved_markets: volume={volume} < {vol_threshold}，跳过")
-                        continue
+                condition_id = market.get("conditionId") or market.get("condition_id", "")
+                if not condition_id or condition_id in seen_condition_ids:
+                    continue
+                seen_condition_ids.add(condition_id)
 
-                    condition_id = market.get("conditionId") or market.get("condition_id", "")
-                    if not condition_id or condition_id in seen_condition_ids:
-                        logger.debug(f"discover_resolved_markets: condition_id 为空或已见过，跳过")
-                        continue
-                    seen_condition_ids.add(condition_id)
+                # 解析 token IDs
+                raw_tokens = market.get("clobTokenIds", "")
+                if isinstance(raw_tokens, str):
+                    token_ids = [t.strip('" []') for t in raw_tokens.split(",") if t.strip('" []')]
+                elif isinstance(raw_tokens, list):
+                    token_ids = [str(t) for t in raw_tokens]
+                else:
+                    token_ids = []
+                token_id = token_ids[0] if token_ids else ""
 
-                    # 解析 token IDs
-                    raw_tokens = market.get("clobTokenIds", "")
-                    if isinstance(raw_tokens, str):
-                        token_ids = [t.strip('" []') for t in raw_tokens.split(",") if t.strip('" []')]
-                    elif isinstance(raw_tokens, list):
-                        token_ids = [str(t) for t in raw_tokens]
-                    else:
-                        token_ids = []
+                # 解析价格
+                try:
+                    prices = _json.loads(market.get("outcomePrices", "[0.5,0.5]"))
+                    yes_price = float(prices[0])
+                except (ValueError, IndexError, TypeError):
+                    yes_price = 0.5
 
-                    token_id = token_ids[0] if token_ids else ""
-
-                    # 解析价格
-                    try:
-                        prices = _json.loads(market.get("outcomePrices", "[0.5,0.5]"))
-                        yes_price = float(prices[0])
-                    except (ValueError, IndexError, TypeError) as e:
-                        logger.debug(f"discover_resolved_markets: 解析 outcomePrices 失败: {e}，使用默认 0.5")
-                        yes_price = 0.5
-
-                    market_info = {
+                if not excluded:
+                    results.append({
                         "condition_id": condition_id,
                         "token_id": token_id,
                         "question": market.get("question", event.get("title", "")),
@@ -163,54 +265,37 @@ class PolymarketHistoryDownloader:
                         "gamma_market_id": market.get("id", ""),
                         "end_date": market.get("endDate"),
                         "resolved": True,
-                    }
-                    if not excluded:
-                        results.append(market_info)
+                    })
 
-                    # Upsert to DB
-                    existing = session.query(PolymarketEvent).filter_by(
-                        condition_id=condition_id
-                    ).first()
-                    if existing:
-                        existing.volume = volume
-                        existing.is_active = False
-                        existing.is_excluded = excluded
-                        if category and not existing.category:
-                            existing.category = category
-                    else:
-                        end_date = None
-                        if market_info["end_date"]:
-                            try:
-                                end_date = datetime.fromisoformat(
-                                    str(market_info["end_date"]).replace("Z", "+00:00")
-                                )
-                            except (ValueError, TypeError) as e:
-                                logger.debug(f"discover_resolved_markets: 解析 end_date 失败: {e}")
+                payload = _build_full_event_payload(
+                    event, market, category, excluded, condition_id, token_id, yes_price, volume,
+                )
+                all_payloads.append((condition_id, payload))
 
-                        session.add(PolymarketEvent(
-                            condition_id=condition_id,
-                            token_id=token_id,
-                            question=market_info["question"][:1000],
-                            description=(market_info["description"] or "")[:5000],
-                            category=market_info["category"],
-                            outcome_yes_price=yes_price,
-                            outcome_no_price=1.0 - yes_price,
-                            volume=volume,
-                            liquidity=market_info["liquidity"],
-                            end_date=end_date,
-                            is_active=False,
-                            is_excluded=excluded,
-                            slug=market_info["slug"],
-                            gamma_market_id=market_info["gamma_market_id"],
-                        ))
+        logger.info(f"[过滤] 符合条件 {len(all_payloads)} 个 market（min_volume={vol_threshold}）")
+        if not all_payloads:
+            return results
 
-            session.commit()
+        # ===== Pass 2: 走 db.upsert() 异步写入（提交到 50 线程写池）=====
+        BATCH_WRITE = 2000
+        total = 0
+        try:
+            for i in range(0, len(all_payloads), BATCH_WRITE):
+                batch = all_payloads[i:i + BATCH_WRITE]
+                records = [p for _, p in batch]
+                self._db.upsert(PolymarketEvent, records, ["condition_id"])
+                total += len(batch)
+                logger.info(f"[写入] 提交进度 {total}/{len(all_payloads)}")
+            logger.info(f"[写入] 全部 {len(all_payloads)} 条已提交到写池，等待 flush...")
+            # 等待异步写完成
+            from concurrent.futures import wait
+            futures = getattr(self._db, "_write_futures", [])
+            if futures:
+                wait(futures)
+                logger.info("[写入] 所有异步写入已完成")
         except Exception as e:
-            session.rollback()
-            logger.error(f"discover_resolved_markets: 保存已结算市场失败: {e}")
+            logger.error(f"discover_resolved_markets: 批量写入失败: {e}")
             raise
-        finally:
-            session.close()
 
         task_manager.update_progress(
             task_id, 20,

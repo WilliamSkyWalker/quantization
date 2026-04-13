@@ -20,6 +20,7 @@ from tqdm import tqdm
 
 from services.config import (
     FMP_API_KEY, FMP_RATE_LIMIT,
+    QUIVER_API_KEY, QUIVER_RATE_LIMIT,
     LOG_LEVEL,
 )
 from services.data.database import (
@@ -27,13 +28,14 @@ from services.data.database import (
     USStockBasic, USDailyPrice, USFinancialData, USKeyMetric,
     USIndustryClass, USEarningsSurprise, USEpsEstimate,
     USInsiderTrade, USAnalystRecommendation, USCorporateAction,
-    USIndexDaily, USCommodityPrice, USMacroIndicator, USSecFiling,
-    USCompanyProfile, USHistoricalMarketCap, USSharesFloat,
+    USIndexDaily, USCommodityPrice, USMacroIndicator,
+    USCompanyProfile, USSharesFloat,
     USFinancialScore, USFinancialGrowth, USEnterpriseValue,
-    USOwnerEarnings, USRevenueSegment, USDCFValuation,
+    USOwnerEarnings, USDCFValuation,
     USStockPeer, USESGRating, USPriceTarget, USInsiderStatistic,
     USEmployeeCount, USIndexConstituent, USSymbolChange, USDelisted,
-    USCongressTrade, USPressRelease, USNews,
+    USCongressTrade,
+    USLobbying, USGovContract,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,6 +146,7 @@ class BulkDownloader:
     def __init__(self, db: DatabaseManager):
         self.db = db
         self._fmp_limiter = RateLimiter(FMP_RATE_LIMIT)
+        self._quiver_limiter = RateLimiter(QUIVER_RATE_LIMIT)
 
     # --- FMP HTTP helpers ---
 
@@ -185,6 +188,28 @@ class BulkDownloader:
             return []
         return data
 
+    # --- Quiver HTTP helper ---
+
+    def _quiver_get_json(self, path: str, params: dict = None) -> list | dict:
+        if not QUIVER_API_KEY:
+            logger.warning("QUIVER_API_KEY 未设置")
+            return []
+        self._quiver_limiter.wait()
+        url = f"https://api.quiverquant.com/beta/{path}"
+        headers = {"Authorization": f"Bearer {QUIVER_API_KEY}", "Accept": "application/json"}
+        resp = _request_with_retry("GET", url, headers=headers, params=params)
+        if resp.status_code == 404:
+            return []  # 该 ticker 无数据
+        if resp.status_code != 200:
+            logger.warning(f"Quiver {path}: HTTP {resp.status_code}")
+            return []
+        try:
+            data = resp.json()
+        except ValueError:
+            logger.warning(f"Quiver {path}: 非 JSON 响应")
+            return []
+        return data if isinstance(data, list) else []
+
     # --- 断点续跑 ---
 
     def _skip_done_tickers(self, table: str, tickers: list[str]) -> list[str]:
@@ -213,6 +238,39 @@ class BulkDownloader:
         count = fetch_fn(ticker)
         self.db.mark_import_done(table, ticker)
         return count
+
+    # ETF 在这些表中确认无数据（FMP 端点对 ETF 返回空）—— 预标记跳过，节省 API
+    _ETF_SKIP_TABLES = [
+        "us_owner_earnings",
+        "us_employee_count",
+        "us_enterprise_value",
+        "us_financial_growth",
+        "us_esg_rating",
+        "us_insider_statistic",
+    ]
+
+    def _premark_etfs_no_data(self) -> int:
+        """预标记 ETF 为 done — 这些表 ETF 无数据，跳过避免浪费 API 调用。"""
+        from sqlalchemy import text
+        total = 0
+        with self.db.get_session() as s:
+            etf_count = s.execute(text("SELECT COUNT(*) FROM us_stock_basic WHERE is_etf = 1")).scalar()
+            if not etf_count:
+                logger.info("Phase 0: 无 ETF，跳过预标记")
+                return 0
+            for tbl in self._ETF_SKIP_TABLES:
+                result = s.execute(text("""
+                    INSERT INTO import_progress (table_name, ticker, completed_at)
+                    SELECT :tbl, ticker, NOW()
+                    FROM us_stock_basic
+                    WHERE is_etf = 1
+                    ON CONFLICT (table_name, ticker) DO NOTHING
+                """), {"tbl": tbl})
+                s.commit()
+                total += result.rowcount
+                logger.info(f"Phase 0: {tbl} 预标记 ETF +{result.rowcount}")
+        logger.info(f"Phase 0: 预标记完成，共写入 {total} 条 import_progress")
+        return total
 
     # ============================================================
     # FMP 下载方法
@@ -258,12 +316,11 @@ class BulkDownloader:
         if not tickers:
             return 0
         total = 0
-        batch_size = 50
-        batches = [tickers[i:i + batch_size] for i in range(0, len(tickers), batch_size)]
 
-        def _fetch_batch(batch):
-            symbols = ",".join(batch)
-            data = self._fmp_get_json(f"profile/{symbols}")
+        # FIX: 用 stable/profile（DB 列按 stable 字段命名 marketCap/volume 等），v3 profile/{ticker} 字段名是 mktCap/volAvg（不匹配）
+        # stable 不支持 batch，per-ticker 调用
+        def _fetch(ticker):
+            data = self._fmp_get_stable("profile", params={"symbol": ticker})
             if not data:
                 return 0
             df = _fmp_df_to_snake(pd.DataFrame(data))
@@ -271,12 +328,12 @@ class BulkDownloader:
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
-            futures = {pool.submit(_fetch_batch, b): b for b in batches}
+            futures = {pool.submit(_fetch, t): t for t in tickers}
             for f in tqdm(as_completed(futures), total=len(futures), desc="FMP Company Profiles"):
                 try:
                     total += f.result()
                 except Exception as e:
-                    logger.warning(f"Profile batch 失败: {e}")
+                    logger.warning(f"Profile 失败 {futures[f]}: {e}")
         logger.info(f"FMP company profiles 总计: {total} 条")
         return total
 
@@ -327,37 +384,13 @@ class BulkDownloader:
         logger.info(f"FMP daily prices 总计: {total} 条")
         return total
 
-    # --- 4. historical_market_cap ---
+    # --- 4. historical_market_cap (DEPRECATED) ---
+    # 该端点 Ultimate plan 只返回最近 ~90 天，from/to 参数需要 Enterprise plan（402）。
+    # 历史市值数据已切换到 us_enterprise_value.market_capitalization
+    # （季度精度，1983-至今全历史，由 download_fmp_enterprise_values 写入）。
     def download_fmp_historical_market_cap(self, tickers: list[str] = None, limit: int = 5000) -> int:
-        if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=True)
-        if not tickers:
-            return 0
-        tickers = self._skip_done_tickers("us_historical_market_cap", tickers)
-        if not tickers:
-            return 0
-        total = 0
-
-        def _fetch(ticker):
-            data = self._fmp_get_stable(
-                "historical-market-capitalization",
-                params={"symbol": ticker, "limit": limit},
-            )
-            if not data:
-                return 0
-            df = _fmp_df_to_snake(pd.DataFrame(data))
-            self.db.upsert_df(USHistoricalMarketCap, df, ["ticker", "date"])
-            return len(df)
-
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            futures = {pool.submit(self._mark_done, "us_historical_market_cap", _fetch, t): t for t in tickers}
-            for f in tqdm(as_completed(futures), total=len(futures), desc="FMP Historical Market Cap"):
-                try:
-                    total += f.result()
-                except Exception as e:
-                    logger.warning(f"Historical market cap 失败 {futures[f]}: {e}")
-        logger.info(f"FMP historical market cap 总计: {total} 条")
-        return total
+        logger.info("download_fmp_historical_market_cap: 已废弃，数据源切换到 us_enterprise_value.market_capitalization")
+        return 0
 
     # --- 5. financial_quarterly (IS+BS+CF 三表合并) ---
     def download_fmp_financial_quarterly(self, tickers: list[str] = None, limit: int = 400) -> int:
@@ -569,7 +602,8 @@ class BulkDownloader:
         total = 0
 
         def _fetch(ticker):
-            data = self._fmp_get_json(f"earnings-surprises/{ticker}", params={"limit": 400})
+            # FIX: 用 stable/earnings 端点，v3 earnings-surprises 字段名是 actualEarningResult/estimatedEarning（与 DB 列不匹配）
+            data = self._fmp_get_stable("earnings", params={"symbol": ticker, "limit": 400})
             if not data:
                 return 0
             df = _fmp_df_to_snake(pd.DataFrame(data))
@@ -1159,21 +1193,131 @@ class BulkDownloader:
     # 全量导入调度
     # ============================================================
 
+    # ============================================================
+    # Quiver 下载方法
+    # ============================================================
+
+    def download_quiver_lobbying(self, tickers: list[str] = None) -> int:
+        """Quiver lobbying: per-ticker 历史游说记录"""
+        if tickers is None:
+            tickers = self.db.get_us_tickers(stocks_only=True)
+        if not tickers:
+            logger.warning("download_quiver_lobbying: 无 ticker 列表，跳过")
+            return 0
+        tickers = self._skip_done_tickers("us_lobbying", tickers)
+        if not tickers:
+            logger.info("download_quiver_lobbying: 全部 ticker 已完成，跳过")
+            return 0
+        total = 0
+
+        def _fetch(ticker):
+            data = self._quiver_get_json(f"historical/lobbying/{ticker}")
+            if not data:
+                return 0
+            df = pd.DataFrame(data)
+            # 字段重命名: API 返回 PascalCase → DB snake_case
+            df = df.rename(columns={
+                "Date": "date", "Amount": "amount", "Client": "client",
+                "Issue": "issue", "Specific_Issue": "specific_issue",
+                "Registrant": "registrant", "Ticker": "ticker",
+            })
+            df = df[df["date"].notna() & df["ticker"].notna()]
+            if df.empty:
+                return 0
+            # 转类型
+            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+            df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+            df = df[df["date"].notna()]
+            # 去重：同 (ticker, date, registrant, client) 只留第一条（保留 amount 最大者）
+            df = df.sort_values("amount", ascending=False, na_position="last")
+            df = df.drop_duplicates(subset=["ticker", "date", "registrant", "client"], keep="first")
+            if df.empty:
+                return 0
+            self.db.upsert_df(USLobbying, df, ["ticker", "date", "registrant", "client"])
+            return len(df)
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {pool.submit(self._mark_done, "us_lobbying", _fetch, t): t for t in tickers}
+            for f in tqdm(as_completed(futures), total=len(futures), desc="Quiver Lobbying"):
+                try:
+                    total += f.result()
+                except Exception as e:
+                    logger.warning(f"Lobbying 失败 {futures[f]}: {e}")
+        logger.info(f"Quiver lobbying 总计: {total} 条")
+        return total
+
+    def download_quiver_gov_contracts(self, tickers: list[str] = None) -> int:
+        """Quiver gov contracts: per-ticker 季度政府合同金额"""
+        if tickers is None:
+            tickers = self.db.get_us_tickers(stocks_only=True)
+        if not tickers:
+            logger.warning("download_quiver_gov_contracts: 无 ticker 列表，跳过")
+            return 0
+        tickers = self._skip_done_tickers("us_gov_contract", tickers)
+        if not tickers:
+            logger.info("download_quiver_gov_contracts: 全部 ticker 已完成，跳过")
+            return 0
+        total = 0
+
+        def _fetch(ticker):
+            data = self._quiver_get_json(f"historical/govcontracts/{ticker}")
+            if not data:
+                return 0
+            df = pd.DataFrame(data)
+            df = df.rename(columns={
+                "Ticker": "ticker", "Amount": "amount",
+                "Qtr": "quarter", "Year": "year",
+            })
+            df = df[df["ticker"].notna() & df["year"].notna() & df["quarter"].notna()]
+            if df.empty:
+                return 0
+            df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+            df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
+            df["quarter"] = pd.to_numeric(df["quarter"], errors="coerce").astype("Int64")
+            df = df.dropna(subset=["year", "quarter"])
+            if df.empty:
+                return 0
+            self.db.upsert_df(USGovContract, df, ["ticker", "year", "quarter"])
+            return len(df)
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {pool.submit(self._mark_done, "us_gov_contract", _fetch, t): t for t in tickers}
+            for f in tqdm(as_completed(futures), total=len(futures), desc="Quiver GovContracts"):
+                try:
+                    total += f.result()
+                except Exception as e:
+                    logger.warning(f"GovContract 失败 {futures[f]}: {e}")
+        logger.info(f"Quiver gov_contracts 总计: {total} 条")
+        return total
+
+    def download_quiver_all(self) -> dict:
+        """Quiver 全量下载"""
+        results = {}
+        logger.info("=== Quiver: lobbying ===")
+        results["lobbying"] = self.download_quiver_lobbying()
+        logger.info("=== Quiver: gov_contracts ===")
+        results["gov_contracts"] = self.download_quiver_gov_contracts()
+        return results
+
     def download_fmp_all(self, start_year: int = 1995) -> dict:
         """FMP 全量下载"""
         results = {}
 
-        # Phase 1: Bulk 端点
+        # Phase 1: Bulk 端点（含 stock_list，必须先跑以拿到 ticker 列表）
         logger.info("=== Phase 1: Bulk 端点 ===")
         results["stock_list"] = self.download_fmp_stock_list()
         results["delisted"] = self.download_fmp_delisted_companies()
         results["symbol_changes"] = self.download_fmp_symbol_changes()
 
+        # Phase 1.5: ETF 预标记（必须在 stock_list 之后，per-ticker 之前）
+        logger.info("=== Phase 1.5: ETF 预标记（跳过无数据端点）===")
+        results["etf_premark"] = self._premark_etfs_no_data()
+
         # Phase 2: Per-ticker 核心数据（有历史序列）
         logger.info("=== Phase 2: Per-ticker 核心数据 ===")
         results["company_profiles"] = self.download_fmp_company_profiles()
         results["prices"] = self.download_fmp_daily_prices(start_year)
-        results["historical_market_cap"] = self.download_fmp_historical_market_cap()
+        # historical_market_cap 已废弃（us_enterprise_value 已有全历史季度市值）
         results["financial_quarterly"] = self.download_fmp_financial_quarterly()
         results["key_metrics"] = self.download_fmp_key_metrics()
         results["ratios"] = self.download_fmp_ratios()
