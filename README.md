@@ -55,14 +55,17 @@ pip install -r requirements.txt
 # 启动服务（开发）
 ./start.sh                                        # 启动后端 + 前端 + 安装 cron
 
-# 数据导入（新源 FMP/UW/Fiscal.ai）
-python3 cli.py data bulk-import --source fmp --target all --clean --start-year 1995
-python3 cli.py data bulk-import --source fmp --target financial-quarterly --clean  # 季度财报(IS+BS+CF)
-python3 cli.py data bulk-import --source fmp --target analyst-grades --clean       # 分析师评级
-python3 cli.py data bulk-import --source uw --target all --clean
-python3 cli.py data bulk-import --source fiscal --target all
-python3 cli.py data bulk-import --source quiver --target all                   # Quiver(游说/政府合同/WSB)
-python3 cli.py data bulk-import --source av --target all                       # AlphaVantage(新闻情绪/期权)
+# 数据导入
+python3 cli.py data bulk-import --source fmp --target all --start-year 1995    # FMP 全量（~6-8h, 含 ETF 预标记）
+python3 cli.py data bulk-import --source quiver --target all                   # Quiver 游说/政府合同
+python3 cli.py polymarket history --min-volume 1000000                          # Polymarket 历史事件
+
+# 单独重跑某端点（修复数据问题后用）
+python3 cli.py data bulk-import --source fmp --target company-profiles         # 公司快照（每次全量覆盖）
+python3 cli.py data bulk-import --source fmp --target earnings                 # Earnings Surprise
+python3 cli.py data bulk-import --source fmp --target metrics                  # Key Metrics
+python3 cli.py data bulk-import --source quiver --target lobbying              # 仅游说
+python3 cli.py data bulk-import --source quiver --target gov-contracts         # 仅政府合同
 
 # 增量更新
 python3 cli.py data update --market us                 # 新源 (FMP+UW+Fiscal)

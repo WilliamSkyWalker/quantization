@@ -88,20 +88,37 @@
 | 数据 | 端点 | 方式 | 表 |
 |------|------|------|-----|
 | 全市场股票列表 | stock-screener | per-ticker | us_stock_basic |
-| SP500 + NASDAQ 100 成分 + 历史变更 | sp500_constituent, nasdaq_constituent + historical | per-ticker | us_stock_basic |
+| 公司详情（快照） | **stable/profile** | per-ticker | us_company_profile |
 | 日线行情 | historical-price-full | per-ticker 5/批 | us_daily_price |
-| 季度财报 (IS+BS+CF) | stable/income-statement + balance-sheet + cash-flow | **per-ticker** 季度 | us_financial_data |
-| Key Metrics | stable/key-metrics | **per-ticker** 季度 | us_key_metric |
-| Financial Ratios | stable/ratios | **per-ticker** 季度 | us_key_metric |
-| Earnings Surprise | earnings-surprises-bulk | **bulk 按年** | us_earnings_surprise |
-| EPS Consensus | analyst-estimates-bulk | **bulk 按年** | us_eps_estimate |
+| 季度财报 (IS+BS+CF) | stable/income-statement + balance-sheet + cash-flow | per-ticker 季度 | us_financial_data |
+| Key Metrics | stable/key-metrics | per-ticker 季度 | us_key_metric |
+| Financial Ratios | stable/ratios | per-ticker 季度 | us_key_metric（共享表，COALESCE upsert） |
+| Enterprise Values（含历史市值） | stable/enterprise-values | per-ticker 季度 | us_enterprise_value |
+| Financial Growth | stable/financial-growth | per-ticker 季度 | us_financial_growth |
+| Owner Earnings | stable/owner-earnings | per-ticker | us_owner_earnings |
+| Earnings Surprise | **stable/earnings** | per-ticker | us_earnings_surprise |
+| EPS Consensus | **v3/analyst-estimates** | per-ticker | us_eps_estimate |
 | Insider Trading (Form 4) | insider-trading (v4) | per-ticker 分页 2003+ | us_insider_trade |
-| GICS 行业 | profile | per-ticker 50/批 | us_industry_class |
+| Insider Statistics | stable/insider-trade-statistics | per-ticker | us_insider_statistic |
+| GICS 行业 | stock-screener | per-ticker | us_industry_class |
 | 分红/拆股 | stock_dividend, stock_split | per-ticker | us_corporate_action |
-| 指数日线 | historical-price-full | per-ticker | us_index_daily |
-| 商品日线 | historical-price-full | per-ticker (GC=F→GCUSD) | us_commodity_price |
 | 分析师评级变更 | grade (v3) | per-ticker | us_analyst_recommendation |
+| ESG 评级 | stable/esg-environmental-social-governance-data | per-ticker | us_esg_rating |
+| 员工数 | stable/employee-count | per-ticker | us_employee_count |
+| 国会交易 | senate-trading (v4) + house-disclosure (v4) | per-ticker | us_congress_trade |
+| 指数日线 | historical-price-full | per-ticker | us_index_daily |
+| 指数成分历史 | sp500_constituent + nasdaq_constituent + historical | per-ticker | us_index_constituent |
+| 商品日线 | historical-price-full | per-ticker (GC=F→GCUSD) | us_commodity_price |
 | 宏观经济 | economic (v4), treasury (v4) | per-ticker | us_macro_indicator |
+| 退市公司 | delisted-companies (v3) | bulk | us_delisted |
+| 代码变更 | symbol_change (v4) | bulk | us_symbol_change |
+
+> **已废弃端点**:
+> - ~~historical-market-capitalization~~: Ultimate plan 只有 ~90 天，`from`/`to` 需 Enterprise plan（402）。历史市值改用 `us_enterprise_value.market_capitalization`（季度精度，1983-至今）。
+> - ~~v3/earnings-surprises/{ticker}~~: 字段名不匹配 DB（`actualEarningResult` vs `epsActual`），已切换到 `stable/earnings`。
+> - ~~v3/profile/{ticker} batch~~: 字段名不匹配 DB（`mktCap` vs `marketCap`），已切换到 `stable/profile`。
+>
+> **COALESCE upsert**: Key Metrics 和 Ratios 共享 `us_key_metric` 表。`database.py:upsert()` 使用 `COALESCE(EXCLUDED.col, table.col)` 确保后写入端点不覆盖前者字段为 NULL。
 
 ### 4.2 Unusual Whales — 替代数据
 
@@ -128,9 +145,9 @@
 
 | 数据 | 端点 | 表 |
 |------|------|-----|
-| 游说活动 | historical/lobbying/{ticker} | us_lobbying |
-| 政府合同 | historical/govcontracts/{ticker} | us_gov_contract |
-| WSB 情绪 | historical/wallstreetbets/{ticker} | us_wsb_sentiment |
+| 游说活动 | historical/lobbying/{ticker} | us_lobbying | ✅ 已导入（223k 行, 1546 ticker, 1999-2026）|
+| 政府合同 | historical/govcontracts/{ticker} | us_gov_contract | ✅ 已导入（36k 行, 1415 ticker, 2008-2026）|
+| ~~WSB 情绪~~ | ~~historical/wallstreetbets/{ticker}~~ | ~~us_wsb_sentiment~~ | 已废弃（只有 3 个 ticker，无截面区分力）|
 
 ### 4.5 Alpha Vantage — 新闻情绪/期权数据
 

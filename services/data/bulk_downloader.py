@@ -308,9 +308,8 @@ class BulkDownloader:
         return len(df)
 
     # --- 2. company_profiles ---
+    # NOTE: 不做 _skip_if_table_has_data 检查——profile 是快照数据，每次全量覆盖更新
     def download_fmp_company_profiles(self, tickers: list[str] = None) -> int:
-        if self._skip_if_table_has_data("us_company_profile", min_rows=5000):
-            return 0
         if tickers is None:
             tickers = self.db.get_us_tickers(stocks_only=False)
         if not tickers:

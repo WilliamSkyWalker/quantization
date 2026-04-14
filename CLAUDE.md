@@ -51,10 +51,14 @@ Claude Code 编码规范。所有代码变更必须遵守。
 - 使用 `python3` 而非 `python`
 
 ### 数据治理重写待办
-- [ ] `cli.py` — 更新 `data_bulk_import` 和 `data_update` 命令适配新方法名
+- [x] FMP 端点字段映射修复（earnings/profile/key-metrics COALESCE upsert）
+- [x] 历史市值切换到 us_enterprise_value.market_capitalization（删 us_historical_market_cap）
+- [x] Quiver lobbying / gov_contract 接入
+- [x] Polymarket model 扩展（52 列）+ history.py 异步写入
+- [x] ETF 预标记机制（_premark_etfs_no_data）
 - [ ] 端到端测试 — 用 AAPL 测试每个端点写入
 - [ ] 删除旧的 `fmp_downloader.py`（yfinance 版）或标记废弃
-- [ ] 其他数据源（UW/Fiscal/Quiver/AV）的下载逻辑需要迁移或重写
+- [ ] UW/Fiscal/AV 下载逻辑迁移
 
 ### 文档同步规则
 

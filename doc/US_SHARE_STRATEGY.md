@@ -56,8 +56,8 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 | 季度财报 | income-statement-bulk | **bulk 按年** | 全市场 1995+，含 filingDate |
 | Key Metrics | stable/key-metrics | **per-ticker** 季度 | PE/PB/ROE/EV 等 80+ 指标（全量导入）|
 | Financial Ratios | stable/ratios | **per-ticker** 季度 | 60+ 比率（全量导入）|
-| Earnings Surprise | earnings-surprises-bulk | **bulk 按年** | actual vs estimated EPS, 1995+ |
-| EPS Consensus | analyst-estimates-bulk | **bulk 按年** | 分析师共识预期 |
+| Earnings Surprise | **stable/earnings** | per-ticker | actual vs estimated EPS/Revenue |
+| EPS Consensus | v3/analyst-estimates | per-ticker 季度 | 分析师共识预期 |
 | Insider Trading | insider-trading (v4) | per-ticker 分页 | SEC Form 4，2003+ |
 | GICS 行业 | profile | per-ticker 50/批 | sector / industry |
 | 分红/拆股 | stock_dividend, stock_split | per-ticker | 全历史 |
@@ -879,15 +879,14 @@ v4 催化剂重建回测失败（UNION + 20 只 + always-on → α 从 6.66% 降
 - **对照基准**：个股空头须跑赢"做空 SPX 指数"baseline，否则不值得
 - 待回测验证
 
-**数据治理（阻塞项，优先于所有策略优化）：**
-- **us_key_metric 季度市值缺失**：FMP bulk endpoint 只返回 FY end（Q1），Q2/Q3/Q4 从未入库
-  - 需要用 FMP stable `/stable/key-metrics?period=quarter` 逐 ticker 补拉全部季度数据
-  - 影响：市值前瞻偏差修复依赖季度精度，当前只有年度 forward-fill
-  - 预计 ~13000 ticker × 限流 = 1-2 小时
-- **市值前瞻偏差**：get_market_cap() 已改用 us_key_metric 历史数据，但年度精度不够
-  - 季度数据补全后自动生效（代码已就绪，只缺数据）
-- **shares × close 方案有拆股 bug**：weighted_avg_shares 是财报期股数，close 是当日价，
-  拆股后两者不匹配导致市值计算爆炸。已放弃此方案，改用 FMP 直接提供的季度 market_cap
+**数据治理（已完成）：**
+- **历史市值数据源**：`us_enterprise_value.market_capitalization`（季度精度，1983-至今，391k 行 / 5,652 ticker）
+  - ~~us_key_metric.market_cap~~：FMP key-metrics 端点不返回该字段，列已删除
+  - ~~us_historical_market_cap~~：FMP Ultimate plan 只有 ~90 天历史，表已删除
+  - `get_market_cap()` 回退链：预加载 enterprise_value → SQL 查 enterprise_value → us_stock_basic 静态快照
+- **upsert COALESCE 修复**：Key Metrics + Ratios 共享 us_key_metric 表，已修复多端点覆写 NULL 的 bug（`COALESCE(EXCLUDED.col, table.col)`）
+- **FMP 端点字段映射修复**：earnings-surprise 切到 stable/earnings、company-profile 切到 stable/profile、eps-estimate 列名修正
+- **Quiver 因子数据到位**：LOBBY_INTENSITY（223k 行 / 1999-2026）、GOV_CONTRACT（36k 行 / 2008-2026）
 
 **P2 — 噪音因子清理（与 P0 并行，2-3 天）：**
 - 直接移除：IV_SKEW、PUT_CALL_RATIO、NEWS_SENTIMENT、POLYMARKET_SENT（无数据/无覆盖，等积累 1-2 年后重评）
