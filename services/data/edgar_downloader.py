@@ -22,7 +22,8 @@ import numpy as np
 import pandas as pd
 
 from services.config import LOG_LEVEL
-from services.data.database import DatabaseManager
+from data.models import USStockBasic, USFinancialData
+from data.upsert import get_upsert_manager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
@@ -77,8 +78,8 @@ _TAG_MAP = {
 class EdgarDownloader:
     """SEC EDGAR XBRL 历史财报下载器。"""
 
-    def __init__(self, db: DatabaseManager):
-        self.db = db
+    def __init__(self, db=None, **kwargs):
+        self._um = get_upsert_manager()
         self._cik_map: dict[str, str] = {}  # ticker → CIK (zero-padded 10 digits)
 
     def _fetch_json(self, url: str) -> Optional[dict]:
@@ -127,7 +128,7 @@ class EdgarDownloader:
             return 0
 
         if tickers is None:
-            tickers = self.db.get_us_tickers()
+            tickers = list(USStockBasic.objects.filter(is_actively_trading=1).values_list("ticker", flat=True))
         if not tickers:
             logger.warning("download_financials: 无 ticker 可下载")
             return 0
@@ -154,7 +155,7 @@ class EdgarDownloader:
             records = self._parse_company_facts(ticker, data, min_dt)
             if records:
                 df = pd.DataFrame(records)
-                self.db.upsert_us_financial_data(df)
+                self._um.upsert_df(USFinancialData, df, ["ticker", "period"])
                 total += len(records)
 
             if (i + 1) % 50 == 0:

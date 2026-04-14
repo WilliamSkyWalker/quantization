@@ -17,7 +17,8 @@ import pandas as pd
 import requests
 
 from services.config import LOG_LEVEL
-from services.data.database import DatabaseManager
+from data.models import USStockBasic
+from data.upsert import get_upsert_manager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
@@ -49,7 +50,7 @@ def get_sp500_historical_changes(since: str = "2015-01-01") -> pd.DataFrame:
     return changes
 
 
-def get_removed_tickers(db: DatabaseManager, since: str = "2015-01-01") -> list[str]:
+def get_removed_tickers(since: str = "2015-01-01", **kwargs) -> list[str]:
     """
     获取从 S&P 500 中移除且不在当前股票池中的 ticker 列表。
 
@@ -62,14 +63,14 @@ def get_removed_tickers(db: DatabaseManager, since: str = "2015-01-01") -> list[
         return []
 
     removed = set(changes["removed_ticker"].dropna().unique())
-    current = set(db.get_us_tickers())
+    current = set(USStockBasic.objects.filter(is_actively_trading=1).values_list("ticker", flat=True))
     missing = sorted(removed - current)
 
     logger.info(f"Historical removed tickers not in current pool: {len(missing)}")
     return missing
 
 
-def build_historical_universe(db: DatabaseManager, since: str = "2015-01-01") -> int:
+def build_historical_universe(since: str = "2015-01-01", **kwargs) -> int:
     """
     把历史被移除的 S&P 500 成分股加入 us_stock_basic（标记 is_actively_trading=0），
     并下载它们的行情数据。
@@ -77,7 +78,7 @@ def build_historical_universe(db: DatabaseManager, since: str = "2015-01-01") ->
     Returns:
         新增股票数。
     """
-    missing = get_removed_tickers(db, since)
+    missing = get_removed_tickers(since)
     if not missing:
         logger.info("No missing historical tickers to add")
         return 0
@@ -98,54 +99,44 @@ def build_historical_universe(db: DatabaseManager, since: str = "2015-01-01") ->
         })
 
     df = pd.DataFrame(records)
-    db.upsert_us_stock_basic(df)
+    um = get_upsert_manager()
+    um.upsert_df(USStockBasic, df, ["ticker"])
     logger.info(f"Added {len(records)} historical tickers to us_stock_basic (is_actively_trading=0)")
 
     return len(records)
 
 
-def download_historical_prices(db: DatabaseManager, since: str = "2015-01-01") -> int:
-    """
-    下载历史成分股的日线数据。
-
-    Returns:
-        下载记录数。
-    """
+def download_historical_prices(since: str = "2015-01-01", **kwargs) -> int:
+    """下载历史成分股的日线数据。"""
     from services.data.fmp_downloader import FMPDownloader
 
-    # 获取 is_actively_trading=0 的 ticker
-    df = db.query("SELECT ticker FROM us_stock_basic WHERE is_actively_trading = 0")
-    if df.empty:
+    tickers = list(
+        USStockBasic.objects.filter(is_actively_trading=0).values_list("ticker", flat=True)
+    )
+    if not tickers:
         logger.debug("download_historical_prices: 无 is_actively_trading=0 的历史 ticker")
         return 0
 
-    tickers = df["ticker"].tolist()
     logger.info(f"Downloading prices for {len(tickers)} historical tickers...")
-
-    dl = FMPDownloader(db)
+    dl = FMPDownloader()
     total = dl.download_daily_prices(tickers=tickers)
     logger.info(f"Historical prices downloaded: {total} records")
     return total
 
 
-def download_historical_financials(db: DatabaseManager) -> int:
-    """
-    从 SEC EDGAR 下载历史成分股的财报。
-
-    Returns:
-        下载记录数。
-    """
+def download_historical_financials(**kwargs) -> int:
+    """从 SEC EDGAR 下载历史成分股的财报。"""
     from services.data.edgar_downloader import EdgarDownloader
 
-    df = db.query("SELECT ticker FROM us_stock_basic WHERE is_actively_trading = 0")
-    if df.empty:
+    tickers = list(
+        USStockBasic.objects.filter(is_actively_trading=0).values_list("ticker", flat=True)
+    )
+    if not tickers:
         logger.debug("download_historical_financials: 无 is_actively_trading=0 的历史 ticker")
         return 0
 
-    tickers = df["ticker"].tolist()
     logger.info(f"Downloading EDGAR financials for {len(tickers)} historical tickers...")
-
-    dl = EdgarDownloader(db)
+    dl = EdgarDownloader()
     total = dl.download_financials(tickers=tickers, min_date="2010-01-01")
     logger.info(f"Historical financials downloaded: {total} records")
     return total

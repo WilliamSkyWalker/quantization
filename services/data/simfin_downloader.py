@@ -23,7 +23,8 @@ from services.config import (
     SIMFIN_DATA_DIR,
     LOG_LEVEL,
 )
-from services.data.database import DatabaseManager
+from data.models import USStockBasic, USFinancialData
+from data.upsert import get_upsert_manager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
@@ -68,8 +69,8 @@ def _read_simfin_csv(path: Path) -> pd.DataFrame:
 class SimFinDownloader:
     """SimFin 美股历史财报下载器。"""
 
-    def __init__(self, db: DatabaseManager):
-        self.db = db
+    def __init__(self, db=None, **kwargs):
+        self._um = get_upsert_manager()
 
         if not SIMFIN_API_KEY:
             raise ValueError(
@@ -94,7 +95,7 @@ class SimFinDownloader:
         Returns:
             写入/更新的记录数。
         """
-        our_tickers = set(self.db.get_us_tickers())
+        our_tickers = set(USStockBasic.objects.filter(is_actively_trading=1).values_list("ticker", flat=True))
         if not our_tickers:
             logger.warning("us_stock_basic 为空，请先下载美股股票列表")
             return 0
@@ -223,7 +224,7 @@ class SimFinDownloader:
             return 0
 
         df_out = pd.DataFrame(records)
-        self.db.upsert_us_financial_data(df_out)
+        self._um.upsert_df(USFinancialData, df_out, ["ticker", "period"])
         logger.info(
             f"SimFin 财报写入完成: {len(records)} 条 "
             f"({df_out['ticker'].nunique()} 只股票, "

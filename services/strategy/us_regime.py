@@ -27,7 +27,7 @@ from services.config import (
     US_REGIME_INDEX,
     US_REGIME_MA_WINDOW,
 )
-from services.data.database import DatabaseManager
+from data.models import USIndexDaily, USMacroIndicator
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
@@ -44,8 +44,7 @@ _BETA_MID = 0.5
 class USRegimeDetector:
     """美股复合 Regime 检测器 + 动态 Beta 目标。"""
 
-    def __init__(self, db: DatabaseManager):
-        self._db = db
+    def __init__(self, db=None, **kwargs):
         self._cache: dict[str, dict] = {}
 
     def detect(self, date: str) -> dict:
@@ -112,12 +111,13 @@ class USRegimeDetector:
     def _trend_score(self, date: str) -> float:
         """S&P 500 vs 60 日 MA → [0, 1]"""
         lookback = US_REGIME_MA_WINDOW + 10
-        df = self._db.query(
-            "SELECT trade_date, close FROM us_index_daily "
-            "WHERE index_code = :index AND trade_date <= :date "
-            "ORDER BY trade_date DESC LIMIT :limit",
-            params={"index": US_REGIME_INDEX, "date": date, "limit": lookback},
+        rows = list(
+            USIndexDaily.objects.filter(
+                index_code=US_REGIME_INDEX,
+                trade_date__lte=date,
+            ).order_by("-trade_date").values_list("trade_date", "close")[:lookback]
         )
+        df = pd.DataFrame(rows, columns=["trade_date", "close"]) if rows else pd.DataFrame()
         if df.empty or len(df) < US_REGIME_MA_WINDOW:
             logger.debug(f"_trend_score: 数据不足({len(df) if not df.empty else 0}/{US_REGIME_MA_WINDOW})，返回中性 0.5")
             return 0.5
@@ -138,12 +138,13 @@ class USRegimeDetector:
 
     def _vol_score(self, date: str) -> float:
         """VIX 历史百分位 → [0, 1]"""
-        df = self._db.query(
-            "SELECT value FROM us_macro_indicator "
-            "WHERE indicator_code = 'US_VIX' AND report_date <= :date "
-            "ORDER BY report_date DESC LIMIT :limit",
-            params={"date": date, "limit": _VIX_LOOKBACK_DAYS + 10},
+        rows = list(
+            USMacroIndicator.objects.filter(
+                indicator_code="US_VIX",
+                report_date__lte=date,
+            ).order_by("-report_date").values_list("value", flat=True)[:_VIX_LOOKBACK_DAYS + 10]
         )
+        df = pd.DataFrame({"value": rows}) if rows else pd.DataFrame()
         if df.empty or len(df) < 20:
             logger.debug(f"_vol_score: VIX 数据不足({len(df) if not df.empty else 0}/20)，返回中性 0.5")
             return 0.5
@@ -160,12 +161,13 @@ class USRegimeDetector:
 
     def _credit_score(self, date: str) -> float:
         """10Y-2Y 利差 → [0, 1]"""
-        df = self._db.query(
-            "SELECT value FROM us_macro_indicator "
-            "WHERE indicator_code = 'US_2Y10Y' AND report_date <= :date "
-            "ORDER BY report_date DESC LIMIT 5",
-            params={"date": date},
+        rows = list(
+            USMacroIndicator.objects.filter(
+                indicator_code="US_2Y10Y",
+                report_date__lte=date,
+            ).order_by("-report_date").values_list("value", flat=True)[:5]
         )
+        df = pd.DataFrame({"value": rows}) if rows else pd.DataFrame()
         if df.empty:
             logger.debug("_credit_score: 利差数据为空，返回中性 0.5")
             return 0.5

@@ -28,7 +28,12 @@ from services.config import (
     US_FALLBACK_TICKERS,
     LOG_LEVEL,
 )
-from services.data.database import DatabaseManager
+from data.models import (
+    USStockBasic, USDailyPrice, USFinancialData, USIndustryClass,
+    USIndexDaily, USCommodityPrice, USAnalystRecommendation,
+    USCorporateAction, USEarningsSurprise, USEpsEstimate,
+)
+from data.upsert import get_upsert_manager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
@@ -57,24 +62,39 @@ def _check_yf():
 class FMPDownloader:
     """美股数据下载器（yfinance 实现，保留类名兼容 API view 引用）"""
 
-    def __init__(self, db: DatabaseManager):
-        self.db = db
+    _TABLE_MODEL_MAP = {
+        "us_daily_price": USDailyPrice,
+        "us_financial_data": USFinancialData,
+        "us_industry_class": USIndustryClass,
+        "us_index_daily": USIndexDaily,
+        "us_commodity_price": USCommodityPrice,
+        "us_analyst_recommendation": USAnalystRecommendation,
+        "us_corporate_action": USCorporateAction,
+        "us_earnings_surprise": USEarningsSurprise,
+        "us_eps_estimate": USEpsEstimate,
+    }
+
+    def __init__(self, db=None, **kwargs):
+        self._um = get_upsert_manager()
         self._start_date = datetime.strptime(US_DATA_START_DATE, "%Y%m%d").strftime("%Y-%m-%d")
         self._yf = _check_yf()
 
+    def _table_to_model(self, table: str):
+        return self._TABLE_MODEL_MAP.get(table)
+
     def _stale_tickers(self, table: str, days: int = 30) -> list[str]:
         """返回在指定表中超过 days 天未更新（或从未下载）的 ticker 列表。"""
-        all_tickers = self.db.get_us_tickers()
+        all_tickers = list(USStockBasic.objects.filter(is_actively_trading=1).values_list("ticker", flat=True))
         if not all_tickers:
             logger.debug("_stale_tickers: 无美股代码")
             return []
         try:
-            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-            result = self.db.query(
-                f"SELECT DISTINCT ticker FROM {table} WHERE updated_at >= :cutoff",
-                params={"cutoff": cutoff},
-            )
-            recent = set(result["ticker"].tolist()) if not result.empty else set()
+            cutoff = datetime.now() - timedelta(days=days)
+            model = self._table_to_model(table)
+            if model:
+                recent = set(model.objects.filter(updated_at__gte=cutoff).values_list("ticker", flat=True).distinct())
+            else:
+                recent = set()
             stale = [t for t in all_tickers if t not in recent]
             return stale
         except Exception as e:
@@ -234,8 +254,8 @@ class FMPDownloader:
 
         # --- 4. Upsert + Deactivate ---
         df = pd.DataFrame(list(all_tickers.values()))
-        self.db.upsert_us_stock_basic(df)
-        self.db.deactivate_us_stocks_not_in(set(all_tickers.keys()))
+        self._um.upsert_df(USStockBasic, df, ["ticker"])
+        USStockBasic.objects.exclude(ticker__in=all_tickers.keys()).update(is_actively_trading=0)
         logger.info(f"美股列表下载完成: 共 {len(all_tickers)} 只（S&P 500: {sp500_count}, NASDAQ 100 新增: {nq100_new}）")
         return len(all_tickers)
 
@@ -287,7 +307,7 @@ class FMPDownloader:
 
                         if records:
                             df = pd.DataFrame(records)
-                            self.db.bulk_upsert_us_daily_price(df)
+                            self._um.upsert_df(USDailyPrice, df, ["ticker", "trade_date"])
                             total += len(records)
                     except KeyError:
                         logger.debug(f"_download_prices_for: {ticker} KeyError，跳过")
@@ -322,7 +342,7 @@ class FMPDownloader:
                             })
                         if records:
                             df = pd.DataFrame(records)
-                            self.db.bulk_upsert_us_daily_price(df)
+                            self._um.upsert_df(USDailyPrice, df, ["ticker", "trade_date"])
                             total += len(records)
                     except Exception as e2:
                         logger.warning(f"日线下载失败 {ticker}: {e2}")
@@ -332,7 +352,7 @@ class FMPDownloader:
     def download_daily_prices(self, tickers: list[str] = None) -> int:
         """全量下载日线数据。"""
         if tickers is None:
-            tickers = self.db.get_us_tickers()
+            tickers = list(USStockBasic.objects.filter(is_actively_trading=1).values_list("ticker", flat=True))
         if not tickers:
             logger.warning("download_daily_prices: 无美股代码，请先下载股票列表")
             return 0
@@ -345,12 +365,13 @@ class FMPDownloader:
 
     def update_daily_prices(self) -> int:
         """增量更新日线（从 DB 最新日期开始）。"""
-        tickers = self.db.get_us_tickers()
+        tickers = list(USStockBasic.objects.filter(is_actively_trading=1).values_list("ticker", flat=True))
         if not tickers:
             logger.warning("update_daily_prices: 无美股代码")
             return 0
 
-        latest = self.db.get_latest_us_trade_date()
+        latest_obj = USDailyPrice.objects.order_by("-trade_date").values_list("trade_date", flat=True).first()
+        latest = str(latest_obj) if latest_obj else None
         if latest:
             from_date = (pd.to_datetime(latest) + timedelta(days=1)).strftime("%Y-%m-%d")
         else:
@@ -509,7 +530,7 @@ class FMPDownloader:
 
         if records:
             df = pd.DataFrame(records)
-            self.db.upsert_us_financial_data(df)
+            self._um.upsert_df(USFinancialData, df, ["ticker", "period"])
             return len(records)
         logger.debug(f"_download_financial_single: {ticker} 无有效财务记录")
         return 0
@@ -517,7 +538,7 @@ class FMPDownloader:
     def download_financial_data(self, tickers: list[str] = None) -> int:
         """下载季度财报（income_stmt + balance_sheet + cashflow），多线程并行。"""
         if tickers is None:
-            tickers = self.db.get_us_tickers()
+            tickers = list(USStockBasic.objects.filter(is_actively_trading=1).values_list("ticker", flat=True))
         if not tickers:
             logger.warning("download_financial_data: 无美股代码")
             return 0
@@ -570,7 +591,7 @@ class FMPDownloader:
 
     def download_industry_class(self) -> int:
         """下载 GICS 行业分类（从 yfinance info 提取），多线程并行。"""
-        tickers = self.db.get_us_tickers()
+        tickers = list(USStockBasic.objects.filter(is_actively_trading=1).values_list("ticker", flat=True))
         if not tickers:
             logger.warning("download_industry_class: 无美股代码")
             return 0
@@ -588,7 +609,7 @@ class FMPDownloader:
 
         if records:
             df = pd.DataFrame(records)
-            self.db.upsert_us_industry_class(df)
+            self._um.upsert_df(USIndustryClass, df, ["ticker"])
 
         logger.info(f"美股行业分类下载完成: {len(records)} 条")
         return len(records)
@@ -629,7 +650,7 @@ class FMPDownloader:
 
                 if records:
                     df = pd.DataFrame(records)
-                    self.db.bulk_upsert_us_index_daily(df)
+                    self._um.upsert_df(USIndexDaily, df, ["index_code", "trade_date"])
                     total += len(records)
 
             except Exception as e:
@@ -641,11 +662,8 @@ class FMPDownloader:
     def update_index_daily(self) -> int:
         """增量更新指数日线。"""
         try:
-            result = self.db.query(
-                "SELECT MAX(trade_date) as max_date FROM us_index_daily"
-            )
-            latest = result["max_date"].iloc[0]
-            if pd.notna(latest):
+            latest = USIndexDaily.objects.order_by("-trade_date").values_list("trade_date", flat=True).first()
+            if latest:
                 from_date = (pd.to_datetime(str(latest)) + timedelta(days=1)).strftime("%Y-%m-%d")
             else:
                 from_date = self._start_date
@@ -684,7 +702,7 @@ class FMPDownloader:
 
                 if records:
                     df = pd.DataFrame(records)
-                    self.db.bulk_upsert_us_index_daily(df)
+                    self._um.upsert_df(USIndexDaily, df, ["index_code", "trade_date"])
                     total += len(records)
 
             except Exception as e:
@@ -726,7 +744,7 @@ class FMPDownloader:
 
                 if records:
                     df = pd.DataFrame(records)
-                    self.db.bulk_upsert_us_commodity_price(df)
+                    self._um.upsert_df(USCommodityPrice, df, ["commodity_symbol", "trade_date"])
                     total += len(records)
 
             except Exception as e:
@@ -738,11 +756,8 @@ class FMPDownloader:
     def update_commodity_prices(self) -> int:
         """增量更新商品期货。"""
         try:
-            result = self.db.query(
-                "SELECT MAX(trade_date) as max_date FROM us_commodity_price"
-            )
-            latest = result["max_date"].iloc[0]
-            if pd.notna(latest):
+            latest = USCommodityPrice.objects.order_by("-trade_date").values_list("trade_date", flat=True).first()
+            if latest:
                 from_date = (pd.to_datetime(str(latest)) + timedelta(days=1)).strftime("%Y-%m-%d")
             else:
                 from_date = self._start_date
@@ -781,7 +796,7 @@ class FMPDownloader:
 
                 if records:
                     df = pd.DataFrame(records)
-                    self.db.bulk_upsert_us_commodity_price(df)
+                    self._um.upsert_df(USCommodityPrice, df, ["commodity_symbol", "trade_date"])
                     total += len(records)
 
             except Exception as e:
@@ -829,7 +844,7 @@ class FMPDownloader:
                 df = df.drop_duplicates(
                     subset=["ticker", "date", "analyst_company"], keep="last"
                 )
-                self.db.upsert_us_analyst_recommendation(df)
+                self._um.upsert_df(USAnalystRecommendation, df, ["ticker", "date", "grading_company"])
                 return len(df)
         except Exception as e:
             logger.warning(f"分析师评级获取失败 {ticker}: {e}")
@@ -838,7 +853,7 @@ class FMPDownloader:
     def download_analyst_recommendations(self, tickers: list[str] = None) -> int:
         """下载分析师评级（yfinance upgrades_downgrades），多线程并行。"""
         if tickers is None:
-            tickers = self.db.get_us_tickers()
+            tickers = list(USStockBasic.objects.filter(is_actively_trading=1).values_list("ticker", flat=True))
         if not tickers:
             logger.warning("download_analyst_recommendations: 无美股代码")
             return 0
@@ -920,7 +935,7 @@ class FMPDownloader:
 
         if records:
             df = pd.DataFrame(records)
-            self.db.upsert_us_corporate_action(df)
+            self._um.upsert_df(USCorporateAction, df, ["ticker", "date", "action_type"])
             return len(records)
         logger.debug(f"_download_corporate_single: {ticker} 无分红/拆股记录")
         return 0
@@ -928,7 +943,7 @@ class FMPDownloader:
     def download_corporate_actions(self, tickers: list[str] = None) -> int:
         """下载分红和拆股历史，多线程并行。"""
         if tickers is None:
-            tickers = self.db.get_us_tickers()
+            tickers = list(USStockBasic.objects.filter(is_actively_trading=1).values_list("ticker", flat=True))
         if not tickers:
             logger.warning("download_corporate_actions: 无美股代码")
             return 0
@@ -992,7 +1007,7 @@ class FMPDownloader:
             logger.info("FMP_API_KEY 未设置，跳过 earnings surprises 下载")
             return 0
         if tickers is None:
-            tickers = self.db.get_us_tickers()
+            tickers = list(USStockBasic.objects.filter(is_actively_trading=1).values_list("ticker", flat=True))
         if not tickers:
             logger.warning("download_earnings_surprises: 无美股代码")
             return 0
@@ -1041,7 +1056,7 @@ class FMPDownloader:
 
         if records:
             df = pd.DataFrame(records)
-            self.db.upsert_us_earnings_surprise(df)
+            self._um.upsert_df(USEarningsSurprise, df, ["ticker", "date"])
         return len(records)
 
     def download_eps_estimates(self, tickers: list[str] = None) -> int:
@@ -1052,7 +1067,7 @@ class FMPDownloader:
             logger.info("FMP_API_KEY 未设置，跳过 EPS estimates 下载")
             return 0
         if tickers is None:
-            tickers = self.db.get_us_tickers()
+            tickers = list(USStockBasic.objects.filter(is_actively_trading=1).values_list("ticker", flat=True))
         if not tickers:
             logger.warning("download_eps_estimates: 无美股代码")
             return 0
@@ -1100,7 +1115,7 @@ class FMPDownloader:
 
         if records:
             df = pd.DataFrame(records)
-            self.db.upsert_us_eps_estimate(df)
+            self._um.upsert_df(USEpsEstimate, df, ["ticker", "date"])
         return len(records)
 
     def update_earnings_surprises(self) -> int:

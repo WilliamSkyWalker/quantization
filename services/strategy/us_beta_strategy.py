@@ -26,7 +26,6 @@ from services.config import (
     US_REBALANCE_INTERVAL,
     LOG_LEVEL,
 )
-from services.data.database import DatabaseManager
 from services.data.us_cleaner import get_us_clean_universe
 from services.strategy.us_regime import USRegimeDetector
 from services.us_factors.base import USFactorBase
@@ -49,9 +48,8 @@ class USBetaStrategy:
     - 熊市：低仓位 + 现金保护
     """
 
-    def __init__(self, db: DatabaseManager, n_holdings: int = _N_HOLDINGS):
-        self.db = db
-        self.regime = USRegimeDetector(db)
+    def __init__(self, db=None, n_holdings: int = _N_HOLDINGS, **kwargs):
+        self.regime = USRegimeDetector()
         self.n_holdings = n_holdings
 
     def get_target_allocation(self, date: str) -> dict:
@@ -193,14 +191,16 @@ class USBetaStrategy:
         return df[["ticker", "gp_score"]].dropna()
 
     def _get_trade_dates(self, start_date: str, end_date: str) -> list[str]:
-        """从 us_index_daily 获取交易日。"""
-        df = self.db.query(
-            "SELECT DISTINCT trade_date FROM us_index_daily "
-            "WHERE index_code = '^GSPC' AND trade_date >= :start AND trade_date <= :end "
-            "ORDER BY trade_date",
-            params={"start": start_date, "end": end_date},
+        """从 us_index_daily 获取交易日（Django ORM）。"""
+        from data.models import USIndexDaily
+        dates = list(
+            USIndexDaily.objects.filter(
+                index_code="^GSPC",
+                trade_date__gte=start_date,
+                trade_date__lte=end_date,
+            ).values_list("trade_date", flat=True).distinct().order_by("trade_date")
         )
-        if df.empty:
+        if not dates:
             logger.debug(f"_get_trade_dates: {start_date}~{end_date} 无交易日数据，返回空列表")
             return []
-        return [d.strftime("%Y-%m-%d") for d in pd.to_datetime(df["trade_date"])]
+        return [d.strftime("%Y-%m-%d") for d in dates]

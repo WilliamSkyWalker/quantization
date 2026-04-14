@@ -54,8 +54,7 @@ def _check_lgb():
 class USMLScorer:
     """LightGBM-based factor scorer for US stocks."""
 
-    def __init__(self, db, forward_days: int = 10, lookback_months: int = 12):
-        self.db = db
+    def __init__(self, db=None, forward_days: int = 10, lookback_months: int = 12, **kwargs):
         self.forward_days = forward_days
         self.lookback_months = lookback_months
         self.model = None
@@ -254,11 +253,19 @@ class USMLScorer:
         # 扩展 end 以便计算 forward returns
         extended_end = (end + pd.Timedelta(days=self.forward_days * 2 + 10)).strftime("%Y-%m-%d")
         start_str = start.strftime("%Y-%m-%d")
-        df = self.db.query(
-            "SELECT ticker, trade_date, COALESCE(adj_close, close) as adj_close FROM us_daily_price "
-            "WHERE trade_date >= :start AND trade_date <= :end",
-            params={"start": start_str, "end": extended_end},
+        from data.models import USDailyPrice
+        df = pd.DataFrame(
+            USDailyPrice.objects.filter(
+                trade_date__gte=start_str,
+                trade_date__lte=extended_end,
+            ).values_list("ticker", "trade_date", "adj_close", "close"),
+            columns=["ticker", "trade_date", "adj_close_raw", "close"],
         )
+        if not df.empty:
+            df["adj_close"] = pd.to_numeric(df["adj_close_raw"], errors="coerce").fillna(
+                pd.to_numeric(df["close"], errors="coerce")
+            )
+            df = df.drop(columns=["adj_close_raw", "close"])
         if not df.empty:
             df["trade_date"] = pd.to_datetime(df["trade_date"])
             df["adj_close"] = pd.to_numeric(df["adj_close"], errors="coerce")
@@ -298,11 +305,14 @@ class USMLScorer:
     ) -> dict[str, float]:
         """计算 S&P 500 每日的未来 N 日收益。"""
         extended_end = (end + pd.Timedelta(days=self.forward_days * 2 + 10)).strftime("%Y-%m-%d")
-        df = self.db.query(
-            "SELECT trade_date, close FROM us_index_daily "
-            "WHERE index_code = '^GSPC' AND trade_date >= :start AND trade_date <= :end "
-            "ORDER BY trade_date",
-            params={"start": start.strftime("%Y-%m-%d"), "end": extended_end},
+        from data.models import USIndexDaily
+        df = pd.DataFrame(
+            USIndexDaily.objects.filter(
+                index_code="^GSPC",
+                trade_date__gte=start.strftime("%Y-%m-%d"),
+                trade_date__lte=extended_end,
+            ).order_by("trade_date").values_list("trade_date", "close"),
+            columns=["trade_date", "close"],
         )
         if df.empty:
             logger.debug("_compute_index_forward_returns: S&P 500 指数数据为空，返回空字典")

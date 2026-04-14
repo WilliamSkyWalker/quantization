@@ -52,7 +52,6 @@ from services.config import (
     US_SHORT_BORROW_FEE_TIERS,
     LOG_LEVEL,
 )
-from services.data.database import DatabaseManager
 from services.data.us_cleaner import get_us_clean_universe
 from services.us_factors.value import EP, BP, DivYield
 from services.us_factors.quality import RoeTTM, GrossMargin, ProfitStability, MarginTrend
@@ -119,12 +118,12 @@ class USMultiFactorStrategy:
 
     def __init__(
         self,
-        db: DatabaseManager,
+        db=None,
         n_holdings: int = US_MAX_HOLDINGS,
         factor_weights: Optional[dict[str, float]] = None,
         min_select_score: float = US_MIN_SELECT_SCORE,
+        **kwargs,
     ):
-        self.db = db
         self.n_holdings = n_holdings
         self.min_select_score = min_select_score
         self._prev_holdings: set[str] = set()
@@ -133,25 +132,23 @@ class USMultiFactorStrategy:
         # Initialize factor instances (23 factors, 7 categories)
         self.factors = [
             # Value
-            EP(db), BP(db), DivYield(db), BuybackYield(db),
+            EP(), BP(), DivYield(), BuybackYield(),
             # Quality
-            RoeTTM(db), GrossMargin(db), ProfitStability(db), MarginTrend(db), Accruals(db),
+            RoeTTM(), GrossMargin(), ProfitStability(), MarginTrend(), Accruals(),
             # Growth
-            NetProfitYoY(db), RevenueYoY(db), NetProfitCAGR3Y(db),
-            # Momentum (pruned: ResidualMom — redundant, Δα=-3.46%)
-            Mom1M(db), Mom3M(db), Mom12M(db), Rev5D(db),
-            # Technical (pruned: VolPriceDiv — no signal, Δα=-4.30%)
-            Turn20D(db), Vol20D(db), Ivol(db), Size(db),
-            IvSkew(db), PutCallRatio(db),
-            # Macro: entire category pruned (截面同值, Δα=-0.25% each)
+            NetProfitYoY(), RevenueYoY(), NetProfitCAGR3Y(),
+            # Momentum
+            Mom1M(), Mom3M(), Mom12M(), Rev5D(),
+            # Technical
+            Turn20D(), Vol20D(), Ivol(), Size(),
+            IvSkew(), PutCallRatio(),
             # Analyst
-            USAnalystRating(db), USAnalystCoverage(db),
-            EarningsSurprise(db), EpsRevision(db), InsiderNetBuy(db),
+            USAnalystRating(), USAnalystCoverage(),
+            EarningsSurprise(), EpsRevision(), InsiderNetBuy(),
             # Sentiment
-            PolymarketSent(db),
-            LobbyIntensity(db), GovContract(db),
-            NewsSentiment(db),
-            # WsbSentiment 移除：只有 3 个 ticker，无截面区分力
+            PolymarketSent(),
+            LobbyIntensity(), GovContract(),
+            NewsSentiment(),
         ]
 
         # 等权（不做 IC 引导权重优化——样本外验证已证明 IC 权重是数据窥探）
@@ -195,8 +192,11 @@ class USMultiFactorStrategy:
         if cached is not None:
             return cached
         try:
-            df = self.db.query(
-                "SELECT ticker, sector FROM us_industry_class WHERE sector IS NOT NULL"
+            from data.models import USIndustryClass
+            df = pd.DataFrame(
+                USIndustryClass.objects.filter(sector__isnull=False)
+                .values_list("ticker", "sector"),
+                columns=["ticker", "sector"],
             )
             if not df.empty:
                 USFactorBase._static_cache[cache_key] = df
@@ -211,7 +211,6 @@ class USMultiFactorStrategy:
         try:
             # Use a temporary factor instance to access get_market_cap()
             factor_instance = self.factors[0] if self.factors else USFactorBase.__new__(USFactorBase)
-            factor_instance.db = self.db
             df = factor_instance.get_market_cap(date)
             if not df.empty:
                 return df
@@ -527,14 +526,8 @@ class USMultiFactorStrategy:
             df_latest = df_fin.groupby("ticker")["date"].max().reset_index()
             df_latest.columns = ["ticker", "latest_end_date"]
         else:
-            tickers = composite["ticker"].tolist()
-            tickers_str = "','".join(tickers)
-            df_latest = self.db.query(
-                f"SELECT ticker, MAX(date) as latest_end_date "
-                f"FROM us_financial_data "
-                f"WHERE ticker IN ('{tickers_str}') AND filing_date <= '{date}' "
-                f"GROUP BY ticker"
-            )
+            logger.warning("_apply_financial_staleness_decay: 缓存为空，请先调用 preload_for_backtest()")
+            return composite
 
         if df_latest.empty:
             logger.debug(f"_apply_financial_staleness_decay: {date} 无财报日期数据，跳过衰减")
@@ -1101,33 +1094,33 @@ class USMultiFactorStrategy:
         Returns:
             List of rebalance date strings.
         """
-        df = self.db.query(
-            "SELECT DISTINCT trade_date FROM us_index_daily "
-            "WHERE index_code = '^GSPC' "
-            "AND trade_date >= :start_date "
-            "AND trade_date <= :end_date "
-            "ORDER BY trade_date",
-            params={"start_date": start_date, "end_date": end_date},
+        from data.models import USIndexDaily
+        dates = list(
+            USIndexDaily.objects.filter(
+                index_code="^GSPC",
+                trade_date__gte=start_date,
+                trade_date__lte=end_date,
+            ).values_list("trade_date", flat=True).distinct().order_by("trade_date")
         )
 
-        if df.empty:
+        if not dates:
             logger.debug("get_rebalance_dates: 无交易日数据，返回空列表")
             return []
 
-        trading_days = sorted(pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d").tolist())
+        trading_days = sorted(d.strftime("%Y-%m-%d") for d in dates)
         return trading_days[::US_REBALANCE_INTERVAL]
 
     def _get_all_trade_dates(self, start_date: str, end_date: str) -> list[str]:
         """Get all US trading days in range from us_index_daily."""
-        df = self.db.query(
-            "SELECT DISTINCT trade_date FROM us_index_daily "
-            "WHERE index_code = '^GSPC' "
-            "AND trade_date >= :start_date "
-            "AND trade_date <= :end_date "
-            "ORDER BY trade_date",
-            params={"start_date": start_date, "end_date": end_date},
+        from data.models import USIndexDaily
+        dates = list(
+            USIndexDaily.objects.filter(
+                index_code="^GSPC",
+                trade_date__gte=start_date,
+                trade_date__lte=end_date,
+            ).values_list("trade_date", flat=True).distinct().order_by("trade_date")
         )
-        if df.empty:
+        if not dates:
             logger.debug("_get_all_trade_dates: 无交易日数据，返回空列表")
             return []
         return pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d").tolist()
@@ -1206,7 +1199,6 @@ class USMultiFactorStrategy:
                 from services.strategy.us_ml_scorer import USMLScorer
                 from services.config import US_ML_FORWARD_DAYS, US_ML_LOOKBACK_MONTHS
                 self._ml_scorer = USMLScorer(
-                    self.db,
                     forward_days=US_ML_FORWARD_DAYS,
                     lookback_months=US_ML_LOOKBACK_MONTHS,
                 )

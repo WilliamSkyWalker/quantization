@@ -20,7 +20,6 @@ import numpy as np
 import pandas as pd
 
 from services.config import LOG_LEVEL
-from services.data.database import DatabaseManager
 from services.us_factors.base import USFactorBase
 from services.strategy.us_multi_factor import USMultiFactorStrategy
 from services.strategy.us_regime import USRegimeDetector
@@ -54,11 +53,9 @@ class USBaselineStrategy:
 
     WEIGHT_TAU = 1.5
 
-    def __init__(self, db: DatabaseManager):
-        self.db = db
-        # Reuse full factor pipeline from Alpha v1
-        self._scorer = USMultiFactorStrategy(db)
-        self._regime = USRegimeDetector(db)
+    def __init__(self, db=None, **kwargs):
+        self._scorer = USMultiFactorStrategy()
+        self._regime = USRegimeDetector()
 
     def generate_signals(
         self,
@@ -114,7 +111,6 @@ class USBaselineStrategy:
                 from services.strategy.us_ml_scorer import USMLScorer
                 from services.config import US_ML_FORWARD_DAYS, US_ML_LOOKBACK_MONTHS
                 self._scorer._ml_scorer = USMLScorer(
-                    self.db,
                     forward_days=US_ML_FORWARD_DAYS,
                     lookback_months=US_ML_LOOKBACK_MONTHS,
                 )
@@ -164,17 +160,18 @@ class USBaselineStrategy:
         return w / w.sum()
 
     def _get_month_end_dates(self, start_date: str, end_date: str) -> list[str]:
-        df = self.db.query(
-            "SELECT DISTINCT trade_date FROM us_index_daily "
-            "WHERE index_code = '^GSPC' "
-            "AND trade_date >= :start AND trade_date <= :end "
-            "ORDER BY trade_date",
-            params={"start": start_date, "end": end_date},
+        from data.models import USIndexDaily
+        dates = list(
+            USIndexDaily.objects.filter(
+                index_code="^GSPC",
+                trade_date__gte=start_date,
+                trade_date__lte=end_date,
+            ).values_list("trade_date", flat=True).distinct().order_by("trade_date")
         )
-        if df.empty:
+        if not dates:
             logger.debug(f"_get_month_end_dates: {start_date}~{end_date} 无交易日数据，返回空列表")
             return []
-        df["trade_date"] = pd.to_datetime(df["trade_date"])
+        df = pd.DataFrame({"trade_date": pd.to_datetime(dates)})
         df["ym"] = df["trade_date"].dt.to_period("M")
         month_ends = df.groupby("ym")["trade_date"].max()
         return sorted(month_ends.dt.strftime("%Y-%m-%d").tolist())

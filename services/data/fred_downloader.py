@@ -17,7 +17,8 @@ from services.config import (
     US_DATA_START_DATE,
     LOG_LEVEL,
 )
-from services.data.database import DatabaseManager
+from data.models import USMacroIndicator
+from data.upsert import get_upsert_manager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
@@ -26,8 +27,8 @@ logger.setLevel(LOG_LEVEL)
 class FREDDownloader:
     """FRED 美股宏观经济数据下载器"""
 
-    def __init__(self, db: DatabaseManager):
-        self.db = db
+    def __init__(self, db=None, **kwargs):
+        self._um = get_upsert_manager()
         self._start_date = datetime.strptime(US_DATA_START_DATE, "%Y%m%d").strftime("%Y-%m-%d")
 
         if not FRED_API_KEY:
@@ -80,7 +81,7 @@ class FREDDownloader:
                 df = df.dropna(subset=["value"])
 
                 if not df.empty:
-                    self.db.upsert_us_macro_indicator(df)
+                    self._um.upsert_df(USMacroIndicator, df, ["indicator_code", "report_date"])
                     results[indicator_code] = len(df)
                     logger.debug(f"FRED {indicator_code}: {len(df)} 条")
                 else:
@@ -107,12 +108,13 @@ class FREDDownloader:
             try:
                 # 查询该指标的最新日期
                 try:
-                    result = self.db.query(
-                        "SELECT MAX(report_date) as max_date FROM us_macro_indicator "
-                        f"WHERE indicator_code = '{indicator_code}'"
+                    latest = (
+                        USMacroIndicator.objects.filter(indicator_code=indicator_code)
+                        .order_by("-report_date")
+                        .values_list("report_date", flat=True)
+                        .first()
                     )
-                    latest = result["max_date"].iloc[0]
-                    if pd.notna(latest):
+                    if latest:
                         start = str(latest)
                     else:
                         start = self._start_date
@@ -138,7 +140,7 @@ class FREDDownloader:
                 df = df.dropna(subset=["value"])
 
                 if not df.empty:
-                    self.db.upsert_us_macro_indicator(df)
+                    self._um.upsert_df(USMacroIndicator, df, ["indicator_code", "report_date"])
                     results[indicator_code] = len(df)
                 else:
                     results[indicator_code] = 0

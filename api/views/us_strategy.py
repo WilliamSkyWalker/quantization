@@ -4,7 +4,6 @@ import logging
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from services.data.database import DatabaseManager
 from services.data.us_cleaner import get_us_clean_universe
 from services.strategy.us_multi_factor import USMultiFactorStrategy
 from services.strategy.us_backtest import USBacktestEngine
@@ -13,8 +12,6 @@ from services.execution.alpaca_trader import AlpacaTrader
 from tasks.manager import task_manager
 
 logger = logging.getLogger(__name__)
-
-_db = DatabaseManager()
 
 
 # ============================================================
