@@ -657,7 +657,7 @@ class USMultiFactorStrategy:
         if cached_univ is not None:
             universe = cached_univ
         else:
-            universe = get_us_clean_universe(self.db, date)
+            universe = get_us_clean_universe(date)
             USFactorBase._date_cache[cache_key] = universe
         if universe.empty:
             logger.warning(f"{date} US universe is empty")
@@ -1193,11 +1193,11 @@ class USMultiFactorStrategy:
                     f"({cached_min.strftime('%Y-%m-%d')}~{cached_max.strftime('%Y-%m-%d')}), reloading"
                 )
                 USFactorBase.clear_all_cache()
-                USFactorBase.preload_for_backtest(self.db, start_date, end_date)
+                USFactorBase.preload_for_backtest(start_date, end_date)
                 USFactorBase.precompute_rolling_stats()
         else:
             USFactorBase.clear_all_cache()
-            USFactorBase.preload_for_backtest(self.db, start_date, end_date)
+            USFactorBase.preload_for_backtest(start_date, end_date)
             USFactorBase.precompute_rolling_stats()
 
         # Initialize ML scorer if enabled

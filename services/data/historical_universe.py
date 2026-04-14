@@ -71,7 +71,7 @@ def get_removed_tickers(db: DatabaseManager, since: str = "2015-01-01") -> list[
 
 def build_historical_universe(db: DatabaseManager, since: str = "2015-01-01") -> int:
     """
-    把历史被移除的 S&P 500 成分股加入 us_stock_basic（标记 is_active=0），
+    把历史被移除的 S&P 500 成分股加入 us_stock_basic（标记 is_actively_trading=0），
     并下载它们的行情数据。
 
     Returns:
@@ -82,7 +82,7 @@ def build_historical_universe(db: DatabaseManager, since: str = "2015-01-01") ->
         logger.info("No missing historical tickers to add")
         return 0
 
-    # 加入 us_stock_basic（is_active=0 标记为历史成分股）
+    # 加入 us_stock_basic（is_actively_trading=0 标记为历史成分股）
     records = []
     for ticker in missing:
         records.append({
@@ -94,12 +94,12 @@ def build_historical_universe(db: DatabaseManager, since: str = "2015-01-01") ->
             "ipo_date": None,
             "market_cap": None,
             "country": "US",
-            "is_active": 0,  # 标记为非活跃（历史成分股）
+            "is_actively_trading": 0,  # 标记为非活跃（历史成分股）
         })
 
     df = pd.DataFrame(records)
     db.upsert_us_stock_basic(df)
-    logger.info(f"Added {len(records)} historical tickers to us_stock_basic (is_active=0)")
+    logger.info(f"Added {len(records)} historical tickers to us_stock_basic (is_actively_trading=0)")
 
     return len(records)
 
@@ -113,10 +113,10 @@ def download_historical_prices(db: DatabaseManager, since: str = "2015-01-01") -
     """
     from services.data.fmp_downloader import FMPDownloader
 
-    # 获取 is_active=0 的 ticker
-    df = db.query("SELECT ticker FROM us_stock_basic WHERE is_active = 0")
+    # 获取 is_actively_trading=0 的 ticker
+    df = db.query("SELECT ticker FROM us_stock_basic WHERE is_actively_trading = 0")
     if df.empty:
-        logger.debug("download_historical_prices: 无 is_active=0 的历史 ticker")
+        logger.debug("download_historical_prices: 无 is_actively_trading=0 的历史 ticker")
         return 0
 
     tickers = df["ticker"].tolist()
@@ -137,9 +137,9 @@ def download_historical_financials(db: DatabaseManager) -> int:
     """
     from services.data.edgar_downloader import EdgarDownloader
 
-    df = db.query("SELECT ticker FROM us_stock_basic WHERE is_active = 0")
+    df = db.query("SELECT ticker FROM us_stock_basic WHERE is_actively_trading = 0")
     if df.empty:
-        logger.debug("download_historical_financials: 无 is_active=0 的历史 ticker")
+        logger.debug("download_historical_financials: 无 is_actively_trading=0 的历史 ticker")
         return 0
 
     tickers = df["ticker"].tolist()

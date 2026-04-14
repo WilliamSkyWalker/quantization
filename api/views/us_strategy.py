@@ -29,7 +29,7 @@ def universe(request):
         import datetime
         date = datetime.date.today().strftime('%Y-%m-%d')
 
-    df = get_us_clean_universe(_db, date)
+    df = get_us_clean_universe(date)
     return Response({
         'date': date,
         'count': len(df),

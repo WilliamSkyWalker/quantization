@@ -562,7 +562,7 @@ class FactorEvaluator:
         """获取指定日期的股票池。"""
         if self.market == "us":
             from services.data.us_cleaner import get_us_clean_universe
-            return get_us_clean_universe(self.db, date_str)
+            return get_us_clean_universe(date_str)
         else:
             from services.data.cleaner import get_clean_universe
             return get_clean_universe(self.db, date_str)
@@ -573,7 +573,7 @@ class FactorEvaluator:
             from services.us_factors.base import USFactorBase
             pre_start = (pd.to_datetime(start) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
             pre_end = (pd.to_datetime(end) + pd.Timedelta(days=90)).strftime("%Y-%m-%d")
-            USFactorBase.preload_for_backtest(self.db, pre_start, pre_end)
+            USFactorBase.preload_for_backtest(pre_start, pre_end)
             USFactorBase.precompute_rolling_stats()
 
     def _get_eval_dates(self, start: str, end: str, freq_months: int = 1) -> list[str]:

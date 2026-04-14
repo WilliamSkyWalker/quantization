@@ -6,7 +6,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-from services.data.database import BacktestResult, DatabaseManager
+from data.models import BacktestResult
 
 logger = logging.getLogger(__name__)
 
@@ -119,23 +119,15 @@ class _NumpyEncoder(json.JSONEncoder):
 
 
 def save_backtest_result(
-    db: DatabaseManager,
     market: str,
     strategy_type: str,
     start_date: str,
     end_date: str,
     result: dict,
+    **kwargs,
 ) -> bool:
     """
-    统一存储回测结果到 backtest_result 表。
-
-    Args:
-        db: DatabaseManager 实例
-        market: "cn" 或 "us"
-        strategy_type: "alpha", "beta", "baseline" 等
-        start_date: 回测开始日期
-        end_date: 回测结束日期
-        result: 回测引擎返回的 dict (nav, benchmark_nav, trades, stats, ...)
+    统一存储回测结果到 backtest_result 表（Django ORM）。
 
     Returns:
         True 存储成功，False 失败
@@ -151,7 +143,6 @@ def save_backtest_result(
     monthly_data = _calc_monthly_returns(nav)
     drawdown_data = _calc_drawdown(nav)
 
-    # stats dict 作为 summary
     summary_dict = {}
     if isinstance(stats, dict):
         summary_dict = stats
@@ -160,20 +151,18 @@ def save_backtest_result(
             summary_dict[row.iloc[0]] = row.iloc[1] if len(row) > 1 else None
 
     try:
-        with db.get_session() as session:
-            session.add(BacktestResult(
-                market=market,
-                strategy_type=strategy_type,
-                start_date=start_date,
-                end_date=end_date,
-                summary=json.dumps(summary_dict, ensure_ascii=False, cls=_NumpyEncoder),
-                nav=json.dumps(nav_data, ensure_ascii=False, cls=_NumpyEncoder),
-                benchmark=json.dumps(bench_data, ensure_ascii=False, cls=_NumpyEncoder),
-                trades=json.dumps(trade_data, ensure_ascii=False, cls=_NumpyEncoder),
-                monthly=json.dumps(monthly_data, ensure_ascii=False, cls=_NumpyEncoder),
-                drawdown=json.dumps(drawdown_data, ensure_ascii=False, cls=_NumpyEncoder),
-            ))
-            session.commit()
+        BacktestResult.objects.create(
+            market=market,
+            strategy_type=strategy_type,
+            start_date=start_date,
+            end_date=end_date,
+            summary=json.dumps(summary_dict, ensure_ascii=False, cls=_NumpyEncoder),
+            nav=json.dumps(nav_data, ensure_ascii=False, cls=_NumpyEncoder),
+            benchmark=json.dumps(bench_data, ensure_ascii=False, cls=_NumpyEncoder),
+            trades=json.dumps(trade_data, ensure_ascii=False, cls=_NumpyEncoder),
+            monthly=json.dumps(monthly_data, ensure_ascii=False, cls=_NumpyEncoder),
+            drawdown=json.dumps(drawdown_data, ensure_ascii=False, cls=_NumpyEncoder),
+        )
         logger.info(f"回测结果已保存: market={market}, strategy={strategy_type}, {start_date}~{end_date}")
         return True
     except Exception as e:

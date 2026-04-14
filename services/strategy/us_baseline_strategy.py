@@ -83,11 +83,11 @@ class USBaselineStrategy:
                     USFactorBase.precompute_rolling_stats()
             else:
                 USFactorBase.clear_all_cache()
-                USFactorBase.preload_for_backtest(self.db, start_date, end_date)
+                USFactorBase.preload_for_backtest(start_date, end_date)
                 USFactorBase.precompute_rolling_stats()
         else:
             USFactorBase.clear_all_cache()
-            USFactorBase.preload_for_backtest(self.db, start_date, end_date)
+            USFactorBase.preload_for_backtest(start_date, end_date)
             USFactorBase.precompute_rolling_stats()
 
         # Monthly rebalance dates

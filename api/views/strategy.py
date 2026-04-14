@@ -7,7 +7,7 @@ import pandas as pd
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from services.data.database import DatabaseManager, SelectionResult, FactorSnapshot
+from services.data.database import DatabaseManager
 from tasks.manager import task_manager
 
 logger = logging.getLogger(__name__)

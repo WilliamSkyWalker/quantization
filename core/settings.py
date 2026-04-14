@@ -30,6 +30,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'corsheaders',
+    'data',
     'api',
 ]
 
@@ -57,8 +58,20 @@ TEMPLATES = [
 
 ASGI_APPLICATION = 'core.asgi.application'
 
-# No Django database needed - we use SQLAlchemy from services layer
-DATABASES = {}
+# PostgreSQL — 与 services/config.py 共享连接参数
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'HOST': qs_settings.DB_HOST,
+        'PORT': qs_settings.DB_PORT,
+        'USER': qs_settings.DB_USER,
+        'PASSWORD': qs_settings.DB_PASSWORD,
+        'NAME': qs_settings.DB_DATABASE,
+        'OPTIONS': {
+            'options': f'-c search_path={qs_settings.DB_SCHEMA}',
+        },
+    }
+}
 
 # CORS - allow Vue dev server
 CORS_ALLOW_ALL_ORIGINS = True

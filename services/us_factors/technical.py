@@ -99,16 +99,8 @@ class Ivol(USFactorBase):
             idx_df = pd.DataFrame()
 
         if idx_df.empty:
-            try:
-                idx_df = self.db.query(
-                    "SELECT trade_date, close FROM us_index_daily "
-                    "WHERE index_code = '^GSPC' AND trade_date <= :date "
-                    "ORDER BY trade_date DESC LIMIT 65",
-                    params={"date": date},
-                )
-            except Exception as e:
-                logger.warning(f"Ivol.compute: 获取S&P500指数数据失败: {e}")
-                return pd.DataFrame(columns=["ticker", "factor_value"])
+            logger.debug("Ivol.compute: 缓存无 S&P 500 数据")
+            return pd.DataFrame(columns=["ticker", "factor_value"])
 
         if idx_df.empty or len(idx_df) < 20:
             logger.debug("Ivol.compute: S&P500指数数据不足")

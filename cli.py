@@ -236,7 +236,7 @@ def data_bulk_import(
     """三家 API 批量导入（FMP/UW/Fiscal.ai）"""
     db = _get_db()
     from services.data.bulk_downloader import BulkDownloader
-    dl = BulkDownloader(db)
+    dl = BulkDownloader()
 
     if clean:
         _clean_tables_for_import(db, source, target)
@@ -344,7 +344,7 @@ def data_download(
 
     if market == "us" and not old_source:
         from services.data.bulk_downloader import BulkDownloader
-        dl = BulkDownloader(db)
+        dl = BulkDownloader()
         dispatch = {
             "all": lambda: dl.download_fmp_all_bulk(1995),
             "list": dl.download_fmp_stock_list,
@@ -435,7 +435,7 @@ def data_update(
         # 六源增量更新
         from services.data.bulk_downloader import BulkDownloader
         from services.data.fred_downloader import FREDDownloader
-        dl = BulkDownloader(db)
+        dl = BulkDownloader()
         console.print("[cyan]增量更新美股数据（六源：FMP/UW/Fiscal/Quiver/AV/FRED）...[/cyan]")
         t0 = time.time()
         current_year = time.localtime().tm_year
@@ -578,7 +578,7 @@ def universe(
 
     if market == "us":
         from services.data.us_cleaner import get_us_clean_universe
-        df = get_us_clean_universe(db, date)
+        df = get_us_clean_universe(date)
         id_col, name_col, ind_col = "ticker", "name", "sector"
     else:
         from services.data.cleaner import get_clean_universe
@@ -741,7 +741,7 @@ def backtest(
     console.print("  运行回测...")
     if market == "us":
         engine = USBacktestEngine(
-            db=db, initial_capital=cap,
+            initial_capital=cap,
             risk_controls=(strategy_type != "baseline"),
         )
     else:
@@ -823,7 +823,7 @@ def backtest(
     # 存库
     from services.strategy.backtest_saver import save_backtest_result
     st = strategy_type if market == "us" else "alpha"
-    if save_backtest_result(db, market, st, start, end, result):
+    if save_backtest_result(market, st, start, end, result):
         console.print("  [dim]回测结果已保存到数据库[/dim]")
     else:
         console.print("  [yellow]回测结果保存失败[/yellow]")
@@ -856,7 +856,7 @@ def factor_calc(
     if market == "us":
         from services.data.us_cleaner import get_us_clean_universe
         from services.us_factors import value, quality, growth, momentum, technical, macro, analyst, polymarket, accruals
-        universe = get_us_clean_universe(db, date)
+        universe = get_us_clean_universe(date)
         id_col = "ticker"
         factor_map = {
             "EP": value.EP, "BP": value.BP, "DIV_YIELD": value.DivYield,
@@ -902,7 +902,7 @@ def factor_calc(
         from services.us_factors.base import USFactorBase
         if not USFactorBase._static_cache.get("_bulk_daily"):
             console.print("  [dim]预加载数据...[/dim]")
-            USFactorBase.preload_for_backtest(db, date, date)
+            USFactorBase.preload_for_backtest(date, date)
             USFactorBase.precompute_rolling_stats()
 
     console.print(f"[cyan]计算 {name_upper}: date={date}, universe={len(universe)}[/cyan]")
@@ -1036,7 +1036,7 @@ def factor_intra_sector(
         next_dt = pd.to_datetime(next_date)
 
         # 股票池 + 行业
-        universe = get_us_clean_universe(db, date_str)
+        universe = get_us_clean_universe(date_str)
         if universe.empty or len(universe) < 50:
             continue
 

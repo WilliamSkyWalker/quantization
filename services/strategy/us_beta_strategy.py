@@ -84,7 +84,7 @@ class USBetaStrategy:
         Returns:
             DataFrame[ticker, weight]
         """
-        universe = get_us_clean_universe(self.db, date)
+        universe = get_us_clean_universe(date)
         if universe.empty:
             logger.debug(f"select_holdings: {date} 股票池为空，返回空 DataFrame")
             return pd.DataFrame(columns=["ticker", "weight"])
@@ -136,7 +136,7 @@ class USBetaStrategy:
 
         # 预加载数据
         USFactorBase.clear_all_cache()
-        USFactorBase.preload_for_backtest(self.db, start_date, end_date)
+        USFactorBase.preload_for_backtest(start_date, end_date)
         USFactorBase.precompute_rolling_stats()
 
         signals = {}

@@ -15,7 +15,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from services.config import LOG_LEVEL
-from services.data.database import DatabaseManager, DailyPrice
+from services.data.database import DatabaseManager
 from services.polymarket.models import PolymarketAlert
 from tasks.manager import task_manager
 

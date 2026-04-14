@@ -2,7 +2,7 @@
 美股股票池清洗
 
 过滤条件：
-    - is_active = 1
+    - is_actively_trading = 1
     - IPO 至少 N 天
     - 最低日均成交额
     - 最低市值
@@ -10,23 +10,23 @@
 """
 
 import logging
-from datetime import datetime
 
 import pandas as pd
+from django.db.models import Avg, F, Q
 
+from data.models import USStockBasic, USIndustryClass, USCompanyProfile, USDailyPrice
 from services.config import (
     LOG_LEVEL,
     US_MIN_DAILY_VOLUME,
     US_MIN_MARKET_CAP,
     US_MIN_LISTING_DAYS,
 )
-from services.data.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
 
 
-def get_us_clean_universe(db: DatabaseManager, date: str) -> pd.DataFrame:
+def get_us_clean_universe(date: str, **kwargs) -> pd.DataFrame:
     """
     获取指定日期的美股可交易股票池。
 
@@ -36,26 +36,56 @@ def get_us_clean_universe(db: DatabaseManager, date: str) -> pd.DataFrame:
     date_dt = pd.to_datetime(date)
     cutoff_date = (date_dt - pd.Timedelta(days=US_MIN_LISTING_DAYS)).strftime("%Y-%m-%d")
 
-    # 基本筛选：
-    # - is_active=1（当前成分股）：直接入选
-    # - is_active=0（历史成分股）：需有行业数据才入选（无 sector 的退市股无法中性化）
-    sql = (
-        "SELECT b.ticker, b.name, b.ipo_date, "
-        "       c.sector, c.industry "
-        "FROM us_stock_basic b "
-        "LEFT JOIN us_industry_class c ON b.ticker = c.ticker "
-        "WHERE (b.is_active = 1 OR (b.is_active = 0 AND c.sector IS NOT NULL)) "
-        "AND (b.ipo_date IS NULL OR b.ipo_date <= :cutoff)"
+    # 1. 行业数据（ticker → sector/industry）
+    industry_map = dict(
+        USIndustryClass.objects.values_list("ticker", "sector")
     )
-    df = db.query(sql, params={"cutoff": cutoff_date})
+    industry_detail = dict(
+        USIndustryClass.objects.values_list("ticker", "industry")
+    )
 
+    # 2. IPO 日期（ticker → ipo_date）
+    ipo_map = dict(
+        USCompanyProfile.objects.values_list("ticker", "ipo_date")
+    )
+
+    # 3. 基本筛选：活跃 OR (非活跃但有行业数据)
+    active_tickers = set(
+        USStockBasic.objects.filter(is_actively_trading=1)
+        .values_list("ticker", flat=True)
+    )
+    inactive_with_sector = set(
+        USStockBasic.objects.filter(is_actively_trading=0)
+        .values_list("ticker", flat=True)
+    ) & set(industry_map.keys())
+
+    all_tickers = active_tickers | inactive_with_sector
+
+    # 4. IPO 日期过滤
+    filtered = []
+    name_map = dict(
+        USStockBasic.objects.filter(ticker__in=all_tickers)
+        .values_list("ticker", "company_name")
+    )
+    for ticker in all_tickers:
+        ipo = ipo_map.get(ticker)
+        if ipo is not None and str(ipo) > cutoff_date:
+            continue
+        filtered.append({
+            "ticker": ticker,
+            "name": name_map.get(ticker, ""),
+            "sector": industry_map.get(ticker),
+            "industry": industry_detail.get(ticker),
+        })
+
+    df = pd.DataFrame(filtered)
     if df.empty:
         logger.warning(f"US 股票池为空 (date={date})")
         return df
 
     initial = len(df)
 
-    # 历史市值过滤（us_key_metric 年度 forward-fill，消除前瞻偏差）
+    # 5. 历史市值过滤（优先用预加载缓存）
     from services.us_factors.base import USFactorBase
     bulk_mktcap = USFactorBase._static_cache.get("_bulk_mktcap")
     if bulk_mktcap is not None and not bulk_mktcap.empty:
@@ -70,22 +100,22 @@ def get_us_clean_universe(db: DatabaseManager, date: str) -> pd.DataFrame:
         else:
             df["market_cap"] = float("nan")
     else:
-        # 非回测模式回退静态快照
-        static_mktcap = db.query(
-            "SELECT ticker, market_cap FROM us_stock_basic WHERE market_cap IS NOT NULL"
+        # 非回测模式：静态快照
+        static = pd.DataFrame(
+            USStockBasic.objects.filter(market_cap__isnull=False)
+            .values("ticker", "market_cap")
         )
-        if not static_mktcap.empty:
-            static_mktcap["market_cap"] = pd.to_numeric(static_mktcap["market_cap"], errors="coerce")
-            df = df.merge(static_mktcap[["ticker", "market_cap"]], on="ticker", how="left")
+        if not static.empty:
+            static["market_cap"] = pd.to_numeric(static["market_cap"], errors="coerce")
+            df = df.merge(static[["ticker", "market_cap"]], on="ticker", how="left")
         else:
             df["market_cap"] = float("nan")
 
     df["market_cap"] = pd.to_numeric(df["market_cap"], errors="coerce")
     df = df[(df["market_cap"] >= US_MIN_MARKET_CAP) | df["market_cap"].isna()]
 
-    # 流动性过滤：优先从预加载缓存计算，回退到 SQL
+    # 6. 流动性过滤
     if not df.empty:
-        from services.us_factors.base import USFactorBase
         bulk_daily = USFactorBase._static_cache.get("_bulk_daily")
 
         if bulk_daily is not None and not bulk_daily.empty:
@@ -102,37 +132,36 @@ def get_us_clean_universe(db: DatabaseManager, date: str) -> pd.DataFrame:
                 liquid = vol_df[vol_df["avg_dollar_vol"] >= US_MIN_DAILY_VOLUME]["ticker"]
                 df = df[df["ticker"].isin(liquid)]
 
-                # 排除当日无交易
                 day_mask = bulk_daily["trade_date"] == date_dt
                 traded = bulk_daily[day_mask & (pd.to_numeric(bulk_daily["volume"], errors="coerce") > 0)]["ticker"]
                 df = df[df["ticker"].isin(traded)]
             else:
                 logger.debug(f"get_us_clean_universe: 内存缓存中 {date} 附近无数据，跳过流动性过滤")
         else:
-            # SQL 回退（无预加载时）
+            # Django ORM 回退
             start_date = (date_dt - pd.Timedelta(days=40)).strftime("%Y-%m-%d")
-            vol_sql = (
-                "SELECT ticker, AVG(close * volume) as avg_dollar_vol "
-                "FROM us_daily_price "
-                "WHERE trade_date >= :start AND trade_date <= :end "
-                "GROUP BY ticker"
+            vol_qs = (
+                USDailyPrice.objects.filter(
+                    trade_date__gte=start_date,
+                    trade_date__lte=date,
+                )
+                .values("ticker")
+                .annotate(avg_dollar_vol=Avg(F("close") * F("volume")))
             )
-            vol_df = db.query(vol_sql, params={"start": start_date, "end": date})
-            if not vol_df.empty:
-                vol_df["avg_dollar_vol"] = pd.to_numeric(vol_df["avg_dollar_vol"], errors="coerce")
-                liquid = vol_df[vol_df["avg_dollar_vol"] >= US_MIN_DAILY_VOLUME]["ticker"]
-                df = df[df["ticker"].isin(liquid)]
+            liquid = {
+                row["ticker"]
+                for row in vol_qs
+                if row["avg_dollar_vol"] and row["avg_dollar_vol"] >= US_MIN_DAILY_VOLUME
+            }
+            df = df[df["ticker"].isin(liquid)]
 
-            # 排除当日无交易的股票
-            traded_sql = (
-                "SELECT DISTINCT ticker FROM us_daily_price "
-                "WHERE trade_date = :date AND volume > 0"
+            # 排除当日无交易
+            traded = set(
+                USDailyPrice.objects.filter(trade_date=date, volume__gt=0)
+                .values_list("ticker", flat=True)
+                .distinct()
             )
-            traded = db.query(traded_sql, params={"date": date})
-            if not traded.empty:
-                df = df[df["ticker"].isin(traded["ticker"])]
-
-    # 注意：低覆盖度股票池筛选已移除（样本外验证显示可能有前视偏差）
+            df = df[df["ticker"].isin(traded)]
 
     logger.info(f"US 股票池: {initial} → {len(df)} (date={date})")
     return df[["ticker", "name", "sector", "industry", "market_cap"]].reset_index(drop=True)

@@ -5,7 +5,7 @@ import pandas as pd
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from services.data.database import DatabaseManager, Watchlist
+from services.data.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 

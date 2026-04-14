@@ -36,15 +36,11 @@ class USAnalystRating(USFactorBase):
 
         # 从预加载数据获取
         bulk_ar = self._static_cache.get("_bulk_analyst")
-        if bulk_ar is not None and not bulk_ar.empty:
-            mask = (bulk_ar["date"] >= start_ts) & (bulk_ar["date"] <= date_ts)
-            df = bulk_ar[mask].copy()
-        else:
-            df = self.db.query(
-                "SELECT ticker, date, rating FROM us_analyst_recommendation "
-                "WHERE date >= :start AND date <= :end",
-                params={"start": start_ts.strftime("%Y-%m-%d"), "end": date},
-            )
+        if bulk_ar is None or bulk_ar.empty:
+            logger.debug("USAnalystRating.compute: 缓存为空")
+            return pd.DataFrame(columns=["ticker", "factor_value"])
+        mask = (bulk_ar["date"] >= start_ts) & (bulk_ar["date"] <= date_ts)
+        df = bulk_ar[mask].copy()
 
         if df.empty:
             logger.debug("USAnalystRating.compute: 无分析师推荐数据")
@@ -54,7 +50,7 @@ class USAnalystRating(USFactorBase):
             df = df[df["ticker"].isin(tickers)]
 
         # 映射评级到数值
-        df["score"] = df["rating"].str.strip().map(_RATING_MAP)
+        df["score"] = df["new_grade"].str.strip().map(_RATING_MAP)
         df = df.dropna(subset=["score"])
 
         if df.empty:
@@ -77,15 +73,11 @@ class USAnalystCoverage(USFactorBase):
         start_ts = date_ts - pd.Timedelta(days=_LOOKBACK_DAYS)
 
         bulk_ar = self._static_cache.get("_bulk_analyst")
-        if bulk_ar is not None and not bulk_ar.empty:
-            mask = (bulk_ar["date"] >= start_ts) & (bulk_ar["date"] <= date_ts)
-            df = bulk_ar[mask].copy()
-        else:
-            df = self.db.query(
-                "SELECT ticker, analyst_company FROM us_analyst_recommendation "
-                "WHERE date >= :start AND date <= :end",
-                params={"start": start_ts.strftime("%Y-%m-%d"), "end": date},
-            )
+        if bulk_ar is None or bulk_ar.empty:
+            logger.debug("USAnalystCoverage.compute: 缓存为空")
+            return pd.DataFrame(columns=["ticker", "factor_value"])
+        mask = (bulk_ar["date"] >= start_ts) & (bulk_ar["date"] <= date_ts)
+        df = bulk_ar[mask].copy()
 
         if df.empty:
             logger.debug("USAnalystCoverage.compute: 无分析师推荐数据")
@@ -94,7 +86,7 @@ class USAnalystCoverage(USFactorBase):
         if tickers:
             df = df[df["ticker"].isin(tickers)]
 
-        result = df.groupby("ticker")["analyst_company"].nunique().reset_index()
+        result = df.groupby("ticker")["grading_company"].nunique().reset_index()
         result.columns = ["ticker", "n_firms"]
         result["factor_value"] = np.log1p(result["n_firms"])
         return result[["ticker", "factor_value"]]

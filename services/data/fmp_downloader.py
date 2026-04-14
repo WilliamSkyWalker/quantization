@@ -150,7 +150,7 @@ class FMPDownloader:
                             "exchange": "NYSE",
                             "sector": str(row.get(sector_col, "")) if sector_col else "",
                             "industry": str(row.get(industry_col, "")) if industry_col else "",
-                            "is_active": 1,
+                            "is_actively_trading": 1,
                             "country": "US",
                         }
                     sp500_count = len(all_tickers)
@@ -202,7 +202,7 @@ class FMPDownloader:
                                 "exchange": "NASDAQ",
                                 "sector": str(row.get(sector_col, "")) if sector_col else "",
                                 "industry": str(row.get(industry_col, "")) if industry_col else "",
-                                "is_active": 1,
+                                "is_actively_trading": 1,
                                 "country": "US",
                             }
                             nq100_new += 1
@@ -224,7 +224,7 @@ class FMPDownloader:
                     "exchange": "NASDAQ",
                     "sector": "",
                     "industry": "",
-                    "is_active": 1,
+                    "is_actively_trading": 1,
                     "country": "US",
                 }
 

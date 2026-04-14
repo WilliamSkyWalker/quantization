@@ -76,31 +76,5 @@ class InsiderNetBuy(USFactorBase):
             logger.debug(f"_get_insider_data: 预加载缓存中 {date} 近90天无数据")
             return pd.DataFrame(columns=["ticker", "net_value"])
 
-        # 回退到 SQL 查询
-        try:
-            sql = (
-                "SELECT ticker, "
-                "  SUM(CASE WHEN acquisition_or_disposition = 'A' "
-                "    THEN securities_transacted * price "
-                "    ELSE -securities_transacted * price END) as net_value "
-                "FROM us_insider_trade "
-                "WHERE DATE(filing_date) >= :start AND DATE(filing_date) <= :end "
-                "  AND price > 0 AND securities_transacted > 0 "
-                "  AND transaction_type IN ('P-Purchase', 'S-Sale', 'A-Award', "
-                "      'P-Purchase+', 'S-Sale+') "
-                "GROUP BY ticker"
-            )
-            df = self.db.query(sql, params={
-                "start": start_ts.strftime("%Y-%m-%d"),
-                "end": date,
-            })
-            if not df.empty:
-                df["net_value"] = pd.to_numeric(df["net_value"], errors="coerce")
-                result = df[df["ticker"].isin(tickers)]
-                if not result.empty:
-                    return result
-            logger.debug(f"_get_insider_data: 日期 {date} 近90天无内部人交易数据")
-        except Exception as e:
-            logger.warning(f"_get_insider_data: us_insider_trade 查询失败: {e}")
-
+        logger.warning("_get_insider_data: 缓存为空，请先调用 preload_for_backtest()")
         return pd.DataFrame(columns=["ticker", "net_value"])

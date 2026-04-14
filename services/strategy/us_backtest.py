@@ -50,7 +50,7 @@ from services.config import (
     LOG_LEVEL,
     PROJECT_ROOT,
 )
-from services.data.database import DatabaseManager
+from data.models import USStockBasic, USDailyPrice, USIndexDaily
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
@@ -72,7 +72,6 @@ class USBacktestEngine:
 
     def __init__(
         self,
-        db: DatabaseManager,
         buy_commission: float = US_BUY_COMMISSION,
         sell_commission: float = US_SELL_COMMISSION,
         stamp_tax: float = US_STAMP_TAX,
@@ -80,8 +79,8 @@ class USBacktestEngine:
         initial_capital: float = None,
         benchmark: str = US_BENCHMARK_INDEX,
         risk_controls: bool = True,
+        **kwargs,
     ):
-        self.db = db
         self.benchmark = benchmark
         self.initial_capital = initial_capital or US_INITIAL_CAPITAL
 
@@ -150,13 +149,13 @@ class USBacktestEngine:
         # Load market cap for tiered borrow fees
         mktcap_map = {}  # {ticker: market_cap}
         try:
-            mktcap_df = self.db.query(
-                "SELECT ticker, market_cap FROM us_stock_basic "
-                "WHERE is_active = 1 AND market_cap IS NOT NULL"
-            )
-            if not mktcap_df.empty:
-                mktcap_df["market_cap"] = pd.to_numeric(mktcap_df["market_cap"], errors="coerce")
-                mktcap_map = dict(zip(mktcap_df["ticker"], mktcap_df["market_cap"]))
+            mktcap_qs = USStockBasic.objects.filter(
+                is_actively_trading=1,
+                market_cap__isnull=False,
+            ).values_list("ticker", "market_cap")
+            for ticker, mcap in mktcap_qs:
+                if mcap is not None:
+                    mktcap_map[ticker] = float(mcap)
         except Exception as e:
             logger.debug(f"Backtest: failed to load mktcap for borrow fees: {e}")
 
@@ -550,22 +549,20 @@ class USBacktestEngine:
 
     def _get_trade_dates(self, start_date: str, end_date: str) -> pd.DatetimeIndex:
         """Get US trade dates from us_index_daily (^GSPC)."""
-        df = self.db.query(
-            "SELECT DISTINCT trade_date FROM us_index_daily "
-            "WHERE index_code = :index_code "
-            "AND trade_date >= :start_date "
-            "AND trade_date <= :end_date "
-            "ORDER BY trade_date",
-            params={
-                "index_code": self.benchmark,
-                "start_date": start_date,
-                "end_date": end_date,
-            },
+        dates = list(
+            USIndexDaily.objects.filter(
+                index_code=self.benchmark,
+                trade_date__gte=start_date,
+                trade_date__lte=end_date,
+            )
+            .values_list("trade_date", flat=True)
+            .distinct()
+            .order_by("trade_date")
         )
-        if df.empty:
+        if not dates:
             logger.debug("_get_trade_dates: 无交易日数据，返回空 DatetimeIndex")
             return pd.DatetimeIndex([])
-        return pd.to_datetime(df["trade_date"])
+        return pd.DatetimeIndex(dates)
 
     def _load_prices(
         self, tickers: list[str], start_date: str, end_date: str
@@ -580,20 +577,14 @@ class USBacktestEngine:
             logger.debug("_load_prices: ticker 列表为空，返回空缓存")
             return {}
 
-        from services.factors.base import FactorBase
-
-        params: dict = {"start_date": start_date, "end_date": end_date}
-        in_clause, in_params = FactorBase._build_in_clause(tickers, prefix="tk")
-        params.update(in_params)
-
-        df = self.db.query(
-            "SELECT ticker, trade_date, `open`, `close`, adj_close, "
-            "`high`, `low`, volume "
-            "FROM us_daily_price "
-            "WHERE trade_date >= :start_date "
-            "AND trade_date <= :end_date "
-            f"AND ticker IN {in_clause}",
-            params=params,
+        cols = ["ticker", "trade_date", "open", "close", "adj_close", "high", "low", "volume"]
+        df = pd.DataFrame(
+            USDailyPrice.objects.filter(
+                ticker__in=tickers,
+                trade_date__gte=start_date,
+                trade_date__lte=end_date,
+            ).values_list(*cols),
+            columns=cols,
         )
 
         if df.empty:
@@ -601,7 +592,6 @@ class USBacktestEngine:
             return {}
 
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
-        # Fill missing adj_close with close
         df["adj_close"] = df["adj_close"].fillna(df["close"])
         df["open"] = df["open"].fillna(df["close"])
         df["high"] = df["high"].fillna(df["close"])
@@ -625,18 +615,19 @@ class USBacktestEngine:
         self, index_code: str, start_date: str, end_date: str
     ) -> dict[str, float]:
         """Load index daily close prices as {date_str: close}."""
-        df = self.db.query(
-            "SELECT trade_date, close FROM us_index_daily "
-            "WHERE index_code = :idx AND trade_date >= :start AND trade_date <= :end "
-            "ORDER BY trade_date",
-            params={"idx": index_code, "start": start_date, "end": end_date},
+        rows = list(
+            USIndexDaily.objects.filter(
+                index_code=index_code,
+                trade_date__gte=start_date,
+                trade_date__lte=end_date,
+            )
+            .order_by("trade_date")
+            .values_list("trade_date", "close")
         )
-        if df.empty:
+        if not rows:
             logger.debug(f"_load_index_prices: {index_code} 无指数价格数据，返回空字典")
             return {}
-        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
-        df["close"] = pd.to_numeric(df["close"], errors="coerce")
-        return dict(zip(df["trade_date"], df["close"]))
+        return {dt.strftime("%Y-%m-%d"): float(c) for dt, c in rows if c is not None}
 
     def _get_benchmark_nav(self, start_date: str, end_date: str) -> pd.Series:
         """
@@ -645,17 +636,16 @@ class USBacktestEngine:
         Returns:
             Benchmark NAV Series (DatetimeIndex), normalized to start at 1.0.
         """
-        df = self.db.query(
-            "SELECT trade_date, `close` FROM us_index_daily "
-            "WHERE index_code = :index_code "
-            "AND trade_date >= :start_date "
-            "AND trade_date <= :end_date "
-            "ORDER BY trade_date",
-            params={
-                "index_code": self.benchmark,
-                "start_date": start_date,
-                "end_date": end_date,
-            },
+        bm_cols = ["trade_date", "close"]
+        df = pd.DataFrame(
+            USIndexDaily.objects.filter(
+                index_code=self.benchmark,
+                trade_date__gte=start_date,
+                trade_date__lte=end_date,
+            )
+            .order_by("trade_date")
+            .values_list(*bm_cols),
+            columns=bm_cols,
         )
 
         if df.empty:
@@ -667,7 +657,6 @@ class USBacktestEngine:
 
         df["trade_date"] = pd.to_datetime(df["trade_date"])
         df = df.set_index("trade_date").sort_index()
-        # Normalize to start at 1.0
         first_close = df["close"].iloc[0]
         if first_close and first_close > 0:
             df["nav"] = df["close"] / first_close

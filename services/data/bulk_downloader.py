@@ -23,8 +23,7 @@ from services.config import (
     QUIVER_API_KEY, QUIVER_RATE_LIMIT,
     LOG_LEVEL,
 )
-from services.data.database import (
-    DatabaseManager,
+from data.models import (
     USStockBasic, USDailyPrice, USFinancialData, USKeyMetric,
     USIndustryClass, USEarningsSurprise, USEpsEstimate,
     USInsiderTrade, USAnalystRecommendation, USCorporateAction,
@@ -37,6 +36,7 @@ from services.data.database import (
     USCongressTrade,
     USLobbying, USGovContract,
 )
+from data.upsert import get_upsert_manager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
@@ -143,10 +143,17 @@ def _request_with_retry(method: str, url: str, max_retries: int = 5, **kwargs) -
 class BulkDownloader:
     """FMP 数据批量下载器"""
 
-    def __init__(self, db: DatabaseManager):
-        self.db = db
+    def __init__(self, db=None, **kwargs):
+        self._um = get_upsert_manager()
         self._fmp_limiter = RateLimiter(FMP_RATE_LIMIT)
         self._quiver_limiter = RateLimiter(QUIVER_RATE_LIMIT)
+
+    def _get_tickers(self, stocks_only: bool = False) -> list[str]:
+        """获取美股代码列表（Django ORM）。"""
+        qs = USStockBasic.objects.filter(is_actively_trading=1)
+        if stocks_only:
+            qs = qs.filter(is_etf=0, is_fund=0)
+        return list(qs.values_list("ticker", flat=True))
 
     # --- FMP HTTP helpers ---
 
@@ -213,19 +220,18 @@ class BulkDownloader:
     # --- 断点续跑 ---
 
     def _skip_done_tickers(self, table: str, tickers: list[str]) -> list[str]:
-        done = self.db.get_import_done_tickers(table)
+        done = self._um.get_import_done_tickers(table)
         remaining = [t for t in tickers if t not in done]
         if done:
             logger.info(f"断点续跑 {table}: 全部 {len(tickers)}, 已完成 {len(done)}, 待跑 {len(remaining)}")
         return remaining
 
     def _skip_if_table_has_data(self, table: str, min_rows: int = 10) -> bool:
+        from django.db import connection
         try:
-            with self.db.get_session() as session:
-                from sqlalchemy import func
-                # 用 raw count 避免全表扫描
-                r = self.db.query(f"SELECT COUNT(*) as cnt FROM \"{table}\"")
-                cnt = int(r["cnt"].iloc[0])
+            with connection.cursor() as cursor:
+                cursor.execute(f'SELECT COUNT(*) FROM "{table}"')
+                cnt = cursor.fetchone()[0]
                 if cnt >= min_rows:
                     logger.info(f"{table} 已有 {cnt} 条数据（>={min_rows}），跳过")
                     return True
@@ -236,7 +242,7 @@ class BulkDownloader:
     def _mark_done(self, table: str, fetch_fn, ticker: str):
         """包装 fetch：无论有无数据都标记完成，避免重跑浪费 API。"""
         count = fetch_fn(ticker)
-        self.db.mark_import_done(table, ticker)
+        self._um.mark_import_done(table, ticker)
         return count
 
     # ETF 在这些表中确认无数据（FMP 端点对 ETF 返回空）—— 预标记跳过，节省 API
@@ -251,24 +257,26 @@ class BulkDownloader:
 
     def _premark_etfs_no_data(self) -> int:
         """预标记 ETF 为 done — 这些表 ETF 无数据，跳过避免浪费 API 调用。"""
-        from sqlalchemy import text
+        from datetime import datetime as dt
+        etf_tickers = list(
+            USStockBasic.objects.filter(is_etf=1).values_list("ticker", flat=True)
+        )
+        if not etf_tickers:
+            logger.info("Phase 0: 无 ETF，跳过预标记")
+            return 0
         total = 0
-        with self.db.get_session() as s:
-            etf_count = s.execute(text("SELECT COUNT(*) FROM us_stock_basic WHERE is_etf = 1")).scalar()
-            if not etf_count:
-                logger.info("Phase 0: 无 ETF，跳过预标记")
-                return 0
-            for tbl in self._ETF_SKIP_TABLES:
-                result = s.execute(text("""
-                    INSERT INTO import_progress (table_name, ticker, completed_at)
-                    SELECT :tbl, ticker, NOW()
-                    FROM us_stock_basic
-                    WHERE is_etf = 1
-                    ON CONFLICT (table_name, ticker) DO NOTHING
-                """), {"tbl": tbl})
-                s.commit()
-                total += result.rowcount
-                logger.info(f"Phase 0: {tbl} 预标记 ETF +{result.rowcount}")
+        from data.models import ImportProgress
+        for tbl in self._ETF_SKIP_TABLES:
+            existing = self._um.get_import_done_tickers(tbl)
+            new_tickers = [t for t in etf_tickers if t not in existing]
+            if new_tickers:
+                ImportProgress.objects.bulk_create(
+                    [ImportProgress(table_name=tbl, ticker=t, completed_at=dt.now()) for t in new_tickers],
+                    batch_size=2000,
+                    ignore_conflicts=True,
+                )
+                total += len(new_tickers)
+                logger.info(f"Phase 0: {tbl} 预标记 ETF +{len(new_tickers)}")
         logger.info(f"Phase 0: 预标记完成，共写入 {total} 条 import_progress")
         return total
 
@@ -296,13 +304,13 @@ class BulkDownloader:
 
         df = _fmp_df_to_snake(pd.DataFrame(all_records))
         df = df.drop_duplicates(subset=["ticker"])
-        self.db.upsert_df(USStockBasic, df, ["ticker"])
+        self._um.upsert_df(USStockBasic, df, ["ticker"])
 
         # 同时写 industry_class
         if "sector" in df.columns:
             ind_df = df[["ticker", "sector", "industry"]].dropna(subset=["sector"])
             if not ind_df.empty:
-                self.db.upsert_df(USIndustryClass, ind_df, ["ticker"])
+                self._um.upsert_df(USIndustryClass, ind_df, ["ticker"])
 
         logger.info(f"FMP 全市场股票列表: {len(df)} 只")
         return len(df)
@@ -311,7 +319,7 @@ class BulkDownloader:
     # NOTE: 不做 _skip_if_table_has_data 检查——profile 是快照数据，每次全量覆盖更新
     def download_fmp_company_profiles(self, tickers: list[str] = None) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=False)
+            tickers = self._get_tickers(stocks_only=False)
         if not tickers:
             return 0
         total = 0
@@ -323,7 +331,7 @@ class BulkDownloader:
             if not data:
                 return 0
             df = _fmp_df_to_snake(pd.DataFrame(data))
-            self.db.upsert_df(USCompanyProfile, df, ["ticker"])
+            self._um.upsert_df(USCompanyProfile, df, ["ticker"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -338,7 +346,7 @@ class BulkDownloader:
 
     # --- 3. daily_price ---
     def download_fmp_daily_prices(self, start_year: int = 1995) -> int:
-        tickers = self.db.get_us_tickers(stocks_only=False)
+        tickers = self._get_tickers(stocks_only=False)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_daily_price", tickers)
@@ -369,7 +377,7 @@ class BulkDownloader:
                     df = df.drop(columns=["date"])
                 df = df[df["trade_date"].notna()]
                 if not df.empty:
-                    self.db.upsert_df(USDailyPrice, df, ["ticker", "trade_date"])
+                    self._um.upsert_df(USDailyPrice, df, ["ticker", "trade_date"])
                     count += len(df)
             return count
 
@@ -394,7 +402,7 @@ class BulkDownloader:
     # --- 5. financial_quarterly (IS+BS+CF 三表合并) ---
     def download_fmp_financial_quarterly(self, tickers: list[str] = None, limit: int = 400) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=False)
+            tickers = self._get_tickers(stocks_only=False)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_financial_data", tickers)
@@ -433,7 +441,7 @@ class BulkDownloader:
             if merged.empty:
                 return 0
 
-            self.db.upsert_df(USFinancialData, merged, ["ticker", "period"])
+            self._um.upsert_df(USFinancialData, merged, ["ticker", "period"])
             return len(merged)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -449,7 +457,7 @@ class BulkDownloader:
     # --- 6. key_metrics ---
     def download_fmp_key_metrics(self, tickers: list[str] = None, limit: int = 400) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=False)
+            tickers = self._get_tickers(stocks_only=False)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_key_metric", tickers)
@@ -462,7 +470,7 @@ class BulkDownloader:
             if not data:
                 return 0
             df = _fmp_df_to_snake(pd.DataFrame(data))
-            self.db.upsert_df(USKeyMetric, df, ["ticker", "date"])
+            self._um.upsert_df(USKeyMetric, df, ["ticker", "date"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -478,7 +486,7 @@ class BulkDownloader:
     # --- 7. ratios ---
     def download_fmp_ratios(self, tickers: list[str] = None, limit: int = 400) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=False)
+            tickers = self._get_tickers(stocks_only=False)
         if not tickers:
             return 0
         # ratios 和 key_metrics 共享表，不做断点续跑（key_metrics 已标记）
@@ -489,7 +497,7 @@ class BulkDownloader:
             if not data:
                 return 0
             df = _fmp_df_to_snake(pd.DataFrame(data))
-            self.db.upsert_df(USKeyMetric, df, ["ticker", "date"])
+            self._um.upsert_df(USKeyMetric, df, ["ticker", "date"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -505,7 +513,7 @@ class BulkDownloader:
     # --- 8. financial_growth ---
     def download_fmp_financial_growth(self, tickers: list[str] = None, limit: int = 400) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=True)
+            tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_financial_growth", tickers)
@@ -518,7 +526,7 @@ class BulkDownloader:
             if not data:
                 return 0
             df = _fmp_df_to_snake(pd.DataFrame(data))
-            self.db.upsert_df(USFinancialGrowth, df, ["ticker", "date"])
+            self._um.upsert_df(USFinancialGrowth, df, ["ticker", "date"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -534,7 +542,7 @@ class BulkDownloader:
     # --- 9. enterprise_values ---
     def download_fmp_enterprise_values(self, tickers: list[str] = None, limit: int = 400) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=True)
+            tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_enterprise_value", tickers)
@@ -547,7 +555,7 @@ class BulkDownloader:
             if not data:
                 return 0
             df = _fmp_df_to_snake(pd.DataFrame(data))
-            self.db.upsert_df(USEnterpriseValue, df, ["ticker", "date"])
+            self._um.upsert_df(USEnterpriseValue, df, ["ticker", "date"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -563,7 +571,7 @@ class BulkDownloader:
     # --- 10. owner_earnings ---
     def download_fmp_owner_earnings(self, tickers: list[str] = None) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=True)
+            tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_owner_earnings", tickers)
@@ -576,7 +584,7 @@ class BulkDownloader:
             if not data:
                 return 0
             df = _fmp_df_to_snake(pd.DataFrame(data if isinstance(data, list) else [data]))
-            self.db.upsert_df(USOwnerEarnings, df, ["ticker", "date"])
+            self._um.upsert_df(USOwnerEarnings, df, ["ticker", "date"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -592,7 +600,7 @@ class BulkDownloader:
     # --- 11. earnings_surprises ---
     def download_fmp_earnings_surprises(self, tickers: list[str] = None) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=False)
+            tickers = self._get_tickers(stocks_only=False)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_earnings_surprise", tickers)
@@ -617,7 +625,7 @@ class BulkDownloader:
                     if pd.notna(r["eps_estimated"]) and r["eps_estimated"] != 0 else None,
                     axis=1,
                 )
-            self.db.upsert_df(USEarningsSurprise, df, ["ticker", "date"])
+            self._um.upsert_df(USEarningsSurprise, df, ["ticker", "date"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -633,7 +641,7 @@ class BulkDownloader:
     # --- 12. eps_estimates ---
     def download_fmp_eps_estimates(self, tickers: list[str] = None) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=False)
+            tickers = self._get_tickers(stocks_only=False)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_eps_estimate", tickers)
@@ -646,7 +654,7 @@ class BulkDownloader:
             if not data:
                 return 0
             df = _fmp_df_to_snake(pd.DataFrame(data))
-            self.db.upsert_df(USEpsEstimate, df, ["ticker", "date"])
+            self._um.upsert_df(USEpsEstimate, df, ["ticker", "date"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -662,7 +670,7 @@ class BulkDownloader:
     # --- 13. insider_trading ---
     def download_fmp_insider_trading(self, tickers: list[str] = None) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=False)
+            tickers = self._get_tickers(stocks_only=False)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_insider_trade", tickers)
@@ -678,7 +686,7 @@ class BulkDownloader:
                 if not data:
                     break
                 df = _fmp_df_to_snake(pd.DataFrame(data))
-                self.db.upsert_df(USInsiderTrade, df, ["ticker", "transaction_date", "reporting_name", "transaction_type"])
+                self._um.upsert_df(USInsiderTrade, df, ["ticker", "transaction_date", "reporting_name", "transaction_type"])
                 count += len(df)
                 if len(data) < 100:
                     break
@@ -698,7 +706,7 @@ class BulkDownloader:
     # --- 14. analyst_grades ---
     def download_fmp_analyst_grades(self, tickers: list[str] = None) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=False)
+            tickers = self._get_tickers(stocks_only=False)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_analyst_recommendation", tickers)
@@ -714,7 +722,7 @@ class BulkDownloader:
             df = df[df["date"].notna() & df["new_grade"].notna()]
             if df.empty:
                 return 0
-            self.db.upsert_df(USAnalystRecommendation, df, ["ticker", "date", "grading_company"])
+            self._um.upsert_df(USAnalystRecommendation, df, ["ticker", "date", "grading_company"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -730,7 +738,7 @@ class BulkDownloader:
     # --- 15. dividends_splits ---
     def download_fmp_dividends_splits(self, tickers: list[str] = None) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=False)
+            tickers = self._get_tickers(stocks_only=False)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_corporate_action", tickers)
@@ -745,14 +753,14 @@ class BulkDownloader:
             if div_data and isinstance(div_data, list):
                 df = _fmp_df_to_snake(pd.DataFrame(div_data))
                 df["action_type"] = "dividend"
-                self.db.upsert_df(USCorporateAction, df, ["ticker", "date", "action_type"])
+                self._um.upsert_df(USCorporateAction, df, ["ticker", "date", "action_type"])
                 count += len(df)
             # Splits
             split_data = self._fmp_get_stable("splits", params={"symbol": ticker})
             if split_data and isinstance(split_data, list):
                 df = _fmp_df_to_snake(pd.DataFrame(split_data))
                 df["action_type"] = "split"
-                self.db.upsert_df(USCorporateAction, df, ["ticker", "date", "action_type"])
+                self._um.upsert_df(USCorporateAction, df, ["ticker", "date", "action_type"])
                 count += len(df)
             return count
 
@@ -769,7 +777,7 @@ class BulkDownloader:
     # --- 16. financial_scores ---
     def download_fmp_financial_scores(self, tickers: list[str] = None) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=True)
+            tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_financial_score", tickers)
@@ -782,7 +790,7 @@ class BulkDownloader:
             if not data:
                 return 0
             df = _fmp_df_to_snake(pd.DataFrame(data if isinstance(data, list) else [data]))
-            self.db.upsert_df(USFinancialScore, df, ["ticker"])
+            self._um.upsert_df(USFinancialScore, df, ["ticker"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -798,7 +806,7 @@ class BulkDownloader:
     # --- 17. shares_float ---
     def download_fmp_shares_float(self, tickers: list[str] = None) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=True)
+            tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_shares_float", tickers)
@@ -811,7 +819,7 @@ class BulkDownloader:
             if not data:
                 return 0
             df = _fmp_df_to_snake(pd.DataFrame(data if isinstance(data, list) else [data]))
-            self.db.upsert_df(USSharesFloat, df, ["ticker", "date"])
+            self._um.upsert_df(USSharesFloat, df, ["ticker", "date"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -827,7 +835,7 @@ class BulkDownloader:
     # --- 18. insider_statistics ---
     def download_fmp_insider_statistics(self, tickers: list[str] = None) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=True)
+            tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_insider_statistic", tickers)
@@ -840,7 +848,7 @@ class BulkDownloader:
             if not data:
                 return 0
             df = _fmp_df_to_snake(pd.DataFrame(data if isinstance(data, list) else [data]))
-            self.db.upsert_df(USInsiderStatistic, df, ["ticker", "year", "quarter"])
+            self._um.upsert_df(USInsiderStatistic, df, ["ticker", "year", "quarter"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -856,7 +864,7 @@ class BulkDownloader:
     # --- 19. employee_count ---
     def download_fmp_employee_count(self, tickers: list[str] = None) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=True)
+            tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_employee_count", tickers)
@@ -869,7 +877,7 @@ class BulkDownloader:
             if not data:
                 return 0
             df = _fmp_df_to_snake(pd.DataFrame(data))
-            self.db.upsert_df(USEmployeeCount, df, ["ticker", "period_of_report"])
+            self._um.upsert_df(USEmployeeCount, df, ["ticker", "period_of_report"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -885,7 +893,7 @@ class BulkDownloader:
     # --- 20. price_targets ---
     def download_fmp_price_targets(self, tickers: list[str] = None) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=True)
+            tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_price_target", tickers)
@@ -898,7 +906,7 @@ class BulkDownloader:
             if not data:
                 return 0
             df = _fmp_df_to_snake(pd.DataFrame(data if isinstance(data, list) else [data]))
-            self.db.upsert_df(USPriceTarget, df, ["ticker"])
+            self._um.upsert_df(USPriceTarget, df, ["ticker"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -914,7 +922,7 @@ class BulkDownloader:
     # --- 21. esg_ratings ---
     def download_fmp_esg_ratings(self, tickers: list[str] = None) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=True)
+            tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_esg_rating", tickers)
@@ -927,7 +935,7 @@ class BulkDownloader:
             if not data:
                 return 0
             df = _fmp_df_to_snake(pd.DataFrame(data if isinstance(data, list) else [data]))
-            self.db.upsert_df(USESGRating, df, ["ticker", "fiscal_year"])
+            self._um.upsert_df(USESGRating, df, ["ticker", "fiscal_year"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -943,7 +951,7 @@ class BulkDownloader:
     # --- 22. dcf_valuations ---
     def download_fmp_dcf_valuations(self, tickers: list[str] = None) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=True)
+            tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_dcf_valuation", tickers)
@@ -957,7 +965,7 @@ class BulkDownloader:
                 return 0
             df = _fmp_df_to_snake(pd.DataFrame(data if isinstance(data, list) else [data]))
             df["dcf_type"] = "standard"
-            self.db.upsert_df(USDCFValuation, df, ["ticker", "date", "dcf_type"])
+            self._um.upsert_df(USDCFValuation, df, ["ticker", "date", "dcf_type"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -973,7 +981,7 @@ class BulkDownloader:
     # --- 23. stock_peers ---
     def download_fmp_stock_peers(self, tickers: list[str] = None) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=True)
+            tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_stock_peer", tickers)
@@ -990,7 +998,7 @@ class BulkDownloader:
                 return 0
             records = [{"ticker": ticker, "peer_ticker": p} for p in peers if p]
             df = pd.DataFrame(records)
-            self.db.upsert_df(USStockPeer, df, ["ticker", "peer_ticker"])
+            self._um.upsert_df(USStockPeer, df, ["ticker", "peer_ticker"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -1030,7 +1038,7 @@ class BulkDownloader:
                     df = df.drop(columns=["date"], errors="ignore")
                 df = df[df["trade_date"].notna()]
                 if not df.empty:
-                    self.db.upsert_df(USIndexDaily, df, ["index_code", "trade_date"])
+                    self._um.upsert_df(USIndexDaily, df, ["index_code", "trade_date"])
                     total += len(df)
         logger.info(f"FMP index daily 总计: {total} 条")
         return total
@@ -1065,7 +1073,7 @@ class BulkDownloader:
                     df = df.drop(columns=["date"], errors="ignore")
                 df = df[df["trade_date"].notna()]
                 if not df.empty:
-                    self.db.upsert_df(USCommodityPrice, df, ["commodity_symbol", "trade_date"])
+                    self._um.upsert_df(USCommodityPrice, df, ["commodity_symbol", "trade_date"])
                     total += len(df)
         logger.info(f"FMP commodity prices 总计: {total} 条")
         return total
@@ -1091,7 +1099,7 @@ class BulkDownloader:
             records = [{"indicator_code": indicator_code, "report_date": item.get("date"), "value": item.get("value")} for item in data]
             if records:
                 df = pd.DataFrame(records)
-                self.db.upsert_df(USMacroIndicator, df, ["indicator_code", "report_date"])
+                self._um.upsert_df(USMacroIndicator, df, ["indicator_code", "report_date"])
                 total += len(records)
 
         # Treasury
@@ -1103,12 +1111,12 @@ class BulkDownloader:
                     val = item.get(col)
                     if val is not None:
                         df = pd.DataFrame([{"indicator_code": code, "report_date": date, "value": val}])
-                        self.db.upsert_df(USMacroIndicator, df, ["indicator_code", "report_date"])
+                        self._um.upsert_df(USMacroIndicator, df, ["indicator_code", "report_date"])
                         total += 1
                 y10, y2 = item.get("year10"), item.get("year2")
                 if y10 is not None and y2 is not None:
                     df = pd.DataFrame([{"indicator_code": "US_2Y10Y", "report_date": date, "value": y10 - y2}])
-                    self.db.upsert_df(USMacroIndicator, df, ["indicator_code", "report_date"])
+                    self._um.upsert_df(USMacroIndicator, df, ["indicator_code", "report_date"])
                     total += 1
 
         logger.info(f"FMP macro 总计: {total} 条")
@@ -1125,7 +1133,7 @@ class BulkDownloader:
                 continue
             df = _fmp_df_to_snake(pd.DataFrame(data))
             df["index_name"] = index_name
-            self.db.upsert_df(USIndexConstituent, df, ["index_name", "ticker", "date"])
+            self._um.upsert_df(USIndexConstituent, df, ["index_name", "ticker", "date"])
             total += len(df)
             logger.info(f"FMP {index_name} 历史成分: {len(df)} 条")
         logger.info(f"FMP index constituents history 总计: {total} 条")
@@ -1139,7 +1147,7 @@ class BulkDownloader:
         if not data:
             return 0
         df = _fmp_df_to_snake(pd.DataFrame(data))
-        self.db.upsert_df(USDelisted, df, ["ticker"])
+        self._um.upsert_df(USDelisted, df, ["ticker"])
         logger.info(f"FMP delisted companies 总计: {len(df)} 条")
         return len(df)
 
@@ -1151,14 +1159,14 @@ class BulkDownloader:
         if not data:
             return 0
         df = _fmp_df_to_snake(pd.DataFrame(data))
-        self.db.upsert_df(USSymbolChange, df, ["old_symbol", "new_symbol", "date"])
+        self._um.upsert_df(USSymbolChange, df, ["old_symbol", "new_symbol", "date"])
         logger.info(f"FMP symbol changes 总计: {len(df)} 条")
         return len(df)
 
     # --- 30. congress_trading (per-ticker, /stable/senate-trades + /stable/house-trades) ---
     def download_fmp_congress_trading(self, tickers: list[str] = None) -> int:
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=True)
+            tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
         tickers = self._skip_done_tickers("us_congress_trade", tickers)
@@ -1174,7 +1182,7 @@ class BulkDownloader:
                     continue
                 df = _fmp_df_to_snake(pd.DataFrame(data))
                 df["source"] = f"fmp_{chamber}"
-                self.db.upsert_df(USCongressTrade, df, ["ticker", "transaction_date", "first_name", "last_name", "type"])
+                self._um.upsert_df(USCongressTrade, df, ["ticker", "transaction_date", "first_name", "last_name", "type"])
                 count += len(df)
             return count
 
@@ -1199,7 +1207,7 @@ class BulkDownloader:
     def download_quiver_lobbying(self, tickers: list[str] = None) -> int:
         """Quiver lobbying: per-ticker 历史游说记录"""
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=True)
+            tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             logger.warning("download_quiver_lobbying: 无 ticker 列表，跳过")
             return 0
@@ -1232,7 +1240,7 @@ class BulkDownloader:
             df = df.drop_duplicates(subset=["ticker", "date", "registrant", "client"], keep="first")
             if df.empty:
                 return 0
-            self.db.upsert_df(USLobbying, df, ["ticker", "date", "registrant", "client"])
+            self._um.upsert_df(USLobbying, df, ["ticker", "date", "registrant", "client"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -1248,7 +1256,7 @@ class BulkDownloader:
     def download_quiver_gov_contracts(self, tickers: list[str] = None) -> int:
         """Quiver gov contracts: per-ticker 季度政府合同金额"""
         if tickers is None:
-            tickers = self.db.get_us_tickers(stocks_only=True)
+            tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             logger.warning("download_quiver_gov_contracts: 无 ticker 列表，跳过")
             return 0
@@ -1276,7 +1284,7 @@ class BulkDownloader:
             df = df.dropna(subset=["year", "quarter"])
             if df.empty:
                 return 0
-            self.db.upsert_df(USGovContract, df, ["ticker", "year", "quarter"])
+            self._um.upsert_df(USGovContract, df, ["ticker", "year", "quarter"])
             return len(df)
 
         with ThreadPoolExecutor(max_workers=10) as pool:

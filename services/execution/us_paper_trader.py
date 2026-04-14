@@ -21,13 +21,12 @@ from typing import Optional
 import pandas as pd
 
 from services.config import US_INITIAL_CAPITAL, US_SLIPPAGE, LOG_LEVEL
-from services.data.database import (
-    DatabaseManager,
-    USPaperAccount,
-    USPaperPosition,
-    USPaperTransaction,
-    USPaperNav,
-)
+from services.data.database import DatabaseManager
+# TODO: USPaperAccount/Position/Transaction/Nav 模型待迁移到 Django ORM
+USPaperAccount = None
+USPaperPosition = None
+USPaperTransaction = None
+USPaperNav = None
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)

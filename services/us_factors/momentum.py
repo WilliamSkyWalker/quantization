@@ -132,25 +132,19 @@ class ResidualMom(USFactorBase):
         if cached is not None:
             return cached
 
-        bulk_daily = self._static_cache.get("_bulk_daily")
         date_ts = pd.to_datetime(date)
 
-        # 尝试从 us_index_daily 获取
-        try:
-            idx_df = self.db.query(
-                "SELECT trade_date, close FROM us_index_daily "
-                "WHERE index_code = '^GSPC' AND trade_date <= :date "
-                "ORDER BY trade_date DESC LIMIT 21",
-                params={"date": date},
-            )
+        bulk_index = self._static_cache.get("_bulk_index")
+        if bulk_index is not None and not bulk_index.empty:
+            idx_df = bulk_index[bulk_index["trade_date"] <= date_ts].sort_values(
+                "trade_date", ascending=False
+            ).head(21)
             if len(idx_df) >= 2:
                 prices = idx_df["close"].astype(float).values
                 ret = prices[0] / prices[-1] - 1 if prices[-1] > 0 else 0.0
                 self._date_cache[cache_key] = ret
                 return ret
-        except Exception as e:
-            logger.warning(f"_get_sp500_20d_return: 获取S&P500指数数据失败: {e}")
 
-        logger.debug("_get_sp500_20d_return: 无法获取S&P500收益，使用默认值0.0")
+        logger.debug("_get_sp500_20d_return: 缓存无 S&P 500 数据，使用默认值 0.0")
         self._date_cache[cache_key] = 0.0
         return 0.0

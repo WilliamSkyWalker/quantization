@@ -101,16 +101,20 @@ class PolymarketSent(USFactorBase):
         if cached is not None:
             return cached
 
-        sql = (
-            "SELECT affected_tickers, llm_confidence, llm_sentiment, created_at "
-            "FROM polymarket_alert "
-            "WHERE created_at >= :start AND created_at <= :end "
-            "AND affected_tickers IS NOT NULL AND affected_tickers != '' "
-            "ORDER BY created_at DESC"
-        )
-        df = self.db.query(sql, params={
-            "start": start.strftime("%Y-%m-%d"),
-            "end": end.strftime("%Y-%m-%d %H:%M:%S"),
-        })
+        try:
+            from services.polymarket.models import PolymarketAlert
+            from django.db.models import Q
+            qs = PolymarketAlert.objects.filter(
+                created_at__gte=start,
+                created_at__lte=end,
+            ).exclude(
+                Q(affected_tickers__isnull=True) | Q(affected_tickers="")
+            ).order_by("-created_at").values(
+                "affected_tickers", "llm_confidence", "llm_sentiment", "created_at"
+            )
+            df = pd.DataFrame(qs)
+        except Exception as e:
+            logger.debug(f"PolymarketSent: 查询失败: {e}")
+            df = pd.DataFrame()
         self._date_cache[cache_key] = df
         return df
