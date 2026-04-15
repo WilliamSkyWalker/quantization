@@ -17,13 +17,31 @@ Claude Code 编码规范。所有代码变更必须遵守。
 
 ## 编码规范
 
+### 项目结构（Django MVT）
+
+按业务域拆分 Django apps：
+
+```
+quantization/
+├── stocks/         # US 股票域：models (36 表) + factors + downloaders + cleaner + views
+├── backtest/       # 回测域：engine + strategy + regime + saver + ff5 + views
+├── trading/        # 交易域：paper_trader + alpaca_trader + views
+├── sentiment/      # 情绪域：polymarket + scrapers + views
+├── api/            # 跨域通用视图：config/data/strategy/watchlist/trading (A 股)
+├── services/       # A 股 + 通用配置：config.py + strategy/factors/data (A 股) + risk/monitor
+├── core/           # Django settings + 根 URL
+└── cli.py          # 保留部分 typer 命令（select/factor/paper/db/polymarket 等）
+```
+
+每个 app 结构：`models/ services/ views/ management/commands/ urls.py apps.py`。
+
 ### 三层同步规则
 
-系统有三个入口层调用同一套 service：**CLI** (`cli.py`)、**API** (`api/views/`)、**前端** (`frontend/src/`)。
+系统有三个入口层调用业务逻辑：**Django management commands** (`python3 manage.py <cmd>`)、**API** (`api/urls.py` + 各 app 的 `views/`)、**前端** (`frontend/src/`)。
 
-- **新增/修改 service 方法** → 同步更新 CLI 命令 + API view + 前端页面
-- **新增 API 端点** → 同步在 CLI 中添加对应命令、在前端 `api/index.ts` 中添加函数
-- **业务逻辑只写在 `services/`** — CLI 和 API views 只做参数解析 + 调用 service + 格式化输出
+- **新增业务逻辑** → 放在对应 app 的 `services/` 下，CLI / API / 前端三处同步
+- **核心命令已迁移**：`python3 manage.py backtest / data_update / bulk_import`
+- **其他 cli.py 命令**（select/factor/paper/db/polymarket）按需逐步迁移到 management commands
 - **前端修改后必须 `pnpm build`** — Django 只提供 dist 静态文件
 
 ### 操作授权规则
@@ -40,13 +58,13 @@ Claude Code 编码规范。所有代码变更必须遵守。
 - **所有修改必须系统性检查** — `grep` 找全、逐一改、`grep` 确认零残留
 - **所有修改必须测试** — 用实际数据运行验证，涉及 DB 写入的必须 `SELECT COUNT(*)` 确认入库
 - **不用 pytest** — 测试用端到端自动化脚本（真实 API + 真实 DB），不用 mock
-- **数据库读写必须使用 Django ORM**，禁止手写 raw SQL。模型定义在 `data/models/`（managed=False），写入用 `data.upsert.UpsertManager`（查询+分流 create/update），查询用 `Model.objects.filter().values_list()`。回测热路径数据通过 parquet 缓存（`cache/` 目录）加速
+- **数据库读写必须使用 Django ORM**，禁止手写 raw SQL。模型定义在 `stocks/models/`、`backtest/models/` 等 app 下（managed=False），写入用 `stocks.services.upsert.UpsertManager`（查询+分流 create/update），查询用 `Model.objects.filter().values_list()`。回测热路径数据通过 parquet 缓存（`cache/` 目录）加速
 - **FMP 数据导入禁止 rename 列名** — DB 列名必须和 `_camel_to_snake()` 转换结果完全一致，不允许手动起别名（如 `roe`/`rd_expenses`）。唯一例外是 `date→trade_date`（避免和 unique key 冲突）
 - **禁止使用 Agent 子进程** — 所有工作在主会话中完成
 - Matplotlib 必须在导入 `pyplot` 前调用 `matplotlib.use("Agg")`
 - 因子计算始终为截面（同一日期，全部股票）
 - MySQL 列名 `open` 是保留字，原生 SQL 需用反引号转义
-- A股因子在 `services/factors/`，美股因子在 `services/us_factors/`（独立，不共享基类）
+- A股因子在 `services/factors/`（待迁移），美股因子在 `stocks/services/factors/`（独立，不共享基类）
 - A股配置无前缀（`MAX_HOLDINGS`），美股配置带 `US_` 前缀（`US_MAX_HOLDINGS`）
 - 使用 `python3` 而非 `python`
 
