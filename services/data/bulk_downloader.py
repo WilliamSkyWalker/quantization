@@ -143,8 +143,9 @@ def _request_with_retry(method: str, url: str, max_retries: int = 5, **kwargs) -
 class BulkDownloader:
     """FMP 数据批量下载器"""
 
-    def __init__(self, db=None, **kwargs):
+    def __init__(self, db=None, incremental: bool = False, **kwargs):
         self._um = get_upsert_manager()
+        self._incremental = incremental
         self._fmp_limiter = RateLimiter(FMP_RATE_LIMIT)
         self._quiver_limiter = RateLimiter(QUIVER_RATE_LIMIT)
 
@@ -220,6 +221,9 @@ class BulkDownloader:
     # --- 断点续跑 ---
 
     def _skip_done_tickers(self, table: str, tickers: list[str]) -> list[str]:
+        if self._incremental:
+            logger.info(f"增量模式 {table}: 跳过断点检查, {len(tickers)} tickers")
+            return tickers
         done = self._um.get_import_done_tickers(table)
         remaining = [t for t in tickers if t not in done]
         if done:
@@ -345,19 +349,34 @@ class BulkDownloader:
         return total
 
     # --- 3. daily_price ---
-    def download_fmp_daily_prices(self, start_year: int = 1995) -> int:
+    def download_fmp_daily_prices(self, start_year: int = 1995, incremental: bool = False) -> int:
         tickers = self._get_tickers(stocks_only=False)
         if not tickers:
             return 0
-        tickers = self._skip_done_tickers("us_daily_price", tickers)
-        if not tickers:
-            return 0
 
-        end_year = datetime.now().year
-        segments = []
-        for yr in range(start_year, end_year + 1, 10):
-            seg_end = min(yr + 9, end_year)
-            segments.append((f"{yr}-01-01", f"{seg_end}-12-31"))
+        if incremental:
+            # 增量模式：查 DB 中最新日期，只拉之后的数据
+            latest = USDailyPrice.objects.order_by("-trade_date").values_list("trade_date", flat=True).first()
+            if latest:
+                from_date = (pd.to_datetime(str(latest)) + timedelta(days=1)).strftime("%Y-%m-%d")
+            else:
+                from_date = f"{start_year}-01-01"
+            today = datetime.now().strftime("%Y-%m-%d")
+            if from_date > today:
+                logger.info("us_daily_price 已是最新")
+                return 0
+            segments = [(from_date, today)]
+            logger.info(f"增量更新 us_daily_price: {from_date} ~ {today}, {len(tickers)} tickers")
+        else:
+            # 全量模式：断点续跑
+            tickers = self._skip_done_tickers("us_daily_price", tickers)
+            if not tickers:
+                return 0
+            end_year = datetime.now().year
+            segments = []
+            for yr in range(start_year, end_year + 1, 10):
+                seg_end = min(yr + 9, end_year)
+                segments.append((f"{yr}-01-01", f"{seg_end}-12-31"))
 
         total = 0
 
@@ -371,7 +390,6 @@ class BulkDownloader:
                 if not data:
                     continue
                 df = _fmp_df_to_snake(pd.DataFrame(data))
-                # date→trade_date（unique key 需要）
                 if "date" in df.columns:
                     df["trade_date"] = pd.to_datetime(df["date"]).dt.date
                     df = df.drop(columns=["date"])

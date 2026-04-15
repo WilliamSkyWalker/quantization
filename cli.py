@@ -435,7 +435,7 @@ def data_update(
         # 六源增量更新
         from services.data.bulk_downloader import BulkDownloader
         from services.data.fred_downloader import FREDDownloader
-        dl = BulkDownloader()
+        dl = BulkDownloader(incremental=True)
         console.print("[cyan]增量更新美股数据（六源：FMP/UW/Fiscal/Quiver/AV/FRED）...[/cyan]")
         t0 = time.time()
         current_year = time.localtime().tm_year
@@ -451,7 +451,7 @@ def data_update(
                 console.print(f"[yellow]FMP {name} 跳过: {e}[/yellow]")
 
         _try("stock_list", dl.download_fmp_stock_list)
-        _try("prices", lambda: dl.download_fmp_daily_prices(current_year))
+        _try("prices", lambda: dl.download_fmp_daily_prices(incremental=True))
         _try("financial", lambda: dl.download_fmp_financial_quarterly(limit=8))
         _try("key_metrics", dl.download_fmp_key_metrics)
         _try("ratios", dl.download_fmp_ratios)
