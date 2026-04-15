@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 from services.config import LOG_LEVEL
-from services.us_factors.base import USFactorBase
+from stocks.services.factors.base import USFactorBase
 from services.strategy.us_multi_factor import USMultiFactorStrategy
 from services.strategy.us_regime import USRegimeDetector
 
@@ -160,7 +160,7 @@ class USBaselineStrategy:
         return w / w.sum()
 
     def _get_month_end_dates(self, start_date: str, end_date: str) -> list[str]:
-        from data.models import USIndexDaily
+        from stocks.models import USIndexDaily
         dates = list(
             USIndexDaily.objects.filter(
                 index_code="^GSPC",

@@ -6,7 +6,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-from data.models import BacktestResult
+from backtest.models import BacktestResult
 
 logger = logging.getLogger(__name__)
 

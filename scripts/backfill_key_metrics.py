@@ -85,7 +85,7 @@ def main():
         return
 
     # Step 2: 回填数据
-    from services.data.bulk_downloader import BulkDownloader
+    from stocks.services.downloaders.bulk import BulkDownloader
     dl = BulkDownloader(db)
 
     tickers = args.tickers or None

@@ -757,8 +757,8 @@ def research_reports(request):
 # ------------------------------------------------------------------
 
 def _run_download_us_all(task_id):
-    from services.data.fmp_downloader import FMPDownloader
-    from services.data.fred_downloader import FREDDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
+    from stocks.services.downloaders.fred import FREDDownloader
     db = _get_db()
     fmp = FMPDownloader(db)
     fred = FREDDownloader(db)
@@ -787,7 +787,7 @@ def _run_download_us_all(task_id):
 
 
 def _run_download_us_list(task_id):
-    from services.data.fmp_downloader import FMPDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
     db = _get_db()
     dl = FMPDownloader(db)
     task_manager.update_progress(task_id, 30, '🇺🇸 下载股票列表...')
@@ -796,7 +796,7 @@ def _run_download_us_list(task_id):
 
 
 def _run_download_us_daily(task_id):
-    from services.data.fmp_downloader import FMPDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
     db = _get_db()
     dl = FMPDownloader(db)
     task_manager.update_progress(task_id, 10, '🇺🇸 下载日线行情...')
@@ -805,7 +805,7 @@ def _run_download_us_daily(task_id):
 
 
 def _run_download_us_financial(task_id):
-    from services.data.fmp_downloader import FMPDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
     db = _get_db()
     dl = FMPDownloader(db)
     task_manager.update_progress(task_id, 10, '🇺🇸 下载财务数据...')
@@ -814,7 +814,7 @@ def _run_download_us_financial(task_id):
 
 
 def _run_download_us_industry(task_id):
-    from services.data.fmp_downloader import FMPDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
     db = _get_db()
     dl = FMPDownloader(db)
     task_manager.update_progress(task_id, 30, '🇺🇸 下载行业分类...')
@@ -823,7 +823,7 @@ def _run_download_us_industry(task_id):
 
 
 def _run_download_us_index(task_id):
-    from services.data.fmp_downloader import FMPDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
     db = _get_db()
     dl = FMPDownloader(db)
     task_manager.update_progress(task_id, 20, '🇺🇸 下载指数数据...')
@@ -832,7 +832,7 @@ def _run_download_us_index(task_id):
 
 
 def _run_download_us_macro(task_id):
-    from services.data.fred_downloader import FREDDownloader
+    from stocks.services.downloaders.fred import FREDDownloader
     db = _get_db()
     dl = FREDDownloader(db)
     task_manager.update_progress(task_id, 20, '🇺🇸 下载宏观数据 (FRED)...')
@@ -841,7 +841,7 @@ def _run_download_us_macro(task_id):
 
 
 def _run_download_us_commodity(task_id):
-    from services.data.fmp_downloader import FMPDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
     db = _get_db()
     dl = FMPDownloader(db)
     task_manager.update_progress(task_id, 20, '🇺🇸 下载商品期货...')
@@ -850,7 +850,7 @@ def _run_download_us_commodity(task_id):
 
 
 def _run_download_us_analyst(task_id):
-    from services.data.fmp_downloader import FMPDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
     db = _get_db()
     dl = FMPDownloader(db)
     task_manager.update_progress(task_id, 10, '🇺🇸 下载分析师评级...')
@@ -859,7 +859,7 @@ def _run_download_us_analyst(task_id):
 
 
 def _run_download_us_sec_filing(task_id):
-    from services.data.fmp_downloader import FMPDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
     db = _get_db()
     dl = FMPDownloader(db)
     task_manager.update_progress(task_id, 10, '🇺🇸 下载SEC公告...')
@@ -868,7 +868,7 @@ def _run_download_us_sec_filing(task_id):
 
 
 def _run_download_us_corporate_action(task_id):
-    from services.data.fmp_downloader import FMPDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
     db = _get_db()
     dl = FMPDownloader(db)
     task_manager.update_progress(task_id, 10, '🇺🇸 下载公司行动...')
@@ -877,7 +877,7 @@ def _run_download_us_corporate_action(task_id):
 
 
 def _run_update_us_daily(task_id):
-    from services.data.fmp_downloader import FMPDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
     db = _get_db()
     dl = FMPDownloader(db)
     task_manager.update_progress(task_id, 10, '🇺🇸 增量更新日线...')
@@ -886,7 +886,7 @@ def _run_update_us_daily(task_id):
 
 
 def _run_update_us_financial(task_id):
-    from services.data.fmp_downloader import FMPDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
     db = _get_db()
     dl = FMPDownloader(db)
     task_manager.update_progress(task_id, 10, '🇺🇸 增量更新财务...')
@@ -895,7 +895,7 @@ def _run_update_us_financial(task_id):
 
 
 def _run_update_us_index(task_id):
-    from services.data.fmp_downloader import FMPDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
     db = _get_db()
     dl = FMPDownloader(db)
     task_manager.update_progress(task_id, 20, '🇺🇸 增量更新指数...')
@@ -904,7 +904,7 @@ def _run_update_us_index(task_id):
 
 
 def _run_update_us_macro(task_id):
-    from services.data.fred_downloader import FREDDownloader
+    from stocks.services.downloaders.fred import FREDDownloader
     db = _get_db()
     dl = FREDDownloader(db)
     task_manager.update_progress(task_id, 20, '🇺🇸 增量更新宏观...')
@@ -913,7 +913,7 @@ def _run_update_us_macro(task_id):
 
 
 def _run_update_us_commodity(task_id):
-    from services.data.fmp_downloader import FMPDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
     db = _get_db()
     dl = FMPDownloader(db)
     task_manager.update_progress(task_id, 20, '🇺🇸 增量更新商品...')
@@ -922,7 +922,7 @@ def _run_update_us_commodity(task_id):
 
 
 def _run_update_us_analyst(task_id):
-    from services.data.fmp_downloader import FMPDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
     db = _get_db()
     dl = FMPDownloader(db)
     task_manager.update_progress(task_id, 10, '🇺🇸 增量更新评级...')
@@ -931,7 +931,7 @@ def _run_update_us_analyst(task_id):
 
 
 def _run_update_us_sec_filing(task_id):
-    from services.data.fmp_downloader import FMPDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
     db = _get_db()
     dl = FMPDownloader(db)
     task_manager.update_progress(task_id, 10, '🇺🇸 增量更新SEC...')
@@ -940,7 +940,7 @@ def _run_update_us_sec_filing(task_id):
 
 
 def _run_update_us_corporate_action(task_id):
-    from services.data.fmp_downloader import FMPDownloader
+    from stocks.services.downloaders.fmp import FMPDownloader
     db = _get_db()
     dl = FMPDownloader(db)
     task_manager.update_progress(task_id, 10, '🇺🇸 增量更新公司行动...')

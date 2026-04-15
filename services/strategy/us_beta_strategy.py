@@ -26,9 +26,9 @@ from services.config import (
     US_REBALANCE_INTERVAL,
     LOG_LEVEL,
 )
-from services.data.us_cleaner import get_us_clean_universe
+from stocks.services.cleaner import get_us_clean_universe
 from services.strategy.us_regime import USRegimeDetector
-from services.us_factors.base import USFactorBase
+from stocks.services.factors.base import USFactorBase
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
@@ -192,7 +192,7 @@ class USBetaStrategy:
 
     def _get_trade_dates(self, start_date: str, end_date: str) -> list[str]:
         """从 us_index_daily 获取交易日（Django ORM）。"""
-        from data.models import USIndexDaily
+        from stocks.models import USIndexDaily
         dates = list(
             USIndexDaily.objects.filter(
                 index_code="^GSPC",

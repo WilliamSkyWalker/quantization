@@ -235,7 +235,7 @@ def data_bulk_import(
 ):
     """三家 API 批量导入（FMP/UW/Fiscal.ai）"""
     db = _get_db()
-    from services.data.bulk_downloader import BulkDownloader
+    from stocks.services.downloaders.bulk import BulkDownloader
     dl = BulkDownloader()
 
     if clean:
@@ -343,7 +343,7 @@ def data_download(
     db = _get_db()
 
     if market == "us" and not old_source:
-        from services.data.bulk_downloader import BulkDownloader
+        from stocks.services.downloaders.bulk import BulkDownloader
         dl = BulkDownloader()
         dispatch = {
             "all": lambda: dl.download_fmp_all_bulk(1995),
@@ -357,7 +357,7 @@ def data_download(
             "macro": lambda: _download_fred(db),
         }
     elif market == "us":
-        from services.data.fmp_downloader import FMPDownloader
+        from stocks.services.downloaders.fmp import FMPDownloader
         dl = FMPDownloader(db)
         dispatch = {
             "all": dl.download_all,
@@ -391,22 +391,22 @@ def data_download(
         raise typer.Exit(1)
 
     def _download_fred(db_inst):
-        from services.data.fred_downloader import FREDDownloader
+        from stocks.services.downloaders.fred import FREDDownloader
         fred = FREDDownloader(db_inst)
         return fred.download_all()
 
     def _download_simfin(db_inst):
-        from services.data.simfin_downloader import SimFinDownloader
+        from stocks.services.downloaders.simfin import SimFinDownloader
         dl_sf = SimFinDownloader(db_inst)
         return dl_sf.download_financials(force=True)
 
     def _download_edgar(db_inst):
-        from services.data.edgar_downloader import EdgarDownloader
+        from stocks.services.downloaders.edgar import EdgarDownloader
         dl_ed = EdgarDownloader(db_inst)
         return dl_ed.download_financials()
 
     def _download_historical(db_inst):
-        from services.data.historical_universe import (
+        from stocks.services.downloaders.historical import (
             build_historical_universe, download_historical_prices, download_historical_financials
         )
         n1 = build_historical_universe(db_inst)
@@ -433,8 +433,8 @@ def data_update(
 
     if market == "us" and not old_source:
         # 六源增量更新
-        from services.data.bulk_downloader import BulkDownloader
-        from services.data.fred_downloader import FREDDownloader
+        from stocks.services.downloaders.bulk import BulkDownloader
+        from stocks.services.downloaders.fred import FREDDownloader
         dl = BulkDownloader(incremental=True)
         console.print("[cyan]增量更新美股数据（六源：FMP/UW/Fiscal/Quiver/AV/FRED）...[/cyan]")
         t0 = time.time()
@@ -514,8 +514,8 @@ def data_update(
         console.print(f"[green]完成[/green] {elapsed:.1f}s — {results}")
     elif market == "us":
         # 老数据源 (yfinance)
-        from services.data.fmp_downloader import FMPDownloader
-        from services.data.fred_downloader import FREDDownloader
+        from stocks.services.downloaders.fmp import FMPDownloader
+        from stocks.services.downloaders.fred import FREDDownloader
         dl = FMPDownloader(db)
         console.print("[cyan]增量更新美股数据 (yfinance, old-source)...[/cyan]")
         t0 = time.time()
@@ -577,7 +577,7 @@ def universe(
     db = _get_db()
 
     if market == "us":
-        from services.data.us_cleaner import get_us_clean_universe
+        from stocks.services.cleaner import get_us_clean_universe
         df = get_us_clean_universe(date)
         id_col, name_col, ind_col = "ticker", "name", "sector"
     else:
@@ -854,8 +854,8 @@ def factor_calc(
     db = _get_db()
 
     if market == "us":
-        from services.data.us_cleaner import get_us_clean_universe
-        from services.us_factors import value, quality, growth, momentum, technical, macro, analyst, polymarket, accruals
+        from stocks.services.cleaner import get_us_clean_universe
+        from stocks.services.factors import value, quality, growth, momentum, technical, macro, analyst, polymarket, accruals
         universe = get_us_clean_universe(date)
         id_col = "ticker"
         factor_map = {
@@ -899,7 +899,7 @@ def factor_calc(
 
     # 预加载数据（动量/技术因子需要 rolling stats）
     if market == "us":
-        from services.us_factors.base import USFactorBase
+        from stocks.services.factors.base import USFactorBase
         if not USFactorBase._static_cache.get("_bulk_daily"):
             console.print("  [dim]预加载数据...[/dim]")
             USFactorBase.preload_for_backtest(date, date)
@@ -997,8 +997,8 @@ def factor_intra_sector(
     db = _get_db()
 
     from services.factors.evaluation import FactorEvaluator
-    from services.us_factors.base import USFactorBase
-    from services.data.us_cleaner import get_us_clean_universe
+    from stocks.services.factors.base import USFactorBase
+    from stocks.services.cleaner import get_us_clean_universe
 
     evaluator = FactorEvaluator(db, market="us")
     factor_map = evaluator._get_factor_map()

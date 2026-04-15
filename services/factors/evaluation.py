@@ -500,7 +500,7 @@ class FactorEvaluator:
     def _get_factor_map(self) -> dict:
         """返回 {factor_name: factor_class}。"""
         if self.market == "us":
-            from services.us_factors import (
+            from stocks.services.factors import (
                 value, quality, growth, momentum, technical,
                 analyst, accruals, polymarket, earnings, insider, quiver,
                 alphavantage,
@@ -561,7 +561,7 @@ class FactorEvaluator:
     def _get_universe(self, date_str: str) -> pd.DataFrame:
         """获取指定日期的股票池。"""
         if self.market == "us":
-            from services.data.us_cleaner import get_us_clean_universe
+            from stocks.services.cleaner import get_us_clean_universe
             return get_us_clean_universe(date_str)
         else:
             from services.data.cleaner import get_clean_universe
@@ -570,7 +570,7 @@ class FactorEvaluator:
     def _preload(self, start: str, end: str):
         """预加载数据（美股需要）。"""
         if self.market == "us":
-            from services.us_factors.base import USFactorBase
+            from stocks.services.factors.base import USFactorBase
             pre_start = (pd.to_datetime(start) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
             pre_end = (pd.to_datetime(end) + pd.Timedelta(days=90)).strftime("%Y-%m-%d")
             USFactorBase.preload_for_backtest(pre_start, pre_end)
@@ -589,7 +589,7 @@ class FactorEvaluator:
     def _get_price_df(self, start: str, end: str) -> pd.DataFrame:
         """获取价格数据用于 IC Decay（只取评估区间 ± 90 天）。"""
         if self.market == "us":
-            from services.us_factors.base import USFactorBase
+            from stocks.services.factors.base import USFactorBase
             bulk = USFactorBase._static_cache.get("_bulk_daily")
             if bulk is not None and not bulk.empty:
                 start_dt = pd.to_datetime(start) - pd.Timedelta(days=10)
@@ -665,7 +665,7 @@ class FactorEvaluator:
             next_dt = pd.to_datetime(next_date)
 
             if self.market == "us":
-                from services.us_factors.base import USFactorBase
+                from stocks.services.factors.base import USFactorBase
                 bulk = USFactorBase._static_cache.get("_bulk_daily")
                 if bulk is None:
                     logger.debug(f"run_all: 日期 {date_str} 无预加载日线数据，跳过")

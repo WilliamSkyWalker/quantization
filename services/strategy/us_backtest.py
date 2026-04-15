@@ -50,7 +50,7 @@ from services.config import (
     LOG_LEVEL,
     PROJECT_ROOT,
 )
-from data.models import USStockBasic, USDailyPrice, USIndexDaily
+from stocks.models import USStockBasic, USDailyPrice, USIndexDaily
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)

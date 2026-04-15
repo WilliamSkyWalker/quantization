@@ -9,3 +9,9 @@ __pycache__/
 output/
 .pytest_cache/
 quantization.db
+
+
+logs/
+cache/
+backend/
+tests/

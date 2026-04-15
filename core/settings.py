@@ -30,7 +30,10 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'corsheaders',
-    'data',
+    'stocks',
+    'backtest',
+    'trading',
+    'sentiment',
     'api',
 ]
 

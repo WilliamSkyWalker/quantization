@@ -27,7 +27,7 @@ from services.config import (
     US_REGIME_INDEX,
     US_REGIME_MA_WINDOW,
 )
-from data.models import USIndexDaily, USMacroIndicator
+from stocks.models import USIndexDaily, USMacroIndicator
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
@@ -189,7 +189,7 @@ class USRegimeDetector:
         高分散 = 因子信号分化大 = 因子有效 → 1.0（牛）
         低分散 = 因子信号收敛/拥挤 = 因子失效 → 0.0（降权）
         """
-        from services.us_factors.base import USFactorBase
+        from stocks.services.factors.base import USFactorBase
 
         # 从预加载的 rolling stats 获取动量截面分散度
         ri = USFactorBase._static_cache.get("_rolling_indexed")

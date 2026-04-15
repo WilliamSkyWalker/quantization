@@ -253,7 +253,7 @@ class USMLScorer:
         # 扩展 end 以便计算 forward returns
         extended_end = (end + pd.Timedelta(days=self.forward_days * 2 + 10)).strftime("%Y-%m-%d")
         start_str = start.strftime("%Y-%m-%d")
-        from data.models import USDailyPrice
+        from stocks.models import USDailyPrice
         df = pd.DataFrame(
             USDailyPrice.objects.filter(
                 trade_date__gte=start_str,
@@ -305,7 +305,7 @@ class USMLScorer:
     ) -> dict[str, float]:
         """计算 S&P 500 每日的未来 N 日收益。"""
         extended_end = (end + pd.Timedelta(days=self.forward_days * 2 + 10)).strftime("%Y-%m-%d")
-        from data.models import USIndexDaily
+        from stocks.models import USIndexDaily
         df = pd.DataFrame(
             USIndexDaily.objects.filter(
                 index_code="^GSPC",
