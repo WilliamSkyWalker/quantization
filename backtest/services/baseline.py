@@ -21,8 +21,8 @@ import pandas as pd
 
 from services.config import LOG_LEVEL
 from stocks.services.factors.base import USFactorBase
-from services.strategy.us_multi_factor import USMultiFactorStrategy
-from services.strategy.us_regime import USRegimeDetector
+from backtest.services.strategy import USMultiFactorStrategy
+from backtest.services.regime import USRegimeDetector
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
@@ -108,7 +108,7 @@ class USBaselineStrategy:
         from services.config import US_ML_SCORING_ENABLED
         if US_ML_SCORING_ENABLED:
             try:
-                from services.strategy.us_ml_scorer import USMLScorer
+                from backtest.services.ml_scorer import USMLScorer
                 from services.config import US_ML_FORWARD_DAYS, US_ML_LOOKBACK_MONTHS
                 self._scorer._ml_scorer = USMLScorer(
                     forward_days=US_ML_FORWARD_DAYS,

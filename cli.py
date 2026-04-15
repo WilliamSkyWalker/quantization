@@ -631,7 +631,7 @@ def select(
     t0 = time.time()
 
     if market == "us":
-        from services.strategy.us_multi_factor import USMultiFactorStrategy
+        from backtest.services.strategy import USMultiFactorStrategy
         strategy = USMultiFactorStrategy(db)
         result = strategy.select_stocks(date)
         id_col = "ticker"
@@ -714,15 +714,15 @@ def backtest(
 
     if market == "us":
         console.print(f"[cyan]运行 US 回测 ({strategy_type}): {start} ~ {end}[/cyan]")
-        from services.strategy.us_backtest import USBacktestEngine
+        from backtest.services.engine import USBacktestEngine
         if strategy_type == "beta":
-            from services.strategy.us_beta_strategy import USBetaStrategy
+            from backtest.services.beta import USBetaStrategy
             strategy = USBetaStrategy(db)
         elif strategy_type == "baseline":
-            from services.strategy.us_baseline_strategy import USBaselineStrategy
+            from backtest.services.baseline import USBaselineStrategy
             strategy = USBaselineStrategy(db)
         else:
-            from services.strategy.us_multi_factor import USMultiFactorStrategy
+            from backtest.services.strategy import USMultiFactorStrategy
             strategy = USMultiFactorStrategy(db)
         cap = capital if capital > 0 else 1000000
     else:
@@ -821,7 +821,7 @@ def backtest(
         console.print(f"  总交易笔数: {len(trades)}")
 
     # 存库
-    from services.strategy.backtest_saver import save_backtest_result
+    from backtest.services.saver import save_backtest_result
     st = strategy_type if market == "us" else "alpha"
     if save_backtest_result(market, st, start, end, result):
         console.print("  [dim]回测结果已保存到数据库[/dim]")
@@ -1285,7 +1285,7 @@ def score(
     t0 = time.time()
 
     if market == "us":
-        from services.strategy.us_multi_factor import USMultiFactorStrategy
+        from backtest.services.strategy import USMultiFactorStrategy
         strategy = USMultiFactorStrategy(db)
         result = strategy.select_stocks(date)
         id_col = "ticker"
@@ -1379,7 +1379,7 @@ def paper_trade(
     t0 = time.time()
 
     if market in ("us", "alpaca"):
-        from services.strategy.us_multi_factor import USMultiFactorStrategy
+        from backtest.services.strategy import USMultiFactorStrategy
         strategy = USMultiFactorStrategy(db)
         result = strategy.select_stocks(date)
         if result is None or result.empty:

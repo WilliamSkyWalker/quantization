@@ -27,7 +27,7 @@ from services.config import (
     LOG_LEVEL,
 )
 from stocks.services.cleaner import get_us_clean_universe
-from services.strategy.us_regime import USRegimeDetector
+from backtest.services.regime import USRegimeDetector
 from stocks.services.factors.base import USFactorBase
 
 logger = logging.getLogger(__name__)

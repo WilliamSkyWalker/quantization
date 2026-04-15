@@ -503,7 +503,7 @@ def _run_backtest(task_id, start_date, end_date):
         signal_data.append({'date': dt, 'stocks': stocks})
 
     # Persist to DB
-    from services.strategy.backtest_saver import save_backtest_result
+    from backtest.services.saver import save_backtest_result
     save_backtest_result(db, 'cn', 'alpha', start_date, end_date, result)
 
     return {

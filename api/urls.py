@@ -1,9 +1,10 @@
 """API URL configuration."""
 from django.urls import path
 
-from .views import data, strategy, trading, sentiment, config, report, polymarket, watchlist
+from .views import data, strategy, trading, sentiment, config, polymarket, watchlist
 from stocks.views import stock
 from stocks.views import strategy as us_strategy
+from backtest.views import report
 
 urlpatterns = [
     # Data management

@@ -499,7 +499,7 @@ class USBacktestEngine:
 
         # FF5 alpha regression
         try:
-            from services.strategy.ff5 import FF5Analyzer
+            from backtest.services.ff5 import FF5Analyzer
             ff5 = FF5Analyzer()
             ff5_result = ff5.analyze(nav, freq="quarterly")
             if "full" in ff5_result:

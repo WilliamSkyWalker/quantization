@@ -7,7 +7,7 @@ Fama-French 五因子回归分析
 Rp - Rf = α + β₁(Mkt-RF) + β₂(SMB) + β₃(HML) + β₄(RMW) + β₅(CMA) + ε
 
 用法：
-    from services.strategy.ff5 import FF5Analyzer
+    from backtest.services.ff5 import FF5Analyzer
     analyzer = FF5Analyzer()
     result = analyzer.analyze(strategy_nav, freq="quarterly")
 """

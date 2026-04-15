@@ -67,7 +67,7 @@ from stocks.services.factors.insider import InsiderNetBuy
 from stocks.services.factors.earnings import EarningsSurprise, EpsRevision
 from stocks.services.factors.base import USFactorBase
 from stocks.services.factors.processor import process_factor, clear_neutralize_cache
-from services.strategy.us_regime import USRegimeDetector
+from backtest.services.regime import USRegimeDetector
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
@@ -1195,7 +1195,7 @@ class USMultiFactorStrategy:
         # Initialize ML scorer if enabled
         if self._ml_enabled:
             try:
-                from services.strategy.us_ml_scorer import USMLScorer
+                from backtest.services.ml_scorer import USMLScorer
                 from services.config import US_ML_FORWARD_DAYS, US_ML_LOOKBACK_MONTHS
                 self._ml_scorer = USMLScorer(
                     forward_days=US_ML_FORWARD_DAYS,

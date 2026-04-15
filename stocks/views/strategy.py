@@ -5,8 +5,8 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from stocks.services.cleaner import get_us_clean_universe
-from services.strategy.us_multi_factor import USMultiFactorStrategy
-from services.strategy.us_backtest import USBacktestEngine
+from backtest.services.strategy import USMultiFactorStrategy
+from backtest.services.engine import USBacktestEngine
 from services.execution.us_paper_trader import USPaperTrader
 from services.execution.alpaca_trader import AlpacaTrader
 from tasks.manager import task_manager
@@ -83,10 +83,10 @@ def backtest_run(request):
     def _run(task_id):
         task_manager.update_progress(task_id, 5, '初始化策略...')
         if strategy_type == 'beta':
-            from services.strategy.us_beta_strategy import USBetaStrategy
+            from backtest.services.beta import USBetaStrategy
             strategy = USBetaStrategy(_db)
         elif strategy_type == 'baseline':
-            from services.strategy.us_baseline_strategy import USBaselineStrategy
+            from backtest.services.baseline import USBaselineStrategy
             strategy = USBaselineStrategy(_db)
         else:
             strategy = USMultiFactorStrategy(_db)
@@ -104,7 +104,7 @@ def backtest_run(request):
         task_manager.update_progress(task_id, 95, '保存结果...')
 
         # 存库
-        from services.strategy.backtest_saver import save_backtest_result
+        from backtest.services.saver import save_backtest_result
         save_backtest_result(_db, 'us', strategy_type, start_date, end_date, result)
 
         # 序列化返回给前端
