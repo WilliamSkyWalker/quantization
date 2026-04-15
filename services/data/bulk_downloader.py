@@ -372,11 +372,16 @@ class BulkDownloader:
             tickers = self._get_tickers(stocks_only=False)
         if not tickers:
             return 0
+        # 纯快照表：用 updated_at 判断过期
+        latest_map = None
+        if self._incremental:
+            latest_map = self._get_ticker_latest(USCompanyProfile, "updated_at")
+            logger.info(f"增量更新 us_company_profile: {len(tickers)} tickers, DB 已有 {len(latest_map)} tickers 有数据")
         total = 0
 
-        # FIX: 用 stable/profile（DB 列按 stable 字段命名 marketCap/volume 等），v3 profile/{ticker} 字段名是 mktCap/volAvg（不匹配）
-        # stable 不支持 batch，per-ticker 调用
         def _fetch(ticker):
+            if latest_map is not None and self._ticker_needs_update(ticker, latest_map, stale_days=7) is None:
+                return 0
             data = self._fmp_get_stable("profile", params={"symbol": ticker})
             if not data:
                 return 0
@@ -915,12 +920,19 @@ class BulkDownloader:
             tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
-        tickers = self._skip_done_tickers("us_financial_score", tickers)
-        if not tickers:
-            return 0
+        latest_map = None
+        if self._incremental:
+            latest_map = self._get_ticker_latest(USFinancialScore, "updated_at")
+            logger.info(f"增量更新 us_financial_score: {len(tickers)} tickers, DB 已有 {len(latest_map)} tickers 有数据")
+        else:
+            tickers = self._skip_done_tickers("us_financial_score", tickers)
+            if not tickers:
+                return 0
         total = 0
 
         def _fetch(ticker):
+            if latest_map is not None and self._ticker_needs_update(ticker, latest_map, stale_days=30) is None:
+                return 0
             data = self._fmp_get_stable("financial-scores", params={"symbol": ticker})
             if not data:
                 return 0
@@ -944,12 +956,19 @@ class BulkDownloader:
             tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
-        tickers = self._skip_done_tickers("us_shares_float", tickers)
-        if not tickers:
-            return 0
+        latest_map = None
+        if self._incremental:
+            latest_map = self._get_ticker_latest(USSharesFloat, "date")
+            logger.info(f"增量更新 us_shares_float: {len(tickers)} tickers, DB 已有 {len(latest_map)} tickers 有数据")
+        else:
+            tickers = self._skip_done_tickers("us_shares_float", tickers)
+            if not tickers:
+                return 0
         total = 0
 
         def _fetch(ticker):
+            if latest_map is not None and self._ticker_needs_update(ticker, latest_map, stale_days=30) is None:
+                return 0
             data = self._fmp_get_stable("shares-float", params={"symbol": ticker})
             if not data:
                 return 0
@@ -1010,12 +1029,19 @@ class BulkDownloader:
             tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
-        tickers = self._skip_done_tickers("us_employee_count", tickers)
-        if not tickers:
-            return 0
+        latest_map = None
+        if self._incremental:
+            latest_map = self._get_ticker_latest(USEmployeeCount, "period_of_report")
+            logger.info(f"增量更新 us_employee_count: {len(tickers)} tickers, DB 已有 {len(latest_map)} tickers 有数据")
+        else:
+            tickers = self._skip_done_tickers("us_employee_count", tickers)
+            if not tickers:
+                return 0
         total = 0
 
         def _fetch(ticker):
+            if latest_map is not None and self._ticker_needs_update(ticker, latest_map, stale_days=90) is None:
+                return 0
             data = self._fmp_get_stable("employee-count", params={"symbol": ticker})
             if not data:
                 return 0
@@ -1039,12 +1065,19 @@ class BulkDownloader:
             tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
-        tickers = self._skip_done_tickers("us_price_target", tickers)
-        if not tickers:
-            return 0
+        latest_map = None
+        if self._incremental:
+            latest_map = self._get_ticker_latest(USPriceTarget, "updated_at")
+            logger.info(f"增量更新 us_price_target: {len(tickers)} tickers, DB 已有 {len(latest_map)} tickers 有数据")
+        else:
+            tickers = self._skip_done_tickers("us_price_target", tickers)
+            if not tickers:
+                return 0
         total = 0
 
         def _fetch(ticker):
+            if latest_map is not None and self._ticker_needs_update(ticker, latest_map, stale_days=7) is None:
+                return 0
             data = self._fmp_get_stable("price-target-consensus", params={"symbol": ticker})
             if not data:
                 return 0
@@ -1068,12 +1101,19 @@ class BulkDownloader:
             tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
-        tickers = self._skip_done_tickers("us_esg_rating", tickers)
-        if not tickers:
-            return 0
+        latest_map = None
+        if self._incremental:
+            latest_map = self._get_ticker_latest(USESGRating, "updated_at")
+            logger.info(f"增量更新 us_esg_rating: {len(tickers)} tickers, DB 已有 {len(latest_map)} tickers 有数据")
+        else:
+            tickers = self._skip_done_tickers("us_esg_rating", tickers)
+            if not tickers:
+                return 0
         total = 0
 
         def _fetch(ticker):
+            if latest_map is not None and self._ticker_needs_update(ticker, latest_map, stale_days=365) is None:
+                return 0
             data = self._fmp_get_stable("esg-ratings", params={"symbol": ticker})
             if not data:
                 return 0
@@ -1097,12 +1137,19 @@ class BulkDownloader:
             tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
-        tickers = self._skip_done_tickers("us_dcf_valuation", tickers)
-        if not tickers:
-            return 0
+        latest_map = None
+        if self._incremental:
+            latest_map = self._get_ticker_latest(USDCFValuation, "date")
+            logger.info(f"增量更新 us_dcf_valuation: {len(tickers)} tickers, DB 已有 {len(latest_map)} tickers 有数据")
+        else:
+            tickers = self._skip_done_tickers("us_dcf_valuation", tickers)
+            if not tickers:
+                return 0
         total = 0
 
         def _fetch(ticker):
+            if latest_map is not None and self._ticker_needs_update(ticker, latest_map, stale_days=7) is None:
+                return 0
             data = self._fmp_get_stable("discounted-cash-flow", params={"symbol": ticker})
             if not data:
                 return 0
@@ -1127,12 +1174,19 @@ class BulkDownloader:
             tickers = self._get_tickers(stocks_only=True)
         if not tickers:
             return 0
-        tickers = self._skip_done_tickers("us_stock_peer", tickers)
-        if not tickers:
-            return 0
+        latest_map = None
+        if self._incremental:
+            latest_map = self._get_ticker_latest(USStockPeer, "updated_at")
+            logger.info(f"增量更新 us_stock_peer: {len(tickers)} tickers, DB 已有 {len(latest_map)} tickers 有数据")
+        else:
+            tickers = self._skip_done_tickers("us_stock_peer", tickers)
+            if not tickers:
+                return 0
         total = 0
 
         def _fetch(ticker):
+            if latest_map is not None and self._ticker_needs_update(ticker, latest_map, stale_days=30) is None:
+                return 0
             data = self._fmp_get_stable("stock-peers", params={"symbol": ticker})
             if not data:
                 return 0
