@@ -144,7 +144,7 @@ class BulkDownloader:
     """FMP 数据批量下载器"""
 
     _WORKERS_BULK = 10
-    _WORKERS_INCREMENTAL = 20
+    _WORKERS_INCREMENTAL = 15
 
     def __init__(self, db=None, incremental: bool = False, **kwargs):
         self._um = get_upsert_manager()
