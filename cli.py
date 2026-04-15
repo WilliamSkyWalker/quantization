@@ -312,7 +312,7 @@ def polymarket_history(
     discover_only: bool = typer.Option(False, help="只发现市场，不下价格"),
 ):
     """从 Gamma + CLOB 下载 Polymarket 已结算市场历史（events + price snapshots）"""
-    from services.polymarket.history import PolymarketHistoryDownloader
+    from sentiment.services.polymarket.history import PolymarketHistoryDownloader
     dl = PolymarketHistoryDownloader()
 
     task_id = f"cli_polymarket_{int(time.time())}"

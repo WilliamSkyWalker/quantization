@@ -16,7 +16,7 @@ import pandas as pd
 
 from services.config import LOG_LEVEL
 from services.factors.base import FactorBase
-from services.sentiment.analyzer import SentimentAnalyzer
+from sentiment.services.scrapers.analyzer import SentimentAnalyzer
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)

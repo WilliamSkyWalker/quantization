@@ -470,7 +470,7 @@ def _run_update_sentiment(task_id):
     task_manager.update_progress(task_id, 10, '增量抓取舆情...')
     sent_new = 0
     try:
-        from services.sentiment.downloader import SentimentDownloader
+        from sentiment.services.scrapers.downloader import SentimentDownloader
         sent_dl = SentimentDownloader(db)
         sent_results = sent_dl.download_all()
         sent_new = sum(r['new'] for r in sent_results.values())
@@ -480,7 +480,7 @@ def _run_update_sentiment(task_id):
     task_manager.update_progress(task_id, 60, '舆情分析...')
     analysis_result = {}
     try:
-        from services.sentiment.analyzer import SentimentAnalyzer
+        from sentiment.services.scrapers.analyzer import SentimentAnalyzer
         analyzer = SentimentAnalyzer(db)
         analysis_result = analyzer.analyze_pending(max_articles=1000)
     except Exception as e:
@@ -549,7 +549,7 @@ def _run_update_all(task_id):
     task_manager.update_progress(task_id, 82, '步骤10/12: 抓取舆情...')
     sent_new = 0
     try:
-        from services.sentiment.downloader import SentimentDownloader
+        from sentiment.services.scrapers.downloader import SentimentDownloader
         sent_dl = SentimentDownloader(db)
         sent_results = sent_dl.download_all(max_pages=2, incremental=True)
         sent_new = sum(r['new'] for r in sent_results.values())
@@ -559,7 +559,7 @@ def _run_update_all(task_id):
 
     task_manager.update_progress(task_id, 90, '步骤11/12: 舆情分析...')
     try:
-        from services.sentiment.analyzer import SentimentAnalyzer
+        from sentiment.services.scrapers.analyzer import SentimentAnalyzer
         analyzer = SentimentAnalyzer(db)
         analysis_result = analyzer.analyze_pending(max_articles=1000)
         logger.info(f'舆情分析完成: keyword={analysis_result["keyword_analyzed"]}, llm={analysis_result["llm_analyzed"]}')

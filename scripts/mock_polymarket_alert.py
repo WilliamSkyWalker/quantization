@@ -21,8 +21,8 @@ django.setup()
 
 from datetime import datetime
 from services.data.database import DatabaseManager
-from services.polymarket.models import PolymarketEvent, PolymarketAlert
-from services.polymarket.alert_manager import AlertManager
+from sentiment.services.polymarket.models import PolymarketEvent, PolymarketAlert
+from sentiment.services.polymarket.alert_manager import AlertManager
 
 
 def main():

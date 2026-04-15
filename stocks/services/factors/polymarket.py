@@ -102,7 +102,7 @@ class PolymarketSent(USFactorBase):
             return cached
 
         try:
-            from services.polymarket.models import PolymarketAlert
+            from sentiment.services.polymarket.models import PolymarketAlert
             from django.db.models import Q
             qs = PolymarketAlert.objects.filter(
                 created_at__gte=start,
