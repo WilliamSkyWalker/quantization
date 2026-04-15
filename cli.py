@@ -1332,14 +1332,14 @@ def paper_status(
     db = _get_db()
 
     if market == "alpaca":
-        from services.execution.alpaca_trader import AlpacaTrader
+        from trading.services.alpaca_trader import AlpacaTrader
         trader = AlpacaTrader(db)
         trader.connect()
         console.print(f"\n[cyan]Alpaca 模拟账户[/cyan]")
         console.print(trader.get_position_report())
         return
     elif market == "us":
-        from services.execution.us_paper_trader import USPaperTrader
+        from trading.services.paper_trader import USPaperTrader
         trader = USPaperTrader(db)
         trader.connect()
     else:
@@ -1387,10 +1387,10 @@ def paper_trade(
             return
 
         if market == "alpaca":
-            from services.execution.alpaca_trader import AlpacaTrader
+            from trading.services.alpaca_trader import AlpacaTrader
             trader = AlpacaTrader(db)
         else:
-            from services.execution.us_paper_trader import USPaperTrader
+            from trading.services.paper_trader import USPaperTrader
             trader = USPaperTrader(db)
 
         trader.connect()
@@ -1420,12 +1420,12 @@ def paper_reset(
     db = _get_db()
 
     if market == "alpaca":
-        from services.execution.alpaca_trader import AlpacaTrader
+        from trading.services.alpaca_trader import AlpacaTrader
         trader = AlpacaTrader(db)
         trader.connect()
         trader.reset()
     elif market == "us":
-        from services.execution.us_paper_trader import USPaperTrader
+        from trading.services.paper_trader import USPaperTrader
         trader = USPaperTrader(db)
         trader.connect()
         trader.reset()

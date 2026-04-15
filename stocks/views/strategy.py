@@ -7,8 +7,8 @@ from rest_framework.response import Response
 from stocks.services.cleaner import get_us_clean_universe
 from backtest.services.strategy import USMultiFactorStrategy
 from backtest.services.engine import USBacktestEngine
-from services.execution.us_paper_trader import USPaperTrader
-from services.execution.alpaca_trader import AlpacaTrader
+from trading.services.paper_trader import USPaperTrader
+from trading.services.alpaca_trader import AlpacaTrader
 from tasks.manager import task_manager
 
 logger = logging.getLogger(__name__)
