@@ -7,7 +7,7 @@
 import logging
 import math
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
-from datetime import datetime
+from django.utils import timezone
 from operator import attrgetter
 
 import pandas as pd
@@ -59,7 +59,8 @@ class UpsertManager:
                 elif isinstance(v, pd.Timestamp):
                     v = v.to_pydatetime() if pd.notna(v) else None
                 clean[k] = v
-            clean["updated_at"] = datetime.now()
+            if "updated_at" in valid_cols:
+                clean["updated_at"] = timezone.now()
             cleaned.append(clean)
 
         if not cleaned:
@@ -87,35 +88,40 @@ class UpsertManager:
     @staticmethod
     def _write_batch(model_class, batch: list[dict], unique_keys: list[str], update_fields: list[str]):
         """单批次写入：查询已有行 → 分流 create/update。"""
-        # 1. 查询已存在的行
-        q = Q()
-        for row in batch:
-            row_q = Q(**{k: row[k] for k in unique_keys if k in row})
-            q |= row_q
+        from django.db import connection
 
-        existing_map = {}
-        for obj in model_class.objects.filter(q):
-            key = tuple(getattr(obj, k) for k in unique_keys)
-            existing_map[key] = obj
+        try:
+            # 1. 查询已存在的行
+            q = Q()
+            for row in batch:
+                row_q = Q(**{k: row[k] for k in unique_keys if k in row})
+                q |= row_q
 
-        # 2. 分流
-        to_create = []
-        to_update = []
-        for row in batch:
-            key = tuple(row.get(k) for k in unique_keys)
-            existing_obj = existing_map.get(key)
-            if existing_obj is None:
-                to_create.append(model_class(**row))
-            else:
-                for field, val in row.items():
-                    setattr(existing_obj, field, val)
-                to_update.append(existing_obj)
+            existing_map = {}
+            for obj in model_class.objects.filter(q):
+                key = tuple(getattr(obj, k) for k in unique_keys)
+                existing_map[key] = obj
 
-        # 3. 写入
-        if to_create:
-            model_class.objects.bulk_create(to_create, batch_size=2000)
-        if to_update:
-            model_class.objects.bulk_update(to_update, update_fields, batch_size=2000)
+            # 2. 分流
+            to_create = []
+            to_update = []
+            for row in batch:
+                key = tuple(row.get(k) for k in unique_keys)
+                existing_obj = existing_map.get(key)
+                if existing_obj is None:
+                    to_create.append(model_class(**row))
+                else:
+                    for field, val in row.items():
+                        setattr(existing_obj, field, val)
+                    to_update.append(existing_obj)
+
+            # 3. 写入
+            if to_create:
+                model_class.objects.bulk_create(to_create, batch_size=2000)
+            if to_update:
+                model_class.objects.bulk_update(to_update, update_fields, batch_size=2000)
+        finally:
+            connection.close()
 
     def upsert_df(self, model_class, df: "pd.DataFrame", unique_keys: list[str]):
         """DataFrame 版 upsert。"""
@@ -145,7 +151,7 @@ class UpsertManager:
         ImportProgress.objects.update_or_create(
             table_name=table_name,
             ticker=ticker,
-            defaults={"completed_at": datetime.now()},
+            defaults={"completed_at": timezone.now()},
         )
 
     def get_import_done_tickers(self, table_name: str) -> set[str]:
