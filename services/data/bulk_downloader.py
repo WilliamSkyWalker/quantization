@@ -360,34 +360,46 @@ class BulkDownloader:
         if not tickers:
             return 0
 
+        today = datetime.now().strftime("%Y-%m-%d")
+
         if incremental:
-            # 增量模式：查 DB 中最新日期，只拉之后的数据
-            latest = USDailyPrice.objects.order_by("-trade_date").values_list("trade_date", flat=True).first()
-            if latest:
-                from_date = (pd.to_datetime(str(latest)) + timedelta(days=1)).strftime("%Y-%m-%d")
-            else:
-                from_date = f"{start_year}-01-01"
-            today = datetime.now().strftime("%Y-%m-%d")
-            if from_date > today:
-                logger.info("us_daily_price 已是最新")
-                return 0
-            segments = [(from_date, today)]
-            logger.info(f"增量更新 us_daily_price: {from_date} ~ {today}, {len(tickers)} tickers")
+            # 增量模式：每个 ticker 查各自最新日期
+            from django.db.models import Max
+            latest_map = dict(
+                USDailyPrice.objects.values("ticker")
+                .annotate(max_date=Max("trade_date"))
+                .values_list("ticker", "max_date")
+            )
+            default_from = f"{start_year}-01-01"
+            logger.info(f"增量更新 us_daily_price: {len(tickers)} tickers, DB 已有 {len(latest_map)} tickers 有数据")
         else:
             # 全量模式：断点续跑
             tickers = self._skip_done_tickers("us_daily_price", tickers)
             if not tickers:
                 return 0
-            end_year = datetime.now().year
-            segments = []
-            for yr in range(start_year, end_year + 1, 10):
-                seg_end = min(yr + 9, end_year)
-                segments.append((f"{yr}-01-01", f"{seg_end}-12-31"))
+            latest_map = None
+            default_from = f"{start_year}-01-01"
 
         total = 0
 
         def _fetch(ticker):
             count = 0
+            if incremental:
+                ticker_latest = latest_map.get(ticker)
+                if ticker_latest:
+                    from_date = (pd.to_datetime(str(ticker_latest)) + timedelta(days=1)).strftime("%Y-%m-%d")
+                else:
+                    from_date = default_from
+                if from_date > today:
+                    return 0
+                segments = [(from_date, today)]
+            else:
+                end_year = int(today[:4])
+                segments = []
+                for yr in range(start_year, end_year + 1, 10):
+                    seg_end = min(yr + 9, end_year)
+                    segments.append((f"{yr}-01-01", f"{seg_end}-12-31"))
+
             for seg_start, seg_end in segments:
                 data = self._fmp_get_stable(
                     "historical-price-eod/full",
