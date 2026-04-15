@@ -141,14 +141,13 @@ class USMultiFactorStrategy:
             Mom1M(), Mom3M(), Mom12M(), Rev5D(),
             # Technical
             Turn20D(), Vol20D(), Ivol(), Size(),
-            IvSkew(), PutCallRatio(),
+            # IV_SKEW, PUT_CALL_RATIO: 数据源无历史，暂不参与评分
             # Analyst
             USAnalystRating(), USAnalystCoverage(),
             EarningsSurprise(), EpsRevision(), InsiderNetBuy(),
             # Sentiment
-            PolymarketSent(),
+            # POLYMARKET_SENT, NEWS_SENTIMENT: 数据积累中，暂不参与评分
             LobbyIntensity(), GovContract(),
-            NewsSentiment(),
         ]
 
         # 等权（不做 IC 引导权重优化——样本外验证已证明 IC 权重是数据窥探）

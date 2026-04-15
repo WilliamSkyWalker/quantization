@@ -631,9 +631,9 @@ US_MIN_LISTING_DAYS = int(os.environ.get("US_MIN_LISTING_DAYS", "180"))
 # 风控
 US_MAX_SINGLE_WEIGHT = float(os.environ.get("US_MAX_SINGLE_WEIGHT", "0.10"))
 US_MAX_SECTOR_WEIGHT = float(os.environ.get("US_MAX_SECTOR_WEIGHT", "0.25"))
-US_DD_START_THRESHOLD = float(os.environ.get("US_DD_START_THRESHOLD", "0.05"))
-US_DD_MAX_THRESHOLD = float(os.environ.get("US_DD_MAX_THRESHOLD", "0.15"))
-US_DD_MIN_POSITION = float(os.environ.get("US_DD_MIN_POSITION", "0.40"))
+US_DD_START_THRESHOLD = float(os.environ.get("US_DD_START_THRESHOLD", "0.10"))
+US_DD_MAX_THRESHOLD = float(os.environ.get("US_DD_MAX_THRESHOLD", "0.25"))
+US_DD_MIN_POSITION = float(os.environ.get("US_DD_MIN_POSITION", "0.50"))
 
 # Regime
 US_REGIME_ENABLED = os.environ.get("US_REGIME_ENABLED", "1") == "1"
@@ -644,7 +644,7 @@ US_REGIME_MA_WINDOW = int(os.environ.get("US_REGIME_MA_WINDOW", "60"))
 US_USE_VOL_TARGETING = os.environ.get("US_USE_VOL_TARGETING", "1") == "1"
 US_TARGET_VOL = float(os.environ.get("US_TARGET_VOL", "0.16"))
 US_VOL_LOOKBACK_DAYS = int(os.environ.get("US_VOL_LOOKBACK_DAYS", "60"))
-US_VOL_SCALE_MIN = float(os.environ.get("US_VOL_SCALE_MIN", "0.3"))
+US_VOL_SCALE_MIN = float(os.environ.get("US_VOL_SCALE_MIN", "0.5"))
 US_VOL_SCALE_MAX = float(os.environ.get("US_VOL_SCALE_MAX", "1.5"))
 
 # 调仓
@@ -653,7 +653,7 @@ US_REBALANCE_MIN_INTERVAL = int(os.environ.get("US_REBALANCE_MIN_INTERVAL", "20"
 
 # 策略动量过滤
 US_STRATEGY_MOM_WINDOW = int(os.environ.get("US_STRATEGY_MOM_WINDOW", "120"))
-US_STRATEGY_MOM_MIN_SCALE = float(os.environ.get("US_STRATEGY_MOM_MIN_SCALE", "0.6"))
+US_STRATEGY_MOM_MIN_SCALE = float(os.environ.get("US_STRATEGY_MOM_MIN_SCALE", "0.7"))
 
 # 熊市持仓比例
 US_BEAR_HOLDINGS_RATIO = float(os.environ.get("US_BEAR_HOLDINGS_RATIO", "0.6"))

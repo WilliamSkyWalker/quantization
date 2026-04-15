@@ -72,16 +72,70 @@ class USFactorBase(ABC):
     # 回测预加载
     # ----------------------------------------------------------
     @classmethod
-    def preload_for_backtest(cls, start_date: str, end_date: str, **kwargs):
-        """
-        一次性预加载回测区间所需数据到内存（Django ORM）。
+    def _find_cache(cls, table: str, start: str, end: str) -> "Path | None":
+        """查找可用的 parquet 缓存：已有缓存范围包含请求范围即可。"""
+        from services.config import PROJECT_ROOT
+        cache_dir = PROJECT_ROOT / "cache"
+        if not cache_dir.exists():
+            return None
+        for f in cache_dir.glob(f"{table}_*.parquet"):
+            parts = f.stem.replace(f"{table}_", "").split("_")
+            if len(parts) == 2:
+                cached_start, cached_end = parts
+                if cached_start <= start and cached_end >= end:
+                    return f
+        return None
 
-        预加载后 get_latest_financial / get_price_history / get_close_on_date
-        自动从内存过滤，跳过 DB 查询。
+    @classmethod
+    def _load_or_query(cls, table: str, model, cols: list[str],
+                       start: str, end: str, date_field: str,
+                       order_by: list[str] | None = None) -> pd.DataFrame:
+        """
+        先找可用 parquet 缓存（范围包含即命中），没有则查 Django ORM 后存缓存。
         """
         import time
+        from services.config import PROJECT_ROOT
 
-        # 1. us_financial_data（按需：只加载 filing_date 在回测区间前 5 年内的数据）
+        hit = cls._find_cache(table, start, end)
+        if hit:
+            t0 = time.time()
+            df = pd.read_parquet(hit)
+            # 内存过滤到请求范围
+            if date_field in df.columns:
+                df[date_field] = pd.to_datetime(df[date_field])
+                df = df[(df[date_field] >= start) & (df[date_field] <= end)]
+            logger.info(f"US 预加载 {table}: {len(df)} 行 (parquet 缓存 {hit.name}, {time.time()-t0:.1f}s)")
+            return df
+
+        t0 = time.time()
+        qs = model.objects.filter(**{
+            f"{date_field}__gte": start,
+            f"{date_field}__lte": end,
+        })
+        if order_by:
+            qs = qs.order_by(*order_by)
+        df = pd.DataFrame(qs.values_list(*cols), columns=cols)
+        logger.info(f"US 预加载 {table}: {len(df)} 行 (DB 查询, {time.time()-t0:.1f}s)")
+
+        if not df.empty:
+            cache_dir = PROJECT_ROOT / "cache"
+            cache_dir.mkdir(exist_ok=True)
+            path = cache_dir / f"{table}_{start}_{end}.parquet"
+            df.to_parquet(path, index=False)
+            logger.info(f"  → 已缓存到 {path.name}")
+        return df
+
+    @classmethod
+    def preload_for_backtest(cls, start_date: str, end_date: str, **kwargs):
+        """
+        一次性预加载回测区间所需数据到内存（Django ORM + parquet 缓存）。
+
+        首次从 DB 加载后缓存到本地 parquet，后续直接读文件。
+        """
+        import time
+        from pathlib import Path
+
+        # 1. us_financial_data
         t0 = time.time()
         fin_cols = [
             "ticker", "period", "date", "filing_date",
@@ -92,12 +146,9 @@ class USFactorBase(ABC):
             "weighted_average_shs_out",
         ]
         fin_start = (pd.to_datetime(start_date) - pd.Timedelta(days=5*365)).strftime("%Y-%m-%d")
-        df_fin = pd.DataFrame(
-            USFinancialData.objects.filter(
-                filing_date__gte=fin_start,
-                filing_date__lte=end_date,
-            ).values_list(*fin_cols),
-            columns=fin_cols,
+        df_fin = cls._load_or_query(
+            "us_financial_data", USFinancialData, fin_cols,
+            fin_start, end_date, "filing_date",
         )
         if not df_fin.empty:
             df_fin["filing_date"] = pd.to_datetime(df_fin["filing_date"])
@@ -121,21 +172,17 @@ class USFactorBase(ABC):
             df_fin["roe"] = df_fin["net_income"] / equity
             df_fin["weighted_avg_shares"] = df_fin["weighted_average_shs_out"]
         cls._static_cache["_bulk_financial"] = df_fin
-        logger.info(f"US 预加载 us_financial_data: {len(df_fin)} 行, {time.time()-t0:.1f}s")
 
         # 2. us_daily_price（回测区间 + 400 天前移量）
-        t0 = time.time()
         price_start = (pd.to_datetime(start_date) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
         price_cols = [
             "ticker", "trade_date", "open", "high", "low",
             "close", "adj_close", "volume", "change_percent",
         ]
-        df_price = pd.DataFrame(
-            USDailyPrice.objects.filter(
-                trade_date__gte=price_start,
-                trade_date__lte=end_date,
-            ).order_by("ticker", "trade_date").values_list(*price_cols),
-            columns=price_cols,
+        df_price = cls._load_or_query(
+            "us_daily_price", USDailyPrice, price_cols,
+            price_start, end_date, "trade_date",
+            order_by=["ticker", "trade_date"],
         )
         if not df_price.empty:
             df_price["trade_date"] = pd.to_datetime(df_price["trade_date"])
@@ -143,7 +190,6 @@ class USFactorBase(ABC):
             df_price["close"] = pd.to_numeric(df_price["close"], errors="coerce")
             df_price["adj_close"] = df_price["adj_close"].fillna(df_price["close"])
         cls._static_cache["_bulk_daily"] = df_price
-        logger.info(f"US 预加载 us_daily_price: {len(df_price)} 行, {time.time()-t0:.1f}s")
 
         # 3. S&P 500 指数（IVOL 因子用）
         t0 = time.time()
