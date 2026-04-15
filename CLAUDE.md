@@ -40,7 +40,7 @@ Claude Code 编码规范。所有代码变更必须遵守。
 - **所有修改必须系统性检查** — `grep` 找全、逐一改、`grep` 确认零残留
 - **所有修改必须测试** — 用实际数据运行验证，涉及 DB 写入的必须 `SELECT COUNT(*)` 确认入库
 - **不用 pytest** — 测试用端到端自动化脚本（真实 API + 真实 DB），不用 mock
-- **数据库读写必须使用 SQLAlchemy ORM**，禁止手写 raw SQL。写入用 `sqlalchemy.dialects.postgresql.insert` + `on_conflict_do_update`，查询用 ORM query 或 `session.query()`
+- **数据库读写必须使用 Django ORM**，禁止手写 raw SQL。模型定义在 `data/models/`（managed=False），写入用 `data.upsert.UpsertManager`（查询+分流 create/update），查询用 `Model.objects.filter().values_list()`。回测热路径数据通过 parquet 缓存（`cache/` 目录）加速
 - **FMP 数据导入禁止 rename 列名** — DB 列名必须和 `_camel_to_snake()` 转换结果完全一致，不允许手动起别名（如 `roe`/`rd_expenses`）。唯一例外是 `date→trade_date`（避免和 unique key 冲突）
 - **禁止使用 Agent 子进程** — 所有工作在主会话中完成
 - Matplotlib 必须在导入 `pyplot` 前调用 `matplotlib.use("Agg")`
