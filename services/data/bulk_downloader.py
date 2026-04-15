@@ -231,6 +231,8 @@ class BulkDownloader:
         return remaining
 
     def _skip_if_table_has_data(self, table: str, min_rows: int = 10) -> bool:
+        if self._incremental:
+            return False
         from django.db import connection
         try:
             with connection.cursor() as cursor:
