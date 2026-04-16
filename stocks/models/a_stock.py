@@ -716,7 +716,7 @@ class AIndustryClass(models.Model):
     class Meta:
         managed = False
         db_table = "a_industry_class"
-        unique_together = (("ts_code", "src", "level"),)
+        unique_together = (("ts_code", "src", "level", "index_code", "in_date"),)
 
 
 # ============================================================
@@ -778,7 +778,7 @@ class AInsiderTrade(models.Model):
     change_date = models.DateField()                                            # 变动开始日
     change_end_date = models.DateField(null=True)                               # 变动截止日
     ann_date = models.DateField(null=True)                                      # 公告日
-    holder_name = models.CharField(max_length=200)                              # 股东名称
+    holder_name = models.CharField(max_length=500)                              # 股东名称
     holder_type = models.CharField(max_length=50, blank=True, null=True)        # 增减方向
     change_vol = models.FloatField(null=True)                                   # 变动数量
     change_ratio = models.FloatField(null=True)                                 # 占总股本比例
@@ -794,7 +794,7 @@ class AInsiderTrade(models.Model):
     class Meta:
         managed = False
         db_table = "a_insider_transaction"
-        unique_together = (("ts_code", "change_date", "holder_name"),)
+        unique_together = (("ts_code", "change_date", "holder_name", "holder_type"),)
 
 
 # ============================================================

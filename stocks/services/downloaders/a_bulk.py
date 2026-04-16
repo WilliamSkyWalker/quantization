@@ -189,7 +189,10 @@ class AShareBulkDownloader:
         """从 a_stock_basic 取 ts_code 列表。"""
         qs = AStockBasic.objects.all()
         if active_only:
-            qs = qs.filter(list_status="L")
+            # list_status="L" 或 delist_date 为空（兜底：Tushare 可能不返回 list_status 列）
+            from django.db.models import Q
+            qs = qs.filter(Q(list_status="L") | Q(list_status__isnull=True) | Q(list_status=""))
+            qs = qs.filter(delist_date__isnull=True)
         return list(qs.values_list("ts_code", flat=True))
 
     def _get_ticker_latest(self, model, date_field: str = "end_date") -> dict[str, str]:
@@ -257,6 +260,11 @@ class AShareBulkDownloader:
         logger.info("下载 A 股股票列表 (stock_basic, 全字段)...")
         df_listed = _tushare_call(self._pro, "stock_basic", self._limiter, list_status="L")
         df_delisted = _tushare_call(self._pro, "stock_basic", self._limiter, list_status="D")
+        # list_status 是查询参数不是返回列，手动标记
+        if not df_listed.empty:
+            df_listed["list_status"] = "L"
+        if not df_delisted.empty:
+            df_delisted["list_status"] = "D"
         df = pd.concat([df_listed, df_delisted], ignore_index=True)
 
         if df.empty:
@@ -530,7 +538,8 @@ class AShareBulkDownloader:
                         df_mem[col] = df_mem[col].apply(lambda x: x.date() if pd.notna(x) else None)
                 keep = ["ts_code", "src", "level", "index_code", "index_name", "in_date", "out_date", "is_new"]
                 df_mem = df_mem[[c for c in keep if c in df_mem.columns]]
-                self._um.upsert_df(AIndustryClass, df_mem, ["ts_code", "src", "level"])
+                df_mem = df_mem.drop_duplicates(subset=["ts_code", "src", "level", "index_code", "in_date"], keep="last")
+                self._um.upsert_df(AIndustryClass, df_mem, ["ts_code", "src", "level", "index_code", "in_date"])
                 total += len(df_mem)
         self._um.flush()
         logger.info(f"行业分类完成: {total} 条")
@@ -726,6 +735,8 @@ class AShareBulkDownloader:
     def _dl_pmi(self, sd, ed):
         df = _tushare_call(self._pro, "cn_pmi", self._limiter, start_m=sd[:6], end_m=ed[:6])
         if df.empty: return 0
+        # cn_pmi 列名全大写（MONTH, PMI010000 等），统一转小写
+        df.columns = [c.lower() for c in df.columns]
         recs = []
         for _, r in df.iterrows():
             d = self._month_to_date(r["month"])
@@ -945,11 +956,22 @@ class AShareBulkDownloader:
             raise ImportError("akshare 未安装，pip install akshare")
 
         logger.info("下载高管持股变动 (AkShare stock_ggcg_em)...")
-        try:
-            df = ak.stock_ggcg_em(symbol="全部")
-        except Exception as e:
-            logger.error(f"stock_ggcg_em 失败: {e}")
-            return 0
+        max_retries = 3
+        df = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                df = ak.stock_ggcg_em(symbol="全部")
+                if df is not None and not df.empty:
+                    break
+            except Exception as e:
+                logger.warning(f"stock_ggcg_em 第{attempt}次失败: {e}")
+                if attempt < max_retries:
+                    wait = 30 * attempt
+                    logger.info(f"等待 {wait}s 后重试...")
+                    time.sleep(wait)
+                else:
+                    logger.error(f"stock_ggcg_em {max_retries} 次重试后仍失败")
+                    return 0
         if df is None or df.empty:
             logger.warning("高管持股变动空")
             return 0
@@ -968,17 +990,21 @@ class AShareBulkDownloader:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        required = ["ts_code", "change_date", "holder_name"]
+        required = ["ts_code", "change_date", "holder_name", "holder_type"]
         missing = [c for c in required if c not in df.columns]
         if missing:
             logger.warning(f"缺少必要列 {missing}，无法 dropna")
             return 0
         df = df.dropna(subset=required)
+        # 截断超长 holder_name（varchar 500）
+        df["holder_name"] = df["holder_name"].astype(str).str[:500]
+        # 批内去重
+        df = df.drop_duplicates(subset=required, keep="last")
         if df.empty:
             logger.warning("清洗后空")
             return 0
 
-        self._um.upsert_df(AInsiderTrade, df, ["ts_code", "change_date", "holder_name"])
+        self._um.upsert_df(AInsiderTrade, df, ["ts_code", "change_date", "holder_name", "holder_type"])
         self._um.flush()
         logger.info(f"高管持股变动: {len(df)} 条")
         return len(df)
@@ -1028,6 +1054,9 @@ class AShareBulkDownloader:
         t0 = time.time()
         logger.info("=== AkShare 全量 ===")
         results["research_report"] = self.download_akshare_research_reports()
+        # 冷却 30 秒：研报密集请求后立刻跑 insider 会触发东方财富反爬
+        logger.info("研报完成，冷却 30s 再跑 insider（避免东方财富连接限制）...")
+        time.sleep(30)
         results["insider"] = self.download_akshare_insider()
         elapsed = time.time() - t0
         logger.info(f"AkShare 全量完成: {elapsed:.0f}s — {results}")
