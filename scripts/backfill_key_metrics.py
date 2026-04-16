@@ -23,7 +23,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.config import LOG_LEVEL
-from services.data.database import DatabaseManager, USKeyMetric
+# DatabaseManager 已废弃, USKeyMetric
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
@@ -72,7 +72,7 @@ def main():
     parser.add_argument("--migrate-only", action="store_true", help="只做 DDL 迁移")
     args = parser.parse_args()
 
-    db = DatabaseManager()
+    db = None  # DatabaseManager 已废弃
 
     # Step 1: DDL 迁移
     logger.info("=" * 60)
@@ -85,7 +85,7 @@ def main():
         return
 
     # Step 2: 回填数据
-    from stocks.services.downloaders.bulk import BulkDownloader
+    from stocks.services.downloaders.us_bulk import BulkDownloader
     dl = BulkDownloader(db)
 
     tickers = args.tickers or None

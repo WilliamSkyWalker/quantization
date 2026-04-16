@@ -23,8 +23,8 @@ from services.config import (
     SKIP_ANALYSIS_SOURCES,
     LOG_LEVEL,
 )
-from services.data.database import DatabaseManager
-from services.factors.base import FactorBase
+# DatabaseManager 已废弃
+from stocks.services.factors.a_base import FactorBase
 from sentiment.services.scrapers.keyword_analyzer import KeywordAnalyzer
 from sentiment.services.scrapers.llm_analyzer import LLMAnalyzer
 
@@ -40,7 +40,7 @@ class SentimentAnalyzer:
     舆情分析调度器。
 
     用法:
-        db = DatabaseManager()
+        db = None  # DatabaseManager 已废弃
         analyzer = SentimentAnalyzer(db)
         stats = analyzer.analyze_pending()
         daily = analyzer.get_daily_score("2025-01-31")

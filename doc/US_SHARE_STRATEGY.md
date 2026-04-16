@@ -134,17 +134,38 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 
 EP = Earnings-to-Price，传统盈利收益率。BP = Book-to-Price，账面价值比。两者在 2012-2023 截面 IC 为负（成长 > 价值时代），由滚动 IC 自动反转。DIV_YIELD 为股息率，BUYBACK_YIELD 为回购收益率（share_repurchased / market_cap）。
 
-#### Quality 大类（5 因子，永不反转）
+#### Quality 大类（15 因子，已迁移到 AlphaSignal 架构）
 
-| 因子 | 代码 | 计算公式 | 数据源 | 回看窗口 | 行业内 |ICIR| |
-|------|------|---------|--------|---------|------------|
-| **ROE_TTM** | `quality.RoeTTM` | 最新季度 net_income / total_equity | FMP IS+BS | 最新季度 | 0.07 弱 |
-| **GROSS_MARGIN** | `quality.GrossMargin` | 最新季度 gross_profit / revenue | FMP IS | 最新季度 | 0.09 弱 |
-| **PROFIT_STB** | `quality.ProfitStability` | -CV(近8Q 净利润 YoY 增速) | FMP IS (季度) | 8Q | 0.12 弱 |
-| **MARGIN_TREND** | `quality.MarginTrend` | 最新 gross_margin - 上季度 gross_margin | FMP IS (季度) | 2Q | 0.14 弱 |
-| **ACCRUALS** | `accruals.Accruals` | (net_income - operating_CF) / total_assets | FMP IS+CF+BS | 4Q TTM | **0.17 有效** |
+**架构：** 全部在 `stocks/services/factors/signals/quality/` 下，继承 `AlphaSignal` 基类，通过 `@register` 装饰器自动注册。每个因子携带元数据：`version / horizon / expected_icir / status / inherent_direction / ic_window_months / data_deps`。方向由 `inherent_direction` 锁定（+1=永不反转，-1=固有反向，0=滚动 IC 决定）。
 
-质量因子锁定正向（+1.0），永不反转。PROFIT_STB 内部已取反（-CV，高稳定性 = 高值）。ACCRUALS 为应计异常：净利润与经营现金流的差异越大，盈利质量越差（因子值越低）。
+**Legacy 5 个**（旧因子搬进 `signals/quality/legacy.py`，行为不变只加元数据）：
+
+| 因子 | 类 | 计算公式 | 方向 | 回看 | 行业内 |ICIR| |
+|------|----|--------|------|------|------------|
+| **ROE_TTM** | `legacy.RoeTTM` | net_income / total_equity（最新季度）| +1 | 1Q | 0.07 弱 |
+| **GROSS_MARGIN** | `legacy.GrossMargin` | gross_profit / revenue（最新季度）| +1 | 1Q | 0.09 弱 |
+| **PROFIT_STB** | `legacy.ProfitStability` | -CV(近 8Q 净利润 YoY 增速) | +1 | 8Q | 0.12 弱 |
+| **MARGIN_TREND** | `legacy.MarginTrend` | 最新 gross_margin - 上季度 gross_margin | +1 | 2Q | 0.14 弱 |
+| **ACCRUALS** | `legacy.Accruals` | -(net_income - FCF) / total_assets | +1 | 4Q TTM | **0.17 有效** |
+
+**新增 10 个**（Quality 补强）：
+
+| 因子 | 类 | 计算公式 | 方向 | 回看 | 数据源 | 学术依据 |
+|------|----|--------|------|------|--------|---------|
+| **PIOTROSKI_F** | `piotroski.PiotroskiF` | 9 项财务体检 binary signals 求和（0-9） | +1 | 5Q | us_financial_data | Piotroski 2000 JAR |
+| **ALTMAN_Z** | `altman.AltmanZ` | 1.2·WC/TA + 1.4·RE/TA + 3.3·EBIT/TA + 0.6·MV/TL + 1.0·S/TA | +1 | 1Q | us_financial_data + us_enterprise_value | Altman 1968 JF |
+| **OHLSON_O** | `ohlson.OhlsonO` | Ohlson 9 输入 logit 公式（破产概率） | **-1** | 2Q | us_financial_data | Ohlson 1980 JAR |
+| **BENEISH_M** | `beneish.BeneishM` | 8 ratios（DSRI/GMI/AQI/SGI/DEPI/SGAI/LVGI/TATA）线性组合 | **-1** | 5Q | us_financial_data | Beneish 1999 FAJ |
+| **QMJ_LEVERAGE** | `qmj_safety.QmjLeverage` | total_debt / total_stockholders_equity | **-1** | 1Q | us_financial_data | AQR 2019 RFS |
+| **QMJ_EARNINGS_VOL** | `qmj_safety.QmjEarningsVol` | std(近 20Q net_income) / \|mean\| | **-1** | 20Q | us_financial_data | AQR 2019 |
+| **QMJ_ROE_VOL** | `qmj_safety.QmjRoeVol` | std(近 20Q ROE) | **-1** | 20Q | us_financial_data | AQR 2019 |
+| **QMJ_NET_PAYOUT** | `qmj_payout.QmjNetPayout` | (TTM 分红 + 回购 − 发行) / market_cap | +1 | 4Q TTM | us_financial_data + us_enterprise_value | AQR 2019 |
+| **CASH_CONV_CYCLE** | `ccc.CashConversionCycle` | DSO + DIO − DPO | **-1** | 1Q | us_key_metric | — |
+| **EARNINGS_PERSISTENCE** | `persistence.EarningsPersistence` | AR(1) 系数 of 近 8Q EPS | +1 | 8Q | us_financial_data | Sloan 1996 |
+
+**注：** 数据存取方式——新 Quality 因子直接查 Django ORM（`AlphaSignal.fetch_financial_latest / fetch_financial_history / fetch_key_metric_latest / pick_year_ago`），不经过 `preload_for_backtest` 的 parquet 缓存（后续批次再统一引入缓存层）。
+
+2 个月验证（2024-11-01 → 2024-12-31）覆盖率：PIOTROSKI_F 70%、ALTMAN_Z 63%、OHLSON_O 66%、BENEISH_M 50%、QMJ 系列 63-65%、CASH_CONV_CYCLE 68%、EARNINGS_PERSISTENCE 64%。极值会在 `processor.winsorize_mad(n=5)` 环节自动剪掉。验证报告在 `output/signal_validation/*.md`。
 
 #### Growth 大类（3 因子）
 
@@ -156,7 +177,9 @@ EP = Earnings-to-Price，传统盈利收益率。BP = Book-to-Price，账面价�
 
 成长因子衡量盈利和收入的历史增速。NET_PROFIT_YOY 行业内几乎无效（|ICIR|=0.05），信号主要来自行业间差异。
 
-#### Momentum 大类（4 因子）
+#### Momentum 大类（10 因子，2026-04-15 新增 6 个 AlphaSignal 进阶因子）
+
+**Legacy 4 个**（旧架构，待迁移）：
 
 | 因子 | 代码 | 计算公式 | 数据源 | 回看窗口 | 行业内 |ICIR| |
 |------|------|---------|--------|---------|------------|
@@ -165,7 +188,31 @@ EP = Earnings-to-Price，传统盈利收益率。BP = Book-to-Price，账面价�
 | **MOM_12M** | `momentum.Mom12M` | 近12个月收益率（跳过最近1月） | 月末价格 | 12M | 0.11 弱 |
 | **REV_5D** | `momentum.Rev5D` | 近5日累计收益率（短期反转） | 日线价格 | 5 交易日 | **0.15 有效** |
 
-MOM_12M 是经典的 Jegadeesh-Titman 动量（skip-1-month），避免短期反转噪音。REV_5D 是短期反转因子，行业内有效（|ICIR|=0.15），信号衰减快（滚动窗口 6M）。
+**新增 6 个**（AlphaSignal 架构，`signals/momentum/us_*.py`）：
+
+| 因子 | 类 | 计算公式 | 方向 | 回看 | 数据源 | 学术依据 |
+|------|----|--------|------|------|--------|---------|
+| **PRICE_52W_HIGH** | `us_high_52w.Price52WHigh` | 当前 adj_close / 过去 252 交易日 max(adj_close) | +1 | 380 天 | us_daily_price | George-Hwang 2004 JF |
+| **RESIDUAL_MOM_FF3** | `us_residual_mom.ResidualMomFF3` | OLS: r_ex = α + β₁·MktRF + β₂·SMB + β₃·HML + ε，取 ε 累加（skip 最近 1 月） | +1 | 430 天 + FF5 缓存 | us_daily_price + ff5_daily.csv | Blitz-Huij-Martens 2011 JEF |
+| **SUE_PEAD** | `us_sue_pead.SuePead` | (eps_actual − eps_estimated) / std(过去 8Q surprise)，仅在财报后 60 天内 | +1 | 8Q | us_earnings_surprise | Foster-Olsen-Shevlin 1984 + Bernard-Thomas 1989 |
+| **INDUSTRY_MOM** | `us_industry_mom.IndustryMomentum` | 个股 12M 收益 − 所属 industry 中位数 12M 收益 | +1 | 380 天 | us_daily_price + us_industry_class | Moskowitz-Grinblatt 1999 JF |
+| **FROG_IN_PAN** | `us_frog_in_pan.FrogInPan` | sign(R₁₂ₘ) × (%neg_days − %pos_days) × \|R₁₂ₘ\| | +1 | 380 天 | us_daily_price | Da-Gurun-Warachka 2014 RFS |
+| **TSMOM** | `us_tsmom.Tsmom` | 12M 累计收益（方向由滚动 IC 决定） | **0** | 380 天 | us_daily_price | Moskowitz-Ooi-Pedersen 2012 JFE |
+
+**关键设计要点：**
+- **FF5 数据**：通过 `AlphaSignal.fetch_ff5_factors()` 从 `output/ff5_data/ff5_daily.csv` 加载（Kenneth French Data Library，1963-2026 日频，已缓存）
+- **PEAD 事件窗口**：SUE_PEAD 只在最近一次财报公布后 60 天内给信号，超出窗口返 NaN（避免跨季混淆）
+- **TSMOM 方向不锁**：与其他动量因子不同，TSMOM 在不同 Regime 可能反转（牛市趋势 vs 熊市反转），让滚动 IC 自动决定
+- **数据存取**：全部 ORM 直查（无 preload/parquet 缓存），后续"统一缓存"批次再统一接入
+
+**2 个月样本**（2024-12-31 截面，5 mega-cap）冒烟通过：
+- PRICE_52W_HIGH：AAPL 0.97（接近高点）/ TSLA 0.84（远离）✓
+- TSMOM：NVDA +168% / TSLA +60% / AAPL +28%（对得上 2024 实际涨幅）✓
+- FROG_IN_PAN：5 票全负（mega-cap 都是"突破型"而非小步累积）✓
+- SUE_PEAD：仅 NVDA 在 60 天 PEAD 窗口内
+- RESIDUAL_MOM_FF3：NVDA +0.09（剔 FF3 后仍正残差）/ AAPL -0.06（被大盘解释完）✓
+
+完整 2 个月全 universe 验证暂搁置（速度问题等"统一缓存"批次解决）。
 
 #### Technical 大类（6 因子）
 
@@ -896,8 +943,59 @@ v4 催化剂重建回测失败（UNION + 20 只 + always-on → α 从 6.66% 降
 - ICIR > 0.3 → 权重 2.0，0.15-0.3 → 1.0，< 0.15 → 0.5
 - 粗粒度分级（低自由度），IS/OOS 对比验证
 
+**P0.5 — 工业级架构补强（与 P1 因子并行，最大架构缺口）：**
+
+当前 Top-N + Softmax + 行业硬 cap 15% 是启发式，缺正规量化基金两个核心组件——协方差矩阵和 mean-variance 优化器。补上后能解决：换手率 8x → 2-3x、β_rmw=-1.01 失控 → 风格中性、行业硬 cap → 软约束（精细控制）。
+
+- **Tier 1（必做，1-2 周）：**
+  - 风险模型：252D 日收益 + Ledoit-Wolf shrinkage → N×N 协方差矩阵 Σ（sklearn.covariance.LedoitWolf，~50 行）
+  - MVO 优化器：cvxpy + OSQP（开源），目标 `max μ̂'w − λ·w'Σw − γ·||w − w_prev||₁`，约束行业/风格/单股流动性，替换 `_select_from_scores()` 中的 Top-N + Softmax，保留 Top-N 作为求解失败 fallback
+  - 验证：跑 2012-2026 完整回测对比，期望换手率降 60%+，|β_rmw| < 0.5，Sharpe 不降
+- **Tier 2（中期 1 月）：**
+  - PCA 统计风险因子（前 20-30 主成分作 Barra 开源替代，B·F·B' + Δ 分解）
+  - 多周期信号合成（日/周/月频分层，不同 horizon 不同 decay）
+  - Alpha Bayesian shrinkage（θ 由历史 IC 估计，抑制极值持仓）
+  - 交易成本/市场冲击模型（线性冲击 cost = spread/2 + κ·|Δw|/ADV，写入优化器）
+- **Tier 3（长期）：**
+  - Alpha Capture System（因子模块化 + 版本号 + 独立 IC 监控 + 灰度上线）
+  - Barra USE5 / Axioma 对标自建模型
+  - 真实执行层（VWAP/TWAP/IS 算法回测，IBKR/PB FIX 替换 Alpaca）
+  - Barra-style P&L 归因（每日拆 factor return × β + specific return）
+
+**P1 — 因子全面补强（17 大类，~70 个新因子）：**
+
+按 ROI 排序补强当前 31 因子的盲区。完整清单见 memory。
+
+- **T1（现有 FMP 数据立即可做，最高 ROI）：**
+  - Quality 完整化：Piotroski F-Score / Beneish M-Score / Altman Z-Score / Ohlson O-Score / QMJ 完整四子项 / Earnings Persistence / CCC
+  - Value 进阶：Asset Growth 反向（Cooper 异象）/ Net Operating Assets / Composite Equity Issuance / Intangible-Adjusted B/P / EV/EBIT / EV/FCF / Shareholder Yield
+  - Momentum 进阶：Residual Momentum（剔 FF3 残差）/ 52-Week High Proximity / Industry Momentum / SUE/PEAD 漂移 / Frog-in-the-Pan / TSMOM
+  - 防御：BAB（Frazzini-Pedersen）/ MAX 因子 / Downside Beta / Coskewness
+  - 流动性：Amihud Illiquidity / Pastor-Stambaugh
+  - 分析师进阶：Recommendation Δ / Analyst Dispersion / Days Since Earnings / Implied Earnings Growth
+  - 空头侧补强：Short Interest + Days-to-Cover / 融券费率 / Hedge Fund Crowding / 13F Δ / Smart Money Index
+- **T2（需补数据源，中等成本）：**
+  - 期权：IV Skew / Put-Call Ratio / IV Rank / RNS / VRP / Option-Implied Beta
+  - 微结构：Realized Vol/Skew/Kurt / OFI / Kyle's λ / VWAP Deviation
+  - NLP：FinBERT News Sentiment / 10-K Loughran-McDonald / 10-K YoY 文本相似度 / Earnings Call Tone（FMP transcript 已可下载）/ WSB Mention
+  - 另类：Google Trends SVI / Patent Count + Citations（Kogan 因子）/ Job Postings / App Downloads / Glassdoor
+  - 宏观增强：VVIX / SKEW Index / TED/OIS Spread / Inflation Surprise / GS FCI / Macro PCA
+- **T3（探索性）：**
+  - ESG/治理：MSCI ESG / Carbon Intensity / Board Independence / G-Index
+  - Crowding：HF Crowding Score / Factor Crowding / Pairwise Correlation Spike
+  - ML 生成：Autoencoder 残差（Gu-Kelly-Xiu）/ XGBoost SHAP 交互因子 / BERT 10-K embedding / K-line CNN
+  - 跨资产扩展：固收（Carry / CDS-Bond Basis）+ 加密（MVRV/NVT/Funding Rate）
+
+**P3 — 方法论强化（与因子并行）：**
+- Fama-MacBeth 截面回归测每个因子的截面溢价 + t 值
+- 多重检验校正：T 阈值 ≥ 3.0（Harvey-Liu-Zhu 2016），不用 2.0
+- Gram-Schmidt 因子正交化去多重共线
+- Barra 风格因子分解：把当前 alpha 拆成风格暴露 + 残差 alpha
+- 半衰期加权 IC（近期权重高）
+- Regime-dependent 因子轮动（HMM / 宏观状态机）
+
 **P4 — 回测鲁棒性（穿插进行）：**
-- 换手率：buffer zone（不跌出前 N×1.5 不换出）或换手惩罚，目标 300%→150-200%
+- 换手率：buffer zone（不跌出前 N×1.5 不换出）或换手惩罚，目标 300%→150-200%（MVO 优化器自动解决，P0.5 完成后此项可降级）
 - 滑点：T+1 VWAP + 10bps / 15bps，测 alpha 衰减幅度
 - Regime：Credit Veto / 拥挤度参数 ±50% 扰动测试
 

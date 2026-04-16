@@ -20,14 +20,14 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "core.settings")
 django.setup()
 
 from datetime import datetime
-from services.data.database import DatabaseManager
+# DatabaseManager 已废弃
 from sentiment.services.polymarket.models import PolymarketEvent, PolymarketAlert
 from sentiment.services.polymarket.alert_manager import AlertManager
 
 
 def main():
     # 1. 初始化 DB
-    db = DatabaseManager()
+    db = None  # DatabaseManager 已废弃
     db.init_tables()
     session = db.get_session()
 

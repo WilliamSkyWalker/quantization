@@ -10,7 +10,7 @@ from sentiment.services.polymarket.history import PolymarketHistoryDownloader
 from sentiment.services.polymarket.backtester import PolymarketBacktester
 from sentiment.services.polymarket.polymarket_pnl_analyzer import PolymarketPnlAnalyzer
 from sentiment.services.polymarket.a_share_backtester import AShareBacktester
-from services.data.database import DatabaseManager
+# DatabaseManager 已废弃
 from sentiment.services.polymarket.models import PolymarketEvent
 from tasks.manager import task_manager
 
@@ -21,7 +21,7 @@ _history_downloader = PolymarketHistoryDownloader()
 _backtester = PolymarketBacktester()
 _pnl_analyzer = PolymarketPnlAnalyzer()
 _a_share_backtester = AShareBacktester()
-_db = DatabaseManager()
+_db = None  # DatabaseManager 已废弃
 
 
 @api_view(['POST'])

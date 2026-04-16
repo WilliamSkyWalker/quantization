@@ -17,7 +17,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from services.config import POLYMARKET_LLM_COOLDOWN, LOG_LEVEL
-from services.data.database import DatabaseManager
+# DatabaseManager 已废弃
 from sentiment.services.polymarket.models import PolymarketAlert
 from sentiment.services.polymarket.event_analyzer import EventAnalyzer
 
@@ -29,7 +29,7 @@ class AlertManager:
     """告警管理器：去重、LLM 分析、持久化、WebSocket 推送。"""
 
     def __init__(self):
-        self._db = DatabaseManager()
+        self._db = None  # DatabaseManager 已废弃
         self._analyzer = EventAnalyzer()
         # 去重缓存: event_slug (或 condition_id) -> last_trigger_timestamp
         # 同一事件的所有 market 共享冷却，不再按 alert_type 区分

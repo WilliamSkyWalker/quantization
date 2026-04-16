@@ -4,14 +4,14 @@ import logging
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from services.data.database import DatabaseManager
+# DatabaseManager 已废弃
 from tasks.manager import task_manager
 
 logger = logging.getLogger(__name__)
 
 
 def _get_db():
-    db = DatabaseManager()
+    db = None  # DatabaseManager 已废弃
     db.init_tables()
     return db
 
@@ -68,7 +68,7 @@ def sentiment_status(request):
     try:
         rr_df = db.query(
             "SELECT COUNT(*) as cnt, MIN(report_date) as earliest, MAX(report_date) as latest "
-            "FROM research_report"
+            "FROM a_research_report"
         )
         if not rr_df.empty and rr_df['cnt'].iloc[0] > 0:
             db_counts['research_report'] = {
@@ -200,7 +200,7 @@ def _query_research_reports(db, start_date, end_date, keyword, page, page_size, 
 
     try:
         total_df = db.query(
-            f"SELECT COUNT(*) as cnt FROM research_report {where}",
+            f"SELECT COUNT(*) as cnt FROM a_research_report {where}",
             params=params,
         )
         total = int(total_df['cnt'].iloc[0])
@@ -215,7 +215,7 @@ def _query_research_reports(db, start_date, end_date, keyword, page, page_size, 
             f"CONCAT(rating, CASE WHEN rating_score IS NOT NULL THEN CONCAT('(', rating_score, ')') ELSE '' END) as category, "
             f"CONCAT(analyst, ' - ', institution) as summary, "
             f"updated_at as scraped_at "
-            f"FROM research_report {where} "
+            f"FROM a_research_report {where} "
             f"ORDER BY report_date DESC LIMIT :limit OFFSET :offset",
             params={**params, 'limit': page_size, 'offset': offset},
         )

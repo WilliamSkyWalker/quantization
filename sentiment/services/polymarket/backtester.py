@@ -30,7 +30,7 @@ BACKTEST_EXCLUDE_CATEGORIES = {"sports", "pop-culture", "crypto"}  # 已迁移�
 RESOLUTION_YES_THRESHOLD = 0.90  # 价格 ≥ 此值视为 YES 出结果
 RESOLUTION_NO_THRESHOLD = 0.10   # 价格 ≤ 此值视为 NO 出结果
 
-from services.data.database import DatabaseManager
+# DatabaseManager 已废弃
 from sentiment.services.polymarket.models import PolymarketEvent, PolymarketPriceSnapshot, PolymarketAlert
 from sentiment.services.polymarket.event_analyzer import EventAnalyzer
 from tasks.manager import task_manager
@@ -58,7 +58,7 @@ class PolymarketBacktester:
     """
 
     def __init__(self):
-        self._db = DatabaseManager()
+        self._db = None  # DatabaseManager 已废弃
         self._analyzer = EventAnalyzer()
 
     def run(

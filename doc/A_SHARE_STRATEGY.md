@@ -1,5 +1,17 @@
 # A股多因子量化选股系统 — 算法文档
 
+> **架构注解（P1 迁移已完成，与美股按 app 对齐）：**
+> - 数据：`stocks/models/a_stock.py`（20 个 Django ORM models, managed=False）
+> - 下载：`stocks/services/downloaders/a_tushare_*.py + a_akshare_*.py`（Tushare 全字段保留）
+> - 股票池：`stocks/services/a_cleaner.py`（`get_clean_universe / preload_clean_universes`）
+> - 因子：`stocks/services/factors/a_*.py`（`a_base.py` + value/quality/growth/momentum/technical/dividend/commodity/macro/sentiment/research/processor/evaluation 共 13 文件）
+> - 策略 + 回测：`backtest/services/a_strategy.py / a_engine.py / a_regime.py`
+> - 风控：`trading/services/a_risk.py`
+> - 模拟盘：`trading/services/a_paper_trader.py`（持仓/交易/净值持久化到 paper_*）
+> - 实盘（可选）：`trading/services/a_gm_trader.py`（掘金量化）
+> - 绩效报告：`trading/services/monitor/{performance,report}.py`（跨市场通用）
+> - 命令入口：`python3 manage.py bulk_import --source tushare/akshare`、`python3 manage.py data_update --market cn`、`python3 manage.py backtest --market cn`
+
 ## 目录
 
 1. [系统概览](#1-系统概览)

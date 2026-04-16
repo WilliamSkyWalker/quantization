@@ -67,10 +67,10 @@ class PolymarketScraper(BaseScraper):
         Yields:
             list[dict] — 当天的文章列表（附带 _analysis 元数据）。
         """
-        from services.data.database import DatabaseManager
+        # DatabaseManager 已废弃
         from sentiment.services.polymarket.models import PolymarketAlert, PolymarketEvent
 
-        db = DatabaseManager()
+        db = None  # DatabaseManager 已废弃
         session = db.get_session()
 
         try:

@@ -907,7 +907,65 @@ class USGovContract(models.Model):
         db_table = "us_gov_contract"
 
 
-# --- 37. import_progress ---
+# --- 37. us_dark_pool_volume（Quiver /historical/offexchange/{ticker}） ---
+class USDarkPoolVolume(models.Model):
+    """日频 Off-Exchange (dark pool / ATS) 短卖与总成交量数据。
+
+    数据源：Quiver Quant `/historical/offexchange/{ticker}`（替代 FMP short-interest，
+    后者订阅不含）。深度：2010-至今每日，AAPL 实测 3926 条。
+
+    字段说明：
+        otc_short  — 场外短卖股数（可作 short interest 日频代理）
+        otc_total  — 场外总成交股数
+        dpi        — Dark Pool Indicator = otc_short / otc_total（Quiver 已计算）
+
+    用于因子：DARK_POOL_SHORT（otc_short / 流通股，short squeeze 候选）、
+    DPI 趋势（DPI 提升 = 机构偷偷做空）、OTC_VOLUME_RATIO（场外成交占比）。
+    """
+    ticker = models.CharField(max_length=20)
+    date = models.DateField()
+    otc_short = models.FloatField(null=True)
+    otc_total = models.FloatField(null=True)
+    dpi = models.FloatField(null=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "us_dark_pool_volume"
+
+
+# --- 38. us_institutional_holder（FMP /stable/institutional-holder/symbol-positions-summary） ---
+class USInstitutionalHolder(models.Model):
+    """季度 13F 持仓汇总（机构持有 ticker 的统计）。
+
+    用于因子：HF_CROWDING（hedge fund 共持度）、INST_OWNERSHIP_DELTA（季度变化）、
+    NEW_POSITIONS（新建仓）、CLOSED_POSITIONS（清仓）。
+    """
+    ticker = models.CharField(max_length=20)
+    date = models.DateField()  # quarter end date
+    investors_holding = models.IntegerField(null=True)  # 持有的机构数
+    investors_holding_change = models.IntegerField(null=True)  # 季度变化
+    number_of_13f_shares = models.FloatField(null=True)
+    number_of_13f_shares_change = models.FloatField(null=True)
+    total_invested = models.FloatField(null=True)
+    total_invested_change = models.FloatField(null=True)
+    ownership_percent = models.FloatField(null=True)
+    ownership_percent_change = models.FloatField(null=True)
+    new_positions = models.IntegerField(null=True)
+    increased_positions = models.IntegerField(null=True)
+    closed_positions = models.IntegerField(null=True)
+    reduced_positions = models.IntegerField(null=True)
+    total_calls = models.FloatField(null=True)
+    total_puts = models.FloatField(null=True)
+    put_call_ratio = models.FloatField(null=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "us_institutional_holder"
+
+
+# --- 39. import_progress ---
 class ImportProgress(models.Model):
     table_name = models.CharField(max_length=50)
     ticker = models.CharField(max_length=20)

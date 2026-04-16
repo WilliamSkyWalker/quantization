@@ -568,6 +568,7 @@ US_FALLBACK_TICKERS: list[str] = [s.strip() for s in _raw_fallback.split(",") if
 
 # FRED 指标映射（indicator_code → FRED series ID）
 FRED_SERIES_MAP = {
+    # 经典宏观（20 个原有）
     "US_GDP": "GDP",
     "US_CPI_YOY": "CPIAUCSL",
     "US_CORE_CPI": "CPILFESL",
@@ -583,11 +584,30 @@ FRED_SERIES_MAP = {
     "US_10Y": "DGS10",
     "US_2Y": "DGS2",
     "US_2Y10Y": "T10Y2Y",
-    "US_TED": "TEDRATE",
+    "US_TED": "TEDRATE",     # 2022 后 FRED 已停发，仅历史值
     "US_VIX": "VIXCLS",
     "US_DXY": "DTWEXBGS",
     "US_INIT_CLAIMS": "ICSA",
     "US_PCE": "PCEPI",
+    # ============================================================
+    # C-3 宏观增强（2026-04-15 新增 11 个）
+    # ============================================================
+    # 短端利率（用于 carry / TS slope）
+    "US_3M": "DGS3MO",                   # 3 个月国债
+    "US_6M": "DGS6MO",                   # 6 个月国债
+    "US_30Y": "DGS30",                   # 30 年国债
+    # 信用利差（HY OAS / IG OAS / AAA-BAA）
+    "US_HY_OAS": "BAMLH0A0HYM2",         # ICE BofA US HY Master OAS
+    "US_IG_OAS": "BAMLC0A0CM",           # ICE BofA US Corp Master OAS
+    "US_AAA_YIELD": "AAA",               # Moody's Seasoned Aaa
+    "US_BAA_YIELD": "BAA",               # Moody's Seasoned Baa
+    # 金融条件 / 压力指数
+    "US_NFCI": "NFCI",                   # Chicago Fed Financial Conditions
+    "US_ANFCI": "ANFCI",                 # Adjusted NFCI（剔除 macro 周期）
+    "US_STLFSI": "STLFSI4",              # St. Louis Fed Financial Stress
+    # 通胀预期
+    "US_BREAKEVEN_5Y": "T5YIE",          # 5Y Breakeven Inflation
+    "US_BREAKEVEN_10Y": "T10YIE",        # 10Y Breakeven Inflation
 }
 
 # ============================================================

@@ -2,11 +2,17 @@
 
 本文档说明系统所有外部数据的来源、获取方式和用途。
 
+> **架构注解（A 股 P1 迁移已完成）：**
+> - A 股下载器：`stocks/services/downloaders/a_tushare_*.py + a_akshare_*.py`（8 文件）
+> - A 股全字段保留：Tushare 端点不指定 `fields=`，财报拆 4 表（income/balance/cashflow/indicator）
+> - 美股下载器：`stocks/services/downloaders/{fmp,bulk,fred,edgar,...}.py`（待重命名为 `us_*.py` 对齐 A 股）
+> - DDL：`scripts/migrate_ashare_schema.sql`（drop+recreate 20 张 A 股表）
+
 ---
 
 ## 一、A股市场数据
 
-### Tushare Pro (`services/data/downloader.py`)
+### Tushare Pro (`stocks/services/downloaders/a_tushare_*.py`)
 
 | 数据 | API 调用 | 频率 | 用途 |
 |------|---------|------|------|
@@ -22,7 +28,7 @@
 - **限速**: 180 req/min（可配置 `TUSHARE_RATE_LIMIT`）
 - **起始日期**: `DATA_START_DATE`，默认 `20150101`
 
-### Tushare 财务数据 (`services/data/downloader.py`)
+### Tushare 财务数据 (`stocks/services/downloaders/a_tushare_financials.py`)
 
 | 数据 | API 调用 | 用途 |
 |------|---------|------|
@@ -35,7 +41,7 @@
 
 ## 二、A股宏观数据
 
-### Tushare 宏观指标 (`services/data/macro_downloader.py`)
+### Tushare 宏观指标 (`stocks/services/downloaders/a_tushare_macro.py`)
 
 | 指标 | API 调用 | 频率 |
 |------|---------|------|
@@ -55,7 +61,7 @@
 
 ## 三、A股商品期货
 
-### Tushare 期货 (`services/data/commodity_downloader.py`)
+### Tushare 期货 (`stocks/services/downloaders/a_tushare_commodity.py`)
 
 | API 调用 | 说明 |
 |---------|------|
@@ -79,7 +85,7 @@
 
 ## 四、美股市场数据
 
-统一下载器：`services/data/bulk_downloader.py`（六源：FMP/UW/Fiscal.ai/Quiver/AlphaVantage/FRED）
+统一下载器：`stocks/services/downloaders/bulk.py`（美股 FMP 全源）（六源：FMP/UW/Fiscal.ai/Quiver/AlphaVantage/FRED）
 
 ### 4.1 FMP (Financial Modeling Prep) — 主力数据源
 
@@ -168,7 +174,7 @@ FMP `/api/v4/economic` 和 `/api/v4/treasury` 提供 GDP、CPI、失业率、国
 
 ### FRED（补充）
 
-`services/data/fred_downloader.py`，通过 `fredapi` 库补充 FMP 未覆盖的指标（VIX、TED 利差、DXY 等）。
+`stocks/services/downloaders/fred.py`（待重命名为 us_fred.py），通过 `fredapi` 库补充 FMP 未覆盖的指标（VIX、TED 利差、DXY 等）。
 
 | 指标代码 | FRED Series | 说明 | 频率 |
 |----------|-------------|------|------|
@@ -195,7 +201,7 @@ FMP `/api/v4/economic` 和 `/api/v4/treasury` 提供 GDP、CPI、失业率、国
 
 ## 六、券商研报
 
-### AKShare / 东方财富 (`services/data/akshare_downloader.py`)
+### AKShare / 东方财富 (`stocks/services/downloaders/a_akshare_reports.py`)
 
 | 数据 | API 调用 | 说明 |
 |------|---------|------|
@@ -210,7 +216,7 @@ FMP `/api/v4/economic` 和 `/api/v4/treasury` 提供 GDP、CPI、失业率、国
 
 ## 七、舆情数据
 
-### 政策新闻爬虫 (`services/sentiment/scrapers/`)
+### 政策新闻爬虫 (`sentiment/services/scrapers/`)
 
 16 个爬虫分 5 个层级，由 `SentimentDownloader` 统一调度。
 
@@ -259,7 +265,7 @@ FMP `/api/v4/economic` 和 `/api/v4/treasury` 提供 GDP、CPI、失业率、国
 - **限速**: Twitter 90 req/min，其他网站 600 req/min/域名
 - **存储表**: `policy_article`
 
-### 舆情分析 (`services/sentiment/analyzer.py`)
+### 舆情分析 (`sentiment/services/scrapers/analyzer.py`)
 
 两层分析管道：
 

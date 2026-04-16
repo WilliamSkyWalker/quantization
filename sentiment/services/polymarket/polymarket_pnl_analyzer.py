@@ -18,7 +18,7 @@ import pytz
 from sqlalchemy import text
 
 from services.config import LOG_LEVEL
-from services.data.database import DatabaseManager
+# DatabaseManager 已废弃
 from sentiment.services.polymarket.models import PolymarketAlert
 from tasks.manager import task_manager
 
@@ -39,7 +39,7 @@ class PolymarketPnlAnalyzer:
     """
 
     def __init__(self):
-        self._db = DatabaseManager()
+        self._db = None  # DatabaseManager 已废弃
 
     # ------------------------------------------------------------------
     # 公开接口

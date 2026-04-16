@@ -20,13 +20,12 @@ class Command(BaseCommand):
         market = opts["market"]
         old_source = opts["old_source"]
 
-        from services.data.database import DatabaseManager
-        db = DatabaseManager()
-        db.init_tables()
+        # DatabaseManager 已废弃
+        db = None  # DatabaseManager 已废弃
 
         if market == "us" and not old_source:
-            from stocks.services.downloaders.bulk import BulkDownloader
-            from stocks.services.downloaders.fred import FREDDownloader
+            from stocks.services.downloaders.us_bulk import BulkDownloader
+            from stocks.services.downloaders.us_fred import FREDDownloader
             dl = BulkDownloader(incremental=True)
             console.print("[cyan]增量更新美股数据（六源：FMP/UW/Fiscal/Quiver/AV/FRED）...[/cyan]")
             t0 = time.time()
@@ -91,8 +90,8 @@ class Command(BaseCommand):
             console.print(f"[green]完成[/green] {elapsed:.1f}s — {results}")
 
         elif market == "us":
-            from stocks.services.downloaders.fmp import FMPDownloader
-            from stocks.services.downloaders.fred import FREDDownloader
+            from stocks.services.downloaders.us_fmp import FMPDownloader
+            from stocks.services.downloaders.us_fred import FREDDownloader
             dl = FMPDownloader(db)
             console.print("[cyan]增量更新美股数据 (yfinance, old-source)...[/cyan]")
             t0 = time.time()
@@ -119,15 +118,33 @@ class Command(BaseCommand):
             elapsed = time.time() - t0
             console.print(f"[green]完成[/green] {elapsed:.1f}s — daily:{n1}, fin:{n2}, idx:{n3}, analyst:{n4}, earnings:{n6}, estimates:{n7}, macro:{n5}")
         else:
-            from services.data.downloader import TushareDownloader
-            from services.data.updater import FinancialUpdater
-            dl = TushareDownloader(db)
-            updater = FinancialUpdater(db)
-            console.print("[cyan]增量更新 A股数据...[/cyan]")
+            from stocks.services.downloaders.a_bulk import AShareBulkDownloader
+            dl = AShareBulkDownloader(incremental=True)
+            console.print("[cyan]增量更新 A 股数据（Tushare + AkShare）...[/cyan]")
             t0 = time.time()
-            dl.download_stock_list()
-            n1 = dl.update_daily_prices()
-            dl.update_index_daily("000300.SH")
-            n2 = updater.update_financial_data()
+            results = {}
+
+            def _try(name, fn):
+                try:
+                    console.print(f"  [dim]{name}...[/dim]")
+                    results[name] = fn()
+                except Exception as e:
+                    logger.warning(f"data_update cn: {name} 跳过: {e}")
+                    console.print(f"[yellow]{name} 跳过: {e}[/yellow]")
+
+            _try("stock_list", dl.download_tushare_stock_list)
+            _try("trade_cal", dl.download_tushare_trade_cal)
+            _try("prices", dl.download_tushare_daily_prices)
+            _try("index", dl.download_tushare_index)
+            _try("income", dl.download_tushare_income)
+            _try("balancesheet", dl.download_tushare_balancesheet)
+            _try("cashflow", dl.download_tushare_cashflow)
+            _try("fina_indicator", dl.download_tushare_fina_indicator)
+            _try("industry", dl.download_tushare_industry)
+            _try("macro", dl.download_tushare_macro)
+            _try("commodity", dl.download_tushare_commodity)
+            _try("research_report", dl.download_akshare_research_reports)
+            _try("insider", dl.download_akshare_insider)
+
             elapsed = time.time() - t0
-            console.print(f"[green]完成[/green] {elapsed:.1f}s — daily:{n1}, financial:{n2}")
+            console.print(f"[green]完成[/green] {elapsed:.1f}s — {results}")

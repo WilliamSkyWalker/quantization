@@ -2,43 +2,44 @@
 
 覆盖数据采集、因子计算、组合构建、风控、回测、模拟交易、舆情爬取和报告生成。
 
-## 系统架构
+## 系统架构（Django MVT，A 股/美股按 app 对齐）
 
 ```
 ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
 │   CLI       │   │ Django API  │   │  Frontend   │
-│ cli.py      │   │ api/views/  │   │ frontend/   │
+│ manage.py   │   │ api/views/  │   │ frontend/   │
 └──────┬──────┘   └──────┬──────┘   └──────┬──────┘
        │                 │                 │
        └────────┬────────┘                 │
                 ▼                          │
-    services/  ◄───────────────────────────┘ (via HTTP)
-    （唯一业务逻辑层）
+    Django apps  ◄──────────────────────────┘ (via HTTP)
+    (stocks / backtest / trading / sentiment)
 
-A股管道:
-  Tushare → data/{downloader,updater}.py → MySQL
-  → data/cleaner.py → factors/*.py (30因子) → factors/processor.py
-  → strategy/regime.py → strategy/multi_factor.py → risk/risk_manager.py
-  → strategy/backtest.py | execution/paper_trader.py
+文件命名规则（同名 app + 前缀分流）:
+  A 股：a_xxx.py    美股：us_xxx.py    通用：xxx.py（无前缀）
 
-美股管道（三策略：Alpha 多空对冲 + Beta Regime 控制 + Baseline VQM 验证）:
-  FMP API → data/bulk_downloader.py → MySQL (us_* 表, per-ticker + bulk 按年)
-    含: 行情/季度财报(IS+BS+CF)/key-metrics/earnings-surprise/EPS-consensus/insider/分析师评级/分红拆股
-    SP500+NASDAQ100 成分股 + 历史变更（幸存者偏差修正，227 只历史退市股）
-  Unusual Whales → data/bulk_downloader.py → us_options_flow/us_dark_pool/us_congress_trade/us_news
-  Fiscal.ai → data/bulk_downloader.py → us_daily_ratio (日频 PE/PB/EV)
-  Quiver → data/bulk_downloader.py → us_lobbying/us_gov_contract/us_wsb_sentiment
-  Alpha Vantage → data/bulk_downloader.py → us_news_sentiment/us_options_snapshot
-  FRED → data/fred_downloader.py → us_macro_indicator 表
-  FF5 → strategy/ff5.py → Fama-French 五因子回归分析
-  → data/us_cleaner.py → us_factors/*.py (31因子×7大类) → us_factors/processor.py
-  → strategy/us_regime.py (四维复合 + credit veto)
-    → Alpha:    strategy/us_multi_factor.py (多空) → risk/us_risk_manager.py
-    → Beta:     strategy/us_beta_strategy.py (Regime→仓位, 质量筛选等权)
-    → Baseline: strategy/us_baseline_strategy.py (VQM 3因子, 纯静态 dollar-neutral)
-  → strategy/us_backtest.py (T+0,借券费,risk_controls开关) → strategy/backtest_saver.py (结果存库)
-  → execution/us_paper_trader.py (本地模拟盘)
-  → execution/alpaca_trader.py (Alpaca API 模拟盘/实盘)
+A 股管道（已全面 Django ORM 化）:
+  Tushare/AkShare → stocks/services/downloaders/a_tushare_*.py + a_akshare_*.py
+    → AStockBasic / ADailyPrice / AFinancial{Income,Balance,Cashflow,Indicator}
+    → stocks/services/a_cleaner.py
+    → stocks/services/factors/a_*.py (30+ 因子)
+    → backtest/services/a_regime.py + a_strategy.py + a_engine.py
+    → trading/services/a_paper_trader.py + a_risk.py + a_gm_trader.py
+
+美股管道（三策略：Alpha 多空 + Beta Regime + Baseline VQM）:
+  FMP / UW / Fiscal / Quiver / AlphaVantage / FRED
+    → stocks/services/downloaders/{fmp,bulk,fred,edgar,...}.py（待重命名为 us_*.py）
+    → US{StockBasic, DailyPrice, FinancialData, ...} (40+ 表)
+    → stocks/services/cleaner.py（待重命名为 us_cleaner.py）
+    → stocks/services/factors/{value,quality,growth,...}.py（待重命名为 us_*.py）
+    → backtest/services/{engine,strategy,regime,ff5,baseline,beta,ml_scorer,saver}.py（待重命名为 us_*.py）
+    → trading/services/{paper_trader,alpaca_trader}.py（待重命名为 us_*.py）
+
+通用层（无前缀）:
+  stocks/services/upsert.py     — Django ORM 异步批写（UpsertManager）
+  trading/services/base_trader.py — 交易执行抽象基类
+  trading/services/monitor/       — 绩效 + HTML 报告
+  backtest/models/result.py       — 回测结果持久化
 ```
 
 **前端页面:**
@@ -46,39 +47,67 @@ A股管道:
 - 美股: 选股(`/us/select`)、回测(`/us/backtest`)、模拟交易(`/us/paper`)
 - 公共: 仪表盘(`/`)、数据管理(`/data`)、自选股(`/watchlist`)、设置(`/settings`)
 
-## 常用命令
+## 常用命令（统一 management commands）
 
 ```bash
 # 安装后端依赖
 pip install -r requirements.txt
 
 # 启动服务（开发）
-./start.sh                                        # 启动后端 + 前端 + 安装 cron
+./start.sh                                        # 后端 + 前端 + cron
 
-# 数据导入
-python3 cli.py data bulk-import --source fmp --target all --start-year 1995    # FMP 全量（~6-8h, 含 ETF 预标记）
-python3 cli.py data bulk-import --source quiver --target all                   # Quiver 游说/政府合同
-python3 cli.py polymarket history --min-volume 1000000                          # Polymarket 历史事件
+# === 美股数据导入（FMP / Quiver） ===
+python3 manage.py bulk_import --source fmp --target all --start-year 1995    # FMP 全量
+python3 manage.py bulk_import --source fmp --target prices                    # 单端点
+python3 manage.py bulk_import --source quiver --target all                    # Quiver 游说/政府合同
 
-# 单独重跑某端点（修复数据问题后用）
-python3 cli.py data bulk-import --source fmp --target company-profiles         # 公司快照（每次全量覆盖）
-python3 cli.py data bulk-import --source fmp --target earnings                 # Earnings Surprise
-python3 cli.py data bulk-import --source fmp --target metrics                  # Key Metrics
-python3 cli.py data bulk-import --source quiver --target lobbying              # 仅游说
-python3 cli.py data bulk-import --source quiver --target gov-contracts         # 仅政府合同
+# 2026-04-15 数据补强批次（验证后正式列表）：
+# 先建新表（dark_pool + 13f）
+psql $PG_URL -f scripts/migrate_us_short_interest_13f.sql
 
-# 增量更新
-python3 cli.py data update --market us                 # 新源 (FMP+UW+Fiscal)
-python3 cli.py data update --market us --old-source    # 旧源 (yfinance)
+# 真有历史的端点 — 一次性 bulk
+python3 manage.py bulk_import --source fmp --target press-releases           # us_press_release（FMP 仅返最近 ~20 天，需 cron 每日积累）
+python3 manage.py bulk_import --source fmp --target sec-filings              # us_sec_filing（per-ticker，按年切段，2010-至今）
+python3 manage.py bulk_import --source fmp --target revenue-segments         # us_revenue_segment（产品+地理，2010-至今 15 年季度）
+python3 manage.py bulk_import --source fmp --target 13f-holdings             # us_institutional_holder（FMP 必须循环 year/quarter，默认 2015-至今）
+python3 manage.py bulk_import --source quiver --target dark-pool             # us_dark_pool_volume（替代 short interest，2010-至今每日）
 
-# CLI 调试
-python3 cli.py db status                               # 查看全表数据状态
-python3 cli.py select --market us --date 2025-01-15    # 美股选股
-python3 cli.py backtest --market us --start 2020-01-01 # 美股回测
-python3 cli.py factor list --market us                 # 列出所有因子
-python3 cli.py score AAPL --date 2025-01-15            # 单只股票得分
-python3 cli.py paper status --market us                # 模拟账户状态
-python3 cli.py paper trade --market us                 # 执行模拟交易
+# Snapshot-only 端点 — 当下立即跑 + 加 cron 周任务积累时序：
+python3 manage.py bulk_import --source fmp --target dcf            --clean   # us_dcf_valuation（仅 1 条/票）
+python3 manage.py bulk_import --source fmp --target scores         --clean   # us_financial_score（仅 1 条/票，对照自算 Piotroski/Altman 用）
+python3 manage.py bulk_import --source fmp --target float          --clean   # us_shares_float（仅 1 条/票）
+python3 manage.py bulk_import --source fmp --target peers          --clean   # us_stock_peer（同业列表，仅 1 条/票）
+
+# C-3 FRED 宏观增强（NFCI / HY OAS / IG OAS / 短端利率 / 通胀预期 等 12 个新指标）：
+python3 manage.py data_update --market us                                    # FRED 用 update 入口（全量自动加载新增 series）
+
+# ⚠ 已移除：news（FMP 计划不含 /general-news 端点，404）+ short-interest（FMP 计划不含，改用 Quiver dark-pool）
+
+# === A 股数据导入（Tushare / AkShare） ===
+# 第一次：先备份 → drop+重建表 → 全量下载
+psql $PG_URL -f scripts/migrate_ashare_schema.sql
+python3 manage.py bulk_import --source tushare --target trade-cal             # 交易日历
+python3 manage.py bulk_import --source tushare --target stock-list            # 股票列表
+python3 manage.py bulk_import --source tushare --target all --start-date 20150101  # 全量
+python3 manage.py bulk_import --source akshare --target all                    # 研报 + 高管持股
+
+# 单端点（Tushare 全字段保留）
+python3 manage.py bulk_import --source tushare --target {prices|income|balancesheet|cashflow|fina-indicator|industry|index|commodity|macro|trade-cal}
+
+# === 增量更新（统一入口，--market 分流） ===
+python3 manage.py data_update --market us                  # 美股 (FMP+UW+Fiscal+Quiver+AV+FRED)
+python3 manage.py data_update --market us --old-source     # 美股旧源 (yfinance)
+python3 manage.py data_update --market cn                  # A 股 (Tushare+AkShare 全部端点)
+
+# === 回测 ===
+python3 manage.py backtest --market us --start 2020-01-01 --end 2024-12-31
+python3 manage.py backtest --market cn --start 2020-01-01 --end 2024-12-31
+
+# === cli.py 残留命令（待迁移到 management commands） ===
+python3 cli.py db status                                    # 查看全表数据状态
+python3 cli.py select --market us --date 2025-01-15        # 选股
+python3 cli.py paper trade --market us                      # 执行模拟交易
+python3 cli.py polymarket history --min-volume 1000000      # Polymarket 历史
 ```
 
 ## 配置
@@ -91,7 +120,7 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 - **舆情**: `TWITTER_USERNAME`/`TWITTER_EMAIL`/`TWITTER_PASSWORD`、`LLM_PROVIDER`/`LLM_API_KEY`/`LLM_MODEL`
 - **数据库**: MySQL 连接信息
 
-## A股因子体系（30 因子，`services/factors/`）
+## A股因子体系（30 因子，`stocks/services/factors/a_*.py`）
 
 | 大类 | 权重 | 因子 |
 |---|---|---|
@@ -103,19 +132,44 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 | 宏观 | 0.6 | MACRO_CYCLE, MACRO_LIQD, MACRO_INFL, MACRO_EXTR |
 | 舆情 | 0.6 | POLICY_SENT, POLICY_INTENSITY, ANALYST_RATING, ANALYST_COVERAGE |
 
-## 美股因子体系（31 因子 × 7 大类，`services/us_factors/`）
+## 美股因子体系（43 因子 × 7 大类）
 
-| 大类 | 权重 | 因子 |
+**已迁移到 AlphaSignal 架构**（`stocks/services/factors/signals/`，元数据化 + `@register` 自动注册）的批次：
+- **Quality**（15 因子，2026-04-15）— Batch 1
+- **Momentum**（10 因子，6 个新增 + 4 个 legacy 待迁移，2026-04-15）— Batch 2
+
+未迁移的类别仍用旧架构，按 T1 backlog 逐批迁移（Value / Defensive / Liquidity / Analyst / Short-side）。
+
+文件命名：`stocks/services/factors/signals/{category}/us_{factor}.py`（A 股未来按 `a_{factor}.py` 加入）。
+
+| 大类 | 因子 | 架构 |
 |------|------|------|
-| value | 1.0 | EP, BP, DIV_YIELD, BUYBACK_YIELD |
-| quality | 1.0 | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND, ACCRUALS |
-| growth | 1.0 | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y |
-| momentum | 1.0 | MOM_1M, MOM_3M, MOM_12M, REV_5D |
-| technical | 1.0 | TURN_20D, VOL_20D, IVOL, SIZE, IV_SKEW, PUT_CALL_RATIO |
-| analyst | 1.0 | US_ANALYST_RATING, US_ANALYST_COVERAGE, EARNINGS_SURPRISE, EPS_REVISION, INSIDER_NET_BUY |
-| sentiment | 1.0 | POLYMARKET_SENT, LOBBY_INTENSITY, GOV_CONTRACT, NEWS_SENTIMENT |
+| value | EP, BP, DIV_YIELD, BUYBACK_YIELD | legacy |
+| **quality** (15) | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND, ACCRUALS（legacy 5 已迁移）+ **PIOTROSKI_F, ALTMAN_Z, OHLSON_O, BENEISH_M, QMJ_LEVERAGE, QMJ_EARNINGS_VOL, QMJ_ROE_VOL, QMJ_NET_PAYOUT, CASH_CONV_CYCLE, EARNINGS_PERSISTENCE**（新增 10）| **AlphaSignal** |
+| **momentum** (10) | MOM_1M, MOM_3M, MOM_12M, REV_5D（legacy 4）+ **PRICE_52W_HIGH, RESIDUAL_MOM_FF3, SUE_PEAD, INDUSTRY_MOM, FROG_IN_PAN, TSMOM**（新增 6）| **AlphaSignal**（新增）+ legacy |
+| growth | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y | legacy |
+| technical | TURN_20D, VOL_20D, IVOL, SIZE, IV_SKEW, PUT_CALL_RATIO | legacy |
+| analyst | US_ANALYST_RATING, US_ANALYST_COVERAGE, EARNINGS_SURPRISE, EPS_REVISION, INSIDER_NET_BUY | legacy |
+| sentiment | POLYMARKET_SENT, LOBBY_INTENSITY, GOV_CONTRACT, NEWS_SENTIMENT | legacy |
 
-等权合成，两层类别打分（类内动态分母 + 类间加权）。因子方向由分因子滚动 IC 自动决定：基本面 24-36M、动量 6-12M、情绪 6M（3 个固有反转 + 5 个质量保护锁定 + 23 个动态）。
+**Quality 15 因子构成：**
+- 体检类：PIOTROSKI_F（9 分财务体检，Piotroski 2000）
+- 造假检测：BENEISH_M（8 ratios，Beneish 1999，反向）
+- 破产预警：ALTMAN_Z（5 ratios，Altman 1968）+ OHLSON_O（9 输入 logit，Ohlson 1980，反向）
+- QMJ Safety：QMJ_LEVERAGE / QMJ_EARNINGS_VOL / QMJ_ROE_VOL（全反向，Asness-Frazzini-Pedersen 2019）
+- QMJ Payout：QMJ_NET_PAYOUT（股东净收益 / 市值）
+- 运营效率：CASH_CONV_CYCLE（反向）+ EARNINGS_PERSISTENCE（EPS 8Q AR(1)）
+- 原有 5 个：ROE_TTM / GROSS_MARGIN / PROFIT_STB / MARGIN_TREND / ACCRUALS
+
+**Momentum 6 个新增：**
+- PRICE_52W_HIGH（George-Hwang 2004，当前价 / 过去 52 周最高）
+- RESIDUAL_MOM_FF3（Blitz-Huij-Martens 2011，剔 FF3 残差累加，比纯动量更稳）
+- SUE_PEAD（Foster-Olsen-Shevlin 1984，标准化盈利惊喜 + 60 天事件窗口）
+- INDUSTRY_MOM（Moskowitz-Grinblatt 1999，个股 12M − 行业中位数 12M）
+- FROG_IN_PAN（Da-Gurun-Warachka 2014，动量"连续小涨" vs "一次性大涨"）
+- TSMOM（Moskowitz-Ooi-Pedersen 2012，时序动量，方向由滚动 IC 决定）
+
+等权合成，两层类别打分（类内动态分母 + 类间加权）。因子方向由 AlphaSignal.inherent_direction 元数据 + 滚动 IC 动态决定：基本面 24-36M、动量 6-12M、情绪 6M。
 
 ## 美股回测绩效（含幸存者偏差修正，基准 S&P 500）
 
@@ -190,21 +244,41 @@ python3 cli.py paper trade --market us                 # 执行模拟交易
 
 **当前待办（按优先级）：**
 
-P0 — 因子优化（最高优先级）：
+**P0 — 工业级架构补强（最大缺口，与因子优化并行）：**
+1. **风险模型** — 252D 日收益 + Ledoit-Wolf shrinkage → N×N 协方差矩阵 Σ
+2. **Mean-Variance 优化器** — cvxpy + OSQP 替换 Top-N + Softmax，目标函数 `max μ̂'w − λ·w'Σw − γ·||w − w_prev||₁`，约束行业/风格/流动性
+3. 预期效果：换手率 8x → 2-3x，β_rmw 失控 → 风格中性，行业硬 cap 15% → 软约束
+
+**P0 — 因子优化（与 P0 架构并行）：**
 1. EPS_REVISION v2 四维复合（方向×幅度×广度×加速度）
 2. ACCRUALS v2 拆分、BP v2 R&D 调整、REV_5D v2 条件反转、ROE_TTM v2 趋势
 
-P1 — 空头 v5：独立因子模型 + Regime 渐进 + 融券约束 + 15% 止损（待回测）
+**P1 — 因子全面补强（17 大类，~70 个新因子）：**
+- T1（现有 FMP 数据可做）：QMJ 完整化（Piotroski/Beneish/Altman）+ Value 进阶（Asset Growth/NOA/Composite Issuance/EV 系列）+ Momentum 进阶（Residual Mom/52W High/SUE/PEAD）+ 防御（BAB/MAX）+ 流动性（Amihud）+ 分析师进阶 + 空头侧补强（Short Interest/融券费率/HF Crowding）
+- T2（需补数据源）：期权（IV Skew/Put-Call/RNS/VRP）+ 微结构（RV/OFI/Kyle's λ）+ NLP（Earnings Call Tone/10-K Sentiment/FinBERT）+ 另类（Google Trends/Patent/Job Postings）+ 宏观增强
+- T3（探索）：ESG/治理 + Crowding + ML 生成因子（Autoencoder/SHAP/BERT/CNN）
 
-P2 — 噪音清理：移除 IV_SKEW/PUT_CALL_RATIO/NEWS_SENTIMENT/POLYMARKET_SENT
+**P1 — 空头 v5**：独立因子模型 + Regime 渐进 + 融券约束 + 15% 止损（待回测）
 
-P3 — 权重分级：ICIR>0.3→2.0, 0.15-0.3→1.0, <0.15→0.5
+**P2 — 噪音清理**：移除 IV_SKEW/PUT_CALL_RATIO/NEWS_SENTIMENT/POLYMARKET_SENT
 
-P4 — 回测鲁棒性：换手率控制 + 滑点敏感性 + Regime 参数扰动
+**P3 — 权重分级**：ICIR>0.3→2.0, 0.15-0.3→1.0, <0.15→0.5
 
-P5 — ML Blend 修复：降 blend 比例 + 增正则化 + 延长窗口（当前拖累 α 7.6%，已关闭）
+**P3 — 方法论强化**：Fama-MacBeth 截面回归 + 多重检验校正（T≥3.0）+ Gram-Schmidt 正交化 + Barra-style 风格分解 + Regime-dependent 因子轮动（HMM）
 
-P6 — 工程与实盘：增量采集自动化 + Alpaca 模拟盘已接入 + 实盘验证 3-6 月
+**P4 — 回测鲁棒性**：换手率控制（MVO 自动解决）+ 滑点敏感性 + Regime 参数扰动
+
+**P5 — ML Blend 修复**：降 blend 比例 + 增正则化 + 延长窗口（当前拖累 α 7.6%，已关闭）
+
+**P6 — 工程与实盘**：增量采集自动化 + Alpaca 模拟盘已接入 + 实盘验证 3-6 月
+
+**P7 — 长期架构升级**：
+- PCA 统计风险因子（Barra 开源替代，前 20-30 主成分作风格因子）
+- 多周期信号合成（日/周/月频分层）
+- Alpha Bayesian Shrinkage（极值持仓抑制）
+- 交易成本/市场冲击模型（写入优化器目标）
+- Alpha Capture System（因子版本化 + 独立 IC 监控 + 灰度上线）
+- Barra-style P&L 归因（每日拆解 factor return × β + specific return）
 
 
 ## 详细文档

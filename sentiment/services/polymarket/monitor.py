@@ -31,7 +31,7 @@ from services.config import (
     POLYMARKET_DISCOVERY_INTERVAL,
     LOG_LEVEL,
 )
-from services.data.database import DatabaseManager
+# DatabaseManager 已废弃
 from sentiment.services.polymarket.models import PolymarketEvent, PolymarketPriceSnapshot
 from sentiment.services.polymarket.utils import category_from_tags
 from tasks.manager import task_manager
@@ -105,7 +105,7 @@ class PolymarketMonitor:
         self._price_histories: dict[str, PriceHistory] = {}  # condition_id -> PriceHistory
         self._ws_thread: Optional[threading.Thread] = None
         self._alert_manager = None  # lazy init to avoid circular import
-        self._db = DatabaseManager()
+        self._db = None  # DatabaseManager 已废弃
 
     def start(self, task_id: str):
         """阻塞式运行监控，由 TaskManager 在线程池中调用。"""

@@ -12,7 +12,7 @@ from services.config import LOG_LEVEL, SENTIMENT_MAX_PAGES, SENTIMENT_BACKFILL_D
 
 # 单个爬虫最大执行时间（秒）
 _PER_SOURCE_TIMEOUT = 60
-from services.data.database import DatabaseManager
+# DatabaseManager 已废弃
 from sentiment.services.scrapers.scrapers import SCRAPER_REGISTRY, TIER_MAP
 from sentiment.services.scrapers.base_scraper import HttpRateLimiter
 
@@ -25,7 +25,7 @@ class SentimentDownloader:
     舆情数据下载编排器。
 
     用法:
-        db = DatabaseManager()
+        db = None  # DatabaseManager 已废弃
         db.init_tables()
         dl = SentimentDownloader(db)
         dl.download_all()

@@ -34,27 +34,26 @@ class Command(BaseCommand):
         capital = opts["capital"]
         strategy_type = opts["strategy_type"]
 
-        from services.data.database import DatabaseManager
-        db = DatabaseManager()
-        db.init_tables()
+        # DatabaseManager 已废弃
+        db = None  # DatabaseManager 已废弃
 
         if market == "us":
             console.print(f"[cyan]运行 US 回测 ({strategy_type}): {start} ~ {end}[/cyan]")
-            from backtest.services.engine import USBacktestEngine
+            from backtest.services.us_engine import USBacktestEngine
             if strategy_type == "beta":
-                from backtest.services.beta import USBetaStrategy
+                from backtest.services.us_beta import USBetaStrategy
                 strategy = USBetaStrategy(db)
             elif strategy_type == "baseline":
-                from backtest.services.baseline import USBaselineStrategy
+                from backtest.services.us_baseline import USBaselineStrategy
                 strategy = USBaselineStrategy(db)
             else:
-                from backtest.services.strategy import USMultiFactorStrategy
+                from backtest.services.us_strategy import USMultiFactorStrategy
                 strategy = USMultiFactorStrategy(db)
             cap = capital if capital > 0 else 1_000_000
         else:
             console.print(f"[cyan]运行 CN 回测: {start} ~ {end}[/cyan]")
-            from services.strategy.multi_factor import MultiFactorStrategy
-            from services.strategy.backtest import BacktestEngine
+            from backtest.services.a_strategy import MultiFactorStrategy
+            from backtest.services.a_engine import BacktestEngine
             strategy = MultiFactorStrategy(db)
             cap = capital if capital > 0 else 1_000_000
 
@@ -141,7 +140,7 @@ class Command(BaseCommand):
             console.print(f"  总交易笔数: {len(trades)}")
 
         # 存库
-        from backtest.services.saver import save_backtest_result
+        from backtest.services.us_saver import save_backtest_result
         st = strategy_type if market == "us" else "alpha"
         if save_backtest_result(market, st, start, end, result):
             console.print("  [dim]回测结果已保存到数据库[/dim]")

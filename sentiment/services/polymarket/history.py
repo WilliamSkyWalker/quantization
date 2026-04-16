@@ -17,7 +17,7 @@ import requests
 from sqlalchemy.orm import Session
 
 from services.config import POLYMARKET_GAMMA_API, POLYMARKET_MIN_VOLUME, LOG_LEVEL
-from services.data.database import DatabaseManager
+# DatabaseManager 已废弃
 from sentiment.services.polymarket.models import PolymarketEvent, PolymarketPriceSnapshot
 from sentiment.services.polymarket.utils import category_from_tags, is_noise_slug, EXCLUDED_CATEGORIES
 from tasks.manager import task_manager
@@ -140,7 +140,7 @@ class PolymarketHistoryDownloader:
     """下载 Polymarket 已结算市场的历史赔率数据。"""
 
     def __init__(self):
-        self._db = DatabaseManager()
+        self._db = None  # DatabaseManager 已废弃
 
     def discover_resolved_markets(
         self,

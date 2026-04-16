@@ -15,7 +15,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from services.config import LOG_LEVEL
-from services.data.database import DatabaseManager
+# DatabaseManager 已废弃
 from sentiment.services.polymarket.models import PolymarketAlert
 from tasks.manager import task_manager
 
@@ -35,7 +35,7 @@ class AShareBacktester:
     """
 
     def __init__(self):
-        self._db = DatabaseManager()
+        self._db = None  # DatabaseManager 已废弃
 
     # ------------------------------------------------------------------
     # 公开接口
@@ -328,7 +328,7 @@ class AShareBacktester:
 
                 sql = text(
                     f"SELECT ts_code, trade_date, `close`, is_limit_up, is_limit_down "
-                    f"FROM daily_price "
+                    f"FROM a_daily_price "
                     f"WHERE ts_code IN ({placeholders}) "
                     f"AND trade_date BETWEEN :start AND :end "
                     f"ORDER BY trade_date"

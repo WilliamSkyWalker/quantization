@@ -58,9 +58,8 @@ app = typer.Typer(help="量化交易系统 CLI", no_args_is_help=True)
 # ============================================================
 
 def _get_db():
-    from services.data.database import DatabaseManager
-    db = DatabaseManager()
-    db.init_tables()
+    # DatabaseManager 已废弃
+    db = None  # DatabaseManager 已废弃
     return db
 
 
@@ -235,7 +234,7 @@ def data_bulk_import(
 ):
     """三家 API 批量导入（FMP/UW/Fiscal.ai）"""
     db = _get_db()
-    from stocks.services.downloaders.bulk import BulkDownloader
+    from stocks.services.downloaders.us_bulk import BulkDownloader
     dl = BulkDownloader()
 
     if clean:
@@ -343,7 +342,7 @@ def data_download(
     db = _get_db()
 
     if market == "us" and not old_source:
-        from stocks.services.downloaders.bulk import BulkDownloader
+        from stocks.services.downloaders.us_bulk import BulkDownloader
         dl = BulkDownloader()
         dispatch = {
             "all": lambda: dl.download_fmp_all_bulk(1995),
@@ -357,7 +356,7 @@ def data_download(
             "macro": lambda: _download_fred(db),
         }
     elif market == "us":
-        from stocks.services.downloaders.fmp import FMPDownloader
+        from stocks.services.downloaders.us_fmp import FMPDownloader
         dl = FMPDownloader(db)
         dispatch = {
             "all": dl.download_all,
@@ -391,22 +390,22 @@ def data_download(
         raise typer.Exit(1)
 
     def _download_fred(db_inst):
-        from stocks.services.downloaders.fred import FREDDownloader
+        from stocks.services.downloaders.us_fred import FREDDownloader
         fred = FREDDownloader(db_inst)
         return fred.download_all()
 
     def _download_simfin(db_inst):
-        from stocks.services.downloaders.simfin import SimFinDownloader
+        from stocks.services.downloaders.us_simfin import SimFinDownloader
         dl_sf = SimFinDownloader(db_inst)
         return dl_sf.download_financials(force=True)
 
     def _download_edgar(db_inst):
-        from stocks.services.downloaders.edgar import EdgarDownloader
+        from stocks.services.downloaders.us_edgar import EdgarDownloader
         dl_ed = EdgarDownloader(db_inst)
         return dl_ed.download_financials()
 
     def _download_historical(db_inst):
-        from stocks.services.downloaders.historical import (
+        from stocks.services.downloaders.us_historical import (
             build_historical_universe, download_historical_prices, download_historical_financials
         )
         n1 = build_historical_universe(db_inst)
@@ -433,8 +432,8 @@ def data_update(
 
     if market == "us" and not old_source:
         # 六源增量更新
-        from stocks.services.downloaders.bulk import BulkDownloader
-        from stocks.services.downloaders.fred import FREDDownloader
+        from stocks.services.downloaders.us_bulk import BulkDownloader
+        from stocks.services.downloaders.us_fred import FREDDownloader
         dl = BulkDownloader(incremental=True)
         console.print("[cyan]增量更新美股数据（六源：FMP/UW/Fiscal/Quiver/AV/FRED）...[/cyan]")
         t0 = time.time()
@@ -514,8 +513,8 @@ def data_update(
         console.print(f"[green]完成[/green] {elapsed:.1f}s — {results}")
     elif market == "us":
         # 老数据源 (yfinance)
-        from stocks.services.downloaders.fmp import FMPDownloader
-        from stocks.services.downloaders.fred import FREDDownloader
+        from stocks.services.downloaders.us_fmp import FMPDownloader
+        from stocks.services.downloaders.us_fred import FREDDownloader
         dl = FMPDownloader(db)
         console.print("[cyan]增量更新美股数据 (yfinance, old-source)...[/cyan]")
         t0 = time.time()
@@ -577,11 +576,11 @@ def universe(
     db = _get_db()
 
     if market == "us":
-        from stocks.services.cleaner import get_us_clean_universe
+        from stocks.services.us_cleaner import get_us_clean_universe
         df = get_us_clean_universe(date)
         id_col, name_col, ind_col = "ticker", "name", "sector"
     else:
-        from services.data.cleaner import get_clean_universe
+        from stocks.services.a_cleaner import get_clean_universe
         df = get_clean_universe(db, date)
         id_col, name_col, ind_col = "ts_code", "name", "industry_name"
 
@@ -631,12 +630,12 @@ def select(
     t0 = time.time()
 
     if market == "us":
-        from backtest.services.strategy import USMultiFactorStrategy
+        from backtest.services.us_strategy import USMultiFactorStrategy
         strategy = USMultiFactorStrategy(db)
         result = strategy.select_stocks(date)
         id_col = "ticker"
     else:
-        from services.strategy.multi_factor import MultiFactorStrategy
+        from backtest.services.a_strategy import MultiFactorStrategy
         strategy = MultiFactorStrategy(db)
         result = strategy.select_stocks(date)
         id_col = "ts_code"
@@ -714,21 +713,21 @@ def backtest(
 
     if market == "us":
         console.print(f"[cyan]运行 US 回测 ({strategy_type}): {start} ~ {end}[/cyan]")
-        from backtest.services.engine import USBacktestEngine
+        from backtest.services.us_engine import USBacktestEngine
         if strategy_type == "beta":
-            from backtest.services.beta import USBetaStrategy
+            from backtest.services.us_beta import USBetaStrategy
             strategy = USBetaStrategy(db)
         elif strategy_type == "baseline":
-            from backtest.services.baseline import USBaselineStrategy
+            from backtest.services.us_baseline import USBaselineStrategy
             strategy = USBaselineStrategy(db)
         else:
-            from backtest.services.strategy import USMultiFactorStrategy
+            from backtest.services.us_strategy import USMultiFactorStrategy
             strategy = USMultiFactorStrategy(db)
         cap = capital if capital > 0 else 1000000
     else:
         console.print(f"[cyan]运行 CN 回测: {start} ~ {end}[/cyan]")
-        from services.strategy.multi_factor import MultiFactorStrategy
-        from services.strategy.backtest import BacktestEngine
+        from backtest.services.a_strategy import MultiFactorStrategy
+        from backtest.services.a_engine import BacktestEngine
         strategy = MultiFactorStrategy(db)
         cap = capital if capital > 0 else 1000000
 
@@ -821,7 +820,7 @@ def backtest(
         console.print(f"  总交易笔数: {len(trades)}")
 
     # 存库
-    from backtest.services.saver import save_backtest_result
+    from backtest.services.us_saver import save_backtest_result
     st = strategy_type if market == "us" else "alpha"
     if save_backtest_result(market, st, start, end, result):
         console.print("  [dim]回测结果已保存到数据库[/dim]")
@@ -854,14 +853,16 @@ def factor_calc(
     db = _get_db()
 
     if market == "us":
-        from stocks.services.cleaner import get_us_clean_universe
-        from stocks.services.factors import value, quality, growth, momentum, technical, macro, analyst, polymarket, accruals
+        from stocks.services.us_cleaner import get_us_clean_universe
+        from stocks.services.factors import us_value as value, growth, momentum, technical, macro, analyst, polymarket, accruals
+        # AlphaSignal registry（Quality 批次 + 未来批次）
+        import stocks.services.factors.signals  # noqa: F401  触发自动注册
+        from stocks.services.factors.us_registry import get_registered as _get_signals
         universe = get_us_clean_universe(date)
         id_col = "ticker"
+        # Legacy factor_map（未迁移的 6 类别），仍硬编码
         factor_map = {
             "EP": value.EP, "BP": value.BP, "DIV_YIELD": value.DivYield,
-            "ROE_TTM": quality.RoeTTM, "GROSS_MARGIN": quality.GrossMargin,
-            "PROFIT_STB": quality.ProfitStability, "MARGIN_TREND": quality.MarginTrend,
             "NET_PROFIT_YOY": growth.NetProfitYoY, "REVENUE_YOY": growth.RevenueYoY,
             "NET_PROFIT_CAGR_3Y": growth.NetProfitCAGR3Y,
             "MOM_1M": momentum.Mom1M, "MOM_3M": momentum.Mom3M,
@@ -874,11 +875,14 @@ def factor_calc(
             "US_MACRO_INFL": macro.USMacroInfl, "US_MACRO_EXTR": macro.USMacroExtr,
             "US_ANALYST_RATING": analyst.USAnalystRating,
             "US_ANALYST_COVERAGE": analyst.USAnalystCoverage,
-            "ACCRUALS": accruals.Accruals, "BUYBACK_YIELD": accruals.BuybackYield,
+            "BUYBACK_YIELD": accruals.BuybackYield,
             "POLYMARKET_SENT": polymarket.PolymarketSent,
         }
+        # 合并 AlphaSignal registry（含 Quality 15 个——legacy 5 + 新增 10）
+        for sig_name, sig_cls in _get_signals().items():
+            factor_map[sig_name] = sig_cls
     else:
-        from services.data.cleaner import get_clean_universe
+        from stocks.services.a_cleaner import get_clean_universe
         universe = get_clean_universe(db, date)
         id_col = "ts_code"
         console.print("[yellow]A股因子 CLI 映射暂未实现，请先用 --market us[/yellow]")
@@ -899,7 +903,7 @@ def factor_calc(
 
     # 预加载数据（动量/技术因子需要 rolling stats）
     if market == "us":
-        from stocks.services.factors.base import USFactorBase
+        from stocks.services.factors.us_base import USFactorBase
         if not USFactorBase._static_cache.get("_bulk_daily"):
             console.print("  [dim]预加载数据...[/dim]")
             USFactorBase.preload_for_backtest(date, date)
@@ -951,15 +955,22 @@ def factor_list(
 ):
     """列出所有可用因子"""
     if market == "us":
+        # Legacy 因子（尚未迁移到 AlphaSignal registry）
         categories = {
-            "value": ["EP", "BP", "DIV_YIELD"],
-            "quality": ["ROE_TTM", "GROSS_MARGIN", "PROFIT_STB", "MARGIN_TREND"],
+            "value": ["EP", "BP", "DIV_YIELD", "BUYBACK_YIELD"],
             "growth": ["NET_PROFIT_YOY", "REVENUE_YOY", "NET_PROFIT_CAGR_3Y"],
             "momentum": ["MOM_1M", "MOM_3M", "MOM_12M", "REV_5D", "RESIDUAL_MOM"],
             "technical": ["TURN_20D", "VOL_20D", "PRICE_DEV_60D", "SIZE", "VOL_PRICE_DIV"],
             "macro": ["US_MACRO_CYCLE", "US_MACRO_LIQD", "US_MACRO_INFL", "US_MACRO_EXTR"],
             "analyst": ["US_ANALYST_RATING", "US_ANALYST_COVERAGE"],
         }
+        # AlphaSignal registry 因子（Quality 批次已迁入；后续批次会增加）
+        import stocks.services.factors.signals  # noqa: F401  触发自动注册
+        from stocks.services.factors.us_registry import get_registered
+        for sig_name, sig_cls in get_registered().items():
+            categories.setdefault(sig_cls.category, [])
+            if sig_name not in categories[sig_cls.category]:
+                categories[sig_cls.category].append(sig_name)
     else:
         categories = {
             "value": ["EP", "BP", "DIV_YIELD"],
@@ -996,9 +1007,9 @@ def factor_intra_sector(
 
     db = _get_db()
 
-    from services.factors.evaluation import FactorEvaluator
-    from stocks.services.factors.base import USFactorBase
-    from stocks.services.cleaner import get_us_clean_universe
+    from stocks.services.factors.a_evaluation import FactorEvaluator
+    from stocks.services.factors.us_base import USFactorBase
+    from stocks.services.us_cleaner import get_us_clean_universe
 
     evaluator = FactorEvaluator(db, market="us")
     factor_map = evaluator._get_factor_map()
@@ -1174,7 +1185,7 @@ def factor_eval(
     db = _get_db()
 
     import numpy as np
-    from services.factors.evaluation import FactorEvaluator
+    from stocks.services.factors.a_evaluation import FactorEvaluator
     evaluator = FactorEvaluator(db, market=market)
 
     factor_list_arg = [f.strip() for f in factors.split(",") if f.strip()] or None
@@ -1285,12 +1296,12 @@ def score(
     t0 = time.time()
 
     if market == "us":
-        from backtest.services.strategy import USMultiFactorStrategy
+        from backtest.services.us_strategy import USMultiFactorStrategy
         strategy = USMultiFactorStrategy(db)
         result = strategy.select_stocks(date)
         id_col = "ticker"
     else:
-        from services.strategy.multi_factor import MultiFactorStrategy
+        from backtest.services.a_strategy import MultiFactorStrategy
         strategy = MultiFactorStrategy(db)
         result = strategy.select_stocks(date)
         id_col = "ts_code"
@@ -1332,18 +1343,18 @@ def paper_status(
     db = _get_db()
 
     if market == "alpaca":
-        from trading.services.alpaca_trader import AlpacaTrader
+        from trading.services.us_alpaca_trader import AlpacaTrader
         trader = AlpacaTrader(db)
         trader.connect()
         console.print(f"\n[cyan]Alpaca 模拟账户[/cyan]")
         console.print(trader.get_position_report())
         return
     elif market == "us":
-        from trading.services.paper_trader import USPaperTrader
+        from trading.services.us_paper_trader import USPaperTrader
         trader = USPaperTrader(db)
         trader.connect()
     else:
-        from services.execution.paper_trader import PaperTrader
+        from trading.services.a_paper_trader import PaperTrader
         trader = PaperTrader(db)
         trader.connect()
 
@@ -1379,7 +1390,7 @@ def paper_trade(
     t0 = time.time()
 
     if market in ("us", "alpaca"):
-        from backtest.services.strategy import USMultiFactorStrategy
+        from backtest.services.us_strategy import USMultiFactorStrategy
         strategy = USMultiFactorStrategy(db)
         result = strategy.select_stocks(date)
         if result is None or result.empty:
@@ -1387,18 +1398,18 @@ def paper_trade(
             return
 
         if market == "alpaca":
-            from trading.services.alpaca_trader import AlpacaTrader
+            from trading.services.us_alpaca_trader import AlpacaTrader
             trader = AlpacaTrader(db)
         else:
-            from trading.services.paper_trader import USPaperTrader
+            from trading.services.us_paper_trader import USPaperTrader
             trader = USPaperTrader(db)
 
         trader.connect()
         n = trader.sync_position(result[["ticker", "weight"]])
         trader.update_nav()
     else:
-        from services.strategy.multi_factor import MultiFactorStrategy
-        from services.execution.paper_trader import PaperTrader
+        from backtest.services.a_strategy import MultiFactorStrategy
+        from trading.services.a_paper_trader import PaperTrader
         strategy = MultiFactorStrategy(db)
         result = strategy.select_stocks(date)
         if result is None or result.empty:
@@ -1420,17 +1431,17 @@ def paper_reset(
     db = _get_db()
 
     if market == "alpaca":
-        from trading.services.alpaca_trader import AlpacaTrader
+        from trading.services.us_alpaca_trader import AlpacaTrader
         trader = AlpacaTrader(db)
         trader.connect()
         trader.reset()
     elif market == "us":
-        from trading.services.paper_trader import USPaperTrader
+        from trading.services.us_paper_trader import USPaperTrader
         trader = USPaperTrader(db)
         trader.connect()
         trader.reset()
     else:
-        from services.execution.paper_trader import PaperTrader
+        from trading.services.a_paper_trader import PaperTrader
         trader = PaperTrader(db)
         trader.connect()
         trader.reset_account()

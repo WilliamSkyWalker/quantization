@@ -15,7 +15,11 @@ def _frontend_file(request, path=''):
 
 
 urlpatterns = [
-    path('api/', include('api.urls')),
+    # API routes — 各 app 自管理，多 include 合并到 /api/ 前缀
+    path('api/', include('stocks.urls')),
+    path('api/', include('backtest.urls')),
+    path('api/', include('trading.urls')),
+    path('api/', include('sentiment.urls')),
     # Frontend static assets (/assets/*)
     re_path(r'^assets/(?P<path>.*)$', serve, {'document_root': settings.FRONTEND_DIST / 'assets'}),
     # Root-level static files (vite.svg, favicon.ico, etc.)

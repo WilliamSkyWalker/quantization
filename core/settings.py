@@ -34,7 +34,6 @@ INSTALLED_APPS = [
     'backtest',
     'trading',
     'sentiment',
-    'api',
 ]
 
 MIDDLEWARE = [
@@ -125,7 +124,22 @@ LOGGING = {
             'level': 'INFO',
             'propagate': False,
         },
-        'api': {
+        'stocks': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'backtest': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'trading': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'sentiment': {
             'handlers': ['console'],
             'level': 'INFO',
             'propagate': False,
