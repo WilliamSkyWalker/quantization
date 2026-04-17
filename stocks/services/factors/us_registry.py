@@ -208,16 +208,261 @@ class AlphaSignal(USFactorBase, ABC):
             "description": (cls.__doc__ or "").strip().split("\n")[0],
         }
 
-    # ------------------------------------------------------------------
-    # ORM 直查 helpers（Quality 批次用；不经过 preload/parquet）
-    # ------------------------------------------------------------------
-    # 设计原则：
-    # - 新 Quality 因子直接查 USFinancialData / USKeyMetric，走 filing_date <= date 防未来偏差
-    # - 每次调用查一次 DB，不做缓存；后续批次再引入缓存层
-    # - 只接 Django ORM（不写 raw SQL），遵守 CLAUDE.md
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # 三层缓存：DB → 本地 parquet → 内存 _static_cache
+    # ==================================================================
+    #
+    # 调用 preload_alpha_cache(start, end) 后：
+    #   1. 检查 cache/ 目录是否有覆盖范围的 parquet 文件
+    #   2. 没有 → 从 DB 查询 → 存 parquet
+    #   3. 从 parquet 加载到 _static_cache（内存）
+    #   4. fetch_* helpers 先查内存，miss 则 fallback ORM
+    # ==================================================================
 
     _FILING_LAG_DAYS = 45  # filing_date <= report_date 时的兜底 lag
+
+    @classmethod
+    def preload_alpha_cache(cls, start_date: str, end_date: str) -> None:
+        """一次性预加载 AlphaSignal 所需全部数据到内存。
+
+        数据流：DB → parquet 文件 → _static_cache（内存）。
+        已有 parquet 缓存且范围覆盖时直接读文件，不查 DB。
+
+        Args:
+            start_date: 回测起始日 (YYYY-MM-DD)
+            end_date: 回测结束日 (YYYY-MM-DD)
+        """
+        import time
+
+        t_total = time.time()
+        logger.info(f"AlphaSignal preload_alpha_cache: {start_date} → {end_date}")
+
+        # ---- 1. us_financial_data（全字段，5 年回看） ----
+        cls._preload_financial(start_date, end_date)
+
+        # ---- 2. us_daily_price（400 天回看） ----
+        cls._preload_daily_price(start_date, end_date)
+
+        # ---- 3. us_key_metric（2 年回看） ----
+        cls._preload_key_metric(start_date, end_date)
+
+        # ---- 4. us_enterprise_value（全字段，200 天回看） ----
+        cls._preload_enterprise_value(start_date, end_date)
+
+        # ---- 5. FF5（已有本地 CSV，直接加载） ----
+        cls.fetch_ff5_factors()
+
+        logger.info(f"AlphaSignal preload 完成: {time.time() - t_total:.1f}s")
+
+    @classmethod
+    def _preload_financial(cls, start_date: str, end_date: str) -> None:
+        """预加载 us_financial_data 全字段。"""
+        import time
+        from stocks.models import USFinancialData
+
+        t0 = time.time()
+        fin_start = (pd.Timestamp(start_date) - pd.DateOffset(years=5)).strftime("%Y-%m-%d")
+
+        # 取全部非系统字段
+        all_fields = [
+            f.name for f in USFinancialData._meta.get_fields()
+            if f.name not in ("id", "updated_at")
+        ]
+
+        df = cls._load_or_query(
+            "alpha_financial", USFinancialData, all_fields,
+            fin_start, end_date, "filing_date",
+        )
+        if not df.empty:
+            df["filing_date"] = pd.to_datetime(df["filing_date"])
+            df["date"] = pd.to_datetime(df["date"])
+            # filing_date 修正
+            bad = df["filing_date"] <= df["date"]
+            if bad.any():
+                df.loc[bad, "filing_date"] = df.loc[bad, "date"] + pd.Timedelta(days=cls._FILING_LAG_DAYS)
+
+        cls._static_cache["_alpha_financial"] = df
+        logger.info(f"  alpha_financial: {len(df)} rows, {time.time() - t0:.1f}s")
+
+    @classmethod
+    def _preload_daily_price(cls, start_date: str, end_date: str) -> None:
+        """预加载 us_daily_price。复用 legacy _bulk_daily 如果已存在。"""
+        import time
+
+        # 如果 legacy preload 已加载，直接复用
+        if "_bulk_daily" in cls._static_cache and not cls._static_cache["_bulk_daily"].empty:
+            cls._static_cache["_alpha_daily"] = cls._static_cache["_bulk_daily"]
+            logger.info("  alpha_daily: 复用 _bulk_daily")
+            return
+
+        from stocks.models import USDailyPrice
+
+        t0 = time.time()
+        price_start = (pd.Timestamp(start_date) - pd.Timedelta(days=450)).strftime("%Y-%m-%d")
+        price_cols = [
+            "ticker", "trade_date", "open", "high", "low",
+            "close", "adj_close", "volume", "change_percent",
+        ]
+
+        df = cls._load_or_query(
+            "us_daily_price", USDailyPrice, price_cols,
+            price_start, end_date, "trade_date",
+            order_by=["ticker", "trade_date"],
+        )
+        if not df.empty:
+            df["trade_date"] = pd.to_datetime(df["trade_date"])
+            df["adj_close"] = pd.to_numeric(df["adj_close"], errors="coerce")
+            df["close"] = pd.to_numeric(df["close"], errors="coerce")
+            df["adj_close"] = df["adj_close"].fillna(df["close"])
+            for c in ["open", "high", "low", "volume", "change_percent"]:
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+
+        cls._static_cache["_alpha_daily"] = df
+        logger.info(f"  alpha_daily: {len(df)} rows, {time.time() - t0:.1f}s")
+
+    @classmethod
+    def _preload_key_metric(cls, start_date: str, end_date: str) -> None:
+        """预加载 us_key_metric 全字段。"""
+        import time
+        from stocks.models import USKeyMetric
+
+        t0 = time.time()
+        km_start = (pd.Timestamp(start_date) - pd.DateOffset(years=2)).strftime("%Y-%m-%d")
+
+        all_fields = [
+            f.name for f in USKeyMetric._meta.get_fields()
+            if f.name not in ("id", "updated_at")
+        ]
+
+        df = cls._load_or_query(
+            "alpha_key_metric", USKeyMetric, all_fields,
+            km_start, end_date, "date",
+        )
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"])
+
+        cls._static_cache["_alpha_key_metric"] = df
+        logger.info(f"  alpha_key_metric: {len(df)} rows, {time.time() - t0:.1f}s")
+
+    @classmethod
+    def _preload_enterprise_value(cls, start_date: str, end_date: str) -> None:
+        """预加载 us_enterprise_value（market_cap + EV）。"""
+        import time
+        from stocks.models import USEnterpriseValue
+
+        t0 = time.time()
+        ev_start = (pd.Timestamp(start_date) - pd.Timedelta(days=250)).strftime("%Y-%m-%d")
+        ev_cols = ["ticker", "date", "market_capitalization", "enterprise_value"]
+
+        df = cls._load_or_query(
+            "alpha_enterprise_value", USEnterpriseValue, ev_cols,
+            ev_start, end_date, "date",
+        )
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"])
+            df["market_capitalization"] = pd.to_numeric(df["market_capitalization"], errors="coerce")
+            df["enterprise_value"] = pd.to_numeric(df["enterprise_value"], errors="coerce")
+
+        cls._static_cache["_alpha_ev"] = df
+        logger.info(f"  alpha_ev: {len(df)} rows, {time.time() - t0:.1f}s")
+
+    # ------------------------------------------------------------------
+    # 统一 market_cap / EV 查询（走缓存或 ORM）
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def fetch_market_cap(cls, date: str, tickers: list[str]) -> pd.DataFrame:
+        """取 date 可见的最新市值。优先走缓存。
+
+        Returns:
+            DataFrame[ticker, market_cap]
+        """
+        date_ts = pd.Timestamp(date)
+
+        # 尝试从缓存切片
+        cache = cls._static_cache.get("_alpha_ev")
+        if cache is not None and not cache.empty:
+            start = date_ts - pd.Timedelta(days=200)
+            mask = (
+                cache["ticker"].isin(tickers)
+                & (cache["date"] >= start)
+                & (cache["date"] <= date_ts)
+                & cache["market_capitalization"].notna()
+                & (cache["market_capitalization"] > 0)
+            )
+            df = cache.loc[mask, ["ticker", "date", "market_capitalization"]].copy()
+            if not df.empty:
+                df = df.sort_values(["ticker", "date"], ascending=[True, False])
+                df = df.drop_duplicates(subset=["ticker"], keep="first")
+                df = df.rename(columns={"market_capitalization": "market_cap"})
+                return df[["ticker", "market_cap"]].reset_index(drop=True)
+
+        # fallback ORM
+        from stocks.models import USEnterpriseValue
+
+        start = (date_ts - pd.DateOffset(days=200)).date()
+        qs = USEnterpriseValue.objects.filter(
+            ticker__in=tickers,
+            date__gte=start,
+            date__lte=date_ts.date(),
+            market_capitalization__isnull=False,
+            market_capitalization__gt=0,
+        ).values_list("ticker", "date", "market_capitalization")
+
+        df = pd.DataFrame(list(qs), columns=["ticker", "date", "market_cap"])
+        if df.empty:
+            return pd.DataFrame(columns=["ticker", "market_cap"])
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values(["ticker", "date"], ascending=[True, False])
+        df = df.drop_duplicates(subset=["ticker"], keep="first")
+        df["market_cap"] = pd.to_numeric(df["market_cap"], errors="coerce")
+        return df[["ticker", "market_cap"]].reset_index(drop=True)
+
+    @classmethod
+    def fetch_enterprise_value(cls, date: str, tickers: list[str]) -> pd.DataFrame:
+        """取 date 可见的最新 EV。优先走缓存。
+
+        Returns:
+            DataFrame[ticker, ev]
+        """
+        date_ts = pd.Timestamp(date)
+
+        cache = cls._static_cache.get("_alpha_ev")
+        if cache is not None and not cache.empty:
+            start = date_ts - pd.Timedelta(days=200)
+            mask = (
+                cache["ticker"].isin(tickers)
+                & (cache["date"] >= start)
+                & (cache["date"] <= date_ts)
+                & cache["enterprise_value"].notna()
+            )
+            df = cache.loc[mask, ["ticker", "date", "enterprise_value"]].copy()
+            if not df.empty:
+                df = df.sort_values(["ticker", "date"], ascending=[True, False])
+                df = df.drop_duplicates(subset=["ticker"], keep="first")
+                df = df.rename(columns={"enterprise_value": "ev"})
+                return df[["ticker", "ev"]].reset_index(drop=True)
+
+        # fallback ORM
+        from stocks.models import USEnterpriseValue
+
+        start = (date_ts - pd.DateOffset(days=200)).date()
+        qs = USEnterpriseValue.objects.filter(
+            ticker__in=tickers,
+            date__gte=start,
+            date__lte=date_ts.date(),
+            enterprise_value__isnull=False,
+        ).values_list("ticker", "date", "enterprise_value")
+
+        df = pd.DataFrame(list(qs), columns=["ticker", "date", "ev"])
+        if df.empty:
+            return pd.DataFrame(columns=["ticker", "ev"])
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values(["ticker", "date"], ascending=[True, False])
+        df = df.drop_duplicates(subset=["ticker"], keep="first")
+        df["ev"] = pd.to_numeric(df["ev"], errors="coerce")
+        return df[["ticker", "ev"]].reset_index(drop=True)
 
     @staticmethod
     def _apply_filing_lag(df: pd.DataFrame) -> pd.DataFrame:
@@ -242,23 +487,43 @@ class AlphaSignal(USFactorBase, ABC):
         columns: list[str],
         lookback_years: int = 2,
     ) -> pd.DataFrame:
-        """获取每只股票在 `date` 可见的最新一条 us_financial_data（ORM 直查，无缓存）。"""
-        from stocks.models import USFinancialData
-
+        """获取每只股票在 `date` 可见的最新一条 us_financial_data。优先走缓存。"""
         tickers = list(tickers)
         if not tickers:
             logger.debug("fetch_financial_latest: 空 ticker 列表")
             return pd.DataFrame()
 
         date_ts = pd.Timestamp(date)
-        start = (date_ts - pd.DateOffset(years=lookback_years)).date()
-
+        start_ts = date_ts - pd.DateOffset(years=lookback_years)
         base_cols = ["ticker", "date", "filing_date", "period"]
         all_cols = base_cols + [c for c in columns if c not in base_cols]
 
+        # ---- 尝试缓存 ----
+        cache = cls._static_cache.get("_alpha_financial")
+        if cache is not None and not cache.empty:
+            # 检查请求列是否都在缓存中
+            missing = [c for c in all_cols if c not in cache.columns]
+            if not missing:
+                mask = (
+                    cache["ticker"].isin(tickers)
+                    & (cache["filing_date"] >= start_ts)
+                    & (cache["filing_date"] <= date_ts)
+                )
+                df = cache.loc[mask, all_cols].copy()
+                if not df.empty:
+                    df = df.sort_values(["ticker", "date"], ascending=[True, False])
+                    df = df.drop_duplicates(subset=["ticker"], keep="first").reset_index(drop=True)
+                    for c in columns:
+                        if c in df.columns:
+                            df[c] = pd.to_numeric(df[c], errors="coerce")
+                    return df
+
+        # ---- fallback ORM ----
+        from stocks.models import USFinancialData
+
         qs = USFinancialData.objects.filter(
             ticker__in=tickers,
-            filing_date__gte=start,
+            filing_date__gte=start_ts.date(),
             filing_date__lte=date_ts.date(),
         ).values_list(*all_cols)
 
@@ -288,27 +553,45 @@ class AlphaSignal(USFactorBase, ABC):
         columns: list[str],
         n_quarters: int,
     ) -> pd.DataFrame:
-        """获取每只股票 `date` 可见的最近 n_quarters 条季报（长格式，ORM 直查，无缓存）。
+        """获取每只股票 `date` 可见的最近 n_quarters 条季报（长格式）。优先走缓存。
 
         用于：同比差分（ΔROA）、历史波动率（QMJ_EARNINGS_VOL）、自相关（EARNINGS_PERSISTENCE）。
         """
-        from stocks.models import USFinancialData
-
         tickers = list(tickers)
         if not tickers:
             logger.debug("fetch_financial_history: 空 ticker 列表")
             return pd.DataFrame()
 
         date_ts = pd.Timestamp(date)
-        # 每季 ~90 天，加 buffer 保证能拿到 n_quarters 条
-        start = (date_ts - pd.DateOffset(days=int(n_quarters * 100) + 180)).date()
-
+        start_ts = date_ts - pd.DateOffset(days=int(n_quarters * 100) + 180)
         base_cols = ["ticker", "date", "filing_date", "period"]
         all_cols = base_cols + [c for c in columns if c not in base_cols]
 
+        # ---- 尝试缓存 ----
+        cache = cls._static_cache.get("_alpha_financial")
+        if cache is not None and not cache.empty:
+            missing = [c for c in all_cols if c not in cache.columns]
+            if not missing:
+                mask = (
+                    cache["ticker"].isin(tickers)
+                    & (cache["filing_date"] >= start_ts)
+                    & (cache["filing_date"] <= date_ts)
+                )
+                df = cache.loc[mask, all_cols].copy()
+                if not df.empty:
+                    df = df.sort_values(["ticker", "date"], ascending=[True, False])
+                    df = df.groupby("ticker", group_keys=False).head(n_quarters).reset_index(drop=True)
+                    for c in columns:
+                        if c in df.columns:
+                            df[c] = pd.to_numeric(df[c], errors="coerce")
+                    return df
+
+        # ---- fallback ORM ----
+        from stocks.models import USFinancialData
+
         qs = USFinancialData.objects.filter(
             ticker__in=tickers,
-            filing_date__gte=start,
+            filing_date__gte=start_ts.date(),
             filing_date__lte=date_ts.date(),
         ).values_list(*all_cols)
 
@@ -334,29 +617,48 @@ class AlphaSignal(USFactorBase, ABC):
         columns: list[str],
         lookback_years: int = 2,
     ) -> pd.DataFrame:
-        """获取每只股票在 `date` 可见的最新一条 us_key_metric。
+        """获取每只股票在 `date` 可见的最新一条 us_key_metric。优先走缓存。
 
         注意：USKeyMetric 没有 filing_date 字段，只能用 `date` 列（report date）并加 45 天
         保守 lag，近似模拟 filing_date。
         """
-        from stocks.models import USKeyMetric
-
         tickers = list(tickers)
         if not tickers:
             logger.debug("fetch_key_metric_latest: 空 ticker 列表")
             return pd.DataFrame()
 
         date_ts = pd.Timestamp(date)
-        effective_cutoff = (date_ts - pd.Timedelta(days=cls._FILING_LAG_DAYS)).date()
-        start = (date_ts - pd.DateOffset(years=lookback_years)).date()
-
+        effective_cutoff = date_ts - pd.Timedelta(days=cls._FILING_LAG_DAYS)
+        start_ts = date_ts - pd.DateOffset(years=lookback_years)
         base_cols = ["ticker", "date", "period"]
         all_cols = base_cols + [c for c in columns if c not in base_cols]
 
+        # ---- 尝试缓存 ----
+        cache = cls._static_cache.get("_alpha_key_metric")
+        if cache is not None and not cache.empty:
+            missing = [c for c in all_cols if c not in cache.columns]
+            if not missing:
+                mask = (
+                    cache["ticker"].isin(tickers)
+                    & (cache["date"] >= start_ts)
+                    & (cache["date"] <= effective_cutoff)
+                )
+                df = cache.loc[mask, all_cols].copy()
+                if not df.empty:
+                    df = df.sort_values(["ticker", "date"], ascending=[True, False])
+                    df = df.drop_duplicates(subset=["ticker"], keep="first").reset_index(drop=True)
+                    for c in columns:
+                        if c in df.columns:
+                            df[c] = pd.to_numeric(df[c], errors="coerce")
+                    return df
+
+        # ---- fallback ORM ----
+        from stocks.models import USKeyMetric
+
         qs = USKeyMetric.objects.filter(
             ticker__in=tickers,
-            date__gte=start,
-            date__lte=effective_cutoff,
+            date__gte=start_ts.date(),
+            date__lte=effective_cutoff.date(),
         ).values_list(*all_cols)
 
         df = pd.DataFrame(list(qs), columns=all_cols)
@@ -384,14 +686,12 @@ class AlphaSignal(USFactorBase, ABC):
         lookback_days: int,
         columns: list[str] | None = None,
     ) -> pd.DataFrame:
-        """获取 `date` 之前 `lookback_days` 个日历日的日线（ORM 直查，无缓存）。
+        """获取 `date` 之前 `lookback_days` 个日历日的日线。优先走缓存。
 
         Returns:
             DataFrame[ticker, trade_date, *columns]，按 (ticker, trade_date ASC) 排序。
             columns 默认 ['adj_close', 'close', 'volume', 'change_percent']。
         """
-        from stocks.models import USDailyPrice
-
         tickers = list(tickers)
         if not tickers:
             logger.debug("fetch_price_history: 空 ticker")
@@ -400,7 +700,6 @@ class AlphaSignal(USFactorBase, ABC):
         if columns is None:
             columns = ["adj_close", "close", "volume", "change_percent"]
         requested = list(columns)
-        # 内部强制带 close 做 adj_close fallback（FMP /stable/ 端点不返 adj_close）
         internal_cols = list(requested)
         if "adj_close" in requested and "close" not in internal_cols:
             internal_cols.append("close")
@@ -408,11 +707,33 @@ class AlphaSignal(USFactorBase, ABC):
         all_cols = base + [c for c in internal_cols if c not in base]
 
         end_ts = pd.Timestamp(date)
-        start = (end_ts - pd.Timedelta(days=lookback_days)).date()
+        start_ts = end_ts - pd.Timedelta(days=lookback_days)
+
+        # ---- 尝试缓存 ----
+        cache = cls._static_cache.get("_alpha_daily")
+        if cache is not None and not cache.empty:
+            missing = [c for c in all_cols if c not in cache.columns]
+            if not missing:
+                tickers_set = set(tickers)
+                mask = (
+                    cache["ticker"].isin(tickers_set)
+                    & (cache["trade_date"] >= start_ts)
+                    & (cache["trade_date"] <= end_ts)
+                )
+                df = cache.loc[mask, all_cols].copy()
+                if not df.empty:
+                    df = df.sort_values(["ticker", "trade_date"])
+                    if "adj_close" in df.columns and "close" in df.columns:
+                        df["adj_close"] = df["adj_close"].fillna(df["close"])
+                    keep = base + [c for c in requested if c in df.columns]
+                    return df[keep]
+
+        # ---- fallback ORM ----
+        from stocks.models import USDailyPrice
 
         qs = USDailyPrice.objects.filter(
             ticker__in=tickers,
-            trade_date__gte=start,
+            trade_date__gte=start_ts.date(),
             trade_date__lte=end_ts.date(),
         ).order_by("ticker", "trade_date").values_list(*all_cols)
 
