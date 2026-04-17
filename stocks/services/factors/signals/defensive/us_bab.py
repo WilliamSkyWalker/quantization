@@ -10,16 +10,13 @@ BAB 核心洞察：
     即直接用市场 beta 的负数作为因子值。
     低 beta 股票信号高（做多），高 beta 股票信号低（做空）。
 
-实现：
-    β 用过去 252 个交易日，个股日收益率 vs 市场日收益率 OLS 回归。
-    市场收益率用 FF5 的 Mkt-RF + RF。
-
-    Frazzini-Pedersen 原文用 3 天重叠收益 + Vasicek shrinkage (先验 β=1)：
-    β_shrunk = 0.6 × β_TS + 0.4 × 1.0
-    这里简化为普通 OLS + shrinkage。
+实现（向量化）：
+    1. 把日线 pivot 成 wide-format 收益率矩阵 (date × ticker)
+    2. 与 Mkt-RF 对齐
+    3. β = Cov(r_ex, MktRF) / Var(MktRF)，一次算所有 ticker
+    4. Vasicek shrinkage: β_shrunk = 0.6·β_OLS + 0.4·1.0
 
 因子方向：+1（高信号 = 低 beta = 利好）
-实际上 factor_value = -beta，inherent_direction = +1 等价于"低 beta 做多"。
 """
 
 import logging
@@ -59,7 +56,6 @@ class BettingAgainstBeta(AlphaSignal):
             logger.debug("BAB: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        # 取 FF5 获取 Mkt-RF 作为市场收益率
         ff5 = self.fetch_ff5_factors()
         if ff5.empty:
             logger.warning(f"BAB({date}): FF5 数据为空")
@@ -73,45 +69,65 @@ class BettingAgainstBeta(AlphaSignal):
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         date_ts = pd.Timestamp(date)
+
+        # --- 向量化：pivot 成 wide-format ---
+        # 排除和 FF 列名冲突的 ticker（极少数如 'RF'）
+        _FF_COLS = {"Mkt-RF", "SMB", "HML", "RMW", "CMA", "RF"}
+        hist = hist[~hist["ticker"].isin(_FF_COLS)]
+
+        wide = hist.pivot(index="trade_date", columns="ticker", values="adj_close")
+        rets = wide.pct_change().iloc[1:]  # (T, N) 日收益率矩阵
+
+        # 对齐 FF 因子
         mkt = ff5[["Mkt-RF", "RF"]].copy()
         mkt = mkt[mkt.index <= date_ts]
-        mkt = mkt.tail(300)  # 稍多取一些，inner join 后保证够
-
-        rows = []
-        for ticker, grp in hist.groupby("ticker", sort=False):
-            prices = grp.set_index("trade_date")["adj_close"].dropna().sort_index()
-            if len(prices) < self._MIN_OBS:
-                continue
-
-            rets = prices.pct_change().dropna()
-            rets.name = "r"
-
-            # 对齐
-            aligned = pd.merge(
-                rets, mkt, left_index=True, right_index=True, how="inner"
-            )
-            if len(aligned) < self._MIN_OBS:
-                continue
-
-            # 超额收益
-            y = (aligned["r"] - aligned["RF"]).values
-            x = aligned["Mkt-RF"].values
-
-            # OLS beta: β = Cov(y, x) / Var(x)
-            x_dm = x - x.mean()
-            beta_ols = np.dot(x_dm, y - y.mean()) / np.dot(x_dm, x_dm)
-
-            # Vasicek shrinkage toward 1.0
-            beta_shrunk = _SHRINKAGE_WEIGHT * beta_ols + (1 - _SHRINKAGE_WEIGHT) * 1.0
-
-            # BAB 信号 = -beta（低 beta 做多）
-            rows.append({"ticker": ticker, "factor_value": -beta_shrunk})
-
-        if not rows:
-            logger.warning(f"BAB({date}): 无有效 ticker")
+        aligned = rets.join(mkt, how="inner")
+        if len(aligned) < self._MIN_OBS:
+            logger.warning(f"BAB({date}): 对齐后天数不足 {len(aligned)}")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        out = pd.DataFrame(rows)
-        n_out = int(out["factor_value"].notna().sum())
+        # 提取矩阵
+        ticker_cols = [c for c in aligned.columns if c not in ("Mkt-RF", "RF")]
+        R = aligned[ticker_cols].values  # (T, N)
+        rf = aligned["RF"].values[:, None]  # (T, 1)
+        mkt_rf = aligned["Mkt-RF"].values  # (T,)
+
+        R_ex = R - rf  # 超额收益矩阵 (T, N)
+
+        # 每列有效观测数 mask
+        valid = np.isfinite(R_ex)  # (T, N)
+        n_valid = valid.sum(axis=0)  # (N,)
+
+        # β = Cov(R_ex, MktRF) / Var(MktRF)，按列向量化
+        # 用 nanmean 处理 NaN
+        mkt_dm = mkt_rf - np.nanmean(mkt_rf)  # (T,)
+        mkt_var = np.nansum(mkt_dm ** 2)
+
+        if mkt_var < 1e-15:
+            logger.warning(f"BAB({date}): MktRF 方差为零")
+            return pd.DataFrame(columns=["ticker", "factor_value"])
+
+        # 对 NaN 位置置 0 参与运算（不影响 cov，因为 x_dm 对应位置也参与）
+        R_ex_clean = np.where(valid, R_ex, 0.0)
+        # 每列均值（只对有效观测）
+        col_means = np.nanmean(R_ex, axis=0)  # (N,)
+        R_ex_dm = R_ex_clean - np.where(valid, col_means[None, :], 0.0)  # (T, N)
+
+        cov_vec = (R_ex_dm * mkt_dm[:, None]).sum(axis=0)  # (N,)
+        beta_ols = cov_vec / mkt_var  # (N,)
+
+        # Vasicek shrinkage
+        beta_shrunk = _SHRINKAGE_WEIGHT * beta_ols + (1 - _SHRINKAGE_WEIGHT) * 1.0
+
+        # 过滤观测不足的 ticker
+        bab_signal = -beta_shrunk
+        bab_signal[n_valid < self._MIN_OBS] = np.nan
+
+        out = pd.DataFrame({
+            "ticker": ticker_cols,
+            "factor_value": bab_signal,
+        })
+        out = out.dropna(subset=["factor_value"])
+        n_out = len(out)
         logger.info(f"BAB({date}): {n_out} 有值")
-        return out
+        return out[["ticker", "factor_value"]].reset_index(drop=True)

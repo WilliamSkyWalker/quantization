@@ -7,9 +7,12 @@
 
 经济直觉：
     - 下行 beta 高的股票在市场下跌时跌更多 → 承担更多下行风险
-    - 投资者应该要求更高溢价？ → 学术结论：实际上高 β_down 后续收益更低
-    - 可能是因为散户低估了下行风险（Ang et al. 2006）
     - 反向因子：高 β_down = 利空
+
+实现（向量化）：
+    1. Pivot 成 wide-format 收益率矩阵
+    2. 用 down-day mask 过滤
+    3. 矩阵 beta 一次算所有 ticker
 
 因子方向：-1
 """
@@ -62,48 +65,68 @@ class DownsideBeta(AlphaSignal):
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         date_ts = pd.Timestamp(date)
+
+        # --- 向量化：pivot wide ---
+        _FF_COLS = {"Mkt-RF", "SMB", "HML", "RMW", "CMA", "RF", "r_mkt"}
+        hist = hist[~hist["ticker"].isin(_FF_COLS)]
+
+        wide = hist.pivot(index="trade_date", columns="ticker", values="adj_close")
+        rets = wide.pct_change().iloc[1:]
+
         mkt = ff5[["Mkt-RF", "RF"]].copy()
-        mkt = mkt[mkt.index <= date_ts].tail(300)
-        # 市场总收益 = Mkt-RF + RF
+        mkt = mkt[mkt.index <= date_ts]
         mkt["r_mkt"] = mkt["Mkt-RF"] + mkt["RF"]
-        mkt_mean = mkt["r_mkt"].mean()
 
-        rows = []
-        for ticker, grp in hist.groupby("ticker", sort=False):
-            prices = grp.set_index("trade_date")["adj_close"].dropna().sort_index()
-            if len(prices) < 120:
-                continue
-
-            rets = prices.pct_change().dropna()
-            rets.name = "r"
-
-            aligned = pd.merge(
-                rets, mkt[["r_mkt", "RF"]], left_index=True, right_index=True, how="inner"
-            )
-
-            # 只保留市场下跌日
-            down_mask = aligned["r_mkt"] < mkt_mean
-            down = aligned[down_mask]
-            if len(down) < self._MIN_DOWN_DAYS:
-                continue
-
-            y = (down["r"] - down["RF"]).values
-            x = (down["r_mkt"] - down["RF"]).values
-
-            # OLS: β_down = Cov(y, x) / Var(x)
-            x_dm = x - x.mean()
-            var_x = np.dot(x_dm, x_dm)
-            if var_x < 1e-15:
-                continue
-            beta_down = np.dot(x_dm, y - y.mean()) / var_x
-
-            rows.append({"ticker": ticker, "factor_value": float(beta_down)})
-
-        if not rows:
-            logger.warning(f"DownsideBeta({date}): 无有效 ticker")
+        aligned = rets.join(mkt, how="inner")
+        if len(aligned) < 60:
+            logger.warning(f"DownsideBeta({date}): 对齐后天数不足")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        out = pd.DataFrame(rows)
-        n_out = int(out["factor_value"].notna().sum())
+        ticker_cols = [c for c in aligned.columns if c not in ("Mkt-RF", "RF", "r_mkt")]
+
+        # 只保留市场下跌日
+        r_mkt = aligned["r_mkt"].values
+        mkt_mean = np.nanmean(r_mkt)
+        down_mask = r_mkt < mkt_mean  # (T,) bool
+
+        n_down = down_mask.sum()
+        if n_down < self._MIN_DOWN_DAYS:
+            logger.warning(f"DownsideBeta({date}): 市场下跌日仅 {n_down}")
+            return pd.DataFrame(columns=["ticker", "factor_value"])
+
+        # 下跌日的数据
+        R = aligned[ticker_cols].values[down_mask]  # (T_down, N)
+        rf = aligned["RF"].values[down_mask, None]  # (T_down, 1)
+        mkt_rf_down = aligned["Mkt-RF"].values[down_mask]  # (T_down,)
+
+        R_ex = R - rf  # (T_down, N)
+
+        # 有效观测计数
+        valid = np.isfinite(R_ex)
+        n_valid = valid.sum(axis=0)
+
+        # β_down = Cov(R_ex, MktRF_down) / Var(MktRF_down)
+        mkt_dm = mkt_rf_down - np.nanmean(mkt_rf_down)
+        mkt_var = np.nansum(mkt_dm ** 2)
+
+        if mkt_var < 1e-15:
+            logger.warning(f"DownsideBeta({date}): MktRF 下行方差为零")
+            return pd.DataFrame(columns=["ticker", "factor_value"])
+
+        R_ex_clean = np.where(valid, R_ex, 0.0)
+        col_means = np.nanmean(R_ex, axis=0)
+        R_ex_dm = R_ex_clean - np.where(valid, col_means[None, :], 0.0)
+
+        cov_vec = (R_ex_dm * mkt_dm[:, None]).sum(axis=0)
+        beta_down = cov_vec / mkt_var
+
+        beta_down[n_valid < self._MIN_DOWN_DAYS] = np.nan
+
+        out = pd.DataFrame({
+            "ticker": ticker_cols,
+            "factor_value": beta_down,
+        })
+        out = out.dropna(subset=["factor_value"])
+        n_out = len(out)
         logger.info(f"DownsideBeta({date}): {n_out} 有值")
-        return out
+        return out[["ticker", "factor_value"]].reset_index(drop=True)
