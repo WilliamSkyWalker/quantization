@@ -335,6 +335,10 @@ class USFactorBase(ABC):
             logger.warning(f"预加载 insider trade 失败: {e}")
             cls._static_cache["_bulk_insider"] = pd.DataFrame()
 
+        # 10. AlphaSignal 缓存（financial 全字段 + key_metric + enterprise_value）
+        from stocks.services.factors.us_registry import AlphaSignal
+        AlphaSignal.preload_alpha_cache(start_date, end_date)
+
     @classmethod
     def precompute_rolling_stats(cls):
         """
