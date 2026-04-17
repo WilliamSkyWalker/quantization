@@ -2,6 +2,11 @@
 """
 全因子分析框架（IC 矩阵 / Fama-MacBeth / 因子衰减）。
 
+架构：
+    Phase 1: 一次性构建因子面板 {date: DataFrame[ticker, f1, f2, ...]}
+    Phase 2: 一次性构建前瞻收益矩阵（wide price pivot → shift）
+    Phase 3: IC / FM / Decay 全在面板上做纯 numpy（秒级）
+
 用法:
     # 删旧缓存后首次跑（~2 小时 preload）
     rm -f cache/*.parquet
@@ -51,142 +56,186 @@ logging.basicConfig(
     level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
 
+HORIZONS = [21, 42, 63, 126, 252]  # 1M, 2M, 3M, 6M, 12M
+
+
 # ======================================================================
-# 1. 数据准备
+# Phase 1: 构建因子面板（一次性计算所有因子 × 所有日期）
 # ======================================================================
 
 
-def get_month_end_dates(start: str, end: str) -> list[str]:
-    """返回 [start, end] 范围内所有月末交易日。"""
-    dates = pd.date_range(start, end, freq="ME")
-    return [d.strftime("%Y-%m-%d") for d in dates]
-
-
-def compute_forward_returns(
-    date: str, tickers: list[str], horizons: list[int] = None
-) -> pd.DataFrame:
-    """计算 date 起各 horizon（交易日）的前瞻收益率。
+def build_factor_panel(
+    registry: dict, dates: list[str]
+) -> dict[str, pd.DataFrame]:
+    """对每个月末日期，计算所有因子的截面值。
 
     Returns:
-        DataFrame[ticker, fwd_1m, fwd_2m, fwd_3m, fwd_6m, fwd_12m]
+        {date_str: DataFrame[ticker, factor1, factor2, ...]}
     """
-    if horizons is None:
-        horizons = [21, 42, 63, 126, 252]  # 1M, 2M, 3M, 6M, 12M
-    max_horizon = max(horizons) + 30  # buffer
-
-    hist = AlphaSignal.fetch_price_history(
-        # 取 date 之后的数据（forward-looking）
-        # 需要用一个技巧：从 date 开始往后看
-        date=_forward_date(date, max_horizon),
-        tickers=tickers,
-        lookback_days=max_horizon + 10,
-        columns=["adj_close"],
-    )
-    if hist.empty:
-        return pd.DataFrame(columns=["ticker"] + [f"fwd_{h}d" for h in horizons])
-
-    date_ts = pd.Timestamp(date)
-    # 只保留 date 当天及之后
-    hist = hist[hist["trade_date"] >= date_ts]
-    if hist.empty:
-        return pd.DataFrame(columns=["ticker"] + [f"fwd_{h}d" for h in horizons])
-
-    # Pivot wide
-    wide = hist.pivot(index="trade_date", columns="ticker", values="adj_close")
-    wide = wide.sort_index()
-
-    if len(wide) < 2:
-        return pd.DataFrame(columns=["ticker"] + [f"fwd_{h}d" for h in horizons])
-
-    # 基准价格 = date 当天或之后最近的交易日
-    base_prices = wide.iloc[0]  # 第一行
-
-    result = pd.DataFrame({"ticker": wide.columns})
-    for h in horizons:
-        if h < len(wide):
-            fwd_prices = wide.iloc[h]
-            fwd_ret = (fwd_prices / base_prices) - 1.0
-            result[f"fwd_{h}d"] = fwd_ret.values
-        else:
-            result[f"fwd_{h}d"] = np.nan
-
-    return result
-
-
-def _forward_date(date: str, days: int) -> str:
-    """date + days 个日历日。"""
-    return (pd.Timestamp(date) + pd.Timedelta(days=int(days * 1.5))).strftime("%Y-%m-%d")
-
-
-# ======================================================================
-# 2. IC 矩阵
-# ======================================================================
-
-
-def compute_ic_matrix(
-    factor_registry: dict,
-    dates: list[str],
-    horizon_days: int = 21,
-) -> pd.DataFrame:
-    """计算所有因子在每个月末的截面 Spearman IC。
-
-    Returns:
-        DataFrame[date, factor1_ic, factor2_ic, ...]
-    """
-    factor_names = sorted(factor_registry.keys())
-    ic_records = []
+    factor_names = sorted(registry.keys())
+    panel = {}
 
     for i, date in enumerate(dates):
         t0 = time.time()
-        # forward return (1M)
         universe = get_us_clean_universe(date)
         if universe.empty:
             logger.warning(f"[{i+1}/{len(dates)}] {date} universe 为空，跳过")
             continue
 
         tickers = universe["ticker"].tolist()
-        fwd = compute_forward_returns(date, tickers, horizons=[horizon_days])
-        fwd_col = f"fwd_{horizon_days}d"
-        if fwd.empty or fwd_col not in fwd.columns:
-            logger.warning(f"[{i+1}/{len(dates)}] {date} 无前瞻收益，跳过")
-            continue
-        fwd = fwd[["ticker", fwd_col]].dropna()
-        if len(fwd) < 50:
-            logger.warning(f"[{i+1}/{len(dates)}] {date} 前瞻收益覆盖不足 ({len(fwd)})")
-            continue
+        result = pd.DataFrame({"ticker": tickers})
 
-        row = {"date": date}
-
-        # 逐因子计算 IC
+        n_ok = 0
         for fname in factor_names:
-            cls = factor_registry[fname]
+            cls = registry[fname]
             try:
                 sig = cls()
                 df = sig.compute(date, universe)
                 if df.empty:
-                    row[fname] = np.nan
-                    continue
-                merged = df.merge(fwd, on="ticker", how="inner").dropna()
-                if len(merged) < 30:
-                    row[fname] = np.nan
-                    continue
-                ic, _ = sp_stats.spearmanr(merged["factor_value"], merged[fwd_col])
-                row[fname] = ic
+                    result[fname] = np.nan
+                else:
+                    result = result.merge(
+                        df.rename(columns={"factor_value": fname}),
+                        on="ticker", how="left",
+                    )
+                    n_ok += 1
             except Exception as e:
-                logger.warning(f"  {fname} 报错: {e}")
-                row[fname] = np.nan
+                logger.debug(f"  {fname} 报错: {e}")
+                result[fname] = np.nan
 
-        ic_records.append(row)
+        panel[date] = result
         dt = time.time() - t0
-        # 简要日志
-        n_valid = sum(1 for f in factor_names if not np.isnan(row.get(f, np.nan)))
-        logger.info(f"[{i+1}/{len(dates)}] {date}: {n_valid}/{len(factor_names)} factors, {dt:.1f}s")
+        logger.info(f"[{i+1}/{len(dates)}] {date}: {n_ok}/{len(factor_names)} factors, "
+                     f"{len(tickers)} tickers, {dt:.1f}s")
 
-    return pd.DataFrame(ic_records)
+    return panel
 
 
-def summarize_ic(ic_matrix: pd.DataFrame, factor_names: list[str]) -> pd.DataFrame:
-    """从 IC 矩阵汇总：mean_IC, std_IC, ICIR, t_stat, pct_positive。"""
+# ======================================================================
+# Phase 2: 构建前瞻收益矩阵（向量化）
+# ======================================================================
+
+
+def build_forward_return_matrix(
+    start: str, end: str, dates: list[str], horizons: list[int] = None,
+) -> dict[int, pd.DataFrame]:
+    """用全量价格矩阵一次性计算所有日期 × 所有 horizon 的前瞻收益。
+
+    Returns:
+        {horizon_days: DataFrame[trade_date(index), ticker(columns)] = forward_return}
+    """
+    if horizons is None:
+        horizons = HORIZONS
+    max_h = max(horizons)
+
+    logger.info(f"Building forward return matrix (max horizon={max_h}d)...")
+    t0 = time.time()
+
+    # 从缓存读全量价格
+    cache = AlphaSignal._static_cache.get("_alpha_daily")
+    if cache is None or cache.empty:
+        logger.warning("_alpha_daily 缓存为空，无法构建前瞻收益")
+        return {}
+
+    # Pivot 成 wide format (trade_date × ticker)
+    price_wide = cache.pivot_table(
+        index="trade_date", columns="ticker", values="adj_close", aggfunc="last"
+    )
+    price_wide = price_wide.sort_index()
+
+    result = {}
+    for h in horizons:
+        # 前瞻收益 = price[t+h] / price[t] - 1
+        fwd = price_wide.shift(-h) / price_wide - 1.0
+        result[h] = fwd
+        logger.info(f"  horizon {h}d: {fwd.shape}")
+
+    logger.info(f"Forward return matrix done: {time.time() - t0:.1f}s")
+    return result
+
+
+def get_forward_returns_for_date(
+    fwd_matrices: dict[int, pd.DataFrame],
+    date: str,
+    tickers: list[str],
+    horizon: int,
+) -> pd.Series:
+    """从预计算的前瞻矩阵取某日某 horizon 的收益。
+
+    Returns:
+        Series[ticker] = return (NaN for missing)
+    """
+    mat = fwd_matrices.get(horizon)
+    if mat is None:
+        return pd.Series(dtype=float)
+
+    date_ts = pd.Timestamp(date)
+    # 找最近的交易日（月末可能不是交易日）
+    valid_dates = mat.index[mat.index >= date_ts]
+    if valid_dates.empty:
+        # 往前找
+        valid_dates = mat.index[mat.index <= date_ts]
+        if valid_dates.empty:
+            return pd.Series(dtype=float)
+        actual_date = valid_dates[-1]
+    else:
+        actual_date = valid_dates[0]
+
+    row = mat.loc[actual_date]
+    # 只取 tickers 中有的
+    common = [t for t in tickers if t in row.index]
+    return row[common]
+
+
+# ======================================================================
+# Phase 3a: IC 矩阵
+# ======================================================================
+
+
+def compute_ic_from_panel(
+    panel: dict[str, pd.DataFrame],
+    fwd_matrices: dict[int, pd.DataFrame],
+    factor_names: list[str],
+    horizon: int = 21,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """从预计算面板 + 前瞻收益算 IC。
+
+    Returns:
+        (ic_matrix: DataFrame[date, f1, f2, ...],
+         ic_summary: DataFrame[factor, mean_ic, std_ic, icir, t_stat, pct_pos, n_months])
+    """
+    logger.info(f"Computing IC matrix (horizon={horizon}d)...")
+    t0 = time.time()
+
+    ic_records = []
+    for date, factor_df in panel.items():
+        tickers = factor_df["ticker"].tolist()
+        fwd_ret = get_forward_returns_for_date(fwd_matrices, date, tickers, horizon)
+        if fwd_ret.empty or fwd_ret.notna().sum() < 50:
+            continue
+
+        row = {"date": date}
+        for fname in factor_names:
+            if fname not in factor_df.columns:
+                row[fname] = np.nan
+                continue
+            vals = factor_df.set_index("ticker")[fname]
+            # 对齐
+            common = vals.index.intersection(fwd_ret.index)
+            v = vals.loc[common].astype(float)
+            r = fwd_ret.loc[common].astype(float)
+            valid = v.notna() & r.notna()
+            if valid.sum() < 30:
+                row[fname] = np.nan
+                continue
+            ic, _ = sp_stats.spearmanr(v[valid], r[valid])
+            row[fname] = ic
+        ic_records.append(row)
+
+    ic_matrix = pd.DataFrame(ic_records)
+    logger.info(f"IC matrix: {ic_matrix.shape}, {time.time() - t0:.1f}s")
+
+    # 汇总
     rows = []
     for fname in factor_names:
         if fname not in ic_matrix.columns:
@@ -204,111 +253,84 @@ def summarize_ic(ic_matrix: pd.DataFrame, factor_names: list[str]) -> pd.DataFra
         t_stat = mean_ic / (std_ic / np.sqrt(n)) if std_ic > 1e-10 else np.nan
         pct_pos = (ics > 0).mean()
         rows.append({
-            "factor": fname,
-            "n_months": n,
-            "mean_ic": mean_ic,
-            "std_ic": std_ic,
-            "icir": icir,
-            "t_stat": t_stat,
-            "pct_pos": pct_pos,
+            "factor": fname, "n_months": n,
+            "mean_ic": mean_ic, "std_ic": std_ic,
+            "icir": icir, "t_stat": t_stat, "pct_pos": pct_pos,
         })
-    df = pd.DataFrame(rows)
-    df = df.sort_values("icir", ascending=False, key=abs)
-    return df
+    ic_summary = pd.DataFrame(rows).sort_values("icir", ascending=False, key=abs)
+    return ic_matrix, ic_summary
 
 
 # ======================================================================
-# 3. Fama-MacBeth 截面回归
+# Phase 3b: Fama-MacBeth
 # ======================================================================
 
 
-def fama_macbeth(
-    factor_registry: dict,
-    dates: list[str],
-    horizon_days: int = 21,
+def fama_macbeth_from_panel(
+    panel: dict[str, pd.DataFrame],
+    fwd_matrices: dict[int, pd.DataFrame],
+    factor_names: list[str],
+    horizon: int = 21,
 ) -> pd.DataFrame:
-    """Fama-MacBeth 两步法：每月截面回归 → 系数时间序列 → t 检验。
-
-    Step 1: 每月 OLS: R_{i,t+1} = γ₀ + Σ γ_k · F_{i,k,t} + ε_{i,t}
-    Step 2: γ_k 时间序列 → mean(γ_k), t-stat(γ_k)
+    """Fama-MacBeth on pre-computed panel.
 
     Returns:
         DataFrame[factor, mean_gamma, std_gamma, t_stat, n_months]
     """
-    factor_names = sorted(factor_registry.keys())
-    gamma_records = []  # list of dicts: {factor1: γ, factor2: γ, ...}
+    logger.info(f"Running Fama-MacBeth (horizon={horizon}d)...")
+    t0 = time.time()
 
-    for i, date in enumerate(dates):
-        t0 = time.time()
-        universe = get_us_clean_universe(date)
-        if universe.empty:
+    gamma_records = []
+    for date, factor_df in panel.items():
+        tickers = factor_df["ticker"].tolist()
+        fwd_ret = get_forward_returns_for_date(fwd_matrices, date, tickers, horizon)
+        if fwd_ret.empty or fwd_ret.notna().sum() < 100:
             continue
 
-        tickers = universe["ticker"].tolist()
-        fwd = compute_forward_returns(date, tickers, horizons=[horizon_days])
-        fwd_col = f"fwd_{horizon_days}d"
-        if fwd.empty or fwd_col not in fwd.columns:
-            continue
-        fwd = fwd[["ticker", fwd_col]].dropna()
-
-        # 计算所有因子截面值
-        factor_df = pd.DataFrame({"ticker": tickers})
-        computed_factors = []
+        # 构建 X: z-score 标准化因子矩阵
+        avail_factors = []
+        X_cols = []
         for fname in factor_names:
-            cls = factor_registry[fname]
-            try:
-                sig = cls()
-                df = sig.compute(date, universe)
-                if df.empty:
-                    continue
-                # z-score 标准化（截面内）
-                vals = pd.to_numeric(df["factor_value"], errors="coerce")
-                mean_v = vals.mean()
-                std_v = vals.std()
-                if std_v > 1e-10:
-                    df = df.copy()
-                    df["factor_value"] = (vals - mean_v) / std_v
-                    factor_df = factor_df.merge(
-                        df[["ticker", "factor_value"]].rename(columns={"factor_value": fname}),
-                        on="ticker", how="left",
-                    )
-                    computed_factors.append(fname)
-            except Exception:
-                pass
+            if fname not in factor_df.columns:
+                continue
+            col = factor_df.set_index("ticker")[fname].astype(float)
+            std = col.std()
+            if std > 1e-10:
+                col = (col - col.mean()) / std
+                X_cols.append(col.rename(fname))
+                avail_factors.append(fname)
 
-        if len(computed_factors) < 5:
+        if len(avail_factors) < 5:
             continue
 
-        # merge forward return
-        merged = factor_df.merge(fwd, on="ticker", how="inner").dropna(subset=[fwd_col])
-        if len(merged) < 100:
+        X_df = pd.concat(X_cols, axis=1)
+        # 对齐 y
+        common = X_df.index.intersection(fwd_ret.index)
+        y = fwd_ret.loc[common].astype(float)
+        X = X_df.loc[common]
+        valid = y.notna() & X.notna().all(axis=1)
+        y = y[valid].values
+        X = X[valid].fillna(0).values
+
+        if len(y) < 100:
             continue
 
-        # 截面 OLS
-        y = merged[fwd_col].values
-        X = merged[computed_factors].fillna(0).values
-        X = np.column_stack([np.ones(len(X)), X])  # intercept
-
+        X = np.column_stack([np.ones(len(X)), X])
         try:
             beta, *_ = np.linalg.lstsq(X, y, rcond=None)
         except np.linalg.LinAlgError:
             continue
 
         gamma = {"_intercept": beta[0]}
-        for j, fname in enumerate(computed_factors):
+        for j, fname in enumerate(avail_factors):
             gamma[fname] = beta[j + 1]
         gamma_records.append(gamma)
-
-        dt = time.time() - t0
-        if (i + 1) % 12 == 0:
-            logger.info(f"FM [{i+1}/{len(dates)}] {date}: {len(computed_factors)} factors, {dt:.1f}s")
 
     if not gamma_records:
         return pd.DataFrame()
 
     gamma_df = pd.DataFrame(gamma_records)
 
-    # Step 2: 时间序列汇总
     rows = []
     for col in gamma_df.columns:
         vals = gamma_df[col].dropna()
@@ -319,87 +341,77 @@ def fama_macbeth(
         std_g = vals.std()
         t_stat = mean_g / (std_g / np.sqrt(n)) if std_g > 1e-10 else np.nan
         rows.append({
-            "factor": col,
-            "mean_gamma": mean_g,
-            "std_gamma": std_g,
-            "t_stat": t_stat,
-            "n_months": n,
+            "factor": col, "mean_gamma": mean_g,
+            "std_gamma": std_g, "t_stat": t_stat, "n_months": n,
         })
-    result = pd.DataFrame(rows)
-    result = result.sort_values("t_stat", ascending=False, key=abs)
+
+    result = pd.DataFrame(rows).sort_values("t_stat", ascending=False, key=abs)
+    logger.info(f"Fama-MacBeth done: {time.time() - t0:.1f}s")
     return result
 
 
 # ======================================================================
-# 4. 因子衰减分析
+# Phase 3c: 因子衰减
 # ======================================================================
 
 
-def factor_decay(
-    factor_registry: dict,
-    dates: list[str],
+def factor_decay_from_panel(
+    panel: dict[str, pd.DataFrame],
+    fwd_matrices: dict[int, pd.DataFrame],
+    factor_names: list[str],
     horizons: list[int] = None,
 ) -> pd.DataFrame:
-    """对每个因子，计算不同前瞻 horizon 的平均 IC（衰减曲线）。
+    """多 horizon IC 衰减。
 
     Returns:
-        DataFrame[factor, ic_1m, ic_2m, ic_3m, ic_6m, ic_12m]
+        DataFrame[factor, ic_21d, icir_21d, ic_42d, icir_42d, ...]
     """
     if horizons is None:
-        horizons = [21, 42, 63, 126, 252]
+        horizons = HORIZONS
+    logger.info(f"Computing factor decay ({len(horizons)} horizons)...")
+    t0 = time.time()
 
-    factor_names = sorted(factor_registry.keys())
-    # 存储: {fname: {horizon: [ic_values]}}
-    ic_by_factor_horizon = {f: {h: [] for h in horizons} for f in factor_names}
+    # {fname: {h: [ic_values]}}
+    ic_store = {f: {h: [] for h in horizons} for f in factor_names}
 
-    for i, date in enumerate(dates):
-        t0 = time.time()
-        universe = get_us_clean_universe(date)
-        if universe.empty:
-            continue
-
-        tickers = universe["ticker"].tolist()
-        fwd = compute_forward_returns(date, tickers, horizons=horizons)
-        if fwd.empty:
-            continue
-
-        for fname in factor_names:
-            cls = factor_registry[fname]
-            try:
-                sig = cls()
-                df = sig.compute(date, universe)
-                if df.empty:
+    for date, factor_df in panel.items():
+        tickers = factor_df["ticker"].tolist()
+        for h in horizons:
+            fwd_ret = get_forward_returns_for_date(fwd_matrices, date, tickers, h)
+            if fwd_ret.empty or fwd_ret.notna().sum() < 50:
+                continue
+            for fname in factor_names:
+                if fname not in factor_df.columns:
                     continue
-                for h in horizons:
-                    fwd_col = f"fwd_{h}d"
-                    if fwd_col not in fwd.columns:
-                        continue
-                    merged = df.merge(fwd[["ticker", fwd_col]], on="ticker", how="inner").dropna()
-                    if len(merged) < 30:
-                        continue
-                    ic, _ = sp_stats.spearmanr(merged["factor_value"], merged[fwd_col])
-                    ic_by_factor_horizon[fname][h].append(ic)
-            except Exception:
-                pass
+                vals = factor_df.set_index("ticker")[fname]
+                common = vals.index.intersection(fwd_ret.index)
+                v = vals.loc[common].astype(float)
+                r = fwd_ret.loc[common].astype(float)
+                valid = v.notna() & r.notna()
+                if valid.sum() < 30:
+                    continue
+                ic, _ = sp_stats.spearmanr(v[valid], r[valid])
+                ic_store[fname][h].append(ic)
 
-        dt = time.time() - t0
-        if (i + 1) % 12 == 0:
-            logger.info(f"Decay [{i+1}/{len(dates)}] {date}: {dt:.1f}s")
-
-    # 汇总
     rows = []
     for fname in factor_names:
         row = {"factor": fname}
         for h in horizons:
-            ics = ic_by_factor_horizon[fname][h]
+            ics = ic_store[fname][h]
             row[f"ic_{h}d"] = np.mean(ics) if ics else np.nan
-            row[f"icir_{h}d"] = (np.mean(ics) / np.std(ics)) if len(ics) > 2 and np.std(ics) > 1e-10 else np.nan
+            row[f"icir_{h}d"] = (
+                np.mean(ics) / np.std(ics)
+                if len(ics) > 2 and np.std(ics) > 1e-10
+                else np.nan
+            )
         rows.append(row)
+
+    logger.info(f"Decay done: {time.time() - t0:.1f}s")
     return pd.DataFrame(rows)
 
 
 # ======================================================================
-# 5. Markdown 报告
+# Report
 # ======================================================================
 
 
@@ -407,15 +419,13 @@ def generate_report(
     ic_summary: pd.DataFrame,
     fm_result: pd.DataFrame,
     decay_df: pd.DataFrame,
-    start: str,
-    end: str,
-    n_dates: int,
+    start: str, end: str, n_dates: int,
 ) -> str:
     md = []
     md.append(f"# 全因子分析报告 ({start} → {end})")
     md.append(f"\n> {n_dates} 个月末截面，59 个 AlphaSignal 因子\n")
 
-    # IC Summary Top 20
+    # IC Summary Top 30
     md.append("## 1. IC 排名 (|ICIR| 排序，Top 30)")
     md.append("")
     md.append("| Rank | Factor | Mean IC | Std IC | ICIR | t-stat | % Positive | N |")
@@ -427,7 +437,7 @@ def generate_report(
         )
     md.append("")
 
-    # Fama-MacBeth Top 20
+    # Fama-MacBeth Top 30
     if not fm_result.empty:
         md.append("## 2. Fama-MacBeth 截面回归 (|t-stat| 排序，Top 30)")
         md.append("")
@@ -443,15 +453,14 @@ def generate_report(
         md.append("> Harvey-Liu-Zhu (2016) 阈值: |t| > 3.0 才有统计显著性（多重检验校正）。")
         md.append("")
 
-    # Decay
+    # Decay Top 30
     if not decay_df.empty:
         md.append("## 3. 因子衰减 (Mean IC at Different Horizons)")
         md.append("")
         md.append("| Factor | IC 1M | IC 2M | IC 3M | IC 6M | IC 12M | ICIR 1M |")
         md.append("|--------|------:|------:|------:|------:|-------:|--------:|")
-        # 按 1M ICIR 排序
         decay_sorted = decay_df.copy()
-        decay_sorted["_sort"] = decay_sorted["icir_21d"].abs()
+        decay_sorted["_sort"] = decay_sorted.get("icir_21d", pd.Series(dtype=float)).abs()
         decay_sorted = decay_sorted.sort_values("_sort", ascending=False).head(30)
         for _, r in decay_sorted.iterrows():
             md.append(
@@ -473,7 +482,7 @@ def generate_report(
 
 
 # ======================================================================
-# 6. Main
+# Main
 # ======================================================================
 
 
@@ -481,89 +490,106 @@ def main():
     parser = argparse.ArgumentParser(description="全因子分析（IC / Fama-MacBeth / 衰减）")
     parser.add_argument("--start", required=True, help="开始日期 YYYY-MM-DD")
     parser.add_argument("--end", required=True, help="结束日期 YYYY-MM-DD")
-    parser.add_argument("--skip-fm", action="store_true", help="跳过 Fama-MacBeth（最慢）")
+    parser.add_argument("--skip-fm", action="store_true", help="跳过 Fama-MacBeth")
     parser.add_argument("--skip-decay", action="store_true", help="跳过衰减分析")
     args = parser.parse_args()
-
-    # 1. Preload
-    logger.info(f"=== Factor Analysis: {args.start} → {args.end} ===")
-    logger.info("Step 0: Preload data...")
-    t0 = time.time()
-    USFactorBase.clear_all_cache()
-    USFactorBase.preload_for_backtest(args.start, args.end)
-    USFactorBase.precompute_rolling_stats()
-    logger.info(f"Preload done: {time.time() - t0:.1f}s")
-
-    # 因子注册表（只 active）
-    registry = {n: c for n, c in get_registered().items() if c.status in ("live", "staging")}
-    factor_names = sorted(registry.keys())
-    logger.info(f"Active factors: {len(factor_names)}")
-
-    dates = get_month_end_dates(args.start, args.end)
-    logger.info(f"Month-end dates: {len(dates)} ({dates[0]} → {dates[-1]})")
 
     out_dir = _PROJECT_ROOT / "output" / "factor_analysis"
     out_dir.mkdir(parents=True, exist_ok=True)
     suffix = f"{args.start}_{args.end}"
 
-    # 2. IC Matrix
+    # ── Step 0: Preload ──
+    logger.info(f"=== Factor Analysis: {args.start} → {args.end} ===")
+    logger.info("Step 0: Preload data...")
+    t_total = time.time()
+    USFactorBase.clear_all_cache()
+    USFactorBase.preload_for_backtest(args.start, args.end)
+    USFactorBase.precompute_rolling_stats()
+    logger.info(f"Preload done: {time.time() - t_total:.1f}s")
+
+    registry = {n: c for n, c in get_registered().items() if c.status in ("live", "staging")}
+    factor_names = sorted(registry.keys())
+    logger.info(f"Active factors: {len(factor_names)}")
+
+    dates = [d.strftime("%Y-%m-%d") for d in pd.date_range(args.start, args.end, freq="ME")]
+    logger.info(f"Month-end dates: {len(dates)} ({dates[0]} → {dates[-1]})")
+
+    # ── Phase 1: 因子面板（最耗时） ──
     logger.info("=" * 60)
-    logger.info("Step 1: Computing IC matrix...")
+    logger.info("Phase 1: Building factor panel (compute once, use thrice)...")
     t0 = time.time()
-    ic_matrix = compute_ic_matrix(registry, dates, horizon_days=21)
-    logger.info(f"IC matrix done: {time.time() - t0:.1f}s, shape={ic_matrix.shape}")
+    panel = build_factor_panel(registry, dates)
+    t_panel = time.time() - t0
+    logger.info(f"Factor panel done: {len(panel)} dates, {t_panel:.1f}s "
+                f"(avg {t_panel / max(len(panel), 1):.1f}s/date)")
 
+    # 存面板到 parquet（便于复查）
+    panel_rows = []
+    for date, df in panel.items():
+        df_copy = df.copy()
+        df_copy.insert(0, "date", date)
+        panel_rows.append(df_copy)
+    if panel_rows:
+        panel_all = pd.concat(panel_rows, ignore_index=True)
+        panel_path = out_dir / f"factor_panel_{suffix}.parquet"
+        panel_all.to_parquet(panel_path, index=False)
+        logger.info(f"Factor panel saved: {panel_path} ({len(panel_all)} rows)")
+
+    # ── Phase 2: 前瞻收益矩阵 ──
+    logger.info("=" * 60)
+    logger.info("Phase 2: Building forward return matrix...")
+    fwd_matrices = build_forward_return_matrix(args.start, args.end, dates)
+
+    # ── Phase 3a: IC ──
+    logger.info("=" * 60)
+    logger.info("Phase 3a: IC matrix...")
+    ic_matrix, ic_summary = compute_ic_from_panel(panel, fwd_matrices, factor_names, horizon=21)
     ic_matrix.to_csv(out_dir / f"ic_matrix_{suffix}.csv", index=False)
-
-    ic_summary = summarize_ic(ic_matrix, factor_names)
     ic_summary.to_csv(out_dir / f"ic_summary_{suffix}.csv", index=False)
-    logger.info(f"IC summary saved. Top 5 by |ICIR|:")
+    logger.info(f"Top 5 by |ICIR|:")
     for _, r in ic_summary.head(5).iterrows():
-        logger.info(f"  {r['factor']:30s} ICIR={r['icir']:+.3f}  mean_IC={r['mean_ic']:+.4f}  t={r['t_stat']:+.2f}")
+        logger.info(f"  {r['factor']:30s} ICIR={r['icir']:+.3f}  IC={r['mean_ic']:+.4f}  t={r['t_stat']:+.2f}")
 
-    # 3. Fama-MacBeth
+    # ── Phase 3b: Fama-MacBeth ──
     fm_result = pd.DataFrame()
     if not args.skip_fm:
         logger.info("=" * 60)
-        logger.info("Step 2: Fama-MacBeth cross-sectional regression...")
-        t0 = time.time()
-        fm_result = fama_macbeth(registry, dates, horizon_days=21)
-        logger.info(f"Fama-MacBeth done: {time.time() - t0:.1f}s")
+        logger.info("Phase 3b: Fama-MacBeth...")
+        fm_result = fama_macbeth_from_panel(panel, fwd_matrices, factor_names, horizon=21)
         if not fm_result.empty:
             fm_result.to_csv(out_dir / f"fama_macbeth_{suffix}.csv", index=False)
             fm_top = fm_result[fm_result["factor"] != "_intercept"].head(5)
-            logger.info(f"FM Top 5 by |t-stat|:")
+            logger.info(f"FM Top 5:")
             for _, r in fm_top.iterrows():
                 logger.info(f"  {r['factor']:30s} γ={r['mean_gamma']:+.6f}  t={r['t_stat']:+.2f}")
 
-    # 4. Decay
+    # ── Phase 3c: Decay ──
     decay_df = pd.DataFrame()
     if not args.skip_decay:
         logger.info("=" * 60)
-        logger.info("Step 3: Factor decay analysis...")
-        t0 = time.time()
-        decay_df = factor_decay(registry, dates, horizons=[21, 42, 63, 126, 252])
-        logger.info(f"Decay done: {time.time() - t0:.1f}s")
+        logger.info("Phase 3c: Decay...")
+        decay_df = factor_decay_from_panel(panel, fwd_matrices, factor_names)
         if not decay_df.empty:
             decay_df.to_csv(out_dir / f"decay_{suffix}.csv", index=False)
 
-    # 5. Report
+    # ── Report ──
     logger.info("=" * 60)
-    logger.info("Generating report...")
     report = generate_report(ic_summary, fm_result, decay_df, args.start, args.end, len(dates))
     report_path = out_dir / f"report_{suffix}.md"
     report_path.write_text(report, encoding="utf-8")
     logger.info(f"Report: {report_path}")
 
+    t_elapsed = time.time() - t_total
     # 终端摘要
     print("\n" + "=" * 70)
-    print(f"FACTOR ANALYSIS: {args.start} → {args.end} ({len(dates)} months)")
+    print(f"FACTOR ANALYSIS: {args.start} → {args.end} ({len(dates)} months, {t_elapsed/60:.0f} min)")
     print("=" * 70)
-    print(f"\nTop 10 Factors by |ICIR|:")
+    print(f"\nTop 10 by |ICIR|:")
     for i, (_, r) in enumerate(ic_summary.head(10).iterrows(), 1):
         star = "***" if abs(r["t_stat"]) > 3.0 else "**" if abs(r["t_stat"]) > 2.0 else ""
         print(f"  {i:2d}. {r['factor']:30s} ICIR={r['icir']:+.3f}  IC={r['mean_ic']:+.4f}  t={r['t_stat']:+.2f} {star}")
-    print(f"\nOutputs: {out_dir}/")
+    print(f"\nTotal time: {t_elapsed/60:.0f} min")
+    print(f"Outputs: {out_dir}/")
 
 
 if __name__ == "__main__":
