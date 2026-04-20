@@ -28,6 +28,7 @@ plotly>=5.15.0
 
 # 机器学习（Phase 2+）
 lightgbm>=4.0.0
+scikit-learn>=1.4.0
 
 # 优化（Phase 4+）
 cvxpy>=1.4.0

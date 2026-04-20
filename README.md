@@ -218,6 +218,7 @@ python3 cli.py polymarket history --min-volume 1000000      # Polymarket 历史
 
 - **无前视偏差（全 31 因子已审计）：** 财务数据按 `filing_date <= date`（公告日）过滤，价格按 `trade_date <= date`，宏观 30 天 lag，情绪/另类数据用 trailing lookback 窗口
 - **两层因子打分：** 类内动态分母 + 类间动态分母，`MIN_VALID_CATEGORIES=4`
+- **MVO 优化器（v4）：** cvxpy + OSQP 替换 Top-N + Softmax。目标函数 `max μ̂'w − λ·w'Σw − γ·||w − w_prev||₁`，约束净敞口/总杠杆/单股上下限/行业 gross。Ledoit-Wolf 252D 协方差矩阵，求解失败自动降级 Top-N
 - **Upsert 语义：** 所有数据库写入为幂等操作（`INSERT ... ON DUPLICATE KEY UPDATE`）
 - **Regime 切换：** 四维复合（趋势+VIX+利差+拥挤度）+ Credit Veto
 - **回测预加载：** `preload_for_backtest()` 一次性加载到内存，因子计算全部从内存过滤
@@ -239,15 +240,17 @@ python3 cli.py polymarket history --min-volume 1000000      # Polymarket 历史
 | 数据迁移 | FMP+UW+Fiscal.ai+Quiver+AlphaVantage 六源数据接入 | ✅ |
 | 全项目日志覆盖 | 106 个 Python 文件所有 return/continue/break/except 分支加 logger | ✅ |
 | P0 行业内验证 | EPS_REVISION 行业内 ICIR=0.43，确认截面选股 alpha 存在 | ✅ |
+| P0.5 MVO 优化器 | Ledoit-Wolf 风险模型 + cvxpy/OSQP MVO 替换 Top-N + Softmax | ✅ |
 | P1 空头 v5 | 独立因子模型 + Regime 渐进 + 融券约束 + 止损，待回测 | 🔄 |
 | 待办 | P0 因子优化 / P2 噪音清理 / P3 权重分级 / P4 鲁棒性 / P5 实盘 | 📋 |
 
 **当前待办（按优先级）：**
 
-**P0 — 工业级架构补强（最大缺口，与因子优化并行）：**
-1. **风险模型** — 252D 日收益 + Ledoit-Wolf shrinkage → N×N 协方差矩阵 Σ
-2. **Mean-Variance 优化器** — cvxpy + OSQP 替换 Top-N + Softmax，目标函数 `max μ̂'w − λ·w'Σw − γ·||w − w_prev||₁`，约束行业/风格/流动性
-3. 预期效果：换手率 8x → 2-3x，β_rmw 失控 → 风格中性，行业硬 cap 15% → 软约束
+**P0.5 — 工业级架构补强 ✅ 已完成：**
+- 风险模型：`backtest/services/us_risk_model.py`（Ledoit-Wolf 252D 协方差 Σ，parquet 缓存）
+- MVO 优化器：`backtest/services/us_optimizer.py`（cvxpy + OSQP，目标 `max μ̂'w − λ·w'Σw − γ·||w − w_prev||₁`）
+- 约束：净敞口 0.6 / 总杠杆 ≤ 1.0 / 单股 [-5%, +15%] / 行业 gross ≤ 25%
+- `US_USE_OPTIMIZER=0` 一键回退 Top-N + Softmax
 
 **P0 — 因子优化（与 P0 架构并行）：**
 1. EPS_REVISION v2 四维复合（方向×幅度×广度×加速度）

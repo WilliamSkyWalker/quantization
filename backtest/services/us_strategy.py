@@ -50,6 +50,7 @@ from services.config import (
     US_SHORT_SCORE_PCT,
     US_SHORT_FACTOR_WEIGHTS,
     US_SHORT_BORROW_FEE_TIERS,
+    US_USE_OPTIMIZER,
     LOG_LEVEL,
 )
 from stocks.services.us_cleaner import get_us_clean_universe
@@ -129,6 +130,7 @@ class USMultiFactorStrategy:
         self.n_holdings = n_holdings
         self.min_select_score = min_select_score
         self._prev_holdings: set[str] = set()
+        self._prev_weights_dict: dict[str, float] = {}
         self._last_date: str = ""
 
         # ----------------------------------------------------------
@@ -223,6 +225,17 @@ class USMultiFactorStrategy:
         # Regime detector
         self._regime_detector = USRegimeDetector(db) if US_REGIME_ENABLED else None
         self._last_regime_strength: float = 1.0
+
+        # MVO optimizer + risk model
+        self._use_optimizer = US_USE_OPTIMIZER
+        self._risk_model = None
+        self._optimizer = None
+        if self._use_optimizer:
+            from backtest.services.us_risk_model import USRiskModel
+            from backtest.services.us_optimizer import USPortfolioOptimizer
+            self._risk_model = USRiskModel()
+            self._optimizer = USPortfolioOptimizer()
+            logger.info("MVO optimizer enabled (Ledoit-Wolf + cvxpy/OSQP)")
 
         # ML scorer (LightGBM)
         from services.config import US_ML_SCORING_ENABLED, US_ML_BLEND_RATIO
@@ -901,11 +914,104 @@ class USMultiFactorStrategy:
         self, composite: pd.DataFrame, prev_holdings: set[str],
     ) -> pd.DataFrame:
         """
+        Dispatch to MVO optimizer or TopN fallback based on US_USE_OPTIMIZER.
+
+        Returns:
+            DataFrame[ticker, score, weight, side].
+        """
+        if self._use_optimizer and self._optimizer is not None:
+            result = self._select_from_scores_mvo(composite, prev_holdings)
+            if result is not None and not result.empty:
+                return result
+            logger.warning("MVO 失败，降级到 Top-N + Softmax")
+        return self._select_from_scores_topn(composite, prev_holdings)
+
+    def _select_from_scores_mvo(
+        self, composite: pd.DataFrame, prev_holdings: set[str],
+    ) -> pd.DataFrame | None:
+        """
+        MVO-based portfolio construction using risk model + optimizer.
+
+        Returns:
+            DataFrame[ticker, score, weight, side] or None if optimization fails.
+        """
+        empty = pd.DataFrame(columns=["ticker", "score", "weight", "side"])
+        if composite.empty:
+            return empty
+
+        date = self._last_date
+        universe = composite["ticker"].tolist()
+
+        # 1. Estimate covariance matrix
+        cov_matrix, cov_tickers = self._risk_model.estimate(date, universe)
+        if len(cov_tickers) < 2:
+            logger.warning(f"MVO: 协方差矩阵有效股票不足 ({len(cov_tickers)})")
+            return None
+
+        # 2. Build score vector (only tickers in cov)
+        cov_set = set(cov_tickers)
+        scored = composite[composite["ticker"].isin(cov_set)].copy()
+        scores = scored.set_index("ticker")["score"]
+
+        # 3. Build previous weights dict
+        prev_weights = {}
+        if hasattr(self, '_prev_weights_dict'):
+            prev_weights = self._prev_weights_dict
+
+        # 4. Build sector map
+        sector_map = {}
+        sector_df = self._get_cached_sector_df()
+        if sector_df is not None and not sector_df.empty:
+            sector_map = dict(zip(sector_df["ticker"], sector_df["sector"]))
+
+        # 5. Run optimizer
+        opt_weights = self._optimizer.optimize(
+            scores=scores,
+            cov_matrix=cov_matrix,
+            cov_tickers=cov_tickers,
+            prev_weights=prev_weights,
+            sector_map=sector_map,
+            short_enabled=US_SHORT_ENABLED,
+        )
+
+        if not opt_weights:
+            return None
+
+        # 6. Build output DataFrame
+        rows = []
+        score_map = dict(zip(composite["ticker"], composite["score"]))
+        for ticker, weight in opt_weights.items():
+            rows.append({
+                "ticker": ticker,
+                "score": score_map.get(ticker, 0.0),
+                "weight": weight,
+                "side": "LONG" if weight > 0 else "SHORT",
+            })
+
+        result = pd.DataFrame(rows)
+
+        # Store weights for next period's turnover penalty
+        self._prev_weights_dict = opt_weights
+
+        n_long = (result["weight"] > 0).sum()
+        n_short = (result["weight"] < 0).sum()
+        net = result["weight"].sum()
+        gross = result["weight"].abs().sum()
+        logger.info(
+            f"MVO selection: {n_long}L/{n_short}S, net={net:.2f}, "
+            f"gross={gross:.2f}, regime={self._last_regime_strength:.2f}"
+        )
+
+        return result[["ticker", "score", "weight", "side"]]
+
+    def _select_from_scores_topn(
+        self, composite: pd.DataFrame, prev_holdings: set[str],
+    ) -> pd.DataFrame:
+        """
+        Top-N + Softmax fallback (original v3 implementation).
+
         Score-ranked L/S with soft sector cap: top-N long, bottom-M short,
         then clip any sector whose net weight exceeds MAX_SECTOR_NET_WEIGHT.
-
-        Preserves factor-driven sector tilts while preventing dangerous concentration.
-        Regime controls net equity exposure.
 
         Returns:
             DataFrame[ticker, score, weight, side].
@@ -1106,6 +1212,11 @@ class USMultiFactorStrategy:
         composite = self._compute_scores_for_date(date)
         selected = self._select_from_scores(composite, self._prev_holdings)
         self._prev_holdings = set(selected["ticker"].tolist()) if len(selected) > 0 else set()
+        # Update prev_weights_dict for next period's turnover penalty
+        if len(selected) > 0:
+            self._prev_weights_dict = dict(zip(selected["ticker"], selected["weight"]))
+        else:
+            self._prev_weights_dict = {}
 
         if len(selected) > 0:
             logger.info(

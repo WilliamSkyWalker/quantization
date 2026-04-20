@@ -369,7 +369,27 @@ LOBBY_INTENSITY 在 Technology 行业内 |ICIR|=0.36（显著），可能反映�
               ├── Top N (LONG) ──┤      ├── Bottom M (SHORT) ──┤
 ```
 
-**多头（Long）：** 得分 ≥ `US_MIN_SELECT_SCORE`(0.0) 的 Top-N 股票。
+**组合构建（默认 MVO 优化器，`US_USE_OPTIMIZER=1`）：**
+
+因子合成得分 μ̂ + Ledoit-Wolf 协方差矩阵 Σ → cvxpy Mean-Variance 优化：
+
+```
+max  μ̂'w − λ·w'Σw − γ·||w − w_prev||₁
+s.t. Σ|w_i| ≤ 1.0        (总杠杆)
+     Σw_i = 0.6           (净敞口)
+     -0.05 ≤ w_i ≤ 0.15   (单股上下限)
+     sector_gross ≤ 0.25   (行业 gross 上限)
+```
+
+- λ=`US_RISK_AVERSION`(1.0)：风险厌恶系数，控制集中度
+- γ=`US_TURNOVER_PENALTY`(0.005)：换手惩罚，降低换手率
+- 协方差：`USRiskModel`（`backtest/services/us_risk_model.py`），252D 日收益 + `sklearn.covariance.LedoitWolf`，最少 120 天历史，parquet 缓存
+- 求解器：OSQP（首选）→ SCS（fallback）→ Top-N + Softmax（终极 fallback）
+- 关键配置：`US_MAX_LONG_WEIGHT`(0.15)、`US_MAX_SHORT_WEIGHT`(0.05)、`US_MAX_SECTOR_GROSS`(0.25)
+
+**Top-N + Softmax fallback（`US_USE_OPTIMIZER=0`）：**
+
+得分 ≥ `US_MIN_SELECT_SCORE`(0.0) 的 Top-N 股票。
 - 固定 `US_LONG_N=15`（不随 Regime 变化）。
 - Softmax 权重分配，`tau=1.5`。
 
@@ -493,7 +513,7 @@ Regime strength [0, 1] 线性映射到 equity_pct [10%, 90%]：
 
 **当前配置**（Alpha v2 Step 3.5）：
 - 因子打分：委托 USMultiFactorStrategy（31 因子 × 7 大类，两层类别评分）
-- 选股：USMultiFactorStrategy._select_from_scores（Top-15 long + Bottom-10 short, Softmax）
+- 选股：USMultiFactorStrategy._select_from_scores（MVO 优化器，fallback Top-15 long + Bottom-10 short Softmax）
 - 调仓：月频（每月最后交易日）
 - 风控：引擎层 risk_controls=False（不使用 vol targeting/drawdown response）
 
@@ -943,14 +963,15 @@ v4 催化剂重建回测失败（UNION + 20 只 + always-on → α 从 6.66% 降
 - ICIR > 0.3 → 权重 2.0，0.15-0.3 → 1.0，< 0.15 → 0.5
 - 粗粒度分级（低自由度），IS/OOS 对比验证
 
-**P0.5 — 工业级架构补强（与 P1 因子并行，最大架构缺口）：**
+**P0.5 — 工业级架构补强 ✅ Tier 1 已完成：**
 
-当前 Top-N + Softmax + 行业硬 cap 15% 是启发式，缺正规量化基金两个核心组件——协方差矩阵和 mean-variance 优化器。补上后能解决：换手率 8x → 2-3x、β_rmw=-1.01 失控 → 风格中性、行业硬 cap → 软约束（精细控制）。
+~~当前 Top-N + Softmax + 行业硬 cap 15% 是启发式~~ → 已替换为 MVO 优化器。
 
-- **Tier 1（必做，1-2 周）：**
-  - 风险模型：252D 日收益 + Ledoit-Wolf shrinkage → N×N 协方差矩阵 Σ（sklearn.covariance.LedoitWolf，~50 行）
-  - MVO 优化器：cvxpy + OSQP（开源），目标 `max μ̂'w − λ·w'Σw − γ·||w − w_prev||₁`，约束行业/风格/单股流动性，替换 `_select_from_scores()` 中的 Top-N + Softmax，保留 Top-N 作为求解失败 fallback
-  - 验证：跑 2012-2026 完整回测对比，期望换手率降 60%+，|β_rmw| < 0.5，Sharpe 不降
+- **Tier 1 ✅ 已完成：**
+  - 风险模型：`backtest/services/us_risk_model.py` — 252D 日收益 + Ledoit-Wolf shrinkage → N×N 协方差矩阵 Σ，parquet 缓存
+  - MVO 优化器：`backtest/services/us_optimizer.py` — cvxpy + OSQP，目标 `max μ̂'w − λ·w'Σw − γ·||w − w_prev||₁`，约束净敞口/杠杆/单股/行业，求解失败自动降级 Top-N
+  - 配置：`US_USE_OPTIMIZER`(开关) / `US_RISK_AVERSION`(λ=1.0) / `US_TURNOVER_PENALTY`(γ=0.005) / `US_MAX_LONG_WEIGHT`(0.15) / `US_MAX_SHORT_WEIGHT`(0.05) / `US_MAX_SECTOR_GROSS`(0.25)
+  - 待验证：跑 2012-2026 完整回测对比，期望换手率降 60%+，|β_rmw| < 0.5，Sharpe 不降
 - **Tier 2（中期 1 月）：**
   - PCA 统计风险因子（前 20-30 主成分作 Barra 开源替代，B·F·B' + Δ 分解）
   - 多周期信号合成（日/周/月频分层，不同 horizon 不同 decay）
@@ -995,7 +1016,7 @@ v4 催化剂重建回测失败（UNION + 20 只 + always-on → α 从 6.66% 降
 - Regime-dependent 因子轮动（HMM / 宏观状态机）
 
 **P4 — 回测鲁棒性（穿插进行）：**
-- 换手率：buffer zone（不跌出前 N×1.5 不换出）或换手惩罚，目标 300%→150-200%（MVO 优化器自动解决，P0.5 完成后此项可降级）
+- 换手率：MVO 优化器 turnover penalty（γ=0.005）已内置，待回测验证效果
 - 滑点：T+1 VWAP + 10bps / 15bps，测 alpha 衰减幅度
 - Regime：Credit Veto / 拥挤度参数 ±50% 扰动测试
 

@@ -708,6 +708,17 @@ US_SHORT_BORROW_FEE_TIERS = {
     10e9: 0.015,   # ≥$10B → 1.5%
 }
 
+# MVO 优化器（替换 Top-N + Softmax）
+US_USE_OPTIMIZER = os.environ.get("US_USE_OPTIMIZER", "1") == "1"
+US_RISK_AVERSION = float(os.environ.get("US_RISK_AVERSION", "1.0"))           # λ: 风险厌恶系数
+US_TURNOVER_PENALTY = float(os.environ.get("US_TURNOVER_PENALTY", "0.005"))   # γ: 换手惩罚（每单位换手的成本）
+US_MAX_LONG_WEIGHT = float(os.environ.get("US_MAX_LONG_WEIGHT", "0.15"))      # 单股多头上限 15%
+US_MAX_SHORT_WEIGHT = float(os.environ.get("US_MAX_SHORT_WEIGHT", "0.05"))    # 单股空头上限 5%
+US_MAX_SECTOR_GROSS = float(os.environ.get("US_MAX_SECTOR_GROSS", "0.25"))    # 行业 gross 暴露上限
+US_COV_LOOKBACK = int(os.environ.get("US_COV_LOOKBACK", "252"))               # 协方差矩阵回看天数
+US_MIN_HISTORY_DAYS = int(os.environ.get("US_MIN_HISTORY_DAYS", "120"))       # 纳入协方差矩阵的最少交易日
+US_GROSS_LEVERAGE = float(os.environ.get("US_GROSS_LEVERAGE", "1.0"))         # 总杠杆上限
+
 # ML 因子合成（LightGBM）— 默认关闭，回测验证 ML blend 吃掉 7.6% alpha
 US_ML_SCORING_ENABLED = os.environ.get("US_ML_SCORING_ENABLED", "0") == "1"
 US_ML_LOOKBACK_MONTHS = int(os.environ.get("US_ML_LOOKBACK_MONTHS", "12"))
