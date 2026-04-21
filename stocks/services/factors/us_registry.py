@@ -223,34 +223,42 @@ class AlphaSignal(USFactorBase, ABC):
 
     @classmethod
     def preload_alpha_cache(cls, start_date: str, end_date: str) -> None:
-        """一次性预加载 AlphaSignal 所需全部数据到内存。
+        """一次性并行预加载 AlphaSignal 所需全部数据到内存。
 
         数据流：DB → parquet 文件 → _static_cache（内存）。
         已有 parquet 缓存且范围覆盖时直接读文件，不查 DB。
+        所有独立表通过 ThreadPoolExecutor 并发加载。
 
         Args:
             start_date: 回测起始日 (YYYY-MM-DD)
             end_date: 回测结束日 (YYYY-MM-DD)
         """
         import time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from django.db import connections
 
         t_total = time.time()
         logger.info(f"AlphaSignal preload_alpha_cache: {start_date} → {end_date}")
 
-        # ---- 1. us_financial_data（全字段，5 年回看） ----
-        cls._preload_financial(start_date, end_date)
+        connections.close_all()
 
-        # ---- 2. us_daily_price（400 天回看） ----
-        cls._preload_daily_price(start_date, end_date)
+        loaders = [
+            lambda: cls._preload_financial(start_date, end_date),
+            lambda: cls._preload_daily_price(start_date, end_date),
+            lambda: cls._preload_key_metric(start_date, end_date),
+            lambda: cls._preload_enterprise_value(start_date, end_date),
+            lambda: cls.fetch_ff5_factors(),
+        ]
 
-        # ---- 3. us_key_metric（2 年回看） ----
-        cls._preload_key_metric(start_date, end_date)
+        with ThreadPoolExecutor(max_workers=len(loaders)) as pool:
+            futures = {pool.submit(fn): i for i, fn in enumerate(loaders)}
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"AlphaSignal preload task {futures[future]} 失败: {e}")
 
-        # ---- 4. us_enterprise_value（全字段，200 天回看） ----
-        cls._preload_enterprise_value(start_date, end_date)
-
-        # ---- 5. FF5（已有本地 CSV，直接加载） ----
-        cls.fetch_ff5_factors()
+        connections.close_all()
 
         logger.info(f"AlphaSignal preload 完成: {time.time() - t_total:.1f}s")
 

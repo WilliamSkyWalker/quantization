@@ -12,6 +12,7 @@
 
 import logging
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import numpy as np
@@ -86,12 +87,18 @@ class USFactorBase(ABC):
                     return f
         return None
 
+    # 超过此行数阈值的表在 DB 冷查询时按年分片并行
+    _SHARD_THRESHOLD_YEARS = 3
+
     @classmethod
     def _load_or_query(cls, table: str, model, cols: list[str],
                        start: str, end: str, date_field: str,
-                       order_by: list[str] | None = None) -> pd.DataFrame:
+                       order_by: list[str] | None = None,
+                       extra_filters: dict | None = None) -> pd.DataFrame:
         """
         先找可用 parquet 缓存（范围包含即命中），没有则查 Django ORM 后存缓存。
+        DB 冷查询时，若日期跨度 >= _SHARD_THRESHOLD_YEARS 年，按年分片并行查询。
+        所有表都会缓存到 parquet，后续直接读文件。
         """
         import time
         from services.config import PROJECT_ROOT
@@ -100,7 +107,6 @@ class USFactorBase(ABC):
         if hit:
             t0 = time.time()
             df = pd.read_parquet(hit)
-            # 内存过滤到请求范围
             if date_field in df.columns:
                 df[date_field] = pd.to_datetime(df[date_field])
                 df = df[(df[date_field] >= start) & (df[date_field] <= end)]
@@ -108,13 +114,15 @@ class USFactorBase(ABC):
             return df
 
         t0 = time.time()
-        qs = model.objects.filter(**{
-            f"{date_field}__gte": start,
-            f"{date_field}__lte": end,
-        })
-        if order_by:
-            qs = qs.order_by(*order_by)
-        df = pd.DataFrame(qs.values_list(*cols), columns=cols)
+        start_ts = pd.to_datetime(start)
+        end_ts = pd.to_datetime(end)
+        span_years = (end_ts - start_ts).days / 365.25
+
+        if span_years >= cls._SHARD_THRESHOLD_YEARS:
+            df = cls._query_sharded(model, cols, start, end, date_field, order_by, extra_filters)
+        else:
+            df = cls._query_single(model, cols, start, end, date_field, order_by, extra_filters)
+
         logger.info(f"US 预加载 {table}: {len(df)} 行 (DB 查询, {time.time()-t0:.1f}s)")
 
         if not df.empty:
@@ -126,218 +134,307 @@ class USFactorBase(ABC):
         return df
 
     @classmethod
+    def _query_single(cls, model, cols, start, end, date_field, order_by,
+                      extra_filters=None):
+        """单次 ORM 查询。"""
+        filters = {
+            f"{date_field}__gte": start,
+            f"{date_field}__lte": end,
+        }
+        if extra_filters:
+            filters.update(extra_filters)
+        qs = model.objects.filter(**filters)
+        if order_by:
+            qs = qs.order_by(*order_by)
+        return pd.DataFrame(qs.values_list(*cols), columns=cols)
+
+    @classmethod
+    def _query_sharded(cls, model, cols, start, end, date_field, order_by,
+                       extra_filters=None):
+        """按年分片，ThreadPoolExecutor 并发查询，pd.concat 合并。"""
+        from django.db import connections
+
+        start_ts = pd.to_datetime(start)
+        end_ts = pd.to_datetime(end)
+
+        shards = []
+        cursor = start_ts
+        while cursor <= end_ts:
+            shard_end = min(cursor.replace(month=12, day=31), end_ts)
+            shards.append((cursor.strftime("%Y-%m-%d"), shard_end.strftime("%Y-%m-%d")))
+            cursor = shard_end + pd.Timedelta(days=1)
+
+        def _query_shard(shard_start, shard_end):
+            filters = {
+                f"{date_field}__gte": shard_start,
+                f"{date_field}__lte": shard_end,
+            }
+            if extra_filters:
+                filters.update(extra_filters)
+            qs = model.objects.filter(**filters)
+            if order_by:
+                qs = qs.order_by(*order_by)
+            return pd.DataFrame(qs.values_list(*cols), columns=cols)
+
+        connections.close_all()
+
+        parts = []
+        with ThreadPoolExecutor(max_workers=min(len(shards), 8)) as pool:
+            futures = {
+                pool.submit(_query_shard, s, e): (s, e) for s, e in shards
+            }
+            for future in as_completed(futures):
+                shard_range = futures[future]
+                try:
+                    part = future.result()
+                    if not part.empty:
+                        parts.append(part)
+                except Exception as exc:
+                    logger.warning(f"分片查询 {shard_range} 失败: {exc}")
+
+        connections.close_all()
+
+        if not parts:
+            return pd.DataFrame(columns=cols)
+
+        df = pd.concat(parts, ignore_index=True)
+        if order_by:
+            sort_cols = [c.lstrip("-") for c in order_by]
+            ascending = [not c.startswith("-") for c in order_by]
+            valid_sort = [c for c in sort_cols if c in df.columns]
+            if valid_sort:
+                valid_asc = ascending[:len(valid_sort)]
+                df = df.sort_values(valid_sort, ascending=valid_asc).reset_index(drop=True)
+        return df
+
+    @classmethod
     def preload_for_backtest(cls, start_date: str, end_date: str, **kwargs):
         """
-        一次性预加载回测区间所需数据到内存（Django ORM + parquet 缓存）。
+        一次性并行预加载回测区间所需数据到内存（Django ORM + parquet 缓存）。
 
+        所有独立表通过 ThreadPoolExecutor 并发加载（IO-bound），
         首次从 DB 加载后缓存到本地 parquet，后续直接读文件。
         """
         import time
-        from pathlib import Path
+        from django.db import connections
 
-        # 1. us_financial_data
-        t0 = time.time()
-        fin_cols = [
-            "ticker", "period", "date", "filing_date",
-            "revenue", "net_income", "eps", "gross_profit",
-            "operating_income", "total_stockholders_equity",
-            "total_equity", "total_assets",
-            "total_debt", "free_cash_flow",
-            "weighted_average_shs_out",
-        ]
-        fin_start = (pd.to_datetime(start_date) - pd.Timedelta(days=5*365)).strftime("%Y-%m-%d")
-        df_fin = cls._load_or_query(
-            "us_financial_data", USFinancialData, fin_cols,
-            fin_start, end_date, "filing_date",
-        )
-        if not df_fin.empty:
-            df_fin["filing_date"] = pd.to_datetime(df_fin["filing_date"])
-            df_fin["date"] = pd.to_datetime(df_fin["date"])
+        t_total = time.time()
+        logger.info(f"US 并行预加载开始: {start_date} ~ {end_date}")
 
-            _FILING_LAG_BUFFER = pd.Timedelta(days=45)
-            bad_mask = df_fin["filing_date"] <= df_fin["date"]
-            n_fixed = bad_mask.sum()
-            if n_fixed > 0:
-                df_fin.loc[bad_mask, "filing_date"] = df_fin.loc[bad_mask, "date"] + _FILING_LAG_BUFFER
-                logger.info(f"Filing date 修正: {n_fixed} 条 (filing_date <= report_date → +45天)")
-
-            for col in ["revenue", "gross_profit", "operating_income", "net_income",
-                        "total_stockholders_equity", "weighted_average_shs_out"]:
-                if col in df_fin.columns:
-                    df_fin[col] = pd.to_numeric(df_fin[col], errors="coerce")
-            rev = df_fin["revenue"].replace(0, np.nan)
-            df_fin["gross_margin"] = df_fin["gross_profit"] / rev
-            df_fin["operating_margin"] = df_fin["operating_income"] / rev
-            equity = df_fin["total_stockholders_equity"].replace(0, np.nan)
-            df_fin["roe"] = df_fin["net_income"] / equity
-            df_fin["weighted_avg_shares"] = df_fin["weighted_average_shs_out"]
-        cls._static_cache["_bulk_financial"] = df_fin
-
-        # 2. us_daily_price（回测区间 + 400 天前移量）
         price_start = (pd.to_datetime(start_date) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
-        price_cols = [
-            "ticker", "trade_date", "open", "high", "low",
-            "close", "adj_close", "volume", "change_percent",
-        ]
-        df_price = cls._load_or_query(
-            "us_daily_price", USDailyPrice, price_cols,
-            price_start, end_date, "trade_date",
-            order_by=["ticker", "trade_date"],
-        )
-        if not df_price.empty:
-            df_price["trade_date"] = pd.to_datetime(df_price["trade_date"])
-            df_price["adj_close"] = pd.to_numeric(df_price["adj_close"], errors="coerce")
-            df_price["close"] = pd.to_numeric(df_price["close"], errors="coerce")
-            df_price["adj_close"] = df_price["adj_close"].fillna(df_price["close"])
-        cls._static_cache["_bulk_daily"] = df_price
-
-        # 3. S&P 500 指数（IVOL 因子用）
-        t0 = time.time()
-        try:
-            idx_cols = ["trade_date", "close"]
-            df_idx = pd.DataFrame(
-                USIndexDaily.objects.filter(
-                    index_code="^GSPC",
-                    trade_date__gte=price_start,
-                    trade_date__lte=end_date,
-                ).order_by("trade_date").values_list(*idx_cols),
-                columns=idx_cols,
-            )
-            if not df_idx.empty:
-                df_idx["trade_date"] = pd.to_datetime(df_idx["trade_date"])
-                df_idx["close"] = pd.to_numeric(df_idx["close"], errors="coerce")
-            cls._static_cache["_bulk_index"] = df_idx
-            logger.info(f"US 预加载 us_index_daily (^GSPC): {len(df_idx)} 行, {time.time()-t0:.1f}s")
-        except Exception as e:
-            logger.warning(f"预加载 S&P 500 指数失败: {e}")
-            cls._static_cache["_bulk_index"] = pd.DataFrame()
-
-        # 4. us_analyst_recommendation
-        t0 = time.time()
+        fin_start = (pd.to_datetime(start_date) - pd.Timedelta(days=5*365)).strftime("%Y-%m-%d")
         analyst_start = (pd.to_datetime(start_date) - pd.Timedelta(days=180)).strftime("%Y-%m-%d")
-        ar_cols = ["ticker", "date", "grading_company", "new_grade", "action"]
-        df_ar = pd.DataFrame(
-            USAnalystRecommendation.objects.filter(
-                date__gte=analyst_start,
-                date__lte=end_date,
-            ).order_by("ticker", "date").values_list(*ar_cols),
-            columns=ar_cols,
-        )
-        if not df_ar.empty:
-            df_ar["date"] = pd.to_datetime(df_ar["date"])
-        cls._static_cache["_bulk_analyst"] = df_ar
-        logger.info(f"US 预加载 us_analyst_recommendation: {len(df_ar)} 行, {time.time()-t0:.1f}s")
-
-        # 5. us_earnings_surprise
-        t0 = time.time()
-        es_start = (pd.to_datetime(start_date) - pd.Timedelta(days=180)).strftime("%Y-%m-%d")
-        es_cols = ["ticker", "date", "eps_actual", "eps_estimated", "surprise", "surprise_pct"]
-        df_es = pd.DataFrame(
-            USEarningsSurprise.objects.filter(
-                date__gte=es_start,
-                date__lte=end_date,
-            ).order_by("ticker", "date").values_list(*es_cols),
-            columns=es_cols,
-        )
-        if not df_es.empty:
-            df_es["date"] = pd.to_datetime(df_es["date"])
-        cls._static_cache["_bulk_earnings_surprise"] = df_es
-        logger.info(f"US 预加载 us_earnings_surprise: {len(df_es)} 行, {time.time()-t0:.1f}s")
-
-        # 6. us_eps_estimate
-        t0 = time.time()
-        ee_cols = ["ticker", "date", "estimated_eps_avg", "estimated_eps_low",
-                   "estimated_eps_high", "number_analysts_estimated_eps"]
+        es_start = analyst_start
         ee_start = (pd.to_datetime(start_date) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
-        df_ee = pd.DataFrame(
-            USEpsEstimate.objects.filter(
-                date__gte=ee_start,
-                date__lte=end_date,
-            ).order_by("ticker", "date").values_list(*ee_cols),
-            columns=ee_cols,
-        )
-        if not df_ee.empty:
-            df_ee["date"] = pd.to_datetime(df_ee["date"])
-        cls._static_cache["_bulk_eps_estimate"] = df_ee
-        logger.info(f"US 预加载 us_eps_estimate: {len(df_ee)} 行, {time.time()-t0:.1f}s")
+        div_start = ee_start
+        mktcap_start = (pd.to_datetime(start_date) - pd.Timedelta(days=120)).strftime("%Y-%m-%d")
+        insider_start = mktcap_start
 
-        # 7. us_corporate_action (dividend)
-        t0 = time.time()
-        div_start = (pd.to_datetime(start_date) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
-        ca_cols = ["ticker", "date", "action_type", "dividend"]
-        df_ca = pd.DataFrame(
-            USCorporateAction.objects.filter(
-                date__gte=div_start,
-                date__lte=end_date,
-                action_type="dividend",
-            ).order_by("ticker", "date").values_list(*ca_cols),
-            columns=ca_cols,
-        )
-        if not df_ca.empty:
-            df_ca["date"] = pd.to_datetime(df_ca["date"])
-        cls._static_cache["_bulk_dividends"] = df_ca
-        logger.info(f"US 预加载 dividends: {len(df_ca)} 行, {time.time()-t0:.1f}s")
+        # ---- 每张表的加载函数（独立，可并发） ----
 
-        # 8. us_enterprise_value.market_capitalization（季度精度）
-        t0 = time.time()
-        try:
-            mktcap_start = (pd.to_datetime(start_date) - pd.Timedelta(days=120)).strftime("%Y-%m-%d")
-            ev_cols = ["ticker", "date", "market_capitalization"]
-            df_mktcap = pd.DataFrame(
-                USEnterpriseValue.objects.filter(
-                    date__gte=mktcap_start,
-                    date__lte=end_date,
-                    market_capitalization__isnull=False,
-                    market_capitalization__gt=0,
-                ).order_by("ticker", "date").values_list(*ev_cols),
-                columns=ev_cols,
+        def _load_financial():
+            t0 = time.time()
+            fin_cols = [
+                "ticker", "period", "date", "filing_date",
+                "revenue", "net_income", "eps", "gross_profit",
+                "operating_income", "total_stockholders_equity",
+                "total_equity", "total_assets",
+                "total_debt", "free_cash_flow",
+                "weighted_average_shs_out",
+            ]
+            df = cls._load_or_query(
+                "us_financial_data", USFinancialData, fin_cols,
+                fin_start, end_date, "filing_date",
             )
-            if not df_mktcap.empty:
-                df_mktcap["date"] = pd.to_datetime(df_mktcap["date"])
-                df_mktcap.rename(columns={"market_capitalization": "market_cap"}, inplace=True)
-                df_mktcap["market_cap"] = pd.to_numeric(df_mktcap["market_cap"], errors="coerce")
-            cls._static_cache["_bulk_mktcap"] = df_mktcap
-            logger.info(f"US 预加载 us_enterprise_value: {len(df_mktcap)} 行, {time.time()-t0:.1f}s")
-        except Exception as e:
-            logger.warning(f"预加载 market_cap 失败: {e}")
-            cls._static_cache["_bulk_mktcap"] = pd.DataFrame()
+            if not df.empty:
+                df["filing_date"] = pd.to_datetime(df["filing_date"])
+                df["date"] = pd.to_datetime(df["date"])
+                _FILING_LAG_BUFFER = pd.Timedelta(days=45)
+                bad_mask = df["filing_date"] <= df["date"]
+                n_fixed = bad_mask.sum()
+                if n_fixed > 0:
+                    df.loc[bad_mask, "filing_date"] = df.loc[bad_mask, "date"] + _FILING_LAG_BUFFER
+                    logger.info(f"Filing date 修正: {n_fixed} 条")
+                for col in ["revenue", "gross_profit", "operating_income", "net_income",
+                            "total_stockholders_equity", "weighted_average_shs_out"]:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                rev = df["revenue"].replace(0, np.nan)
+                df["gross_margin"] = df["gross_profit"] / rev
+                df["operating_margin"] = df["operating_income"] / rev
+                equity = df["total_stockholders_equity"].replace(0, np.nan)
+                df["roe"] = df["net_income"] / equity
+                df["weighted_avg_shares"] = df["weighted_average_shs_out"]
+            logger.info(f"  _bulk_financial: {len(df)} 行, {time.time()-t0:.1f}s")
+            return "_bulk_financial", df
 
-        # 9. us_insider_trade（INSIDER_NET_BUY 因子用）
-        t0 = time.time()
-        insider_start = (pd.to_datetime(start_date) - pd.Timedelta(days=120)).strftime("%Y-%m-%d")
-        try:
+        def _load_daily_price():
+            t0 = time.time()
+            price_cols = [
+                "ticker", "trade_date", "open", "high", "low",
+                "close", "adj_close", "volume", "change_percent",
+            ]
+            df = cls._load_or_query(
+                "us_daily_price", USDailyPrice, price_cols,
+                price_start, end_date, "trade_date",
+                order_by=["ticker", "trade_date"],
+            )
+            if not df.empty:
+                df["trade_date"] = pd.to_datetime(df["trade_date"])
+                df["adj_close"] = pd.to_numeric(df["adj_close"], errors="coerce")
+                df["close"] = pd.to_numeric(df["close"], errors="coerce")
+                df["adj_close"] = df["adj_close"].fillna(df["close"])
+            logger.info(f"  _bulk_daily: {len(df)} 行, {time.time()-t0:.1f}s")
+            return "_bulk_daily", df
+
+        def _load_index():
+            t0 = time.time()
+            idx_cols = ["index_code", "trade_date", "close"]
+            df = cls._load_or_query(
+                "us_index_daily_gspc", USIndexDaily, idx_cols,
+                price_start, end_date, "trade_date",
+                order_by=["trade_date"],
+                extra_filters={"index_code": "^GSPC"},
+            )
+            if not df.empty:
+                df["trade_date"] = pd.to_datetime(df["trade_date"])
+                df["close"] = pd.to_numeric(df["close"], errors="coerce")
+            logger.info(f"  _bulk_index: {len(df)} 行, {time.time()-t0:.1f}s")
+            return "_bulk_index", df
+
+        def _load_analyst():
+            t0 = time.time()
+            ar_cols = ["ticker", "date", "grading_company", "new_grade", "action"]
+            df = cls._load_or_query(
+                "us_analyst_recommendation", USAnalystRecommendation, ar_cols,
+                analyst_start, end_date, "date",
+                order_by=["ticker", "date"],
+            )
+            if not df.empty:
+                df["date"] = pd.to_datetime(df["date"])
+            logger.info(f"  _bulk_analyst: {len(df)} 行, {time.time()-t0:.1f}s")
+            return "_bulk_analyst", df
+
+        def _load_earnings_surprise():
+            t0 = time.time()
+            es_cols = ["ticker", "date", "eps_actual", "eps_estimated", "surprise", "surprise_pct"]
+            df = cls._load_or_query(
+                "us_earnings_surprise", USEarningsSurprise, es_cols,
+                es_start, end_date, "date",
+                order_by=["ticker", "date"],
+            )
+            if not df.empty:
+                df["date"] = pd.to_datetime(df["date"])
+            logger.info(f"  _bulk_earnings_surprise: {len(df)} 行, {time.time()-t0:.1f}s")
+            return "_bulk_earnings_surprise", df
+
+        def _load_eps_estimate():
+            t0 = time.time()
+            ee_cols = ["ticker", "date", "estimated_eps_avg", "estimated_eps_low",
+                       "estimated_eps_high", "number_analysts_estimated_eps"]
+            df = cls._load_or_query(
+                "us_eps_estimate", USEpsEstimate, ee_cols,
+                ee_start, end_date, "date",
+                order_by=["ticker", "date"],
+            )
+            if not df.empty:
+                df["date"] = pd.to_datetime(df["date"])
+            logger.info(f"  _bulk_eps_estimate: {len(df)} 行, {time.time()-t0:.1f}s")
+            return "_bulk_eps_estimate", df
+
+        def _load_dividends():
+            t0 = time.time()
+            ca_cols = ["ticker", "date", "action_type", "dividend"]
+            df = cls._load_or_query(
+                "us_corporate_action_div", USCorporateAction, ca_cols,
+                div_start, end_date, "date",
+                order_by=["ticker", "date"],
+                extra_filters={"action_type": "dividend"},
+            )
+            if not df.empty:
+                df["date"] = pd.to_datetime(df["date"])
+            logger.info(f"  _bulk_dividends: {len(df)} 行, {time.time()-t0:.1f}s")
+            return "_bulk_dividends", df
+
+        def _load_mktcap():
+            t0 = time.time()
+            ev_cols = ["ticker", "date", "market_capitalization"]
+            df = cls._load_or_query(
+                "us_enterprise_value_mktcap", USEnterpriseValue, ev_cols,
+                mktcap_start, end_date, "date",
+                order_by=["ticker", "date"],
+                extra_filters={
+                    "market_capitalization__isnull": False,
+                    "market_capitalization__gt": 0,
+                },
+            )
+            if not df.empty:
+                df["date"] = pd.to_datetime(df["date"])
+                df.rename(columns={"market_capitalization": "market_cap"}, inplace=True)
+                df["market_cap"] = pd.to_numeric(df["market_cap"], errors="coerce")
+            logger.info(f"  _bulk_mktcap: {len(df)} 行, {time.time()-t0:.1f}s")
+            return "_bulk_mktcap", df
+
+        def _load_insider():
+            t0 = time.time()
             insider_types = ["P-Purchase", "S-Sale", "A-Award", "P-Purchase+", "S-Sale+"]
             ins_cols = ["ticker", "filing_date", "acquisition_or_disposition",
                         "securities_transacted", "price"]
-            df_insider = pd.DataFrame(
-                USInsiderTrade.objects.filter(
-                    filing_date__gte=insider_start,
-                    filing_date__lte=end_date,
-                    price__gt=0,
-                    securities_transacted__gt=0,
-                    transaction_type__in=insider_types,
-                ).values_list(*ins_cols),
-                columns=ins_cols,
+            df = cls._load_or_query(
+                "us_insider_trade", USInsiderTrade, ins_cols,
+                insider_start, end_date, "filing_date",
+                extra_filters={
+                    "price__gt": 0,
+                    "securities_transacted__gt": 0,
+                    "transaction_type__in": insider_types,
+                },
             )
-            if not df_insider.empty:
-                df_insider["filing_date"] = pd.to_datetime(df_insider["filing_date"])
-                # 计算 net_value（原来在 SQL CASE WHEN 中做的）
-                is_acquire = df_insider["acquisition_or_disposition"] == "A"
-                df_insider["net_value"] = np.where(
+            if not df.empty:
+                df["filing_date"] = pd.to_datetime(df["filing_date"])
+                is_acquire = df["acquisition_or_disposition"] == "A"
+                df["net_value"] = np.where(
                     is_acquire,
-                    df_insider["securities_transacted"] * df_insider["price"],
-                    -df_insider["securities_transacted"] * df_insider["price"],
+                    df["securities_transacted"] * df["price"],
+                    -df["securities_transacted"] * df["price"],
                 )
-                df_insider = df_insider[["ticker", "filing_date", "net_value"]]
-            cls._static_cache["_bulk_insider"] = df_insider
-            logger.info(f"US 预加载 us_insider_trade: {len(df_insider)} 行, {time.time()-t0:.1f}s")
-        except Exception as e:
-            logger.warning(f"预加载 insider trade 失败: {e}")
-            cls._static_cache["_bulk_insider"] = pd.DataFrame()
+                df = df[["ticker", "filing_date", "net_value"]]
+            logger.info(f"  _bulk_insider: {len(df)} 行, {time.time()-t0:.1f}s")
+            return "_bulk_insider", df
 
-        # 10. AlphaSignal 缓存（financial 全字段 + key_metric + enterprise_value）
+        # ---- 并行提交所有基础表加载任务 ----
+        loaders = [
+            _load_financial,
+            _load_daily_price,
+            _load_index,
+            _load_analyst,
+            _load_earnings_surprise,
+            _load_eps_estimate,
+            _load_dividends,
+            _load_mktcap,
+            _load_insider,
+        ]
+
+        # Django ORM 在多线程中需要关闭陈旧连接
+        connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=len(loaders)) as pool:
+            futures = {pool.submit(fn): fn.__name__ for fn in loaders}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    cache_key, df = future.result()
+                    if cache_key is not None:
+                        cls._static_cache[cache_key] = df
+                except Exception as e:
+                    logger.error(f"并行预加载 {name} 失败: {e}")
+
+        connections.close_all()
+
+        # AlphaSignal 预加载依赖 _bulk_daily（复用检查），必须在基础表之后
         from stocks.services.factors.us_registry import AlphaSignal
         AlphaSignal.preload_alpha_cache(start_date, end_date)
+
+        logger.info(f"US 并行预加载完成: {time.time()-t_total:.1f}s")
 
     @classmethod
     def precompute_rolling_stats(cls):

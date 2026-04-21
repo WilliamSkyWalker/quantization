@@ -1433,7 +1433,9 @@ class USMultiFactorStrategy:
     ) -> dict[str, pd.DataFrame]:
         """
         Parallel signal generation: multi-thread factor computation → serial top-N selection.
+        Each worker thread gets its own DB connection to avoid 'another command in progress'.
         """
+        from django.db import connections
         t0 = time.time()
 
         # Phase 1: Parallel factor computation
@@ -1441,21 +1443,38 @@ class USMultiFactorStrategy:
         effective_workers = min(max_workers, len(rebalance_dates))
         logger.info(f"US parallel factors: {len(rebalance_dates)} dates, {effective_workers} threads")
 
+        def _compute_with_own_connection(dt: str) -> pd.DataFrame:
+            """每个线程关闭继承的连接，让 Django 自动创建独立连接。"""
+            connections.close_all()
+            try:
+                return self._compute_scores_for_date(dt)
+            finally:
+                connections.close_all()
+
+        connections.close_all()
+
         with ThreadPoolExecutor(max_workers=effective_workers) as pool:
             future_map = {}
             for dt in rebalance_dates:
                 if cancel_check and cancel_check():
                     raise RuntimeError("Backtest cancelled")
-                future = pool.submit(self._compute_scores_for_date, dt)
+                future = pool.submit(_compute_with_own_connection, dt)
                 future_map[future] = dt
 
+            n_done = 0
+            n_total = len(future_map)
             for future in as_completed(future_map):
                 dt = future_map[future]
+                n_done += 1
                 try:
                     composites[dt] = future.result()
+                    n_stocks = len(composites[dt])
+                    logger.info(f"[{n_done}/{n_total}] {dt} 因子计算完成: {n_stocks} stocks, {time.time()-t0:.0f}s elapsed")
                 except Exception as e:
-                    logger.warning(f"{dt} factor computation failed: {e}")
+                    logger.warning(f"[{n_done}/{n_total}] {dt} factor computation failed: {e}")
                     composites[dt] = pd.DataFrame(columns=["ticker", "score"])
+
+        connections.close_all()
 
         t1 = time.time()
         logger.info(f"US parallel factors done: {t1 - t0:.1f}s")
@@ -1464,15 +1483,18 @@ class USMultiFactorStrategy:
         signals = {}
         prev_holdings: set[str] = set()
 
-        for dt in sorted(composites.keys()):
+        for i, dt in enumerate(sorted(composites.keys())):
             self._last_date = dt
             composite = composites[dt]
             selected = self._select_from_scores(composite, prev_holdings)
             signals[dt] = selected
             prev_holdings = set(selected["ticker"].tolist()) if len(selected) > 0 else set()
 
+            n_sel = len(selected)
             if selected.empty:
-                logger.info(f"{dt} empty portfolio signal")
+                logger.info(f"[{i+1}/{len(composites)}] {dt} empty portfolio signal")
+            else:
+                logger.info(f"[{i+1}/{len(composites)}] {dt} 选股完成: {n_sel} stocks")
 
         self._prev_holdings = prev_holdings
 

@@ -449,6 +449,130 @@ def generate_report(ic_summary, fm_result, decay_df, start, end, n_dates) -> str
 # ======================================================================
 
 
+def _split_panel_by_year(panel: dict) -> dict[str, dict]:
+    """将面板按年份分组。返回 {year_str: {date: df}}。"""
+    yearly = {}
+    for date, df in panel.items():
+        year = date[:4]
+        yearly.setdefault(year, {})[date] = df
+    return yearly
+
+
+def _analyze_period(
+    label: str, sub_panel: dict, fwd_matrices: dict, factor_names: list,
+    skip_fm: bool = False, skip_decay: bool = False,
+) -> dict:
+    """对一个时间段（某年或全量）计算 IC / FM / Decay。"""
+    result = {"label": label, "n_dates": len(sub_panel)}
+
+    _, ic_summary = compute_ic_from_panel(sub_panel, fwd_matrices, factor_names)
+    result["ic_summary"] = ic_summary
+
+    if not skip_fm:
+        result["fm"] = fama_macbeth_from_panel(sub_panel, fwd_matrices, factor_names)
+    else:
+        result["fm"] = pd.DataFrame()
+
+    if not skip_decay:
+        result["decay"] = factor_decay_from_panel(sub_panel, fwd_matrices, factor_names)
+    else:
+        result["decay"] = pd.DataFrame()
+
+    return result
+
+
+def generate_yearly_report(
+    yearly_results: list[dict], total_result: dict, factor_names: list,
+    start: str, end: str,
+) -> str:
+    """生成逐年 + 总计报告。"""
+    md = [f"# 逐年因子分析报告 ({start} → {end})",
+          f"\n> 共 {total_result['n_dates']} 个月末截面，{len(factor_names)} 个因子\n"]
+
+    # ── 逐年 IC 热力图（每年 Top 20 因子的 ICIR） ──
+    md.append("## 1. 逐年 ICIR 矩阵 (Top 30 by 全期 |ICIR|)\n")
+
+    total_ic = total_result["ic_summary"]
+    top_factors = total_ic.head(30)["factor"].tolist()
+
+    # 表头
+    years = [r["label"] for r in yearly_results]
+    md.append("| Factor | " + " | ".join(years) + " | **Total** |")
+    md.append("|--------|" + "|".join(["-------:" for _ in years]) + "|--------:|")
+
+    # 构造 {year: {factor: icir}} 查找表
+    yearly_icir = {}
+    for r in yearly_results:
+        ic = r["ic_summary"]
+        yearly_icir[r["label"]] = dict(zip(ic["factor"], ic["icir"]))
+    total_icir = dict(zip(total_ic["factor"], total_ic["icir"]))
+
+    for fname in top_factors:
+        cells = []
+        for yr in years:
+            v = yearly_icir.get(yr, {}).get(fname, np.nan)
+            if pd.isna(v):
+                cells.append("-")
+            else:
+                cells.append(f"{v:+.2f}")
+        total_v = total_icir.get(fname, np.nan)
+        total_s = f"**{total_v:+.2f}**" if not pd.isna(total_v) else "-"
+        md.append(f"| {fname} | " + " | ".join(cells) + f" | {total_s} |")
+    md.append("")
+
+    # ── 全期 IC 排名 ──
+    md.append("## 2. 全期 IC 排名 (|ICIR| Top 30)\n")
+    md.append("| Rank | Factor | Mean IC | Std IC | ICIR | t-stat | %Pos | N |")
+    md.append("|------|--------|--------:|-------:|-----:|-------:|-----:|--:|")
+    for i, (_, r) in enumerate(total_ic.head(30).iterrows(), 1):
+        star = " ***" if abs(r.get("t_stat", 0)) > 3.0 else " **" if abs(r.get("t_stat", 0)) > 2.0 else ""
+        md.append(
+            f"| {i} | {r['factor']} | {r['mean_ic']:+.4f} | {r['std_ic']:.4f} "
+            f"| {r['icir']:+.3f} | {r['t_stat']:+.2f}{star} | {r['pct_pos']:.0%} | {int(r['n_months'])} |"
+        )
+    md.append("")
+
+    # ── 全期 Fama-MacBeth ──
+    fm = total_result.get("fm", pd.DataFrame())
+    if not fm.empty:
+        md.append("## 3. 全期 Fama-MacBeth (|t-stat| Top 30)\n")
+        md.append("| Rank | Factor | Mean γ | t-stat | N |")
+        md.append("|------|--------|-------:|-------:|--:|")
+        for i, (_, r) in enumerate(fm[fm["factor"] != "_intercept"].head(30).iterrows(), 1):
+            md.append(f"| {i} | {r['factor']} | {r['mean_gamma']:+.6f} | {r['t_stat']:+.2f} | {int(r['n_months'])} |")
+        md.append("\n> Harvey-Liu-Zhu (2016): |t| > 3.0 才有统计显著性。\n")
+
+    # ── 全期因子衰减 ──
+    decay = total_result.get("decay", pd.DataFrame())
+    if not decay.empty:
+        md.append("## 4. 全期因子衰减 (Top 30 by |ICIR 1M|)\n")
+        md.append("| Factor | IC 1M | IC 2M | IC 3M | IC 6M | IC 12M | ICIR 1M |")
+        md.append("|--------|------:|------:|------:|------:|-------:|--------:|")
+        ds = decay.copy()
+        ds["_s"] = ds.get("icir_21d", pd.Series(dtype=float)).abs()
+        for _, r in ds.sort_values("_s", ascending=False).head(30).iterrows():
+            md.append(
+                f"| {r['factor']} | {r.get('ic_21d',np.nan):+.4f} | {r.get('ic_42d',np.nan):+.4f} "
+                f"| {r.get('ic_63d',np.nan):+.4f} | {r.get('ic_126d',np.nan):+.4f} "
+                f"| {r.get('ic_252d',np.nan):+.4f} | {r.get('icir_21d',np.nan):+.3f} |"
+            )
+        md.append("")
+
+    # ── 逐年 Top 5 ──
+    md.append("## 5. 逐年 Top 5 因子\n")
+    for r in yearly_results:
+        ic = r["ic_summary"]
+        md.append(f"### {r['label']} ({r['n_dates']} months)\n")
+        md.append("| Rank | Factor | ICIR | Mean IC | t-stat |")
+        md.append("|------|--------|-----:|--------:|-------:|")
+        for i, (_, row) in enumerate(ic.head(5).iterrows(), 1):
+            md.append(f"| {i} | {row['factor']} | {row['icir']:+.3f} | {row['mean_ic']:+.4f} | {row['t_stat']:+.2f} |")
+        md.append("")
+
+    md.append("---\n*Generated by `scripts/factor_analysis.py`*")
+    return "\n".join(md)
+
+
 def main():
     parser = argparse.ArgumentParser(description="全因子分析（IC / Fama-MacBeth / 衰减）")
     parser.add_argument("--start", required=True)
@@ -476,7 +600,7 @@ def main():
     dates = [d.strftime("%Y-%m-%d") for d in pd.date_range(args.start, args.end, freq="ME")]
     logger.info(f"Factors: {len(factor_names)}, Dates: {len(dates)}")
 
-    # ── Phase 1: 因子面板 ──
+    # ── Phase 1: 因子面板（一次性计算全量） ──
     logger.info("=" * 60)
     logger.info("Phase 1: Factor panel...")
     t0 = time.time()
@@ -495,40 +619,66 @@ def main():
         pa.to_parquet(out_dir / f"factor_panel_{suffix}.parquet", index=False)
         logger.info(f"Panel saved: {len(pa)} rows")
 
-    # ── Phase 2: 前瞻收益 ──
+    # ── Phase 2: 前瞻收益（一次性计算） ──
     logger.info("=" * 60)
     fwd_matrices = build_forward_return_matrix(args.start, args.end, dates)
 
-    # ── Phase 3 ──
+    # ── Phase 3: 逐年分析 + 全期汇总 ──
     logger.info("=" * 60)
-    ic_matrix, ic_summary = compute_ic_from_panel(panel, fwd_matrices, factor_names)
-    ic_matrix.to_csv(out_dir / f"ic_matrix_{suffix}.csv", index=False)
-    ic_summary.to_csv(out_dir / f"ic_summary_{suffix}.csv", index=False)
+    logger.info("Phase 3: Yearly + total analysis...")
 
-    fm_result = pd.DataFrame()
-    if not args.skip_fm:
-        fm_result = fama_macbeth_from_panel(panel, fwd_matrices, factor_names)
-        if not fm_result.empty:
-            fm_result.to_csv(out_dir / f"fama_macbeth_{suffix}.csv", index=False)
+    # 3a. 逐年
+    yearly_panels = _split_panel_by_year(panel)
+    yearly_results = []
+    for year in sorted(yearly_panels.keys()):
+        sub = yearly_panels[year]
+        logger.info(f"  Analyzing {year} ({len(sub)} dates)...")
+        r = _analyze_period(year, sub, fwd_matrices, factor_names,
+                            skip_fm=True, skip_decay=True)
+        yearly_results.append(r)
+        # 存逐年 IC
+        r["ic_summary"].to_csv(out_dir / f"ic_summary_{year}.csv", index=False)
 
-    decay_df = pd.DataFrame()
-    if not args.skip_decay:
-        decay_df = factor_decay_from_panel(panel, fwd_matrices, factor_names)
-        if not decay_df.empty:
-            decay_df.to_csv(out_dir / f"decay_{suffix}.csv", index=False)
+    # 3b. 全期
+    logger.info(f"  Analyzing TOTAL ({len(panel)} dates)...")
+    total_result = _analyze_period("TOTAL", panel, fwd_matrices, factor_names,
+                                   skip_fm=args.skip_fm, skip_decay=args.skip_decay)
 
-    # Report
-    report = generate_report(ic_summary, fm_result, decay_df, args.start, args.end, len(dates))
+    # 存全期结果
+    total_result["ic_summary"].to_csv(out_dir / f"ic_summary_{suffix}.csv", index=False)
+    if not total_result["fm"].empty:
+        total_result["fm"].to_csv(out_dir / f"fama_macbeth_{suffix}.csv", index=False)
+    if not total_result["decay"].empty:
+        total_result["decay"].to_csv(out_dir / f"decay_{suffix}.csv", index=False)
+
+    # ── Report ──
+    report = generate_yearly_report(yearly_results, total_result, factor_names,
+                                     args.start, args.end)
     (out_dir / f"report_{suffix}.md").write_text(report, encoding="utf-8")
 
+    # ── Console summary ──
     t_elapsed = time.time() - t_total
+    ic_total = total_result["ic_summary"]
+
     print("\n" + "=" * 70)
     print(f"FACTOR ANALYSIS: {args.start} → {args.end} ({len(dates)} months, {t_elapsed/60:.0f} min)")
     print("=" * 70)
-    print(f"\nTop 10 by |ICIR|:")
-    for i, (_, r) in enumerate(ic_summary.head(10).iterrows(), 1):
+
+    # 逐年概览
+    print(f"\n{'Year':>6s} | {'#1 Factor':>30s} | {'ICIR':>6s} | {'#Dates':>6s}")
+    print("-" * 60)
+    for r in yearly_results:
+        ic = r["ic_summary"]
+        if not ic.empty:
+            top = ic.iloc[0]
+            print(f"{r['label']:>6s} | {top['factor']:>30s} | {top['icir']:+.3f} | {r['n_dates']:>6d}")
+    print("-" * 60)
+
+    print(f"\nTop 10 by |ICIR| (全期):")
+    for i, (_, r) in enumerate(ic_total.head(10).iterrows(), 1):
         star = "***" if abs(r.get("t_stat", 0)) > 3.0 else "**" if abs(r.get("t_stat", 0)) > 2.0 else ""
         print(f"  {i:2d}. {r['factor']:30s} ICIR={r['icir']:+.3f}  IC={r['mean_ic']:+.4f}  t={r['t_stat']:+.2f} {star}")
+
     print(f"\nTotal: {t_elapsed/60:.0f} min, RSS={_mem_mb():.0f}MB")
     print(f"Outputs: {out_dir}/")
 
