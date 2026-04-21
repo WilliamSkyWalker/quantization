@@ -53,9 +53,18 @@ class Rsi14(AlphaSignal):
             logger.debug("RSI14: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        hist = self.fetch_price_history(
-            date, tickers, lookback_days=self._LOOKBACK_DAYS, columns=["adj_close"]
+        bulk_daily = self._static_cache.get("_bulk_daily")
+        if bulk_daily is None or bulk_daily.empty:
+            logger.warning(f"RSI14({date}): 无预加载数据")
+            return pd.DataFrame(columns=["ticker", "factor_value"])
+        date_ts = pd.to_datetime(date)
+        start_ts = date_ts - pd.Timedelta(days=self._LOOKBACK_DAYS)
+        mask = (
+            bulk_daily["ticker"].isin(set(tickers))
+            & (bulk_daily["trade_date"] >= start_ts)
+            & (bulk_daily["trade_date"] <= date_ts)
         )
+        hist = bulk_daily.loc[mask, ["ticker", "trade_date", "adj_close"]].dropna(subset=["adj_close"])
         if hist.empty:
             logger.warning(f"RSI14({date}): 无价格数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
@@ -128,31 +137,47 @@ class VolumeRatio(AlphaSignal):
             logger.debug("VolumeRatio: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        hist = self.fetch_price_history(
-            date, tickers, lookback_days=self._LOOKBACK_DAYS, columns=["volume"]
+        # 直接从 _bulk_daily 切最近 5 天和 20 天成交量，向量化聚合
+        bulk_daily = self._static_cache.get("_bulk_daily")
+        if bulk_daily is None or bulk_daily.empty:
+            logger.warning(f"VolumeRatio({date}): 无预加载数据")
+            return pd.DataFrame(columns=["ticker", "factor_value"])
+
+        date_ts = pd.to_datetime(date)
+        ticker_set = set(tickers)
+
+        # 20 天窗口
+        start_20 = date_ts - pd.Timedelta(days=self._LOOKBACK_DAYS)
+        mask_20 = (
+            bulk_daily["ticker"].isin(ticker_set)
+            & (bulk_daily["trade_date"] >= start_20)
+            & (bulk_daily["trade_date"] <= date_ts)
         )
-        if hist.empty:
-            logger.warning(f"VolumeRatio({date}): 无数据")
+        vol_20 = bulk_daily.loc[mask_20, ["ticker", "trade_date", "volume"]].dropna()
+        if vol_20.empty:
+            logger.warning(f"VolumeRatio({date}): 无成交量数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        rows = []
-        for ticker, grp in hist.groupby("ticker", sort=False):
-            vol = grp["volume"].dropna().values
-            if len(vol) < self._MIN_DAYS:
-                continue
+        vol_20["volume"] = vol_20["volume"].astype(float)
 
-            avg_5 = vol[-5:].mean()
-            avg_20 = vol[-20:].mean()
-            if avg_20 < 1e-10:
-                continue
+        # 每 ticker 的 20d 均量
+        avg_20 = vol_20.groupby("ticker").agg(
+            avg_vol_20=("volume", "mean"),
+            n_days=("volume", "count"),
+        ).reset_index()
+        avg_20 = avg_20[avg_20["n_days"] >= self._MIN_DAYS]
 
-            rows.append({"ticker": ticker, "factor_value": float(avg_5 / avg_20)})
+        # 5 天窗口（从 20 天数据里取最近 5 天）
+        start_5 = date_ts - pd.Timedelta(days=8)
+        vol_5 = vol_20[vol_20["trade_date"] >= start_5]
+        avg_5 = vol_5.groupby("ticker")["volume"].mean().reset_index()
+        avg_5.columns = ["ticker", "avg_vol_5"]
 
-        if not rows:
-            logger.warning(f"VolumeRatio({date}): 无有效 ticker")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
+        merged = avg_20.merge(avg_5, on="ticker", how="inner")
+        merged = merged[merged["avg_vol_20"] > 1e-10]
+        merged["factor_value"] = merged["avg_vol_5"] / merged["avg_vol_20"]
 
-        out = pd.DataFrame(rows)
+        out = merged[["ticker", "factor_value"]].copy()
         logger.info(f"VolumeRatio({date}): {len(out)} 有值")
         return out
 
@@ -190,28 +215,15 @@ class Volatility21d(AlphaSignal):
             logger.debug("Volatility21d: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        hist = self.fetch_price_history(
-            date, tickers, lookback_days=self._LOOKBACK_DAYS, columns=["adj_close"]
-        )
-        if hist.empty:
-            logger.warning(f"Volatility21d({date}): 无数据")
+        # 直接用预算好的 _rolling_indexed 里的 vol_20d（年化）
+        rolling = self._get_rolling_for_date(date, set(tickers))
+        if rolling is None or rolling.empty:
+            logger.warning(f"Volatility21d({date}): 无 rolling 数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        rows = []
-        for ticker, grp in hist.groupby("ticker", sort=False):
-            prices = grp["adj_close"].dropna().values
-            if len(prices) < self._MIN_DAYS:
-                continue
-
-            rets = np.diff(prices) / prices[:-1]
-            vol = float(np.std(rets, ddof=1) * np.sqrt(252))
-            rows.append({"ticker": ticker, "factor_value": vol})
-
-        if not rows:
-            logger.warning(f"Volatility21d({date}): 无有效 ticker")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
-
-        out = pd.DataFrame(rows)
+        df = rolling[["vol_20d"]].dropna().reset_index()
+        df["factor_value"] = df["vol_20d"] * np.sqrt(252)
+        out = df[["ticker", "factor_value"]].copy()
         logger.info(f"Volatility21d({date}): {len(out)} 有值")
         return out
 
@@ -251,35 +263,40 @@ class PriceVolumeTrend(AlphaSignal):
             logger.debug("PVTrend: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        hist = self.fetch_price_history(
-            date, tickers, lookback_days=self._LOOKBACK_DAYS,
-            columns=["adj_close", "volume"],
+        # 直接从 _bulk_daily 切片（避免 fetch_price_history 开销）
+        bulk_daily = self._static_cache.get("_bulk_daily")
+        if bulk_daily is None or bulk_daily.empty:
+            logger.warning(f"PVTrend({date}): 无预加载数据")
+            return pd.DataFrame(columns=["ticker", "factor_value"])
+
+        date_ts = pd.to_datetime(date)
+        start_ts = date_ts - pd.Timedelta(days=self._LOOKBACK_DAYS)
+        mask = (
+            bulk_daily["ticker"].isin(set(tickers))
+            & (bulk_daily["trade_date"] >= start_ts)
+            & (bulk_daily["trade_date"] <= date_ts)
         )
+        hist = bulk_daily.loc[mask, ["ticker", "adj_close", "volume"]].dropna()
         if hist.empty:
             logger.warning(f"PVTrend({date}): 无数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        rows = []
-        for ticker, grp in hist.groupby("ticker", sort=False):
-            grp = grp.dropna(subset=["adj_close", "volume"])
-            if len(grp) < self._MIN_DAYS:
-                continue
+        # 向量化：groupby 算收益 × 成交量
+        hist = hist.sort_values(["ticker", "adj_close"])
+        hist["ret"] = hist.groupby("ticker")["adj_close"].pct_change()
+        hist["ret_x_vol"] = hist["ret"] * hist["volume"]
 
-            prices = grp["adj_close"].values
-            volume = grp["volume"].values
+        agg = hist.dropna(subset=["ret"]).groupby("ticker").agg(
+            pvt_sum=("ret_x_vol", "sum"),
+            avg_vol=("volume", "mean"),
+            n_days=("ret", "count"),
+        ).reset_index()
 
-            rets = np.diff(prices) / prices[:-1]
-            pvt = np.sum(rets * volume[1:])
+        agg = agg[(agg["n_days"] >= self._MIN_DAYS) & (agg["avg_vol"] > 1e-10)]
+        agg["factor_value"] = agg["pvt_sum"] / agg["avg_vol"]
 
-            # 归一化：/ 平均成交量
-            avg_vol = volume.mean()
-            if avg_vol < 1e-10:
-                continue
-
-            pvt_norm = pvt / avg_vol
-            rows.append({"ticker": ticker, "factor_value": float(pvt_norm)})
-
-        if not rows:
+        out = agg[["ticker", "factor_value"]].copy()
+        if out.empty:
             logger.warning(f"PVTrend({date}): 无有效 ticker")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
