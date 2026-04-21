@@ -9,14 +9,14 @@ Spawn worker for parallel factor computation.
 def compute_factors_for_dates(args: tuple) -> list[tuple[str, dict]]:
     """spawn worker：独立进程计算因子值（不做评分/选股）。
 
-    每个 worker 从 parquet 缓存加载数据，计算指定日期的全部因子原始值。
-    返回 [(date, {factor_name: DataFrame[ticker, factor_value]}), ...]
+    主进程已确保所有 parquet 缓存存在。
+    worker 只从 parquet 读取，不查 DB。
     """
     import os
     import sys
     import time as _time
 
-    worker_id, dates_chunk, start_date, end_date = args
+    worker_id, dates_chunk, preload_start, preload_end = args
 
     # Django setup（必须在任何 model import 之前）
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -44,11 +44,12 @@ def compute_factors_for_dates(args: tuple) -> list[tuple[str, dict]]:
     from stocks.services.factors.us_insider import InsiderNetBuy
     from stocks.services.factors.us_quiver import LobbyIntensity, GovContract
 
-    # 加载缓存
-    USFactorBase.preload_for_backtest(start_date, end_date)
+    # 加载缓存（主进程已确保 parquet 存在，这里只读 parquet，不查 DB）
+    # 用主进程的 preload 日期范围，确保 _find_cache 命中
+    USFactorBase.preload_for_backtest(preload_start, preload_end)
     if not USFactorBase.load_precomputed_cache():
         USFactorBase.precompute_rolling_stats()
-    AlphaSignal.preload_alpha_cache(start_date, end_date)
+    AlphaSignal.preload_alpha_cache(preload_start, preload_end)
 
     # 构建因子实例
     alpha_signals = [cls() for cls in get_active_signals().values()]

@@ -1377,7 +1377,8 @@ class USMultiFactorStrategy:
         if self._ml_enabled and self._ml_scorer is not None:
             signals = self._generate_signals_sequential(rebalance_dates, cancel_check)
         elif max_workers > 1 and n_dates > 1:
-            signals = self._generate_signals_parallel(rebalance_dates, max_workers, cancel_check)
+            signals = self._generate_signals_parallel(rebalance_dates, max_workers, cancel_check,
+                                                       start_date=start_date, end_date=end_date)
         else:
             signals = self._generate_signals_sequential(rebalance_dates, cancel_check)
 
@@ -1446,6 +1447,8 @@ class USMultiFactorStrategy:
         rebalance_dates: list[str],
         max_workers: int,
         cancel_check: Optional[callable] = None,
+        start_date: str = "",
+        end_date: str = "",
     ) -> dict[str, pd.DataFrame]:
         """
         Parallel signal generation: multiprocessing spawn factor computation → serial scoring/selection.
@@ -1464,16 +1467,17 @@ class USMultiFactorStrategy:
         if not (PROJECT_ROOT / "cache" / "_rolling_indexed.parquet").exists():
             USFactorBase.precompute_rolling_stats()
 
+        # 获取主进程 preload 使用的日期范围（worker 用同样的范围确保 _find_cache 命中）
+        preload_start = start_date  # generate_signals 传入的 start_date
+        preload_end = end_date      # generate_signals 传入的 end_date
+
         # 分割日期（连续块）
         n = len(rebalance_dates)
         chunk_size = (n + effective_workers - 1) // effective_workers
         chunks = [rebalance_dates[i:i+chunk_size] for i in range(0, n, chunk_size)]
 
-        start_date = (pd.to_datetime(rebalance_dates[0]) - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
-        end_date = rebalance_dates[-1]
-
         worker_args = [
-            (i, chunk, start_date, end_date)
+            (i, chunk, preload_start, preload_end)
             for i, chunk in enumerate(chunks) if chunk
         ]
 
