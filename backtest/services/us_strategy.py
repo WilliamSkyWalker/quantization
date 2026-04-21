@@ -16,6 +16,7 @@ Rebalancing:
 """
 
 import logging
+import multiprocessing as mp
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
@@ -78,6 +79,90 @@ from backtest.services.us_regime import USRegimeDetector
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
+
+
+# ======================================================================
+# Spawn worker（模块级函数，multiprocessing spawn 可调用）
+# ======================================================================
+
+def _spawn_factor_worker(args: tuple) -> list[tuple[str, dict]]:
+    """spawn worker：独立进程计算因子值（不做评分/选股）。
+
+    每个 worker 从 parquet 缓存加载数据，计算指定日期的全部因子原始值。
+    返回 [(date, {factor_name: DataFrame[ticker, factor_value]}), ...]
+    """
+    import os, sys, traceback
+    worker_id, dates_chunk, start_date, end_date = args
+
+    # Django setup
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "core.settings")
+    import django
+    django.setup()
+
+    import time as _time
+    t0 = _time.time()
+
+    from stocks.services.factors.us_base import USFactorBase
+    from stocks.services.us_cleaner import get_us_clean_universe
+    from stocks.services.factors.us_registry import get_active as get_active_signals
+    import stocks.services.factors.signals  # noqa: F401
+    from stocks.services.factors.us_value import EP, BP, DivYield
+    from stocks.services.factors.us_growth import NetProfitYoY, RevenueYoY, NetProfitCAGR3Y
+    from stocks.services.factors.us_momentum import Mom1M, Mom3M, Mom12M, Rev5D
+    from stocks.services.factors.us_technical import Turn20D, Vol20D, Ivol, Size
+    from stocks.services.factors.us_analyst import USAnalystRating, USAnalystCoverage
+    from stocks.services.factors.us_accruals import BuybackYield
+    from stocks.services.factors.us_earnings import EarningsSurprise, EpsRevision
+    from stocks.services.factors.us_insider import InsiderNetBuy
+    from stocks.services.factors.us_quiver import LobbyIntensity, GovContract
+    from stocks.services.factors.us_registry import AlphaSignal
+
+    # 加载缓存
+    USFactorBase.preload_for_backtest(start_date, end_date)
+    if not USFactorBase.load_precomputed_cache():
+        USFactorBase.precompute_rolling_stats()
+    AlphaSignal.preload_alpha_cache(start_date, end_date)
+
+    # 构建因子实例
+    alpha_signals = [cls() for cls in get_active_signals().values()]
+    legacy_factors = [
+        EP(), BP(), DivYield(), BuybackYield(),
+        NetProfitYoY(), RevenueYoY(), NetProfitCAGR3Y(),
+        Mom1M(), Mom3M(), Mom12M(), Rev5D(),
+        Turn20D(), Vol20D(), Ivol(), Size(),
+        USAnalystRating(), USAnalystCoverage(),
+        EarningsSurprise(), EpsRevision(), InsiderNetBuy(),
+        LobbyIntensity(), GovContract(),
+    ]
+    all_factors = alpha_signals + legacy_factors
+
+    print(f"  Worker {worker_id}: 加载完成 {_time.time()-t0:.1f}s, {len(dates_chunk)} dates, "
+          f"{len(all_factors)} factors", flush=True)
+
+    results = []
+    for date in dates_chunk:
+        try:
+            universe = get_us_clean_universe(date)
+            if universe.empty:
+                results.append((date, {}))
+                continue
+
+            factor_scores = {}
+            for factor in all_factors:
+                try:
+                    df = factor.compute(date, universe)
+                    if not df.empty:
+                        factor_scores[factor.name] = df
+                except Exception:
+                    pass
+
+            results.append((date, factor_scores))
+            print(f"  Worker {worker_id} | {date}: {len(factor_scores)} factors", flush=True)
+        except Exception as e:
+            print(f"  Worker {worker_id} | {date}: ERROR {e}", flush=True)
+            results.append((date, {}))
+
+    return results
 
 
 class USMultiFactorStrategy:
@@ -1447,73 +1532,132 @@ class USMultiFactorStrategy:
         cancel_check: Optional[callable] = None,
     ) -> dict[str, pd.DataFrame]:
         """
-        Parallel signal generation: multi-thread factor computation → serial top-N selection.
-        Each worker thread gets its own DB connection to avoid 'another command in progress'.
+        Parallel signal generation: multiprocessing spawn factor computation → serial scoring/selection.
+
+        Phase 1: spawn N workers，每个独立进程从 parquet 加载数据 + 计算因子（真多核并行）
+        Phase 2: 主进程串行做 rolling IC + 评分 + 选股（有跨期依赖）
         """
         from django.db import connections
         t0 = time.time()
 
-        # Phase 1: Parallel factor computation
-        composites: dict[str, pd.DataFrame] = {}
-        effective_workers = min(max_workers, len(rebalance_dates))
-        logger.info(f"US parallel factors: {len(rebalance_dates)} dates, {effective_workers} threads")
+        effective_workers = min(max_workers, 3)  # 内存限制：每个 worker ~5.5GB
+        logger.info(f"US spawn factors: {len(rebalance_dates)} dates, {effective_workers} workers")
 
-        def _compute_with_own_connection(dt: str) -> pd.DataFrame:
-            """每个线程关闭继承的连接，让 Django 自动创建独立连接。"""
-            connections.close_all()
-            try:
-                return self._compute_scores_for_date(dt)
-            finally:
-                connections.close_all()
+        # 确保 rolling stats parquet 缓存存在（供 worker 读取）
+        from services.config import PROJECT_ROOT
+        if not (PROJECT_ROOT / "cache" / "_rolling_indexed.parquet").exists():
+            USFactorBase.precompute_rolling_stats()
 
+        # 分割日期（连续块）
+        n = len(rebalance_dates)
+        chunk_size = (n + effective_workers - 1) // effective_workers
+        chunks = [rebalance_dates[i:i+chunk_size] for i in range(0, n, chunk_size)]
+
+        start_date = (pd.to_datetime(rebalance_dates[0]) - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+        end_date = rebalance_dates[-1]
+
+        worker_args = [
+            (i, chunk, start_date, end_date)
+            for i, chunk in enumerate(chunks) if chunk
+        ]
+
+        # Phase 1: spawn 多进程计算因子
         connections.close_all()
-
-        with ThreadPoolExecutor(max_workers=effective_workers) as pool:
-            future_map = {}
-            for dt in rebalance_dates:
-                if cancel_check and cancel_check():
-                    raise RuntimeError("Backtest cancelled")
-                future = pool.submit(_compute_with_own_connection, dt)
-                future_map[future] = dt
-
-            n_done = 0
-            n_total = len(future_map)
-            for future in as_completed(future_map):
-                dt = future_map[future]
-                n_done += 1
-                try:
-                    composites[dt] = future.result()
-                    n_stocks = len(composites[dt])
-                    logger.info(f"[{n_done}/{n_total}] {dt} 因子计算完成: {n_stocks} stocks, {time.time()-t0:.0f}s elapsed")
-                except Exception as e:
-                    logger.warning(f"[{n_done}/{n_total}] {dt} factor computation failed: {e}")
-                    composites[dt] = pd.DataFrame(columns=["ticker", "score"])
-
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=len(worker_args)) as pool:
+            all_results = pool.map(_spawn_factor_worker, worker_args)
         connections.close_all()
 
         t1 = time.time()
-        logger.info(f"US parallel factors done: {t1 - t0:.1f}s")
+        logger.info(f"US spawn factors done: {t1 - t0:.1f}s")
 
-        # Phase 2: Serial selection with turnover tracking
+        # 整理因子结果：{date: {factor_name: DataFrame}}
+        factor_results: dict[str, dict] = {}
+        for batch in all_results:
+            for date, fscores in batch:
+                factor_results[date] = fscores
+
+        t1 = time.time()
+        logger.info(f"US spawn factors done: {t1 - t0:.1f}s, {len(factor_results)} dates")
+
+        # Phase 2: 串行处理 + 评分 + 选股（有跨期依赖：rolling IC, prev_weights）
         signals = {}
         prev_holdings: set[str] = set()
+        sorted_dates = sorted(factor_results.keys())
 
-        for i, dt in enumerate(sorted(composites.keys())):
+        sector_df = self._get_cached_sector_df()
+
+        for i, dt in enumerate(sorted_dates):
             self._last_date = dt
-            composite = composites[dt]
+            fscores = factor_results[dt]
+            if not fscores:
+                logger.info(f"[{i+1}/{len(sorted_dates)}] {dt} 无因子数据")
+                continue
+
+            # 从因子值构建 composite（处理 + 评分，和 _compute_scores_for_date 后半段一致）
+            universe = get_us_clean_universe(dt)
+            if universe.empty:
+                continue
+
+            mktcap_df = self._get_cached_mktcap_df(dt)
+            all_tickers = universe["ticker"].tolist()
+            composite = pd.DataFrame({"ticker": all_tickers})
+
+            for fname, df_raw in fscores.items():
+                cat = self.FACTOR_TO_CATEGORY.get(fname)
+                effective_neutralize = US_CATEGORY_NEUTRALIZE_OVERRIDES.get(cat, US_NEUTRALIZE_MODE)
+                processed = process_factor(
+                    df_raw,
+                    industry_df=sector_df,
+                    mktcap_df=mktcap_df,
+                    do_neutralize=(mktcap_df is not None),
+                    neutralize_mode=effective_neutralize,
+                    nonlinear_size=False,
+                    standardize_mode=US_STANDARDIZE_MODE,
+                )
+                processed = processed.rename(columns={"factor_value": fname})
+                composite = composite.merge(processed, on="ticker", how="left")
+
+            factor_cols = [c for c in composite.columns if c != "ticker"]
+
+            # 滚动 IC + 评分
+            self._update_rolling_ic_weights(dt, composite, factor_cols)
+            self._apply_financial_staleness_decay(dt, composite, factor_cols)
+            effective_cat_weights = self._get_regime_cat_weights(dt)
+            composite = self._compute_scores(composite, factor_cols, sector_df,
+                                              category_weights=effective_cat_weights)
+            composite = composite.dropna(subset=["score"])
+
+            # 趋势过滤
+            if "MOM_12M" in composite.columns:
+                mom12 = composite["MOM_12M"]
+                trend_mask = mom12 < -1.0
+                if trend_mask.any():
+                    penalty = np.clip(1.0 + 0.3 * mom12[trend_mask], 0.3, 0.7)
+                    composite.loc[trend_mask, "score"] *= penalty
+
+            # 保留空头因子列
+            keep_cols = ["ticker", "score"]
+            for col in US_SHORT_FACTOR_WEIGHTS:
+                if col != "BORROW_COST" and col in composite.columns:
+                    keep_cols.append(col)
+            composite = composite[keep_cols]
+
+            # 选股
             selected = self._select_from_scores(composite, prev_holdings)
             signals[dt] = selected
             prev_holdings = set(selected["ticker"].tolist()) if len(selected) > 0 else set()
+            if len(selected) > 0:
+                self._prev_weights_dict = dict(zip(selected["ticker"], selected["weight"]))
+            else:
+                self._prev_weights_dict = {}
 
             n_sel = len(selected)
-            if selected.empty:
-                logger.info(f"[{i+1}/{len(composites)}] {dt} empty portfolio signal")
-            else:
-                logger.info(f"[{i+1}/{len(composites)}] {dt} 选股完成: {n_sel} stocks")
+            logger.info(f"[{i+1}/{len(sorted_dates)}] {dt} 评分+选股完成: {n_sel} stocks")
 
         self._prev_holdings = prev_holdings
 
         t2 = time.time()
-        logger.info(f"US serial selection done: {t2 - t1:.1f}s, total: {t2 - t0:.1f}s")
+        logger.info(f"US serial scoring+selection done: {t2 - t1:.1f}s, total: {t2 - t0:.1f}s")
 
         return signals
