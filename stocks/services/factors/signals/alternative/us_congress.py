@@ -55,18 +55,37 @@ class CongressNetBuy(AlphaSignal):
             logger.debug("CongressNetBuy: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        from stocks.models import USCongressTrade
-
         date_ts = pd.Timestamp(date)
         start = (date_ts - pd.Timedelta(days=self._WINDOW_DAYS)).date()
 
-        qs = USCongressTrade.objects.filter(
-            ticker__in=tickers,
-            transaction_date__gte=start,
-            transaction_date__lte=date_ts.date(),
-        ).values_list("ticker", "type")
+        df = pd.DataFrame(columns=["ticker", "type"])
 
-        df = pd.DataFrame(list(qs), columns=["ticker", "type"])
+        # 优先从预加载缓存获取
+        bulk = self._static_cache.get("_bulk_congress")
+        if bulk is not None and not bulk.empty:
+            mask = (
+                bulk["ticker"].isin(tickers)
+                & (bulk["transaction_date"] >= pd.Timestamp(start))
+                & (bulk["transaction_date"] <= date_ts)
+            )
+            filtered = bulk[mask]
+            if not filtered.empty:
+                df = filtered[["ticker", "transaction_type"]].copy()
+                df.columns = ["ticker", "type"]
+                logger.debug(f"CongressNetBuy({date}): 缓存命中 {len(df)} 条")
+            else:
+                logger.debug(f"CongressNetBuy({date}): 缓存中无匹配数据")
+        else:
+            # fallback ORM
+            from stocks.models import USCongressTrade
+
+            qs = USCongressTrade.objects.filter(
+                ticker__in=tickers,
+                transaction_date__gte=start,
+                transaction_date__lte=date_ts.date(),
+            ).values_list("ticker", "type")
+            df = pd.DataFrame(list(qs), columns=["ticker", "type"])
+            logger.debug(f"CongressNetBuy({date}): ORM fallback {len(df)} 条")
         if df.empty:
             logger.warning(f"CongressNetBuy({date}): 无国会交易数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])

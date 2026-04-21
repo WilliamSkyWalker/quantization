@@ -88,14 +88,33 @@ class ShareholderYield(AlphaSignal):
         logger.info(f"ShareholderYield({date}): {n_out} / {len(out)} 有值")
         return out
 
-    @staticmethod
-    def _get_market_cap_on(date: str, tickers: list[str]) -> pd.DataFrame:
-        """从 us_enterprise_value 取 `date` 可见的最新市值。"""
+    @classmethod
+    def _get_market_cap_on(cls, date: str, tickers: list[str]) -> pd.DataFrame:
+        """从 us_enterprise_value 取 `date` 可见的最新市值。优先走缓存。"""
+        date_ts = pd.Timestamp(date)
+
+        # 优先从预加载缓存切片
+        cache = cls._static_cache.get("_alpha_ev")
+        if cache is not None and not cache.empty:
+            start = date_ts - pd.Timedelta(days=200)
+            mask = (
+                cache["ticker"].isin(tickers)
+                & (cache["date"] >= start)
+                & (cache["date"] <= date_ts)
+                & cache["market_capitalization"].notna()
+                & (cache["market_capitalization"] > 0)
+            )
+            df = cache.loc[mask, ["ticker", "date", "market_capitalization"]].copy()
+            if not df.empty:
+                df = df.sort_values(["ticker", "date"], ascending=[True, False])
+                df = df.drop_duplicates(subset=["ticker"], keep="first")
+                df = df.rename(columns={"market_capitalization": "market_cap"})
+                return df[["ticker", "market_cap"]].reset_index(drop=True)
+
+        # fallback ORM
         from stocks.models import USEnterpriseValue
 
-        date_ts = pd.Timestamp(date)
         start = (date_ts - pd.DateOffset(days=200)).date()
-
         qs = USEnterpriseValue.objects.filter(
             ticker__in=tickers,
             date__gte=start,

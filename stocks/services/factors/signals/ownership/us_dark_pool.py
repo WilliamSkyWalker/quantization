@@ -50,11 +50,35 @@ class DarkPoolShort(AlphaSignal):
             logger.debug("DarkPoolShort: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
+        date_ts = pd.Timestamp(date)
+        start_ts = date_ts - pd.Timedelta(days=self._LOOKBACK_DAYS)
+
+        # ---- 优先从预加载缓存获取 ----
+        bulk = self._static_cache.get("_bulk_dark_pool")
+        if bulk is not None and not bulk.empty:
+            mask = (
+                bulk["ticker"].isin(tickers)
+                & (bulk["date"] >= start_ts)
+                & (bulk["date"] <= date_ts)
+            )
+            df = bulk.loc[mask, ["ticker", "short_volume", "total_volume"]].copy()
+            if df.empty:
+                logger.warning(f"DarkPoolShort({date}): 缓存中无暗池数据")
+                return pd.DataFrame(columns=["ticker", "factor_value"])
+            df["short_volume"] = pd.to_numeric(df["short_volume"], errors="coerce")
+            df["total_volume"] = pd.to_numeric(df["total_volume"], errors="coerce")
+            df["dpi"] = np.where(
+                df["total_volume"] > 0,
+                df["short_volume"] / df["total_volume"],
+                np.nan,
+            )
+            return self._agg_dpi(df, date)
+
+        # ---- fallback ORM ----
+        logger.debug(f"DarkPoolShort({date}): 缓存为空，fallback ORM")
         from stocks.models import USDarkPoolVolume
 
-        date_ts = pd.Timestamp(date)
-        start = (date_ts - pd.Timedelta(days=self._LOOKBACK_DAYS)).date()
-
+        start = start_ts.date()
         qs = USDarkPoolVolume.objects.filter(
             ticker__in=tickers,
             date__gte=start,
@@ -64,12 +88,13 @@ class DarkPoolShort(AlphaSignal):
 
         df = pd.DataFrame(list(qs), columns=["ticker", "date", "dpi"])
         if df.empty:
-            logger.warning(f"DarkPoolShort({date}): 无暗池数据")
+            logger.warning(f"DarkPoolShort({date}): ORM 无暗池数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
-
         df["dpi"] = pd.to_numeric(df["dpi"], errors="coerce")
+        return self._agg_dpi(df, date)
 
-        # 每只股票取 20 日均 DPI
+    def _agg_dpi(self, df: pd.DataFrame, date: str) -> pd.DataFrame:
+        """汇总 DPI：每只股票取 20 日均 DPI。"""
         agg = df.groupby("ticker").agg(
             cnt=("dpi", "count"),
             mean_dpi=("dpi", "mean"),

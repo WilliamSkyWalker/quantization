@@ -68,15 +68,49 @@ class PriceTargetRatio(AlphaSignal):
     def _compute_from_pt_detail(
         self, date: str, date_ts: pd.Timestamp, tickers: list[str],
     ) -> pd.DataFrame | None:
-        """从 us_price_target_detail 取截面日前 12M 的 analyst targets → median。"""
-        from stocks.models import USPriceTargetDetail
+        """从 us_price_target_detail 取截面日前 12M 的 analyst targets → median。
+
+        优先走预加载缓存 _bulk_pt_detail，fallback 查 DB。
+        """
+        from django.utils.timezone import make_aware
+        from datetime import timezone
 
         start_ts = date_ts - pd.Timedelta(days=_PT_LOOKBACK_DAYS)
 
+        # 优先走缓存
+        cache = self._static_cache.get("_bulk_pt_detail")
+        if cache is not None and not cache.empty:
+            mask = (
+                cache["ticker"].isin(tickers)
+                & (cache["published_date"] >= start_ts)
+                & (cache["published_date"] <= date_ts)
+                & cache["price_target"].notna()
+                & (cache["price_target"] > 0)
+            )
+            df = cache[mask][["ticker", "price_target"]].copy()
+            if not df.empty and len(df) >= 50:
+                df["price_target"] = pd.to_numeric(df["price_target"], errors="coerce")
+                consensus = df.groupby("ticker")["price_target"].median().reset_index()
+                consensus.columns = ["ticker", "target"]
+                price = self._get_price(date, consensus["ticker"].tolist())
+                if not price.empty:
+                    merged = consensus.merge(price, on="ticker", how="inner")
+                    p = merged["close"].replace(0, np.nan)
+                    merged["factor_value"] = merged["target"] / p
+                    out = merged[["ticker", "factor_value"]].dropna()
+                    logger.info(f"PriceTargetRatio({date}): {len(out)} 有值 (PT detail cache, {len(df)} records)")
+                    return out
+
+        # fallback ORM（用 timezone-aware datetime 消除 warning）
+        from stocks.models import USPriceTargetDetail
+
+        start_aware = make_aware(start_ts.to_pydatetime(), timezone=timezone.utc)
+        end_aware = make_aware(date_ts.to_pydatetime(), timezone=timezone.utc)
+
         qs = USPriceTargetDetail.objects.filter(
             ticker__in=tickers,
-            published_date__gte=start_ts,
-            published_date__lte=date_ts,
+            published_date__gte=start_aware,
+            published_date__lte=end_aware,
             price_target__gt=0,
         ).values_list("ticker", "price_target")
 

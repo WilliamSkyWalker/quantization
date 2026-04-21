@@ -93,18 +93,34 @@ class RecommendationChange(AlphaSignal):
             logger.debug("RecChange: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        from stocks.models import USAnalystRecommendation
-
         date_ts = pd.Timestamp(date)
-        start = (date_ts - pd.Timedelta(days=self._WINDOW_DAYS)).date()
+        start_ts = date_ts - pd.Timedelta(days=self._WINDOW_DAYS)
 
-        qs = USAnalystRecommendation.objects.filter(
-            ticker__in=tickers,
-            date__gte=start,
-            date__lte=date_ts.date(),
-        ).values_list("ticker", "date", "previous_grade", "new_grade")
+        # 优先走缓存
+        cache = self._static_cache.get("_bulk_analyst")
+        if cache is not None and not cache.empty:
+            mask = (
+                cache["ticker"].isin(tickers)
+                & (cache["date"] >= start_ts)
+                & (cache["date"] <= date_ts)
+            )
+            df = cache[mask][["ticker", "date", "grading_company", "new_grade"]].copy()
+            # 缓存无 previous_grade，从同一分析师的上一条记录推导
+            df = df.sort_values(["ticker", "grading_company", "date"])
+            df["previous_grade"] = df.groupby(
+                ["ticker", "grading_company"]
+            )["new_grade"].shift(1)
+            df = df[["ticker", "date", "previous_grade", "new_grade"]]
+        else:
+            # ORM fallback
+            from stocks.models import USAnalystRecommendation
 
-        df = pd.DataFrame(list(qs), columns=["ticker", "date", "previous_grade", "new_grade"])
+            qs = USAnalystRecommendation.objects.filter(
+                ticker__in=tickers,
+                date__gte=start_ts.date(),
+                date__lte=date_ts.date(),
+            ).values_list("ticker", "date", "previous_grade", "new_grade")
+            df = pd.DataFrame(list(qs), columns=["ticker", "date", "previous_grade", "new_grade"])
         if df.empty:
             logger.warning(f"RecChange({date}): 无推荐数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])

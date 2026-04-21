@@ -48,8 +48,6 @@ class SuePead(AlphaSignal):
     _PEAD_WINDOW_DAYS = 60  # 超过 60 天不给信号（事件衰减）
 
     def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
-        from stocks.models import USEarningsSurprise
-
         tickers = universe["ticker"].tolist()
         if not tickers:
             logger.debug("SuePead: 空 universe")
@@ -57,24 +55,41 @@ class SuePead(AlphaSignal):
 
         date_ts = pd.Timestamp(date)
         # 拉 8 季数据（~720 天足够）
-        start = (date_ts - pd.Timedelta(days=800)).date()
+        start_ts = date_ts - pd.Timedelta(days=800)
 
-        qs = USEarningsSurprise.objects.filter(
-            ticker__in=tickers,
-            date__gte=start,
-            date__lte=date_ts.date(),
-            eps_actual__isnull=False,
-            eps_estimated__isnull=False,
-        ).order_by("ticker", "-date").values_list(
-            "ticker", "date", "eps_actual", "eps_estimated"
-        )
+        # 优先走缓存
+        cache = self._static_cache.get("_bulk_earnings_surprise")
+        if cache is not None and not cache.empty:
+            mask = (
+                cache["ticker"].isin(tickers)
+                & (cache["date"] >= start_ts)
+                & (cache["date"] <= date_ts)
+                & cache["eps_actual"].notna()
+                & cache["eps_estimated"].notna()
+            )
+            df = cache[mask][["ticker", "date", "eps_actual", "eps_estimated"]].copy()
+            df.columns = ["ticker", "date", "actual", "estimated"]
+        else:
+            # ORM fallback
+            from stocks.models import USEarningsSurprise
 
-        df = pd.DataFrame(list(qs), columns=["ticker", "date", "actual", "estimated"])
+            qs = USEarningsSurprise.objects.filter(
+                ticker__in=tickers,
+                date__gte=start_ts.date(),
+                date__lte=date_ts.date(),
+                eps_actual__isnull=False,
+                eps_estimated__isnull=False,
+            ).order_by("ticker", "-date").values_list(
+                "ticker", "date", "eps_actual", "eps_estimated"
+            )
+            df = pd.DataFrame(list(qs), columns=["ticker", "date", "actual", "estimated"])
+            if not df.empty:
+                df["date"] = pd.to_datetime(df["date"])
+
         if df.empty:
             logger.warning(f"SuePead({date}): 无 earnings surprise 数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        df["date"] = pd.to_datetime(df["date"])
         df["actual"] = pd.to_numeric(df["actual"], errors="coerce")
         df["estimated"] = pd.to_numeric(df["estimated"], errors="coerce")
         df["surprise"] = df["actual"] - df["estimated"]

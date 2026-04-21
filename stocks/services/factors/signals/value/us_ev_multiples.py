@@ -62,7 +62,7 @@ class EvToEbit(AlphaSignal):
             logger.warning(f"EvToEbit({date}): 财务数据为空")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        ev_df = self._get_ev_on(date, fin["ticker"].tolist())
+        ev_df = self.fetch_enterprise_value(date, fin["ticker"].tolist())
         if ev_df.empty:
             logger.warning(f"EvToEbit({date}): 无 EV 数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
@@ -75,30 +75,6 @@ class EvToEbit(AlphaSignal):
         n_out = int(out["factor_value"].notna().sum())
         logger.info(f"EvToEbit({date}): {n_out} / {len(out)} 有值")
         return out
-
-    @staticmethod
-    def _get_ev_on(date: str, tickers: list[str]) -> pd.DataFrame:
-        """从 us_enterprise_value 取最新 EV。"""
-        from stocks.models import USEnterpriseValue
-
-        date_ts = pd.Timestamp(date)
-        start = (date_ts - pd.DateOffset(days=200)).date()
-
-        qs = USEnterpriseValue.objects.filter(
-            ticker__in=tickers,
-            date__gte=start,
-            date__lte=date_ts.date(),
-            enterprise_value__isnull=False,
-        ).values_list("ticker", "date", "enterprise_value")
-
-        df = pd.DataFrame(list(qs), columns=["ticker", "date", "ev"])
-        if df.empty:
-            return pd.DataFrame(columns=["ticker", "ev"])
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values(["ticker", "date"], ascending=[True, False])
-        df = df.drop_duplicates(subset=["ticker"], keep="first")
-        df["ev"] = pd.to_numeric(df["ev"], errors="coerce")
-        return df[["ticker", "ev"]].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------

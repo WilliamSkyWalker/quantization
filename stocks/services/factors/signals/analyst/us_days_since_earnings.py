@@ -48,23 +48,34 @@ class DaysSinceEarnings(AlphaSignal):
             logger.debug("DaysSinceEarnings: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        from stocks.models import USEarningsSurprise
-
         date_ts = pd.Timestamp(date)
-        start = (date_ts - pd.Timedelta(days=self._MAX_LOOKBACK_DAYS)).date()
+        start_ts = date_ts - pd.Timedelta(days=self._MAX_LOOKBACK_DAYS)
 
-        qs = USEarningsSurprise.objects.filter(
-            ticker__in=tickers,
-            date__gte=start,
-            date__lte=date_ts.date(),
-        ).values_list("ticker", "date")
+        # 优先走缓存
+        cache = self._static_cache.get("_bulk_earnings_surprise")
+        if cache is not None and not cache.empty:
+            mask = (
+                cache["ticker"].isin(tickers)
+                & (cache["date"] >= start_ts)
+                & (cache["date"] <= date_ts)
+            )
+            df = cache[mask][["ticker", "date"]].copy()
+        else:
+            # ORM fallback
+            from stocks.models import USEarningsSurprise
 
-        df = pd.DataFrame(list(qs), columns=["ticker", "date"])
+            qs = USEarningsSurprise.objects.filter(
+                ticker__in=tickers,
+                date__gte=start_ts.date(),
+                date__lte=date_ts.date(),
+            ).values_list("ticker", "date")
+            df = pd.DataFrame(list(qs), columns=["ticker", "date"])
+            if not df.empty:
+                df["date"] = pd.to_datetime(df["date"])
+
         if df.empty:
             logger.warning(f"DaysSinceEarnings({date}): 无财报数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
-
-        df["date"] = pd.to_datetime(df["date"])
         # 每只股票取最近一次财报
         df = df.sort_values(["ticker", "date"], ascending=[True, False])
         df = df.drop_duplicates(subset=["ticker"], keep="first")

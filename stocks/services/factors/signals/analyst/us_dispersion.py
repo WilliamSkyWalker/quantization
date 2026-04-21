@@ -45,34 +45,50 @@ class AnalystDispersion(AlphaSignal):
             logger.debug("AnalystDispersion: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        from stocks.models import USEpsEstimate
-
         date_ts = pd.Timestamp(date)
+        end_ts = date_ts + pd.DateOffset(years=1)
 
-        # 取未来 1 年内（forward-looking）的 estimate，但只看 date 在截面日之后的
-        # 且至少有 2 个分析师
-        qs = USEpsEstimate.objects.filter(
-            ticker__in=tickers,
-            date__gte=date_ts.date(),
-            date__lte=(date_ts + pd.DateOffset(years=1)).date(),
-            estimated_eps_avg__isnull=False,
-            estimated_eps_high__isnull=False,
-            estimated_eps_low__isnull=False,
-            number_analysts_estimated_eps__gte=2,
-        ).values_list(
-            "ticker", "date",
-            "estimated_eps_avg", "estimated_eps_high", "estimated_eps_low",
-        )
+        # 优先走缓存
+        cache = self._static_cache.get("_bulk_eps_estimate")
+        if cache is not None and not cache.empty:
+            mask = (
+                cache["ticker"].isin(tickers)
+                & (cache["date"] >= date_ts)
+                & (cache["date"] <= end_ts)
+                & cache["estimated_eps_avg"].notna()
+                & cache["estimated_eps_high"].notna()
+                & cache["estimated_eps_low"].notna()
+                & (cache["number_analysts_estimated_eps"] >= 2)
+            )
+            df = cache[mask][["ticker", "date", "estimated_eps_avg", "estimated_eps_high", "estimated_eps_low"]].copy()
+            df.columns = ["ticker", "date", "eps_avg", "eps_high", "eps_low"]
+        else:
+            # ORM fallback
+            from stocks.models import USEpsEstimate
 
-        df = pd.DataFrame(list(qs), columns=[
-            "ticker", "date", "eps_avg", "eps_high", "eps_low",
-        ])
+            qs = USEpsEstimate.objects.filter(
+                ticker__in=tickers,
+                date__gte=date_ts.date(),
+                date__lte=end_ts.date(),
+                estimated_eps_avg__isnull=False,
+                estimated_eps_high__isnull=False,
+                estimated_eps_low__isnull=False,
+                number_analysts_estimated_eps__gte=2,
+            ).values_list(
+                "ticker", "date",
+                "estimated_eps_avg", "estimated_eps_high", "estimated_eps_low",
+            )
+            df = pd.DataFrame(list(qs), columns=[
+                "ticker", "date", "eps_avg", "eps_high", "eps_low",
+            ])
+            if not df.empty:
+                df["date"] = pd.to_datetime(df["date"])
+
         if df.empty:
             logger.warning(f"AnalystDispersion({date}): 无 EPS 估计数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         # 每只股票取最近一期的 estimate（最近的 forward period）
-        df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values(["ticker", "date"])
         df = df.drop_duplicates(subset=["ticker"], keep="first")
 

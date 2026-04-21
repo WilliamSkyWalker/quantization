@@ -59,11 +59,30 @@ class LogMarketCap(AlphaSignal):
         logger.info(f"LogMarketCap({date}): {n_out} / {len(out)} 有值")
         return out
 
-    @staticmethod
-    def _get_market_cap(date: str, tickers: list[str]) -> pd.DataFrame:
+    def _get_market_cap(self, date: str, tickers: list[str]) -> pd.DataFrame:
+        date_ts = pd.Timestamp(date)
+
+        # 优先走缓存 _alpha_ev
+        cache = self._static_cache.get("_alpha_ev")
+        if cache is not None and not cache.empty:
+            start = date_ts - pd.Timedelta(days=200)
+            mask = (
+                cache["ticker"].isin(tickers)
+                & (cache["date"] >= start)
+                & (cache["date"] <= date_ts)
+                & cache["market_capitalization"].notna()
+                & (cache["market_capitalization"] > 0)
+            )
+            df = cache.loc[mask, ["ticker", "date", "market_capitalization"]].copy()
+            if not df.empty:
+                df = df.sort_values(["ticker", "date"], ascending=[True, False])
+                df = df.drop_duplicates(subset=["ticker"], keep="first")
+                df = df.rename(columns={"market_capitalization": "market_cap"})
+                return df[["ticker", "market_cap"]].reset_index(drop=True)
+
+        # fallback ORM
         from stocks.models import USEnterpriseValue
 
-        date_ts = pd.Timestamp(date)
         start = (date_ts - pd.DateOffset(days=200)).date()
 
         qs = USEnterpriseValue.objects.filter(
@@ -113,14 +132,25 @@ class FreeFloatPct(AlphaSignal):
             logger.debug("FreeFloatPct: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        from stocks.models import USSharesFloat
+        df = pd.DataFrame(columns=["ticker", "free_float"])
 
-        qs = USSharesFloat.objects.filter(
-            ticker__in=tickers,
-            free_float__isnull=False,
-        ).values_list("ticker", "free_float")
+        # 优先走缓存 _bulk_shares_float（snapshot 表，无 date 列）
+        cache = self._static_cache.get("_bulk_shares_float")
+        if cache is not None and not cache.empty:
+            mask = cache["ticker"].isin(tickers) & cache["free_float"].notna()
+            df = cache.loc[mask, ["ticker", "free_float"]].copy()
 
-        df = pd.DataFrame(list(qs), columns=["ticker", "free_float"])
+        # fallback ORM
+        if df.empty:
+            from stocks.models import USSharesFloat
+
+            qs = USSharesFloat.objects.filter(
+                ticker__in=tickers,
+                free_float__isnull=False,
+            ).values_list("ticker", "free_float")
+
+            df = pd.DataFrame(list(qs), columns=["ticker", "free_float"])
+
         if df.empty:
             logger.warning(f"FreeFloatPct({date}): 无 float 数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])

@@ -50,20 +50,35 @@ class LobbyIntensity(AlphaSignal):
             logger.debug("LobbyIntensity: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        from stocks.models import USLobbying
-
         date_ts = pd.Timestamp(date)
-        start = (date_ts - pd.Timedelta(days=self._WINDOW_DAYS)).date()
+        start_ts = date_ts - pd.Timedelta(days=self._WINDOW_DAYS)
 
-        qs = USLobbying.objects.filter(
-            ticker__in=tickers,
-            date__gte=start,
-            date__lte=date_ts.date(),
-            amount__isnull=False,
-            amount__gt=0,
-        ).values_list("ticker", "amount")
+        # 优先走缓存（列名: ticker, year, amount — year 是日期字段）
+        df = pd.DataFrame()
+        cache = self._static_cache.get("_bulk_lobbying")
+        if cache is not None and not cache.empty:
+            mask = (
+                cache["ticker"].isin(tickers)
+                & (cache["year"] >= start_ts)
+                & (cache["year"] <= date_ts)
+                & cache["amount"].notna()
+                & (cache["amount"] > 0)
+            )
+            df = cache.loc[mask, ["ticker", "amount"]].copy()
 
-        df = pd.DataFrame(list(qs), columns=["ticker", "amount"])
+        # fallback ORM
+        if df.empty:
+            from stocks.models import USLobbying
+
+            start = start_ts.date()
+            qs = USLobbying.objects.filter(
+                ticker__in=tickers,
+                date__gte=start,
+                date__lte=date_ts.date(),
+                amount__isnull=False,
+                amount__gt=0,
+            ).values_list("ticker", "amount")
+            df = pd.DataFrame(list(qs), columns=["ticker", "amount"])
         if df.empty:
             logger.warning(f"LobbyIntensity({date}): 无游说数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
@@ -87,13 +102,31 @@ class LobbyIntensity(AlphaSignal):
         logger.info(f"LobbyIntensity({date}): {n_out} / {len(out)} 有值")
         return out
 
-    @staticmethod
-    def _get_market_cap(date: str, tickers: list[str]) -> pd.DataFrame:
+    def _get_market_cap(self, date: str, tickers: list[str]) -> pd.DataFrame:
+        date_ts = pd.Timestamp(date)
+        start_ts = date_ts - pd.Timedelta(days=200)
+
+        # 优先走缓存（列名: ticker, date, market_capitalization, enterprise_value）
+        cache = self._static_cache.get("_alpha_ev")
+        if cache is not None and not cache.empty:
+            mask = (
+                cache["ticker"].isin(tickers)
+                & (cache["date"] >= start_ts)
+                & (cache["date"] <= date_ts)
+                & cache["market_capitalization"].notna()
+                & (cache["market_capitalization"] > 0)
+            )
+            df = cache.loc[mask, ["ticker", "date", "market_capitalization"]].copy()
+            if not df.empty:
+                df = df.sort_values(["ticker", "date"], ascending=[True, False])
+                df = df.drop_duplicates(subset=["ticker"], keep="first")
+                df = df.rename(columns={"market_capitalization": "market_cap"})
+                return df[["ticker", "market_cap"]].reset_index(drop=True)
+
+        # fallback ORM
         from stocks.models import USEnterpriseValue
 
-        date_ts = pd.Timestamp(date)
-        start = (date_ts - pd.DateOffset(days=200)).date()
-
+        start = start_ts.date()
         qs = USEnterpriseValue.objects.filter(
             ticker__in=tickers,
             date__gte=start,

@@ -36,15 +36,39 @@ def _herfindahl(revenues: np.ndarray) -> float:
 
 
 def _fetch_segments(date: str, tickers: list[str], seg_type: str) -> pd.DataFrame:
-    """取截面日可见的最新一期 segment 数据。"""
-    from stocks.models import USRevenueSegment
+    """取截面日可见的最新一期 segment 数据。优先走缓存。"""
+    from stocks.services.factors.us_base import USFactorBase
 
     date_ts = pd.Timestamp(date)
-    start = (date_ts - pd.DateOffset(years=2)).date()
+    start_ts = date_ts - pd.DateOffset(years=2)
+
+    # ---- 优先从预加载缓存获取 ----
+    bulk = USFactorBase._static_cache.get("_bulk_revenue_segment")
+    if bulk is not None and not bulk.empty:
+        mask = (
+            (bulk["ticker"].isin(tickers))
+            & (bulk["date"] >= start_ts)
+            & (bulk["date"] <= date_ts)
+            & (bulk["segment_type"] == seg_type)
+            & (bulk["revenue"].notna())
+        )
+        df = bulk[mask][["ticker", "date", "segment", "revenue"]].copy()
+        if df.empty:
+            return df
+        # 每只股票取最新 date 的所有 segments
+        latest_dates = df.groupby("ticker")["date"].max().reset_index()
+        latest_dates.columns = ["ticker", "max_date"]
+        df = df.merge(latest_dates, on="ticker")
+        df = df[df["date"] == df["max_date"]].drop(columns=["max_date"])
+        return df
+
+    # ---- ORM fallback ----
+    logger.debug("_fetch_segments: 缓存未命中，回退 ORM 查询")
+    from stocks.models import USRevenueSegment
 
     qs = USRevenueSegment.objects.filter(
         ticker__in=tickers,
-        date__gte=start,
+        date__gte=start_ts.date(),
         date__lte=date_ts.date(),
         segment_type=seg_type,
         revenue__isnull=False,
@@ -207,26 +231,42 @@ class SegmentGrowthDisp(AlphaSignal):
             logger.debug("SegmentGrowthDisp: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        from stocks.models import USRevenueSegment
-
         date_ts = pd.Timestamp(date)
-        start = (date_ts - pd.DateOffset(years=3)).date()
+        start_ts = date_ts - pd.DateOffset(years=3)
 
-        qs = USRevenueSegment.objects.filter(
-            ticker__in=tickers,
-            date__gte=start,
-            date__lte=date_ts.date(),
-            segment_type="product",
-            revenue__isnull=False,
-        ).values_list("ticker", "date", "segment_name", "revenue")
+        # ---- 优先从预加载缓存获取 ----
+        from stocks.services.factors.us_base import USFactorBase
+        bulk = USFactorBase._static_cache.get("_bulk_revenue_segment")
+        if bulk is not None and not bulk.empty:
+            mask = (
+                (bulk["ticker"].isin(tickers))
+                & (bulk["date"] >= start_ts)
+                & (bulk["date"] <= date_ts)
+                & (bulk["segment_type"] == "product")
+                & (bulk["revenue"].notna())
+            )
+            df = bulk[mask][["ticker", "date", "segment", "revenue"]].copy()
+        else:
+            # ---- ORM fallback ----
+            logger.debug("SegmentGrowthDisp: 缓存未命中，回退 ORM 查询")
+            from stocks.models import USRevenueSegment
 
-        df = pd.DataFrame(list(qs), columns=["ticker", "date", "segment", "revenue"])
+            qs = USRevenueSegment.objects.filter(
+                ticker__in=tickers,
+                date__gte=start_ts.date(),
+                date__lte=date_ts.date(),
+                segment_type="product",
+                revenue__isnull=False,
+            ).values_list("ticker", "date", "segment_name", "revenue")
+
+            df = pd.DataFrame(list(qs), columns=["ticker", "date", "segment", "revenue"])
+            if not df.empty:
+                df["date"] = pd.to_datetime(df["date"])
+                df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce")
+
         if df.empty:
             logger.warning(f"SegmentGrowthDisp({date}): 无数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
-
-        df["date"] = pd.to_datetime(df["date"])
-        df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce")
 
         rows = []
         for ticker, grp in df.groupby("ticker", sort=False):

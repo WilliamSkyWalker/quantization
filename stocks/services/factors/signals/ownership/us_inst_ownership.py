@@ -48,12 +48,50 @@ class InstOwnershipDelta(AlphaSignal):
             logger.debug("InstOwnershipDelta: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
+        date_ts = pd.Timestamp(date)
+        # 13F 季报有 ~45 天延迟，回看 200 天保证覆盖（需多取一期算 change）
+        start_ts = date_ts - pd.Timedelta(days=400)
+
+        # ---- 优先从预加载缓存获取 ----
+        # 缓存列: ticker, date, investors_holding, number_of_13f_shares
+        bulk = self._static_cache.get("_bulk_institutional")
+        if bulk is not None and not bulk.empty:
+            mask = (
+                bulk["ticker"].isin(tickers)
+                & (bulk["date"] >= start_ts)
+                & (bulk["date"] <= date_ts)
+            )
+            df = bulk.loc[mask, ["ticker", "date", "number_of_13f_shares"]].copy()
+            if df.empty:
+                logger.warning(f"InstOwnershipDelta({date}): 缓存中无 13F 数据")
+                return pd.DataFrame(columns=["ticker", "factor_value"])
+            df["number_of_13f_shares"] = pd.to_numeric(df["number_of_13f_shares"], errors="coerce")
+            df = df.dropna(subset=["number_of_13f_shares"])
+            df = df.sort_values(["ticker", "date"], ascending=[True, False])
+            df = df.drop_duplicates(subset=["ticker", "date"], keep="first")
+
+            # 每只 ticker 取最近两期，计算 change
+            df["rank"] = df.groupby("ticker").cumcount()
+            latest = df[df["rank"] == 0][["ticker", "number_of_13f_shares"]].copy()
+            latest.columns = ["ticker", "shares"]
+            prev = df[df["rank"] == 1][["ticker", "number_of_13f_shares"]].copy()
+            prev.columns = ["ticker", "shares_prev"]
+            merged = latest.merge(prev, on="ticker", how="inner")
+            if merged.empty:
+                logger.warning(f"InstOwnershipDelta({date}): 缓存中不足两期数据")
+                return pd.DataFrame(columns=["ticker", "factor_value"])
+            denom = merged["shares_prev"].replace(0, np.nan)
+            merged["factor_value"] = (merged["shares"] - merged["shares_prev"]) / denom
+            out = merged[["ticker", "factor_value"]].copy()
+            n_out = int(out["factor_value"].notna().sum())
+            logger.info(f"InstOwnershipDelta({date}): {n_out} / {len(out)} 有值 (cache)")
+            return out[["ticker", "factor_value"]]
+
+        # ---- fallback ORM ----
+        logger.debug(f"InstOwnershipDelta({date}): 缓存为空，fallback ORM")
         from stocks.models import USInstitutionalHolder
 
-        date_ts = pd.Timestamp(date)
-        # 13F 季报有 ~45 天延迟，回看 200 天保证覆盖
         start = (date_ts - pd.Timedelta(days=200)).date()
-
         qs = USInstitutionalHolder.objects.filter(
             ticker__in=tickers,
             date__gte=start,
@@ -64,7 +102,7 @@ class InstOwnershipDelta(AlphaSignal):
 
         df = pd.DataFrame(list(qs), columns=["ticker", "date", "shares", "shares_change"])
         if df.empty:
-            logger.warning(f"InstOwnershipDelta({date}): 无 13F 数据")
+            logger.warning(f"InstOwnershipDelta({date}): ORM 无 13F 数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df["date"] = pd.to_datetime(df["date"])

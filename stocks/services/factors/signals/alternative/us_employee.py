@@ -46,21 +46,42 @@ class EmployeeGrowth(AlphaSignal):
             logger.debug("EmployeeGrowth: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        from stocks.models import USEmployeeCount
-
         date_ts = pd.Timestamp(date)
         # 10-K 年报，回看 3 年保证有 2 个数据点
         start = (date_ts - pd.DateOffset(years=3)).date()
 
-        qs = USEmployeeCount.objects.filter(
-            ticker__in=tickers,
-            period_of_report__gte=start,
-            period_of_report__lte=date_ts.date(),
-            employee_count__isnull=False,
-            employee_count__gt=0,
-        ).values_list("ticker", "period_of_report", "employee_count")
+        df = pd.DataFrame(columns=["ticker", "date", "emp"])
 
-        df = pd.DataFrame(list(qs), columns=["ticker", "date", "emp"])
+        # 优先从预加载缓存获取
+        bulk = self._static_cache.get("_bulk_employee")
+        if bulk is not None and not bulk.empty:
+            mask = (
+                bulk["ticker"].isin(tickers)
+                & (bulk["date"] >= pd.Timestamp(start))
+                & (bulk["date"] <= date_ts)
+                & bulk["employee_count"].notna()
+                & (bulk["employee_count"] > 0)
+            )
+            filtered = bulk[mask]
+            if not filtered.empty:
+                df = filtered[["ticker", "date", "employee_count"]].copy()
+                df.columns = ["ticker", "date", "emp"]
+                logger.debug(f"EmployeeGrowth({date}): 缓存命中 {len(df)} 条")
+            else:
+                logger.debug(f"EmployeeGrowth({date}): 缓存中无匹配数据")
+        else:
+            # fallback ORM
+            from stocks.models import USEmployeeCount
+
+            qs = USEmployeeCount.objects.filter(
+                ticker__in=tickers,
+                period_of_report__gte=start,
+                period_of_report__lte=date_ts.date(),
+                employee_count__isnull=False,
+                employee_count__gt=0,
+            ).values_list("ticker", "period_of_report", "employee_count")
+            df = pd.DataFrame(list(qs), columns=["ticker", "date", "emp"])
+            logger.debug(f"EmployeeGrowth({date}): ORM fallback {len(df)} 条")
         if df.empty:
             logger.warning(f"EmployeeGrowth({date}): 无员工数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])

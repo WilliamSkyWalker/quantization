@@ -55,19 +55,38 @@ class EsgRisk(AlphaSignal):
             logger.debug("EsgRisk: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        from stocks.models import USESGRating
-
         date_ts = pd.Timestamp(date)
         # 取截面年份及之前的最新评级
         max_fy = date_ts.year
 
-        qs = USESGRating.objects.filter(
-            ticker__in=tickers,
-            fiscal_year__lte=max_fy,
-            esg_risk_rating__isnull=False,
-        ).values_list("ticker", "fiscal_year", "esg_risk_rating")
+        df = pd.DataFrame(columns=["ticker", "fy", "rating"])
 
-        df = pd.DataFrame(list(qs), columns=["ticker", "fy", "rating"])
+        # 优先从预加载缓存获取
+        bulk = self._static_cache.get("_bulk_esg")
+        if bulk is not None and not bulk.empty:
+            mask = (
+                bulk["ticker"].isin(tickers)
+                & (bulk["fiscal_year"] <= max_fy)
+                & bulk["esg_risk_rating"].notna()
+            )
+            filtered = bulk[mask]
+            if not filtered.empty:
+                df = filtered[["ticker", "fiscal_year", "esg_risk_rating"]].copy()
+                df.columns = ["ticker", "fy", "rating"]
+                logger.debug(f"EsgRisk({date}): 缓存命中 {len(df)} 条")
+            else:
+                logger.debug(f"EsgRisk({date}): 缓存中无匹配数据")
+        else:
+            # fallback ORM
+            from stocks.models import USESGRating
+
+            qs = USESGRating.objects.filter(
+                ticker__in=tickers,
+                fiscal_year__lte=max_fy,
+                esg_risk_rating__isnull=False,
+            ).values_list("ticker", "fiscal_year", "esg_risk_rating")
+            df = pd.DataFrame(list(qs), columns=["ticker", "fy", "rating"])
+            logger.debug(f"EsgRisk({date}): ORM fallback {len(df)} 条")
         if df.empty:
             logger.warning(f"EsgRisk({date}): 无 ESG 数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])

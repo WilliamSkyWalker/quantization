@@ -24,6 +24,10 @@ from stocks.models import (
     USAnalystRecommendation, USEarningsSurprise, USEpsEstimate,
     USCorporateAction, USEnterpriseValue, USInsiderTrade,
     USStockBasic,
+    USRevenueSegment, USDarkPoolVolume, USESGRating,
+    USLobbying, USGovContract, USCongressTrade,
+    USEmployeeCount, USSharesFloat, USInstitutionalHolder,
+    USPriceTargetDetail,
 )
 
 logger = logging.getLogger(__name__)
@@ -401,6 +405,86 @@ class USFactorBase(ABC):
             logger.info(f"  _bulk_insider: {len(df)} 行, {time.time()-t0:.1f}s")
             return "_bulk_insider", df
 
+        # ---- 因子用到但之前没预加载的表（消除 ORM fallback） ----
+
+        def _load_generic(table_name, model, cols, start, end, date_field,
+                          cache_key=None, order_by=None, extra_filters=None):
+            """通用加载：任意表 → _static_cache[cache_key]。"""
+            t0 = time.time()
+            df = cls._load_or_query(table_name, model, cols, start, end, date_field,
+                                    order_by=order_by, extra_filters=extra_filters)
+            if not df.empty and date_field in df.columns:
+                df[date_field] = pd.to_datetime(df[date_field])
+            key = cache_key or f"_bulk_{table_name}"
+            logger.info(f"  {key}: {len(df)} 行, {time.time()-t0:.1f}s")
+            return key, df
+
+        def _load_revenue_segment():
+            cols = ["ticker", "date", "segment", "revenue", "segment_type"]
+            seg_start = (pd.to_datetime(start_date) - pd.Timedelta(days=3*365)).strftime("%Y-%m-%d")
+            return _load_generic("us_revenue_segment", USRevenueSegment, cols,
+                                 seg_start, end_date, "date",
+                                 cache_key="_bulk_revenue_segment", order_by=["ticker", "date"])
+
+        def _load_dark_pool():
+            cols = ["ticker", "date", "short_volume", "total_volume"]
+            return _load_generic("us_dark_pool_volume", USDarkPoolVolume, cols,
+                                 analyst_start, end_date, "date",
+                                 cache_key="_bulk_dark_pool", order_by=["ticker", "date"])
+
+        def _load_esg():
+            cols = ["ticker", "fiscal_year", "esg_risk_rating"]
+            return _load_generic("us_esg_rating", USESGRating, cols,
+                                 "2010-01-01", end_date, "fiscal_year",
+                                 cache_key="_bulk_esg")
+
+        def _load_lobbying():
+            cols = ["ticker", "year", "amount"]
+            return _load_generic("us_lobbying", USLobbying, cols,
+                                 "2010-01-01", end_date, "year",
+                                 cache_key="_bulk_lobbying")
+
+        def _load_gov_contract():
+            cols = ["ticker", "date", "amount"]
+            return _load_generic("us_gov_contract", USGovContract, cols,
+                                 analyst_start, end_date, "date",
+                                 cache_key="_bulk_gov_contract")
+
+        def _load_congress():
+            cols = ["ticker", "transaction_date", "transaction_type"]
+            cong_start = (pd.to_datetime(start_date) - pd.Timedelta(days=180)).strftime("%Y-%m-%d")
+            return _load_generic("us_congress_trade", USCongressTrade, cols,
+                                 cong_start, end_date, "transaction_date",
+                                 cache_key="_bulk_congress")
+
+        def _load_employee():
+            cols = ["ticker", "date", "employee_count"]
+            return _load_generic("us_employee_count", USEmployeeCount, cols,
+                                 fin_start, end_date, "date",
+                                 cache_key="_bulk_employee", order_by=["ticker", "date"])
+
+        def _load_shares_float():
+            cols = ["ticker", "free_float", "float_shares", "outstanding_shares"]
+            t0 = time.time()
+            rows = list(USSharesFloat.objects.values_list(*cols))
+            df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
+            logger.info(f"  _bulk_shares_float: {len(df)} 行, {time.time()-t0:.1f}s")
+            return "_bulk_shares_float", df
+
+        def _load_institutional_holder():
+            cols = ["ticker", "date", "investors_holding", "number_of_13f_shares"]
+            ih_start = (pd.to_datetime(start_date) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
+            return _load_generic("us_institutional_holder", USInstitutionalHolder, cols,
+                                 ih_start, end_date, "date",
+                                 cache_key="_bulk_institutional", order_by=["ticker", "date"])
+
+        def _load_price_target_detail():
+            cols = ["ticker", "published_date", "analyst_company", "price_target", "price_when_posted"]
+            pt_start = "2020-01-01"
+            return _load_generic("us_price_target_detail", USPriceTargetDetail, cols,
+                                 pt_start, end_date, "published_date",
+                                 cache_key="_bulk_pt_detail", order_by=["ticker", "published_date"])
+
         # ---- 并行提交所有基础表加载任务 ----
         loaders = [
             _load_financial,
@@ -412,6 +496,17 @@ class USFactorBase(ABC):
             _load_dividends,
             _load_mktcap,
             _load_insider,
+            # 因子专用表（消除 ORM fallback）
+            _load_revenue_segment,
+            _load_dark_pool,
+            _load_esg,
+            _load_lobbying,
+            _load_gov_contract,
+            _load_congress,
+            _load_employee,
+            _load_shares_float,
+            _load_institutional_holder,
+            _load_price_target_detail,
         ]
 
         # Django ORM 在多线程中需要关闭陈旧连接
