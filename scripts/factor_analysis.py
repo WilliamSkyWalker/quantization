@@ -233,16 +233,18 @@ def _spawn_worker(args: tuple) -> list[tuple[str, pd.DataFrame | None]]:
                 result[fname] = np.nan
 
         dt = _time.time() - date_t0
+        dates_done = len(results) + 1
         print(f"  Worker {worker_id} | {date}: {n_ok}/{len(factor_names)} factors, "
-              f"{len(tickers)} tickers, {dt:.1f}s", flush=True)
+              f"{len(tickers)} tickers, {dt:.1f}s [{dates_done}/{len(dates_chunk)}]", flush=True)
         results.append((date, result))
 
-    # 打印该 worker 的慢因子 Top 10
-    top_slow = sorted(slow_factors.items(), key=lambda x: x[1], reverse=True)[:10]
-    print(f"  Worker {worker_id} 慢因子 Top 10:", flush=True)
-    for fname, total_s in top_slow:
-        avg_s = total_s / len(dates_chunk)
-        print(f"    {fname:35s} total={total_s:.1f}s  avg={avg_s:.2f}s/date", flush=True)
+        # 每 5 个日期打印阶段性慢因子 Top 10
+        if dates_done % 5 == 0 or dates_done == len(dates_chunk):
+            top_slow = sorted(slow_factors.items(), key=lambda x: x[1], reverse=True)[:10]
+            print(f"  Worker {worker_id} 慢因子 Top 10 (after {dates_done} dates):", flush=True)
+            for fname, total_s in top_slow:
+                avg_s = total_s / dates_done
+                print(f"    {fname:35s} total={total_s:6.1f}s  avg={avg_s:.2f}s/date", flush=True)
 
     return results
 
