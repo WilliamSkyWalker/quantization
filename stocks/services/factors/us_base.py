@@ -433,12 +433,21 @@ class USFactorBase(ABC):
                                  cache_key="_bulk_dark_pool", order_by=["ticker", "date"])
 
         def _load_esg():
-            # fiscal_year 是整数，不能用日期范围查。直接全量加载。
+            # fiscal_year 是整数，不能用日期范围查。全量加载 + parquet 缓存。
+            from services.config import PROJECT_ROOT
             t0 = time.time()
+            cache_path = PROJECT_ROOT / "cache" / "us_esg_rating_all.parquet"
+            if cache_path.exists():
+                df = pd.read_parquet(cache_path)
+                logger.info(f"  _bulk_esg: {len(df)} 行 (parquet 缓存, {time.time()-t0:.1f}s)")
+                return "_bulk_esg", df
             cols = ["ticker", "fiscal_year", "esg_risk_rating"]
             rows = list(USESGRating.objects.values_list(*cols))
             df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
-            logger.info(f"  _bulk_esg: {len(df)} 行, {time.time()-t0:.1f}s")
+            if not df.empty:
+                cache_path.parent.mkdir(exist_ok=True)
+                df.to_parquet(cache_path, index=False)
+            logger.info(f"  _bulk_esg: {len(df)} 行 (DB, {time.time()-t0:.1f}s)")
             return "_bulk_esg", df
 
         def _load_lobbying():
@@ -448,12 +457,21 @@ class USFactorBase(ABC):
                                  cache_key="_bulk_lobbying")
 
         def _load_gov_contract():
-            # USGovContract 没有 date 字段，用 year（整数）。全量加载。
+            # USGovContract 没有 date 字段，用 year（整数）。全量加载 + parquet 缓存。
+            from services.config import PROJECT_ROOT
             t0 = time.time()
+            cache_path = PROJECT_ROOT / "cache" / "us_gov_contract_all.parquet"
+            if cache_path.exists():
+                df = pd.read_parquet(cache_path)
+                logger.info(f"  _bulk_gov_contract: {len(df)} 行 (parquet 缓存, {time.time()-t0:.1f}s)")
+                return "_bulk_gov_contract", df
             cols = ["ticker", "year", "quarter", "amount"]
             rows = list(USGovContract.objects.values_list(*cols))
             df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
-            logger.info(f"  _bulk_gov_contract: {len(df)} 行, {time.time()-t0:.1f}s")
+            if not df.empty:
+                cache_path.parent.mkdir(exist_ok=True)
+                df.to_parquet(cache_path, index=False)
+            logger.info(f"  _bulk_gov_contract: {len(df)} 行 (DB, {time.time()-t0:.1f}s)")
             return "_bulk_gov_contract", df
 
         def _load_congress():
@@ -470,11 +488,20 @@ class USFactorBase(ABC):
                                  cache_key="_bulk_employee", order_by=["ticker", "filing_date"])
 
         def _load_shares_float():
-            cols = ["ticker", "free_float", "float_shares", "outstanding_shares"]
+            from services.config import PROJECT_ROOT
             t0 = time.time()
+            cache_path = PROJECT_ROOT / "cache" / "us_shares_float_all.parquet"
+            if cache_path.exists():
+                df = pd.read_parquet(cache_path)
+                logger.info(f"  _bulk_shares_float: {len(df)} 行 (parquet 缓存, {time.time()-t0:.1f}s)")
+                return "_bulk_shares_float", df
+            cols = ["ticker", "free_float", "float_shares", "outstanding_shares"]
             rows = list(USSharesFloat.objects.values_list(*cols))
             df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
-            logger.info(f"  _bulk_shares_float: {len(df)} 行, {time.time()-t0:.1f}s")
+            if not df.empty:
+                cache_path.parent.mkdir(exist_ok=True)
+                df.to_parquet(cache_path, index=False)
+            logger.info(f"  _bulk_shares_float: {len(df)} 行 (DB, {time.time()-t0:.1f}s)")
             return "_bulk_shares_float", df
 
         def _load_institutional_holder():
