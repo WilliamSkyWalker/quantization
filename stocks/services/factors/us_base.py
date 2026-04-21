@@ -540,8 +540,8 @@ class USFactorBase(ABC):
             cls._static_cache["_rolling_indexed"] = df_ri
 
             df_me = pd.read_parquet(me_path)
-            df_me["trade_date"] = pd.to_datetime(df_me["trade_date"])
-            df_me["year_month"] = df_me["trade_date"].dt.to_period("M")
+            # parquet 存的是 ticker/year_month/adj_close，year_month 是字符串
+            df_me["year_month"] = df_me["year_month"].apply(lambda x: pd.Period(str(x), freq="M"))
             cls._static_cache["_month_end_prices"] = df_me
 
             logger.info(f"Worker 加载预算缓存: rolling={len(df_ri)}, month_end={len(df_me)}, {time.time()-t0:.1f}s")
