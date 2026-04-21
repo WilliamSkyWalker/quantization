@@ -63,7 +63,7 @@ class InstOwnershipDelta(AlphaSignal):
             )
             df = bulk.loc[mask, ["ticker", "date", "number_of_13f_shares"]].copy()
             if df.empty:
-                logger.warning(f"InstOwnershipDelta({date}): 缓存中无 13F 数据")
+                logger.debug(f"InstOwnershipDelta({date}): 缓存中无 13F 数据")
                 return pd.DataFrame(columns=["ticker", "factor_value"])
             df["number_of_13f_shares"] = pd.to_numeric(df["number_of_13f_shares"], errors="coerce")
             df = df.dropna(subset=["number_of_13f_shares"])
@@ -102,7 +102,7 @@ class InstOwnershipDelta(AlphaSignal):
 
         df = pd.DataFrame(list(qs), columns=["ticker", "date", "shares", "shares_change"])
         if df.empty:
-            logger.warning(f"InstOwnershipDelta({date}): ORM 无 13F 数据")
+            logger.debug(f"InstOwnershipDelta({date}): ORM 无 13F 数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df["date"] = pd.to_datetime(df["date"])

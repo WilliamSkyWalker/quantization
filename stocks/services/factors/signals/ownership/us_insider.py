@@ -64,7 +64,7 @@ class InsiderNetBuy(AlphaSignal):
             )
             df = bulk.loc[mask, ["ticker", "net_value"]].copy()
             if df.empty:
-                logger.warning(f"InsiderNetBuy({date}): 缓存中无内部人交易数据")
+                logger.debug(f"InsiderNetBuy({date}): 缓存中无内部人交易数据")
                 return pd.DataFrame(columns=["ticker", "factor_value"])
 
             # net_value > 0 = 买入金额, < 0 = 卖出金额

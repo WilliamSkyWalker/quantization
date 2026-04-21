@@ -87,7 +87,7 @@ class CongressNetBuy(AlphaSignal):
             df = pd.DataFrame(list(qs), columns=["ticker", "type"])
             logger.debug(f"CongressNetBuy({date}): ORM fallback {len(df)} 条")
         if df.empty:
-            logger.warning(f"CongressNetBuy({date}): 无国会交易数据")
+            logger.debug(f"CongressNetBuy({date}): 无国会交易数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df["is_buy"] = df["type"].isin(_BUY_TYPES).astype(int)

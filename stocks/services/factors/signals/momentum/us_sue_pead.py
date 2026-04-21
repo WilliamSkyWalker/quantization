@@ -119,7 +119,7 @@ class SuePead(AlphaSignal):
             rows.append({"ticker": ticker, "factor_value": float(sue)})
 
         if not rows:
-            logger.warning(f"SuePead({date}): 无事件窗口内的 ticker")
+            logger.debug(f"SuePead({date}): 无事件窗口内的 ticker")
             return pd.DataFrame(columns=["ticker", "factor_value"])
         out = pd.DataFrame(rows)
         logger.info(f"SuePead({date}): {len(out)} 有值 (60 天 PEAD 窗口内)")

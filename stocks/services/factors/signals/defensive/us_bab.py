@@ -86,7 +86,10 @@ class BettingAgainstBeta(AlphaSignal):
             logger.warning(f"BAB({date}): 对齐后天数不足 {len(aligned)}")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        # 提取矩阵
+        # 提取矩阵（抑制空切片 nanmean warning）
+        import warnings
+        warnings.filterwarnings("ignore", "Mean of empty slice", RuntimeWarning)
+
         ticker_cols = [c for c in aligned.columns if c not in ("Mkt-RF", "RF")]
         R = aligned[ticker_cols].values  # (T, N)
         rf = aligned["RF"].values[:, None]  # (T, 1)

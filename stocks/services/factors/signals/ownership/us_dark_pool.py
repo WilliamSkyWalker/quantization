@@ -63,7 +63,7 @@ class DarkPoolShort(AlphaSignal):
             )
             df = bulk.loc[mask, ["ticker", "dpi"]].copy()
             if df.empty:
-                logger.warning(f"DarkPoolShort({date}): 缓存中无暗池数据")
+                logger.debug(f"DarkPoolShort({date}): 缓存中无暗池数据")
                 return pd.DataFrame(columns=["ticker", "factor_value"])
             df["dpi"] = pd.to_numeric(df["dpi"], errors="coerce")
             return self._agg_dpi(df, date)
@@ -82,7 +82,7 @@ class DarkPoolShort(AlphaSignal):
 
         df = pd.DataFrame(list(qs), columns=["ticker", "date", "dpi"])
         if df.empty:
-            logger.warning(f"DarkPoolShort({date}): ORM 无暗池数据")
+            logger.debug(f"DarkPoolShort({date}): ORM 无暗池数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
         df["dpi"] = pd.to_numeric(df["dpi"], errors="coerce")
         return self._agg_dpi(df, date)

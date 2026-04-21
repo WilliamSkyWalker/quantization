@@ -84,6 +84,10 @@ class DownsideBeta(AlphaSignal):
 
         ticker_cols = [c for c in aligned.columns if c not in ("Mkt-RF", "RF", "r_mkt")]
 
+        # 抑制空切片 nanmean warning
+        import warnings
+        warnings.filterwarnings("ignore", "Mean of empty slice", RuntimeWarning)
+
         # 只保留市场下跌日
         r_mkt = aligned["r_mkt"].values
         mkt_mean = np.nanmean(r_mkt)
