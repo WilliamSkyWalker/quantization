@@ -54,51 +54,52 @@ class AmihudIlliquidity(AlphaSignal):
             logger.debug("AmihudIlliq: 空 universe")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        hist = self.fetch_price_history(
-            date, tickers, lookback_days=self._LOOKBACK_DAYS,
-            columns=["adj_close", "close", "volume"],
+        # 从预加载缓存直接切片（避免 fetch_price_history 大切片）
+        bulk_daily = self._static_cache.get("_bulk_daily")
+        if bulk_daily is None or bulk_daily.empty:
+            logger.warning(f"AmihudIlliq({date}): 无预加载数据")
+            return pd.DataFrame(columns=["ticker", "factor_value"])
+
+        date_ts = pd.to_datetime(date)
+        start_ts = date_ts - pd.Timedelta(days=self._LOOKBACK_DAYS)
+        ticker_set = set(tickers)
+
+        mask = (
+            bulk_daily["ticker"].isin(ticker_set)
+            & (bulk_daily["trade_date"] >= start_ts)
+            & (bulk_daily["trade_date"] <= date_ts)
         )
+        hist = bulk_daily.loc[mask, ["ticker", "adj_close", "close", "volume"]].copy()
+
         if hist.empty:
             logger.warning(f"AmihudIlliq({date}): 无价格数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        rows = []
-        for ticker, grp in hist.groupby("ticker", sort=False):
-            grp = grp.dropna(subset=["adj_close", "close", "volume"])
-            if len(grp) < self._MIN_DAYS:
-                continue
+        hist = hist.dropna(subset=["adj_close", "close", "volume"])
+        hist["adj_close"] = hist["adj_close"].astype(float)
+        hist["close"] = hist["close"].astype(float)
+        hist["volume"] = hist["volume"].astype(float)
 
-            prices = grp["adj_close"].values
-            close = grp["close"].values
-            volume = grp["volume"].values
+        # 向量化计算：按 ticker 分组算收益和成交量
+        hist = hist.sort_values(["ticker", "adj_close"])  # 保持时间序排序
+        hist["ret"] = hist.groupby("ticker")["adj_close"].pct_change()
+        hist["dollar_vol"] = hist["close"] * hist["volume"]
 
-            # 日收益率
-            rets = np.diff(prices) / prices[:-1]
-            # 美元成交量（用 close × volume，和 |R| 取对应天数）
-            dollar_vol = close[1:] * volume[1:]
+        # 过滤有效行
+        valid = hist.dropna(subset=["ret"]).copy()
+        valid = valid[valid["dollar_vol"] > 0]
 
-            # 过滤掉零成交量
-            valid = dollar_vol > 0
-            if valid.sum() < self._MIN_DAYS:
-                continue
+        # 向量化聚合
+        valid["illiq_ratio"] = valid["ret"].abs() / valid["dollar_vol"]
+        agg = valid.groupby("ticker").agg(
+            illiq_mean=("illiq_ratio", "mean"),
+            n_days=("illiq_ratio", "count"),
+        ).reset_index()
 
-            illiq = np.abs(rets[valid]) / dollar_vol[valid]
-            # 月均值
-            amihud = float(illiq.mean())
+        agg = agg[agg["n_days"] >= self._MIN_DAYS]
+        agg = agg[agg["illiq_mean"] > 0]
+        agg["factor_value"] = np.log(agg["illiq_mean"])
 
-            # 取 log 防极值（Amihud 原文也建议 log 化）
-            if amihud > 0:
-                amihud = np.log(amihud)
-            else:
-                continue
-
-            rows.append({"ticker": ticker, "factor_value": amihud})
-
-        if not rows:
-            logger.warning(f"AmihudIlliq({date}): 无有效 ticker")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
-
-        out = pd.DataFrame(rows)
-        n_out = int(out["factor_value"].notna().sum())
-        logger.info(f"AmihudIlliq({date}): {n_out} 有值")
+        out = agg[["ticker", "factor_value"]].copy()
+        logger.info(f"AmihudIlliq({date}): {len(out)} 有值")
         return out

@@ -52,36 +52,32 @@ class IndustryMomentum(AlphaSignal):
             logger.warning(f"IndustryMomentum({date}): 无行业映射")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        hist = self.fetch_price_history(
-            date, tickers, lookback_days=self._LOOKBACK_DAYS, columns=["adj_close"]
-        )
-        if hist.empty:
-            logger.warning(f"IndustryMomentum({date}): 无价格数据")
+        # 用预算的月末价格向量化算 12M 收益（不切 380 天全量数据）
+        ticker_set = set(tickers)
+        px_now = self._get_month_end_adj_close(date, 1, ticker_set)   # 1 月前月末（避免反转）
+        px_12m = self._get_month_end_adj_close(date, 13, ticker_set)  # 13 月前月末
+
+        if px_now is None or px_12m is None:
+            logger.warning(f"IndustryMomentum({date}): 无月末价格数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        # 每只股票算 12M return
-        ret_rows = []
-        for ticker, grp in hist.groupby("ticker", sort=False):
-            prices = grp["adj_close"].dropna().values
-            if len(prices) < 200:
-                continue
-            start_p = prices[0]
-            end_p = prices[-1]
-            if pd.isna(start_p) or pd.isna(end_p) or start_p <= 0:
-                continue
-            ret_rows.append({"ticker": ticker, "ret_12m": (end_p / start_p) - 1.0})
+        # 向量化 merge 算收益
+        px_now = px_now.rename(columns={"adj_close": "px_now"})
+        px_12m = px_12m.rename(columns={"adj_close": "px_12m"})
+        ret = px_now.merge(px_12m, on="ticker", how="inner")
+        ret = ret[(ret["px_12m"] > 0) & ret["px_now"].notna()]
+        ret["ret_12m"] = ret["px_now"] / ret["px_12m"] - 1.0
 
-        if not ret_rows:
+        if ret.empty:
             logger.warning(f"IndustryMomentum({date}): 无有效收益")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        ret = pd.DataFrame(ret_rows)
         merged = ret.merge(ind_map[["ticker", "industry"]], on="ticker", how="left")
         merged["industry"] = merged["industry"].fillna("__unknown__")
 
-        # 按 industry 算中位数
-        ind_median = merged.groupby("industry")["ret_12m"].median().to_dict()
-        merged["industry_median"] = merged["industry"].map(ind_median)
+        # 按 industry 算中位数（向量化）
+        ind_median = merged.groupby("industry")["ret_12m"].median()
+        merged = merged.merge(ind_median.rename("industry_median"), on="industry", how="left")
         merged["factor_value"] = merged["ret_12m"] - merged["industry_median"]
 
         out = merged[["ticker", "factor_value"]].copy()
