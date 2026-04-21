@@ -49,6 +49,7 @@ class Command(BaseCommand):
             _try("estimates", dl.download_fmp_eps_estimates)
             _try("analyst_grades", dl.download_fmp_analyst_grades)
             _try("price_targets", dl.download_fmp_price_targets)
+            _try("price_target_detail", dl.download_fmp_price_target_detail)
             _try("insider", dl.download_fmp_insider_trading)
             _try("company_profiles", dl.download_fmp_company_profiles)
             _try("dividends", dl.download_fmp_dividends_splits)

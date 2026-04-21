@@ -23,6 +23,7 @@ _ALL_FMP_TABLES = [
     "us_index_daily", "us_index_constituent",
     "us_commodity_price", "us_macro_indicator",
     "us_symbol_change", "us_delisted", "us_congress_trade",
+    "us_price_target_detail",
 ]
 
 _ALL_TUSHARE_TABLES = [
@@ -59,6 +60,7 @@ _CLEAN_MAP = {
     ("fmp", "insider-stats"): ["us_insider_statistic"],
     ("fmp", "analyst-grades"): ["us_analyst_recommendation"],
     ("fmp", "price-targets"): ["us_price_target"],
+    ("fmp", "price-target-detail"): ["us_price_target_detail"],
     ("fmp", "dividends"): ["us_corporate_action"],
     ("fmp", "scores"): ["us_financial_score"],
     ("fmp", "growth"): ["us_financial_growth"],
@@ -211,6 +213,7 @@ class Command(BaseCommand):
             ("fmp", "insider-stats"): dl.download_fmp_insider_statistics,
             ("fmp", "analyst-grades"): dl.download_fmp_analyst_grades,
             ("fmp", "price-targets"): dl.download_fmp_price_targets,
+            ("fmp", "price-target-detail"): dl.download_fmp_price_target_detail,
             ("fmp", "dividends"): dl.download_fmp_dividends_splits,
             ("fmp", "scores"): dl.download_fmp_financial_scores,
             ("fmp", "float"): dl.download_fmp_shares_float,

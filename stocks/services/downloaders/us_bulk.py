@@ -37,6 +37,7 @@ from stocks.models import (
     USLobbying, USGovContract,
     USNews, USPressRelease, USSecFiling, USRevenueSegment,
     USDarkPoolVolume, USInstitutionalHolder,
+    USPriceTargetDetail,
 )
 from stocks.services.upsert import get_upsert_manager
 
@@ -1095,6 +1096,67 @@ class BulkDownloader:
                 except Exception as e:
                     logger.warning(f"Price targets 失败 {futures[f]}: {e}")
         logger.info(f"FMP price targets 总计: {total} 条")
+        return total
+
+    # --- 20b. price_target_detail（per-analyst 历史目标价） ---
+    def download_fmp_price_target_detail(self, tickers: list[str] = None) -> int:
+        """下载 FMP v4/price-target（per-analyst 历史目标价，带 publishedDate）。
+
+        全量模式：断点续跑（已完成 ticker 跳过）。
+        增量模式：只拉 DB 中最新日期之后的新数据。
+        """
+        if tickers is None:
+            tickers = self._get_tickers(stocks_only=True)
+        if not tickers:
+            return 0
+        latest_map = None
+        if self._incremental:
+            latest_map = self._get_ticker_latest(USPriceTargetDetail, "published_date")
+            logger.info(f"增量更新 us_price_target_detail: {len(tickers)} tickers, DB 已有 {len(latest_map)} tickers 有数据")
+        else:
+            tickers = self._skip_done_tickers("us_price_target_detail", tickers)
+            if not tickers:
+                return 0
+        total = 0
+
+        def _fetch(ticker):
+            if latest_map is not None and self._ticker_needs_update(ticker, latest_map, stale_days=7) is None:
+                return 0
+            count = 0
+            page = 0
+            while True:
+                data = self._fmp_get_json(
+                    "price-target", params={"symbol": ticker, "page": page},
+                    version="v4",
+                )
+                if not data:
+                    break
+                df = _fmp_df_to_snake(pd.DataFrame(data))
+                # FMP 返回字段：symbol, publishedDate, analystName, analystCompany,
+                # priceTarget, adjPriceTarget, priceWhenPosted, newsTitle, newsPublisher, ...
+                # camelToSnake 后：published_date, analyst_name, analyst_company, price_target, ...
+                col_map = {
+                    "symbol": "ticker",
+                }
+                df = df.rename(columns=col_map)
+                self._um.upsert_df(
+                    USPriceTargetDetail, df,
+                    ["ticker", "published_date", "analyst_company"],
+                )
+                count += len(df)
+                if len(data) < 100:
+                    break
+                page += 1
+            return count
+
+        with ThreadPoolExecutor(max_workers=self._workers) as pool:
+            futures = {pool.submit(self._mark_done, "us_price_target_detail", _fetch, t): t for t in tickers}
+            for f in tqdm(as_completed(futures), total=len(futures), desc="FMP Price Target Detail"):
+                try:
+                    total += f.result()
+                except Exception as e:
+                    logger.warning(f"Price target detail 失败 {futures[f]}: {e}")
+        logger.info(f"FMP price target detail 总计: {total} 条")
         return total
 
     # --- 21. esg_ratings ---

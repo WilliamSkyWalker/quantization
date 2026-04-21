@@ -721,6 +721,24 @@ class USPriceTarget(models.Model):
         db_table = "us_price_target"
 
 
+# --- 24b. us_price_target_detail（per-analyst 历史目标价，带 published_date） ---
+class USPriceTargetDetail(models.Model):
+    ticker = models.CharField(max_length=20)
+    published_date = models.DateTimeField()
+    analyst_company = models.CharField(max_length=200, blank=True, null=True)
+    analyst_name = models.CharField(max_length=200, blank=True, null=True)
+    price_target = models.FloatField(null=True)
+    adj_price_target = models.FloatField(null=True)
+    price_when_posted = models.FloatField(null=True)
+    news_title = models.CharField(max_length=500, blank=True, null=True)
+    news_publisher = models.CharField(max_length=200, blank=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "us_price_target_detail"
+
+
 # --- 25. us_esg_rating ---
 class USESGRating(models.Model):
     ticker = models.CharField(max_length=20)

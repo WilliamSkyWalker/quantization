@@ -41,6 +41,19 @@ from stocks.services.factors.us_base import USFactorBase  # noqa: E402
 from stocks.services.factors.us_registry import AlphaSignal, get_registered  # noqa: E402
 import stocks.services.factors.signals  # noqa: F401, E402
 
+# Legacy 因子 imports（未迁移到 AlphaSignal registry 的因子）
+from stocks.services.factors.us_value import EP, BP, DivYield  # noqa: E402
+from stocks.services.factors.us_growth import NetProfitYoY, RevenueYoY, NetProfitCAGR3Y  # noqa: E402
+from stocks.services.factors.us_momentum import Mom1M, Mom3M, Mom12M, Rev5D  # noqa: E402
+from stocks.services.factors.us_technical import Turn20D, Vol20D, Ivol, Size  # noqa: E402
+from stocks.services.factors.us_analyst import USAnalystRating, USAnalystCoverage  # noqa: E402
+from stocks.services.factors.us_accruals import BuybackYield  # noqa: E402
+from stocks.services.factors.us_earnings import EarningsSurprise, EpsRevision  # noqa: E402
+from stocks.services.factors.us_insider import InsiderNetBuy  # noqa: E402
+from stocks.services.factors.us_polymarket import PolymarketSent  # noqa: E402
+from stocks.services.factors.us_quiver import LobbyIntensity, GovContract  # noqa: E402
+from stocks.services.factors.us_alphavantage import NewsSentiment  # noqa: E402
+
 logger = logging.getLogger("factor_analysis")
 logger.setLevel(LOG_LEVEL)
 logging.basicConfig(
@@ -49,12 +62,37 @@ logging.basicConfig(
 
 HORIZONS = [21, 42, 63, 126, 252]  # 1M, 2M, 3M, 6M, 12M
 
+# Legacy 因子名 → 类 映射（未迁移到 AlphaSignal registry）
+_LEGACY_FACTOR_MAP: dict[str, type] = {
+    "EP": EP, "BP": BP, "DIV_YIELD": DivYield, "BUYBACK_YIELD": BuybackYield,
+    "NET_PROFIT_YOY": NetProfitYoY, "REVENUE_YOY": RevenueYoY,
+    "NET_PROFIT_CAGR_3Y": NetProfitCAGR3Y,
+    "MOM_1M": Mom1M, "MOM_3M": Mom3M, "MOM_12M": Mom12M, "REV_5D": Rev5D,
+    "TURN_20D": Turn20D, "VOL_20D": Vol20D, "IVOL": Ivol, "SIZE": Size,
+    "US_ANALYST_RATING": USAnalystRating, "US_ANALYST_COVERAGE": USAnalystCoverage,
+    "EARNINGS_SURPRISE": EarningsSurprise, "EPS_REVISION": EpsRevision,
+    "INSIDER_NET_BUY": InsiderNetBuy,
+    "LOBBY_INTENSITY": LobbyIntensity, "GOV_CONTRACT": GovContract,
+}
+
+
+def _get_all_factors() -> dict[str, type]:
+    """合并 AlphaSignal registry + legacy 因子，返回 {name: class}。"""
+    combined = {n: c for n, c in get_registered().items() if c.status in ("live", "staging")}
+    # Legacy 因子补入（不覆盖已在 registry 中的同名因子）
+    for name, cls in _LEGACY_FACTOR_MAP.items():
+        if name not in combined:
+            combined[name] = cls
+    return combined
+
+
 # ======================================================================
-# 多进程 worker 全局状态（fork COW 继承，不复制）
+# 多线程 worker 全局状态
 # ======================================================================
 
 _WORKER_UNIVERSES: dict[str, pd.DataFrame] = {}  # {date: universe_df}
 _WORKER_FACTOR_NAMES: list[str] = []
+_WORKER_ALL_FACTORS: dict[str, type] = {}  # {name: class} 合并后的完整因子表
 
 
 def _compute_single_date(date: str) -> tuple[str, pd.DataFrame | None]:
@@ -69,14 +107,14 @@ def _compute_single_date(date: str) -> tuple[str, pd.DataFrame | None]:
         if universe is None or universe.empty:
             return date, None
 
-        registry = get_registered()
+        all_factors = _WORKER_ALL_FACTORS
         tickers = universe["ticker"].tolist()
         result = pd.DataFrame({"ticker": tickers})
 
         n_ok = 0
         n_fail = 0
         for fname in _WORKER_FACTOR_NAMES:
-            cls = registry.get(fname)
+            cls = all_factors.get(fname)
             if cls is None:
                 result[fname] = np.nan
                 continue
@@ -119,12 +157,13 @@ def build_factor_panel(
     - numpy/pandas 释放 GIL，线程能真并行
     - 避免 macOS fork 多线程进程 crash
     """
-    global _WORKER_UNIVERSES, _WORKER_FACTOR_NAMES
+    global _WORKER_UNIVERSES, _WORKER_FACTOR_NAMES, _WORKER_ALL_FACTORS
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from django.db import connections
 
     factor_names = sorted(registry.keys())
     _WORKER_FACTOR_NAMES = factor_names
+    _WORKER_ALL_FACTORS = registry
 
     # 预先计算所有 universe（串行查 DB，首次后走缓存）
     logger.info(f"Pre-computing universes for {len(dates)} dates...")
@@ -620,7 +659,7 @@ def main():
     USFactorBase.precompute_rolling_stats()
     logger.info(f"Preload done: {time.time() - t_total:.1f}s, RSS={_mem_mb():.0f}MB")
 
-    registry = {n: c for n, c in get_registered().items() if c.status in ("live", "staging")}
+    registry = _get_all_factors()
     factor_names = sorted(registry.keys())
     # 用实际交易日（每月最后交易日），不用日历月末（可能落在周末/假日）
     from stocks.models import USIndexDaily
