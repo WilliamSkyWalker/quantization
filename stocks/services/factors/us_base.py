@@ -508,9 +508,47 @@ class USFactorBase(ABC):
         month_ends = df_me.loc[idx, ["ticker", "year_month", "adj_close"]].reset_index(drop=True)
         cls._static_cache["_month_end_prices"] = month_ends
 
+        # 存 parquet 缓存（供 spawn worker 读取，跳过重算）
+        from services.config import PROJECT_ROOT
+        cache_dir = PROJECT_ROOT / "cache"
+        cache_dir.mkdir(exist_ok=True)
+        df_indexed.reset_index().to_parquet(cache_dir / "_rolling_indexed.parquet", index=False)
+        month_ends.to_parquet(cache_dir / "_month_end_prices.parquet", index=False)
+
         logger.info(
             f"US 预计算 rolling stats + 月末价格: {len(df)} 行, {time.time()-t0:.1f}s"
         )
+
+    @classmethod
+    def load_precomputed_cache(cls):
+        """供 spawn worker 调用：从 parquet 读取预算好的缓存，跳过 precompute_rolling_stats。"""
+        import time
+        from services.config import PROJECT_ROOT
+        t0 = time.time()
+        cache_dir = PROJECT_ROOT / "cache"
+
+        # 1. 加载所有基础表（已有 parquet 缓存，秒级）
+        # preload_for_backtest 会自动命中 parquet
+        # 这里只需读 rolling stats 和 month_end
+        ri_path = cache_dir / "_rolling_indexed.parquet"
+        me_path = cache_dir / "_month_end_prices.parquet"
+
+        if ri_path.exists() and me_path.exists():
+            df_ri = pd.read_parquet(ri_path)
+            df_ri["trade_date"] = pd.to_datetime(df_ri["trade_date"])
+            df_ri = df_ri.set_index(["trade_date", "ticker"]).sort_index()
+            cls._static_cache["_rolling_indexed"] = df_ri
+
+            df_me = pd.read_parquet(me_path)
+            df_me["trade_date"] = pd.to_datetime(df_me["trade_date"])
+            df_me["year_month"] = df_me["trade_date"].dt.to_period("M")
+            cls._static_cache["_month_end_prices"] = df_me
+
+            logger.info(f"Worker 加载预算缓存: rolling={len(df_ri)}, month_end={len(df_me)}, {time.time()-t0:.1f}s")
+            return True
+        else:
+            logger.warning("预算缓存不存在，需要跑 precompute_rolling_stats()")
+            return False
 
     # ----------------------------------------------------------
     # Rolling stats helpers

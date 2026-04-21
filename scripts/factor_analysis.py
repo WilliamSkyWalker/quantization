@@ -147,25 +147,93 @@ def _compute_single_date(date: str) -> tuple[str, pd.DataFrame | None]:
 # ======================================================================
 
 
+def _spawn_worker(args: tuple) -> list[tuple[str, pd.DataFrame | None]]:
+    """spawn worker: 独立进程，从 parquet 加载数据，计算一批日期的因子。
+
+    每个 worker 是全新进程（spawn），无继承线程状态，无 GIL 限制。
+    """
+    dates_chunk, factor_names, universe_dict_path, start_date, end_date = args
+
+    # 1. Django setup（spawn 进程从零开始）
+    import os, sys
+    _root = Path(__file__).resolve().parent.parent
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "core.settings")
+    import django
+    django.setup()
+
+    # 2. 加载预算缓存（parquet，不查 DB）
+    from stocks.services.factors.us_base import USFactorBase
+    USFactorBase.preload_for_backtest(start_date, end_date)
+    if not USFactorBase.load_precomputed_cache():
+        USFactorBase.precompute_rolling_stats()
+
+    # AlphaSignal 缓存
+    from stocks.services.factors.us_registry import AlphaSignal
+    AlphaSignal.preload_alpha_cache(start_date, end_date)
+
+    # 3. 加载 universe（主进程预算好存到 pickle）
+    import pickle
+    with open(universe_dict_path, "rb") as f:
+        universes = pickle.load(f)
+
+    # 4. 构建因子注册表
+    import stocks.services.factors.signals  # noqa: F401 — 触发 @register
+    all_factors = _get_all_factors()
+
+    # 5. 计算因子
+    results = []
+    for date in dates_chunk:
+        universe = universes.get(date)
+        if universe is None or universe.empty:
+            results.append((date, None))
+            continue
+
+        tickers = universe["ticker"].tolist()
+        result = pd.DataFrame({"ticker": tickers})
+        n_ok = 0
+        for fname in factor_names:
+            cls = all_factors.get(fname)
+            if cls is None:
+                result[fname] = np.nan
+                continue
+            try:
+                sig = cls()
+                df = sig.compute(date, universe)
+                if df.empty:
+                    result[fname] = np.nan
+                else:
+                    result = result.merge(
+                        df.rename(columns={"factor_value": fname}),
+                        on="ticker", how="left",
+                    )
+                    n_ok += 1
+            except Exception:
+                result[fname] = np.nan
+
+        print(f"  {date}: {n_ok}/{len(factor_names)} factors, {len(tickers)} tickers", flush=True)
+        results.append((date, result))
+
+    return results
+
+
 def build_factor_panel(
     registry: dict, dates: list[str], n_workers: int = 1,
+    start_date: str = "", end_date: str = "",
 ) -> dict[str, pd.DataFrame]:
     """计算所有因子 × 所有日期的面板。
 
-    使用 ThreadPoolExecutor 并行：
-    - 缓存在同一进程内，线程天然共享（不需要 fork COW）
-    - numpy/pandas 释放 GIL，线程能真并行
-    - 避免 macOS fork 多线程进程 crash
+    n_workers=1: 单进程
+    n_workers>1: multiprocessing spawn（真多核并行，无 GIL）
     """
     global _WORKER_UNIVERSES, _WORKER_FACTOR_NAMES, _WORKER_ALL_FACTORS
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    from django.db import connections
 
     factor_names = sorted(registry.keys())
     _WORKER_FACTOR_NAMES = factor_names
     _WORKER_ALL_FACTORS = registry
 
-    # 预先计算所有 universe（串行查 DB，首次后走缓存）
+    # 预先计算所有 universe（串行，首次后走缓存）
     logger.info(f"Pre-computing universes for {len(dates)} dates...")
     t0 = time.time()
     for date in dates:
@@ -183,38 +251,39 @@ def build_factor_panel(
             logger.info(f"[{i+1}/{len(dates)}] {date}: {dt:.1f}s")
         return panel
 
-    # 多线程（同进程共享缓存，numpy/pandas 释放 GIL）
-    logger.info(f"Launching {n_workers} threads (shared cache ~{_mem_mb():.0f}MB)...")
+    # === multiprocessing spawn ===
+    logger.info(f"Launching {n_workers} spawn workers (~{_mem_mb():.0f}MB cache, {len(dates)} dates)...")
 
-    def _compute_with_own_connection(date: str):
-        """每个线程独立 DB 连接。"""
-        connections.close_all()
-        try:
-            return _compute_single_date(date)
-        finally:
-            connections.close_all()
+    # 存 universe 到临时 pickle（供 worker 读取）
+    import pickle, tempfile
+    universe_path = Path(tempfile.mktemp(suffix=".pkl"))
+    with open(universe_path, "wb") as f:
+        pickle.dump(_WORKER_UNIVERSES, f)
 
-    connections.close_all()
+    # 分割日期
+    chunks = [dates[i::n_workers] for i in range(n_workers)]
+    worker_args = [
+        (chunk, factor_names, str(universe_path), start_date, end_date)
+        for chunk in chunks if chunk
+    ]
 
-    panel = {}
-    n_done = 0
+    # spawn 多进程
+    ctx = mp.get_context("spawn")
     t_start = time.time()
+    with ctx.Pool(processes=len(worker_args)) as pool:
+        all_results = pool.map(_spawn_worker, worker_args)
 
-    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = {
-            pool.submit(_compute_with_own_connection, d): d for d in dates
-        }
-        for future in as_completed(futures):
-            n_done += 1
-            try:
-                date, result = future.result()
-                if result is not None:
-                    panel[date] = result
-            except Exception as e:
-                date = futures[future]
-                logger.warning(f"[{n_done}/{len(dates)}] {date} failed: {e}")
+    # 清理临时文件
+    universe_path.unlink(missing_ok=True)
 
-    connections.close_all()
+    # 合并结果
+    panel = {}
+    for batch in all_results:
+        for date, result in batch:
+            if result is not None:
+                panel[date] = result
+
+    logger.info(f"Spawn workers done: {len(panel)} dates, {time.time() - t_start:.1f}s")
     return panel
 
 
@@ -683,7 +752,8 @@ def main():
     logger.info("=" * 60)
     logger.info("Phase 1: Factor panel...")
     t0 = time.time()
-    panel = build_factor_panel(registry, dates, n_workers=args.workers)
+    panel = build_factor_panel(registry, dates, n_workers=args.workers,
+                               start_date=args.start, end_date=args.end)
     t_panel = time.time() - t0
     logger.info(f"Panel: {len(panel)} dates, {t_panel:.0f}s ({t_panel/max(len(panel),1):.1f}s/date), RSS={_mem_mb():.0f}MB")
 
