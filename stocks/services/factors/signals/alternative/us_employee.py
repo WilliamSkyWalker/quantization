@@ -57,14 +57,14 @@ class EmployeeGrowth(AlphaSignal):
         if bulk is not None and not bulk.empty:
             mask = (
                 bulk["ticker"].isin(tickers)
-                & (bulk["date"] >= pd.Timestamp(start))
-                & (bulk["date"] <= date_ts)
+                & (bulk["filing_date"] >= pd.Timestamp(start))
+                & (bulk["filing_date"] <= date_ts)
                 & bulk["employee_count"].notna()
                 & (bulk["employee_count"] > 0)
             )
             filtered = bulk[mask]
             if not filtered.empty:
-                df = filtered[["ticker", "date", "employee_count"]].copy()
+                df = filtered[["ticker", "filing_date", "employee_count"]].copy()
                 df.columns = ["ticker", "date", "emp"]
                 logger.debug(f"EmployeeGrowth({date}): 缓存命中 {len(df)} 条")
             else:

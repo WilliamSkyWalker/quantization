@@ -50,14 +50,27 @@ class GovContractFlow(AlphaSignal):
         # 最近 4 季度 ≈ 365 天回看
         start_ts = date_ts - pd.Timedelta(days=365)
 
-        # 优先走缓存（列名: ticker, date, amount）
+        # 优先走缓存（列名: ticker, year, quarter, amount）
         df = pd.DataFrame()
         cache = self._static_cache.get("_bulk_gov_contract")
         if cache is not None and not cache.empty:
+            year = date_ts.year
+            quarter = (date_ts.month - 1) // 3 + 1
+            # 最近 4 个季度
+            yq_list = []
+            y, q = year, quarter
+            for _ in range(4):
+                yq_list.append((y, q))
+                q -= 1
+                if q == 0:
+                    q = 4
+                    y -= 1
+            yq_mask = pd.Series(False, index=cache.index)
+            for yy, qq in yq_list:
+                yq_mask |= (cache["year"] == yy) & (cache["quarter"] == qq)
             mask = (
                 cache["ticker"].isin(tickers)
-                & (cache["date"] >= start_ts)
-                & (cache["date"] <= date_ts)
+                & yq_mask
                 & cache["amount"].notna()
                 & (cache["amount"] > 0)
             )

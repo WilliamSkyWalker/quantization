@@ -66,7 +66,7 @@ _GRADE_MAP = {
 
 def _grade_to_score(grade: str | None) -> float:
     """评级文本 → 数值。无法识别返回 NaN。"""
-    if not grade:
+    if not grade or not isinstance(grade, str):
         return np.nan
     return _GRADE_MAP.get(grade.strip().lower(), np.nan)
 
