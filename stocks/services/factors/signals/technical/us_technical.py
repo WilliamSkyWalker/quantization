@@ -300,6 +300,5 @@ class PriceVolumeTrend(AlphaSignal):
             logger.warning(f"PVTrend({date}): 无有效 ticker")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        out = pd.DataFrame(rows)
         logger.info(f"PVTrend({date}): {len(out)} 有值")
         return out

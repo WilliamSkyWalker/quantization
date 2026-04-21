@@ -69,7 +69,7 @@ def neutralize(
 
     df = factor_df.dropna(subset=required_cols).copy()
     if len(df) < 10:
-        logger.warning(f"中性化样本不足({len(df)}只)，跳过中性化")
+        logger.debug(f"中性化样本不足({len(df)}只)，跳过中性化")
         return factor_df["factor_value"]
 
     if mode == "full":

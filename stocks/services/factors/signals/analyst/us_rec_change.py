@@ -122,7 +122,7 @@ class RecommendationChange(AlphaSignal):
             ).values_list("ticker", "date", "previous_grade", "new_grade")
             df = pd.DataFrame(list(qs), columns=["ticker", "date", "previous_grade", "new_grade"])
         if df.empty:
-            logger.warning(f"RecChange({date}): 无推荐数据")
+            logger.debug(f"RecChange({date}): 无推荐数据")
             return pd.DataFrame(columns=["ticker", "factor_value"])
 
         df["prev_score"] = df["previous_grade"].apply(_grade_to_score)
