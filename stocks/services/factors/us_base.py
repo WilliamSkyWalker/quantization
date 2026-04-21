@@ -448,13 +448,16 @@ class USFactorBase(ABC):
                                  cache_key="_bulk_lobbying")
 
         def _load_gov_contract():
-            cols = ["ticker", "date", "amount"]
-            return _load_generic("us_gov_contract", USGovContract, cols,
-                                 analyst_start, end_date, "date",
-                                 cache_key="_bulk_gov_contract")
+            # USGovContract 没有 date 字段，用 year（整数）。全量加载。
+            t0 = time.time()
+            cols = ["ticker", "year", "quarter", "amount"]
+            rows = list(USGovContract.objects.values_list(*cols))
+            df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
+            logger.info(f"  _bulk_gov_contract: {len(df)} 行, {time.time()-t0:.1f}s")
+            return "_bulk_gov_contract", df
 
         def _load_congress():
-            cols = ["ticker", "transaction_date", "transaction_type"]
+            cols = ["ticker", "transaction_date", "type"]
             cong_start = (pd.to_datetime(start_date) - pd.Timedelta(days=180)).strftime("%Y-%m-%d")
             return _load_generic("us_congress_trade", USCongressTrade, cols,
                                  cong_start, end_date, "transaction_date",
