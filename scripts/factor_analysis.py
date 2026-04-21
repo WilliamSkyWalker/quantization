@@ -148,14 +148,15 @@ def _compute_single_date(date: str) -> tuple[str, pd.DataFrame | None]:
 
 
 def _spawn_worker(args: tuple) -> list[tuple[str, pd.DataFrame | None]]:
-    """spawn worker: 独立进程，从 parquet 加载数据，计算一批日期的因子。
+    """spawn worker: 独立进程，从 parquet 加载数据子集，计算一批日期的因子。
 
     每个 worker 是全新进程（spawn），无继承线程状态，无 GIL 限制。
+    只加载该 worker 日期范围所需的数据子集，减少内存占用。
     """
-    dates_chunk, factor_names, universe_dict_path, start_date, end_date = args
+    worker_id, dates_chunk, factor_names, universe_dict_path, full_start, full_end = args
 
     # 1. Django setup（spawn 进程从零开始）
-    import os, sys
+    import os, sys, time as _time
     _root = Path(__file__).resolve().parent.parent
     if str(_root) not in sys.path:
         sys.path.insert(0, str(_root))
@@ -163,15 +164,26 @@ def _spawn_worker(args: tuple) -> list[tuple[str, pd.DataFrame | None]]:
     import django
     django.setup()
 
-    # 2. 加载预算缓存（parquet，不查 DB）
+    t_start = _time.time()
+
+    # 2. 计算该 worker 的数据范围（日期范围 + lookback）
+    #    价格数据需要 400 天 lookback（动量因子），财报需要 5 年 lookback
+    #    但 parquet 缓存已包含全量，用 full_start/full_end 加载后内存过滤
     from stocks.services.factors.us_base import USFactorBase
-    USFactorBase.preload_for_backtest(start_date, end_date)
+
+    # 加载全量 parquet 缓存（秒级，因为文件已存在）
+    USFactorBase.preload_for_backtest(full_start, full_end)
+
+    # 加载预算的 rolling stats（跳过重算）
     if not USFactorBase.load_precomputed_cache():
         USFactorBase.precompute_rolling_stats()
 
     # AlphaSignal 缓存
     from stocks.services.factors.us_registry import AlphaSignal
-    AlphaSignal.preload_alpha_cache(start_date, end_date)
+    AlphaSignal.preload_alpha_cache(full_start, full_end)
+
+    print(f"  Worker {worker_id}: 数据加载完成, {_time.time()-t_start:.1f}s, "
+          f"{len(dates_chunk)} dates", flush=True)
 
     # 3. 加载 universe（主进程预算好存到 pickle）
     import pickle
@@ -182,8 +194,10 @@ def _spawn_worker(args: tuple) -> list[tuple[str, pd.DataFrame | None]]:
     import stocks.services.factors.signals  # noqa: F401 — 触发 @register
     all_factors = _get_all_factors()
 
-    # 5. 计算因子
+    # 5. 计算因子（带计时，找慢因子）
     results = []
+    slow_factors: dict[str, float] = {}  # {factor_name: total_seconds}
+
     for date in dates_chunk:
         universe = universes.get(date)
         if universe is None or universe.empty:
@@ -193,14 +207,20 @@ def _spawn_worker(args: tuple) -> list[tuple[str, pd.DataFrame | None]]:
         tickers = universe["ticker"].tolist()
         result = pd.DataFrame({"ticker": tickers})
         n_ok = 0
+        date_t0 = _time.time()
+
         for fname in factor_names:
             cls = all_factors.get(fname)
             if cls is None:
                 result[fname] = np.nan
                 continue
             try:
+                ft0 = _time.time()
                 sig = cls()
                 df = sig.compute(date, universe)
+                elapsed_f = _time.time() - ft0
+                slow_factors[fname] = slow_factors.get(fname, 0.0) + elapsed_f
+
                 if df.empty:
                     result[fname] = np.nan
                 else:
@@ -212,8 +232,17 @@ def _spawn_worker(args: tuple) -> list[tuple[str, pd.DataFrame | None]]:
             except Exception:
                 result[fname] = np.nan
 
-        print(f"  {date}: {n_ok}/{len(factor_names)} factors, {len(tickers)} tickers", flush=True)
+        dt = _time.time() - date_t0
+        print(f"  Worker {worker_id} | {date}: {n_ok}/{len(factor_names)} factors, "
+              f"{len(tickers)} tickers, {dt:.1f}s", flush=True)
         results.append((date, result))
+
+    # 打印该 worker 的慢因子 Top 10
+    top_slow = sorted(slow_factors.items(), key=lambda x: x[1], reverse=True)[:10]
+    print(f"  Worker {worker_id} 慢因子 Top 10:", flush=True)
+    for fname, total_s in top_slow:
+        avg_s = total_s / len(dates_chunk)
+        print(f"    {fname:35s} total={total_s:.1f}s  avg={avg_s:.2f}s/date", flush=True)
 
     return results
 
@@ -260,11 +289,12 @@ def build_factor_panel(
     with open(universe_path, "wb") as f:
         pickle.dump(_WORKER_UNIVERSES, f)
 
-    # 分割日期
-    chunks = [dates[i::n_workers] for i in range(n_workers)]
+    # 分割日期（连续块，不交错，便于数据子集优化）
+    chunk_size = (len(dates) + n_workers - 1) // n_workers
+    chunks = [dates[i:i+chunk_size] for i in range(0, len(dates), chunk_size)]
     worker_args = [
-        (chunk, factor_names, str(universe_path), start_date, end_date)
-        for chunk in chunks if chunk
+        (i, chunk, factor_names, str(universe_path), start_date, end_date)
+        for i, chunk in enumerate(chunks) if chunk
     ]
 
     # spawn 多进程
