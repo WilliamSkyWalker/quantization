@@ -1122,32 +1122,20 @@ class BulkDownloader:
         def _fetch(ticker):
             if latest_map is not None and self._ticker_needs_update(ticker, latest_map, stale_days=7) is None:
                 return 0
-            count = 0
-            page = 0
-            while True:
-                data = self._fmp_get_json(
-                    "price-target", params={"symbol": ticker, "page": page},
-                    version="v4",
-                )
-                if not data:
-                    break
-                df = _fmp_df_to_snake(pd.DataFrame(data))
-                # FMP 返回字段：symbol, publishedDate, analystName, analystCompany,
-                # priceTarget, adjPriceTarget, priceWhenPosted, newsTitle, newsPublisher, ...
-                # camelToSnake 后：published_date, analyst_name, analyst_company, price_target, ...
-                col_map = {
-                    "symbol": "ticker",
-                }
-                df = df.rename(columns=col_map)
-                self._um.upsert_df(
-                    USPriceTargetDetail, df,
-                    ["ticker", "published_date", "analyst_company"],
-                )
-                count += len(df)
-                if len(data) < 100:
-                    break
-                page += 1
-            return count
+            # FMP v4/price-target 不支持分页，单次返回全部数据
+            data = self._fmp_get_json(
+                "price-target", params={"symbol": ticker},
+                version="v4",
+            )
+            if not data:
+                return 0
+            df = _fmp_df_to_snake(pd.DataFrame(data))
+            df = df.rename(columns={"symbol": "ticker"})
+            self._um.upsert_df(
+                USPriceTargetDetail, df,
+                ["ticker", "published_date", "analyst_company"],
+            )
+            return len(df)
 
         with ThreadPoolExecutor(max_workers=self._workers) as pool:
             futures = {pool.submit(self._mark_done, "us_price_target_detail", _fetch, t): t for t in tickers}
