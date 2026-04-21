@@ -137,7 +137,7 @@ class USPortfolioOptimizer:
 
         # Objective: maximize alpha - risk - turnover cost
         alpha_term = mu @ w
-        risk_term = self.risk_aversion * cp.quad_form(w, sigma)
+        risk_term = self.risk_aversion * cp.quad_form(w, cp.psd_wrap(sigma))
         turnover_term = self.turnover_penalty * cp.norm1(w - w_prev)
         objective = cp.Maximize(alpha_term - risk_term - turnover_term)
 

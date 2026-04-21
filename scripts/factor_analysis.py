@@ -21,6 +21,7 @@ import sys
 import time
 from pathlib import Path
 
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -61,38 +62,46 @@ def _compute_single_date(date: str) -> tuple[str, pd.DataFrame | None]:
 
     通过 fork COW 继承 _static_cache（~700MB）和 _WORKER_UNIVERSES，不复制内存。
     """
-    universe = _WORKER_UNIVERSES.get(date)
-    if universe is None or universe.empty:
-        return date, None
+    import traceback as _tb
 
-    registry = get_registered()
-    tickers = universe["ticker"].tolist()
-    result = pd.DataFrame({"ticker": tickers})
+    try:
+        universe = _WORKER_UNIVERSES.get(date)
+        if universe is None or universe.empty:
+            return date, None
 
-    n_ok = 0
-    for fname in _WORKER_FACTOR_NAMES:
-        cls = registry.get(fname)
-        if cls is None:
-            result[fname] = np.nan
-            continue
-        try:
-            sig = cls()
-            df = sig.compute(date, universe)
-            if df.empty:
+        registry = get_registered()
+        tickers = universe["ticker"].tolist()
+        result = pd.DataFrame({"ticker": tickers})
+
+        n_ok = 0
+        n_fail = 0
+        for fname in _WORKER_FACTOR_NAMES:
+            cls = registry.get(fname)
+            if cls is None:
                 result[fname] = np.nan
-            else:
-                result = result.merge(
-                    df.rename(columns={"factor_value": fname}),
-                    on="ticker", how="left",
-                )
-                n_ok += 1
-        except Exception:
-            result[fname] = np.nan
+                continue
+            try:
+                sig = cls()
+                df = sig.compute(date, universe)
+                if df.empty:
+                    result[fname] = np.nan
+                else:
+                    result = result.merge(
+                        df.rename(columns={"factor_value": fname}),
+                        on="ticker", how="left",
+                    )
+                    n_ok += 1
+            except Exception as e:
+                result[fname] = np.nan
+                n_fail += 1
 
-    # 简化日志（worker 进程）
-    print(f"  {date}: {n_ok}/{len(_WORKER_FACTOR_NAMES)} factors, {len(tickers)} tickers",
-          flush=True)
-    return date, result
+        print(f"  {date}: {n_ok}/{len(_WORKER_FACTOR_NAMES)} ok, {n_fail} fail, {len(tickers)} tickers",
+              flush=True)
+        return date, result
+
+    except Exception as e:
+        print(f"  {date}: WORKER ERROR: {e}\n{_tb.format_exc()}", flush=True)
+        return date, None
 
 
 # ======================================================================
@@ -105,15 +114,19 @@ def build_factor_panel(
 ) -> dict[str, pd.DataFrame]:
     """计算所有因子 × 所有日期的面板。
 
-    n_workers=1: 单进程（无 fork 开销）
-    n_workers>1: fork 多进程，COW 共享 _static_cache
+    使用 ThreadPoolExecutor 并行：
+    - 缓存在同一进程内，线程天然共享（不需要 fork COW）
+    - numpy/pandas 释放 GIL，线程能真并行
+    - 避免 macOS fork 多线程进程 crash
     """
     global _WORKER_UNIVERSES, _WORKER_FACTOR_NAMES
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from django.db import connections
 
     factor_names = sorted(registry.keys())
     _WORKER_FACTOR_NAMES = factor_names
 
-    # 预先计算所有 universe（主进程查 DB，worker 不查 DB）
+    # 预先计算所有 universe（串行查 DB，首次后走缓存）
     logger.info(f"Pre-computing universes for {len(dates)} dates...")
     t0 = time.time()
     for date in dates:
@@ -121,7 +134,6 @@ def build_factor_panel(
     logger.info(f"Universes done: {time.time() - t0:.1f}s")
 
     if n_workers <= 1:
-        # 单进程
         panel = {}
         for i, date in enumerate(dates):
             t0 = time.time()
@@ -132,25 +144,38 @@ def build_factor_panel(
             logger.info(f"[{i+1}/{len(dates)}] {date}: {dt:.1f}s")
         return panel
 
-    # 多进程（fork COW）
-    logger.info(f"Launching {n_workers} workers (fork COW, shared cache ~{_mem_mb():.0f}MB)...")
+    # 多线程（同进程共享缓存，numpy/pandas 释放 GIL）
+    logger.info(f"Launching {n_workers} threads (shared cache ~{_mem_mb():.0f}MB)...")
 
-    # 关闭 DB 连接（fork 后子进程不能复用父进程连接）
-    from django.db import connections
-    connections.close_all()
+    def _compute_with_own_connection(date: str):
+        """每个线程独立 DB 连接。"""
+        connections.close_all()
+        try:
+            return _compute_single_date(date)
+        finally:
+            connections.close_all()
 
-    ctx = mp.get_context("fork")
-    with ctx.Pool(processes=n_workers) as pool:
-        results = pool.map(_compute_single_date, dates)
-
-    # 重新建立主进程 DB 连接
     connections.close_all()
 
     panel = {}
-    for date, result in results:
-        if result is not None:
-            panel[date] = result
+    n_done = 0
+    t_start = time.time()
 
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = {
+            pool.submit(_compute_with_own_connection, d): d for d in dates
+        }
+        for future in as_completed(futures):
+            n_done += 1
+            try:
+                date, result = future.result()
+                if result is not None:
+                    panel[date] = result
+            except Exception as e:
+                date = futures[future]
+                logger.warning(f"[{n_done}/{len(dates)}] {date} failed: {e}")
+
+    connections.close_all()
     return panel
 
 
@@ -597,7 +622,22 @@ def main():
 
     registry = {n: c for n, c in get_registered().items() if c.status in ("live", "staging")}
     factor_names = sorted(registry.keys())
-    dates = [d.strftime("%Y-%m-%d") for d in pd.date_range(args.start, args.end, freq="ME")]
+    # 用实际交易日（每月最后交易日），不用日历月末（可能落在周末/假日）
+    from stocks.models import USIndexDaily
+    trade_dates = list(
+        USIndexDaily.objects.filter(
+            index_code="^GSPC",
+            trade_date__gte=args.start,
+            trade_date__lte=args.end,
+        ).order_by("trade_date").values_list("trade_date", flat=True)
+    )
+    if not trade_dates:
+        logger.error("无交易日数据")
+        return
+    td_series = pd.Series(trade_dates)
+    td_series.index = pd.to_datetime(td_series)
+    # 每月最后一个交易日
+    dates = [d.strftime("%Y-%m-%d") for d in td_series.groupby(td_series.index.to_period("M")).last()]
     logger.info(f"Factors: {len(factor_names)}, Dates: {len(dates)}")
 
     # ── Phase 1: 因子面板（一次性计算全量） ──

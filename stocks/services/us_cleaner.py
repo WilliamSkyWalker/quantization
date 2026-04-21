@@ -25,6 +25,55 @@ from services.config import (
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
 
+# 模块级缓存（静态数据，整个进程生命周期内不变）
+_STATIC_CACHE: dict = {}
+
+
+def _get_static_data() -> tuple[dict, dict, dict, set, set, dict]:
+    """获取静态数据（行业/IPO/股票列表），首次查 DB 后缓存。"""
+    if "_loaded" in _STATIC_CACHE:
+        return (
+            _STATIC_CACHE["industry_map"],
+            _STATIC_CACHE["industry_detail"],
+            _STATIC_CACHE["ipo_map"],
+            _STATIC_CACHE["active_tickers"],
+            _STATIC_CACHE["inactive_with_sector"],
+            _STATIC_CACHE["name_map"],
+        )
+
+    industry_map = dict(USIndustryClass.objects.values_list("ticker", "sector"))
+    industry_detail = dict(USIndustryClass.objects.values_list("ticker", "industry"))
+    ipo_map = dict(USCompanyProfile.objects.values_list("ticker", "ipo_date"))
+
+    active_tickers = set(
+        USStockBasic.objects.filter(is_actively_trading=1)
+        .values_list("ticker", flat=True)
+    )
+    inactive_with_sector = set(
+        USStockBasic.objects.filter(is_actively_trading=0)
+        .values_list("ticker", flat=True)
+    ) & set(industry_map.keys())
+
+    all_tickers = active_tickers | inactive_with_sector
+    name_map = dict(
+        USStockBasic.objects.filter(ticker__in=all_tickers)
+        .values_list("ticker", "company_name")
+    )
+
+    _STATIC_CACHE["industry_map"] = industry_map
+    _STATIC_CACHE["industry_detail"] = industry_detail
+    _STATIC_CACHE["ipo_map"] = ipo_map
+    _STATIC_CACHE["active_tickers"] = active_tickers
+    _STATIC_CACHE["inactive_with_sector"] = inactive_with_sector
+    _STATIC_CACHE["name_map"] = name_map
+    _STATIC_CACHE["_loaded"] = True
+
+    logger.info(
+        f"US cleaner 静态数据已缓存: {len(industry_map)} 行业, "
+        f"{len(ipo_map)} IPO, {len(all_tickers)} tickers"
+    )
+    return industry_map, industry_detail, ipo_map, active_tickers, inactive_with_sector, name_map
+
 
 def get_us_clean_universe(date: str, **kwargs) -> pd.DataFrame:
     """
@@ -36,37 +85,13 @@ def get_us_clean_universe(date: str, **kwargs) -> pd.DataFrame:
     date_dt = pd.to_datetime(date)
     cutoff_date = (date_dt - pd.Timedelta(days=US_MIN_LISTING_DAYS)).strftime("%Y-%m-%d")
 
-    # 1. 行业数据（ticker → sector/industry）
-    industry_map = dict(
-        USIndustryClass.objects.values_list("ticker", "sector")
-    )
-    industry_detail = dict(
-        USIndustryClass.objects.values_list("ticker", "industry")
-    )
-
-    # 2. IPO 日期（ticker → ipo_date）
-    ipo_map = dict(
-        USCompanyProfile.objects.values_list("ticker", "ipo_date")
-    )
-
-    # 3. 基本筛选：活跃 OR (非活跃但有行业数据)
-    active_tickers = set(
-        USStockBasic.objects.filter(is_actively_trading=1)
-        .values_list("ticker", flat=True)
-    )
-    inactive_with_sector = set(
-        USStockBasic.objects.filter(is_actively_trading=0)
-        .values_list("ticker", flat=True)
-    ) & set(industry_map.keys())
+    # 1-3. 静态数据（首次查 DB，后续走缓存）
+    industry_map, industry_detail, ipo_map, active_tickers, inactive_with_sector, name_map = _get_static_data()
 
     all_tickers = active_tickers | inactive_with_sector
 
     # 4. IPO 日期过滤
     filtered = []
-    name_map = dict(
-        USStockBasic.objects.filter(ticker__in=all_tickers)
-        .values_list("ticker", "company_name")
-    )
     for ticker in all_tickers:
         ipo = ipo_map.get(ticker)
         if ipo is not None and str(ipo) > cutoff_date:
