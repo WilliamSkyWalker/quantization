@@ -16,6 +16,8 @@ Claude Code 编码规范。**所有代码变更必须遵守，无例外。**
 8. **禁止静默失败** — 每个 `return/continue/break` 前必须有 `logger`。数据跳过、空返回必须打日志。
 9. **每次修改后验证** — `python3 manage.py check` + import smoke test + 真实 API 调用 + `SELECT COUNT(*)` 确认入库。不能只检查语法。**[违反 1 次：未清 import_progress 就跑 smoke test，财报 4 表假通]**
 10. **严禁重复犯同一个错误** — 被纠正一次，后续所有类似场景必须记住。
+11. **禁止快速补丁** — 不做 `.empty` → `.is_empty()` 这种逐行替换式的 quick fix。必须完整迁移整个文件，grep 确认全项目零残留。半吊子修复比不修更差。
+12. **大规模变更必须有验证门禁** — 涉及 >10 个文件的变更，commit 前必须：(1) `grep -rn "旧模式" | wc -l` 确认零残留；(2) 列出所有改动文件 vs 应改文件的 diff，确认无遗漏；(3) `python3 manage.py check` + 至少一个 smoke test。Agent 产出必须验证后再合并，不能盲信。**[违反 1 次：2026-04-21 polars 迁移只完成 25%，浪费 ~500K tokens]**
 
 ---
 
