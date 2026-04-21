@@ -66,7 +66,7 @@ class Command(BaseCommand):
             from backtest.services.us_strategy import USMultiFactorStrategy
             strategy = USMultiFactorStrategy(None)
             result = strategy.select_stocks(date)
-            if result is None or result.is_empty():
+            if result is None or result.empty:
                 console.print("[yellow]无选股结果，跳过交易[/yellow]")
                 return
             if market == "alpaca":
@@ -76,7 +76,7 @@ class Command(BaseCommand):
                 from trading.services.us_paper_trader import USPaperTrader
                 trader = USPaperTrader(None)
             trader.connect()
-            n = trader.sync_position(result.select(["ticker", "weight"]).to_pandas())
+            n = trader.sync_position(result[["ticker", "weight"]])
             trader.update_nav()
         else:
             from backtest.services.a_strategy import MultiFactorStrategy

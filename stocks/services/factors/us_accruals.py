@@ -9,10 +9,9 @@ BUYBACK_YIELD: (Share Repurchases) / Market Cap
 """
 
 import logging
-from datetime import datetime
 
 import numpy as np
-import polars as pl
+import pandas as pd
 
 from services.config import LOG_LEVEL
 from stocks.services.factors.us_base import USFactorBase
@@ -20,82 +19,79 @@ from stocks.services.factors.us_base import USFactorBase
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
 
-_EMPTY = pl.DataFrame(schema={"ticker": pl.Utf8, "factor_value": pl.Float64})
-
 
 class BuybackYield(USFactorBase):
     """Buyback Yield: trailing 12M share repurchases / market cap"""
     name = "BUYBACK_YIELD"
     description = "回购收益率 (近12月回购金额 / 市值)"
 
-    def compute(self, date: str, universe: pl.DataFrame) -> pl.DataFrame:
-        tickers = universe["ticker"].to_list()
-        date_ts = datetime.strptime(date, "%Y-%m-%d") if isinstance(date, str) else date
+    def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
+        tickers = universe["ticker"].tolist()
+        date_ts = pd.to_datetime(date)
 
         bulk_fin = self._static_cache.get("_bulk_financial")
-        if bulk_fin is None or bulk_fin.is_empty():
+        if bulk_fin is None or bulk_fin.empty:
             logger.debug("BuybackYield.compute: 无预加载财务数据")
-            return _EMPTY.clone()
+            return pd.DataFrame(columns=["ticker", "factor_value"])
 
-        df = bulk_fin.filter(pl.col("filing_date") <= date_ts)
+        df = bulk_fin[bulk_fin["filing_date"] <= date_ts].copy()
         if tickers:
-            df = df.filter(pl.col("ticker").is_in(tickers))
-        df = df.sort(["ticker", "date"], descending=[False, True])
+            df = df[df["ticker"].isin(tickers)]
+        df = df.sort_values(["ticker", "date"], ascending=[True, False])
 
-        df = df.group_by("ticker").head(4)
-        df = df.with_columns([
-            pl.col("total_equity").cast(pl.Float64, strict=False),
-            pl.col("net_income").cast(pl.Float64, strict=False),
-        ])
+        # SimFin cashflow 没有单独的回购字段，用 free_cash_flow 和 net_income 的差异来近似
+        # 更好的方式：用 us_corporate_action 中的 split 数据，但那不是回购
+        # 最佳近似：(Operating CF - Free CF - Net Income Change) 但太间接
+        # 实际做法：查 SimFin 原始 CSV 的回购字段
+
+        # 先尝试从 bulk_financial 获取（如果有 repurchase 字段）
+        # SimFin 下载器没存回购字段，回退到市值变化近似
+        # 简化方案：用 equity 变化 + dividends 来推算回购
+        # equity_change = equity(t) - equity(t-1) - net_income + dividends
+        # buyback ≈ -equity_change（当 equity 下降但有盈利时，说明在回购）
+
+        df = df.groupby("ticker").head(4)
+        for col in ["total_equity", "net_income"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
         mktcap = self.get_market_cap(date, tickers)
-        mktcap_dict = dict(zip(
-            mktcap["ticker"].to_list(),
-            mktcap["market_cap"].to_list(),
-        )) if not mktcap.is_empty() else {}
+        mktcap_map = dict(zip(mktcap["ticker"], mktcap["market_cap"]))
 
         # 获取股息
         divs = self.get_dividends(date, lookback_days=365, universe_tickers=tickers)
-        div_dict = dict(zip(
-            divs["ticker"].to_list(),
-            divs["total_dividend"].to_list(),
-        )) if not divs.is_empty() else {}
+        div_map = dict(zip(divs["ticker"], divs["total_dividend"])) if not divs.empty else {}
 
         results = []
-        for ticker, grp in df.group_by("ticker"):
-            ticker = ticker[0] if isinstance(ticker, tuple) else ticker
-            if grp.height < 2:
+        for ticker, grp in df.groupby("ticker"):
+            if len(grp) < 2:
                 results.append({"ticker": ticker, "factor_value": np.nan})
                 logger.debug(f"BuybackYield.compute: {ticker} 季度数据不足2条，跳过")
                 continue
 
-            mc = mktcap_dict.get(ticker)
+            mc = mktcap_map.get(ticker)
             if not mc or mc <= 0:
                 results.append({"ticker": ticker, "factor_value": np.nan})
                 logger.debug(f"BuybackYield.compute: {ticker} 市值无效，跳过")
                 continue
 
             # TTM net income
-            ni_vals = grp["net_income"].to_numpy()
-            ni_ttm = float(np.nansum(ni_vals))
+            ni_ttm = grp["net_income"].sum()
             # Equity change (latest - oldest in window)
-            eq_vals = grp["total_equity"].to_numpy()
-            eq_latest = float(eq_vals[0])
-            eq_oldest = float(eq_vals[-1])
+            eq_latest = grp["total_equity"].iloc[0]
+            eq_oldest = grp["total_equity"].iloc[-1]
 
-            if np.isnan(eq_latest) or np.isnan(eq_oldest) or np.isnan(ni_ttm):
+            if pd.isna(eq_latest) or pd.isna(eq_oldest) or pd.isna(ni_ttm):
                 results.append({"ticker": ticker, "factor_value": np.nan})
                 logger.debug(f"BuybackYield.compute: {ticker} 权益或净利润数据缺失，跳过")
                 continue
 
             equity_change = eq_latest - eq_oldest
             # Estimated buyback = NI - equity_change - dividends
-            total_div = div_dict.get(ticker, 0) or 0
+            # (if company earned NI but equity didn't increase, the difference was returned)
+            total_div = div_map.get(ticker, 0) or 0
             estimated_buyback = ni_ttm - equity_change - total_div
             buyback_yield = max(0, estimated_buyback) / mc  # only count net buybacks
 
             results.append({"ticker": ticker, "factor_value": buyback_yield})
 
-        if not results:
-            return _EMPTY.clone()
-        return pl.DataFrame(results)
+        return pd.DataFrame(results)

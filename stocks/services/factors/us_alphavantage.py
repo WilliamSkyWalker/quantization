@@ -9,7 +9,7 @@
 import logging
 
 import numpy as np
-import polars as pl
+import pandas as pd
 
 from services.config import LOG_LEVEL
 from stocks.services.factors.us_base import USFactorBase
@@ -20,18 +20,16 @@ logger.setLevel(LOG_LEVEL)
 _NEWS_LOOKBACK_DAYS = 14
 _OPTIONS_LOOKBACK_DAYS = 5
 
-_EMPTY = pl.DataFrame(schema={"ticker": pl.Utf8, "factor_value": pl.Float64})
-
 
 class NewsSentiment(USFactorBase):
     """News Sentiment: relevance-weighted mean sentiment over trailing 14 days"""
     name = "NEWS_SENTIMENT"
     description = "新闻情绪 (近14天 AI 情绪加权均值)"
 
-    def compute(self, date: str, universe: pl.DataFrame) -> pl.DataFrame:
+    def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
         # TODO: 待 us_news_sentiment 表数据积累后实现 Django ORM 查询
         logger.debug("NewsSentiment.compute: 数据积累中，暂返回空")
-        return _EMPTY.clone()
+        return pd.DataFrame(columns=["ticker", "factor_value"])
 
 
 class IvSkew(USFactorBase):
@@ -39,10 +37,10 @@ class IvSkew(USFactorBase):
     name = "IV_SKEW"
     description = "隐含波动率偏斜 (近5天 ATM put_iv - call_iv 均值)"
 
-    def compute(self, date: str, universe: pl.DataFrame) -> pl.DataFrame:
+    def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
         # TODO: 待 us_options_snapshot 表数据积累后实现 Django ORM 查询
         logger.debug("IvSkew.compute: 数据积累中，暂返回空")
-        return _EMPTY.clone()
+        return pd.DataFrame(columns=["ticker", "factor_value"])
 
 
 class PutCallRatio(USFactorBase):
@@ -50,7 +48,7 @@ class PutCallRatio(USFactorBase):
     name = "PUT_CALL_RATIO"
     description = "看跌/看涨比率 (近5天成交量比均值)"
 
-    def compute(self, date: str, universe: pl.DataFrame) -> pl.DataFrame:
+    def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
         # TODO: 待 us_options_snapshot 表数据积累后实现 Django ORM 查询
         logger.debug("PutCallRatio.compute: 数据积累中，暂返回空")
-        return _EMPTY.clone()
+        return pd.DataFrame(columns=["ticker", "factor_value"])

@@ -21,8 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import numpy as np
-import pandas as pd  # kept for factor-layer boundary (preloaded cache is pandas)
-import polars as pl
+import pandas as pd
 
 from services.config import (
     US_MAX_HOLDINGS,
@@ -243,27 +242,27 @@ class USMultiFactorStrategy:
         self._ml_scorer = None
         self._ml_blend_ratio = US_ML_BLEND_RATIO
         self._ml_enabled = US_ML_SCORING_ENABLED
-        self._ml_factor_history: dict[str, pl.DataFrame] = {}
+        self._ml_factor_history: dict[str, pd.DataFrame] = {}
         self._ml_last_train_idx = -1
 
     # ----------------------------------------------------------
     # Cache helpers
     # ----------------------------------------------------------
 
-    def _get_cached_sector_df(self) -> pl.DataFrame | None:
+    def _get_cached_sector_df(self) -> pd.DataFrame | None:
         """Get sector mapping from DB (cached)."""
-        cache_key = "_us_sector_map_pl"
+        cache_key = "_us_sector_map"
         cached = USFactorBase._static_cache.get(cache_key)
         if cached is not None:
             return cached
         try:
             from stocks.models import USIndustryClass
-            rows = list(
+            df = pd.DataFrame(
                 USIndustryClass.objects.filter(sector__isnull=False)
-                .values_list("ticker", "sector")
+                .values_list("ticker", "sector"),
+                columns=["ticker", "sector"],
             )
-            if rows:
-                df = pl.DataFrame(rows, schema=["ticker", "sector"], orient="row")
+            if not df.empty:
                 USFactorBase._static_cache[cache_key] = df
                 return df
             logger.debug("_get_cached_sector_df: 行业映射表为空")
@@ -271,14 +270,14 @@ class USMultiFactorStrategy:
             logger.debug(f"_get_cached_sector_df: 获取行业映射失败: {e}")
         return None
 
-    def _get_cached_mktcap_df(self, date: str) -> pl.DataFrame | None:
+    def _get_cached_mktcap_df(self, date: str) -> pd.DataFrame | None:
         """Get historical market cap for a given date (delegates to USFactorBase)."""
         try:
             # Use a temporary factor instance to access get_market_cap()
             factor_instance = self.factors[0] if self.factors else USFactorBase.__new__(USFactorBase)
-            df_pd = factor_instance.get_market_cap(date)  # returns pandas
-            if not df_pd.empty:
-                return pl.from_pandas(df_pd)
+            df = factor_instance.get_market_cap(date)
+            if not df.empty:
+                return df
             logger.debug(f"_get_cached_mktcap_df: {date} 市值数据为空")
         except Exception as e:
             logger.debug(f"_get_cached_mktcap_df: 获取市值数据失败: {e}")
@@ -321,11 +320,11 @@ class USMultiFactorStrategy:
 
     def _compute_scores(
         self,
-        composite: pl.DataFrame,
+        composite: pd.DataFrame,
         factor_cols: list[str],
-        sector_df: pl.DataFrame | None,
+        sector_df: pd.DataFrame | None,
         category_weights: dict[str, float] | None = None,
-    ) -> pl.DataFrame:
+    ) -> pd.DataFrame:
         """
         Two-layer category scoring with missing category weight redistribution.
 
@@ -333,30 +332,28 @@ class USMultiFactorStrategy:
         2. Intra-category: weighted average with dynamic denominator
         3. Inter-category: weighted sum / sum of valid category weights
         """
-        composite = composite.clone()
+        composite = composite.copy()
         effective_cat_weights = category_weights or self.CATEGORY_WEIGHTS
 
         # 1. Core financial admission filter
         core_cols = [c for c in self.CORE_FINANCIAL_FACTORS if c in factor_cols]
         if core_cols:
-            # Keep rows where at least one core col is not null
-            has_financial = pl.any_horizontal([pl.col(c).is_not_null() for c in core_cols])
-            n_before = composite.height
-            composite = composite.filter(has_financial)
-            n_dropped = n_before - composite.height
+            has_financial = composite[core_cols].notna().any(axis=1)
+            n_before = len(composite)
+            composite = composite[has_financial].copy()
+            n_dropped = n_before - len(composite)
             if n_dropped > 0:
                 logger.info(f"Core financial filter: dropped {n_dropped} stocks (missing all core financials)")
 
-        if composite.is_empty():
+        if composite.empty:
             logger.debug("_compute_scores: 核心财务过滤后股票池为空，返回空评分")
-            composite = composite.with_columns(pl.lit(None).cast(pl.Float64).alias("score"))
+            composite["score"] = np.nan
             return composite
 
-        # 2. Vectorized scoring (uses numpy internally)
-        scores = self._compute_scores_vectorized(
+        # 2. Vectorized scoring
+        composite["score"] = self._compute_scores_vectorized(
             composite, factor_cols, effective_cat_weights
         )
-        composite = composite.with_columns(pl.Series("score", scores))
 
         return composite
 
@@ -393,7 +390,7 @@ class USMultiFactorStrategy:
     @staticmethod
     def _apply_missing_factor_penalty(
         final_score: np.ndarray,
-        composite: pl.DataFrame,
+        composite: pd.DataFrame,
         factor_cols: list[str],
     ) -> np.ndarray:
         """
@@ -406,13 +403,7 @@ class USMultiFactorStrategy:
         if n_total == 0:
             return final_score
 
-        # Count non-null values per row across factor columns
-        valid_cols = [c for c in factor_cols if c in composite.columns]
-        if not valid_cols:
-            return final_score
-        n_valid = composite.select(
-            pl.sum_horizontal([pl.col(c).is_not_null().cast(pl.Int32) for c in valid_cols])
-        ).to_numpy().flatten()
+        n_valid = composite[factor_cols].notna().sum(axis=1).values
         missing_ratio = 1.0 - n_valid / n_total
 
         excess = np.clip(missing_ratio - MISSING_FACTOR_THRESHOLD, 0, None)
@@ -438,7 +429,7 @@ class USMultiFactorStrategy:
     # 已改为 __init__ 中实例属性，由 AlphaSignal registry 推导 + legacy 硬编码合并生成。
 
     def _update_rolling_ic_weights(
-        self, date: str, composite: pl.DataFrame, factor_cols: list[str],
+        self, date: str, composite: pd.DataFrame, factor_cols: list[str],
     ):
         """
         根据分因子滚动 IC 方向，动态决定每个因子的权重符号。
@@ -460,10 +451,7 @@ class USMultiFactorStrategy:
         - 其他因子：滚动 IC 均值 < -0.01 → -1.0，否则 +1.0
         - 冷启动期（观测数 < 窗口的 1/3）：默认 +1.0
         """
-        import datetime as _dt
-        from scipy.stats import spearmanr
-
-        date_ts = _dt.datetime.strptime(date, "%Y-%m-%d")
+        date_ts = pd.to_datetime(date)
 
         # 初始化滚动 IC 存储
         if not hasattr(self, "_rolling_ic_window"):
@@ -472,32 +460,28 @@ class USMultiFactorStrategy:
             self._prev_date = None
 
         # Step 1: 用上一期快照 + 本期收益计算 IC（回看，不前看）
-        # NOTE: bulk_daily is pandas from factor layer cache
         bulk_daily = USFactorBase._static_cache.get("_bulk_daily")
         if (self._prev_factor_snapshot is not None
                 and self._prev_date is not None
                 and bulk_daily is not None
                 and not bulk_daily.empty):
-            prev_ts = _dt.datetime.strptime(self._prev_date, "%Y-%m-%d")
+            prev_ts = pd.to_datetime(self._prev_date)
 
-            # 上一期价格 (pandas operations on cached pandas DataFrame)
-            mask1 = (bulk_daily["trade_date"] >= prev_ts - _dt.timedelta(days=5)) & \
+            # 上一期价格
+            mask1 = (bulk_daily["trade_date"] >= prev_ts - pd.Timedelta(days=5)) & \
                      (bulk_daily["trade_date"] <= prev_ts)
-            px_prev_pd = bulk_daily[mask1].sort_values("trade_date").groupby("ticker").tail(1)[["ticker", "adj_close"]]
+            px_prev = bulk_daily[mask1].sort_values("trade_date").groupby("ticker").tail(1)[["ticker", "adj_close"]]
 
             # 本期价格
-            mask2 = (bulk_daily["trade_date"] >= date_ts - _dt.timedelta(days=5)) & \
+            mask2 = (bulk_daily["trade_date"] >= date_ts - pd.Timedelta(days=5)) & \
                      (bulk_daily["trade_date"] <= date_ts)
-            px_now_pd = bulk_daily[mask2].sort_values("trade_date").groupby("ticker").tail(1)[["ticker", "adj_close"]]
+            px_now = bulk_daily[mask2].sort_values("trade_date").groupby("ticker").tail(1)[["ticker", "adj_close"]]
 
-            if not px_prev_pd.empty and not px_now_pd.empty:
-                # Convert to polars for joining
-                px_prev = pl.from_pandas(px_prev_pd).rename({"adj_close": "px_prev"})
-                px_now = pl.from_pandas(px_now_pd).rename({"adj_close": "px_now"})
-                fwd_ret = px_prev.join(px_now, on="ticker", how="inner")
-                fwd_ret = fwd_ret.with_columns(
-                    (pl.col("px_now") / pl.col("px_prev") - 1.0).alias("ret")
-                )
+            if not px_prev.empty and not px_now.empty:
+                px_prev.columns = ["ticker", "px_prev"]
+                px_now.columns = ["ticker", "px_now"]
+                fwd_ret = px_prev.merge(px_now, on="ticker")
+                fwd_ret["ret"] = fwd_ret["px_now"] / fwd_ret["px_prev"] - 1
 
                 prev_snap = self._prev_factor_snapshot
                 for fname in prev_snap.columns:
@@ -506,16 +490,13 @@ class USMultiFactorStrategy:
                     if fname in self._INHERENT_REVERSE_SET or fname in self._NEVER_REVERSE_SET:
                         continue
 
-                    merged = prev_snap.select(["ticker", fname]).join(
-                        fwd_ret.select(["ticker", "ret"]), on="ticker", how="inner"
-                    ).drop_nulls()
-                    if merged.height < 30:
+                    merged = prev_snap[["ticker", fname]].merge(
+                        fwd_ret[["ticker", "ret"]], on="ticker"
+                    ).dropna()
+                    if len(merged) < 30:
                         continue
 
-                    f_vals = merged.get_column(fname).to_numpy()
-                    r_vals = merged.get_column("ret").to_numpy()
-                    corr, _ = spearmanr(f_vals, r_vals)
-                    ic = float(corr)
+                    ic = merged[fname].corr(merged["ret"], method="spearman")
                     if not np.isnan(ic):
                         if fname not in self._rolling_ic_window:
                             self._rolling_ic_window[fname] = []
@@ -528,7 +509,7 @@ class USMultiFactorStrategy:
 
         # Step 2: 保存本期因子快照（供下一期计算 IC）
         snap_cols = ["ticker"] + [f for f in factor_cols if f in composite.columns]
-        self._prev_factor_snapshot = composite.select(snap_cols).clone()
+        self._prev_factor_snapshot = composite[snap_cols].copy()
         self._prev_date = date
 
         # Step 3: 用滚动 IC 均值决定方向
@@ -561,9 +542,9 @@ class USMultiFactorStrategy:
     def _apply_financial_staleness_decay(
         self,
         date: str,
-        composite: pl.DataFrame,
+        composite: pd.DataFrame,
         factor_cols: list[str],
-    ) -> pl.DataFrame:
+    ) -> pd.DataFrame:
         """
         Financial data staleness decay based on filing recency.
 
@@ -573,50 +554,45 @@ class USMultiFactorStrategy:
             6~9 months: 25%
             > 9 months: negative penalty (-1.0)
         """
-        import datetime as _dt
-
         fin_cols = [f for f in self.FINANCIAL_DEPENDENT_FACTORS if f in factor_cols]
         if not fin_cols:
             logger.debug("_apply_financial_staleness_decay: 无财务依赖因子，跳过衰减")
             return composite
 
-        # Get latest filing date per ticker from preloaded data (pandas cache)
+        # Get latest filing date per ticker from preloaded data
         bulk_fin = USFactorBase._static_cache.get("_bulk_financial")
         if bulk_fin is not None and not bulk_fin.empty:
-            date_ts = _dt.datetime.strptime(date, "%Y-%m-%d")
-            codes_set = set(composite.get_column("ticker").to_list())
+            date_ts = pd.to_datetime(date)
+            codes_set = set(composite["ticker"].tolist())
             df_fin = bulk_fin[
                 (bulk_fin["filing_date"] <= date_ts) & bulk_fin["ticker"].isin(codes_set)
             ]
             if df_fin.empty:
                 logger.debug(f"_apply_financial_staleness_decay: {date} 无财报数据，跳过衰减")
                 return composite
-            df_latest_pd = df_fin.groupby("ticker")["date"].max().reset_index()
-            df_latest_pd.columns = ["ticker", "latest_end_date"]
+            df_latest = df_fin.groupby("ticker")["date"].max().reset_index()
+            df_latest.columns = ["ticker", "latest_end_date"]
         else:
             logger.warning("_apply_financial_staleness_decay: 缓存为空，请先调用 preload_for_backtest()")
             return composite
 
-        if df_latest_pd.empty:
+        if df_latest.empty:
             logger.debug(f"_apply_financial_staleness_decay: {date} 无财报日期数据，跳过衰减")
             return composite
 
-        # Convert to polars
-        df_latest = pl.from_pandas(df_latest_pd)
-        ref_date = _dt.datetime.strptime(date, "%Y-%m-%d")
-        df_latest = df_latest.with_columns(
-            pl.col("latest_end_date").cast(pl.Datetime("us"))
-        ).with_columns(
-            ((pl.lit(ref_date) - pl.col("latest_end_date")).dt.total_days() / 30.44).alias("months_stale")
+        composite = composite.copy()
+        ref_date = pd.to_datetime(date)
+        df_latest["latest_end_date"] = pd.to_datetime(df_latest["latest_end_date"])
+        df_latest["months_stale"] = (
+            (ref_date - df_latest["latest_end_date"]).dt.days / 30.44
         )
 
-        composite = composite.join(
-            df_latest.select(["ticker", "months_stale"]), on="ticker", how="left"
-        ).with_columns(
-            pl.col("months_stale").fill_null(99.0)
+        composite = composite.merge(
+            df_latest[["ticker", "months_stale"]], on="ticker", how="left"
         )
+        composite["months_stale"] = composite["months_stale"].fillna(99)
 
-        months = composite.get_column("months_stale").to_numpy()
+        months = composite["months_stale"].values
         decay = np.where(
             months <= 3, 1.0,
             np.where(months <= 6, 0.5,
@@ -626,9 +602,10 @@ class USMultiFactorStrategy:
         stale_penalty = -1.0
         for col in fin_cols:
             if col in composite.columns:
-                vals = composite.get_column(col).to_numpy().astype(float)
-                new_vals = np.where(decay > 0, vals * decay, stale_penalty)
-                composite = composite.with_columns(pl.Series(col, new_vals))
+                vals = composite[col].values.astype(float)
+                composite[col] = np.where(
+                    decay > 0, vals * decay, stale_penalty
+                )
 
         n_decayed = ((decay < 1.0) & (decay > 0)).sum()
         n_penalized = (decay == 0).sum()
@@ -637,17 +614,17 @@ class USMultiFactorStrategy:
                 f"Financial staleness decay: {n_decayed} decayed, {n_penalized} penalized"
             )
 
-        composite = composite.drop("months_stale")
+        composite = composite.drop(columns=["months_stale"])
         return composite
 
     def _compute_scores_vectorized(
         self,
-        composite: pl.DataFrame,
+        composite: pd.DataFrame,
         factor_cols: list[str],
         effective_cat_weights: dict[str, float],
     ) -> np.ndarray:
         """Vectorized two-layer scoring (universal weights)."""
-        n_stocks = composite.height
+        n_stocks = len(composite)
         n_cats = len(self.FACTOR_CATEGORIES)
         cat_names = list(self.FACTOR_CATEGORIES.keys())
 
@@ -656,12 +633,12 @@ class USMultiFactorStrategy:
 
         for cat_idx, cat in enumerate(cat_names):
             factors = self.FACTOR_CATEGORIES[cat]
-            cat_factor_cols = [f for f in factors if f in factor_cols and f in composite.columns]
+            cat_factor_cols = [f for f in factors if f in factor_cols]
             if not cat_factor_cols:
                 continue
 
             fw = np.array([self.factor_weights.get(f, 1.0) for f in cat_factor_cols])
-            values = composite.select(cat_factor_cols).to_numpy().astype(float)
+            values = composite[cat_factor_cols].values.astype(float)
 
             valid = ~np.isnan(values)
             weighted_sum = np.nansum(values * fw, axis=1)
@@ -703,7 +680,7 @@ class USMultiFactorStrategy:
     # Factor computation for a single date
     # ----------------------------------------------------------
 
-    def _compute_scores_for_date(self, date: str) -> pl.DataFrame:
+    def _compute_scores_for_date(self, date: str) -> pd.DataFrame:
         """
         Compute full factor scores for a given date (thread-safe, no top-N selection).
 
@@ -714,23 +691,23 @@ class USMultiFactorStrategy:
 
         clear_neutralize_cache()
 
-        # 1. Build universe (cached) — factor layer returns pandas
+        # 1. Build universe (cached)
         cache_key = f"_us_universe_{date}"
         cached_univ = USFactorBase._date_cache.get(cache_key)
         if cached_univ is not None:
-            universe_pd = cached_univ
+            universe = cached_univ
         else:
-            universe_pd = get_us_clean_universe(date)
-            USFactorBase._date_cache[cache_key] = universe_pd
-        if universe_pd.empty:
+            universe = get_us_clean_universe(date)
+            USFactorBase._date_cache[cache_key] = universe
+        if universe.empty:
             logger.warning(f"{date} US universe is empty")
-            return pl.DataFrame(schema={"ticker": pl.Utf8, "score": pl.Float64})
+            return pd.DataFrame(columns=["ticker", "score"])
 
-        # 2. Compute factors — factor.compute() returns pandas DataFrames
+        # 2. Compute factors
         factor_scores = {}
         for factor in self.factors:
             try:
-                df_factor = factor.compute(date, universe_pd)
+                df_factor = factor.compute(date, universe)
                 if not df_factor.empty:
                     factor_scores[factor.name] = df_factor
             except Exception as e:
@@ -738,34 +715,29 @@ class USMultiFactorStrategy:
 
         if not factor_scores:
             logger.warning(f"{date} all US factors failed")
-            return pl.DataFrame(schema={"ticker": pl.Utf8, "score": pl.Float64})
+            return pd.DataFrame(columns=["ticker", "score"])
 
         # 3. Process factors + compose
-        sector_df = self._get_cached_sector_df()  # polars
-        mktcap_df = self._get_cached_mktcap_df(date)  # polars
+        sector_df = self._get_cached_sector_df()
+        mktcap_df = self._get_cached_mktcap_df(date)
 
-        # process_factor expects pandas for industry_df/mktcap_df
-        sector_df_pd = sector_df.to_pandas() if sector_df is not None else None
-        mktcap_df_pd = mktcap_df.to_pandas() if mktcap_df is not None else None
-
-        all_tickers = universe_pd["ticker"].tolist()
-        composite = pl.DataFrame({"ticker": all_tickers})
+        all_tickers = universe["ticker"].tolist()
+        composite = pd.DataFrame({"ticker": all_tickers})
 
         for fname, df_raw in factor_scores.items():
             cat = self.FACTOR_TO_CATEGORY.get(fname)
             effective_neutralize = US_CATEGORY_NEUTRALIZE_OVERRIDES.get(cat, US_NEUTRALIZE_MODE)
-            # process_factor returns pandas DataFrame[ticker, factor_value]
-            processed_pd = process_factor(
+            processed = process_factor(
                 df_raw,
-                industry_df=sector_df_pd,
-                mktcap_df=mktcap_df_pd,
+                industry_df=sector_df,
+                mktcap_df=mktcap_df,
                 do_neutralize=(mktcap_df is not None),
                 neutralize_mode=effective_neutralize,
                 nonlinear_size=False,
                 standardize_mode=US_STANDARDIZE_MODE,
             )
-            processed = pl.from_pandas(processed_pd).rename({"factor_value": fname})
-            composite = composite.join(processed, on="ticker", how="left")
+            processed = processed.rename(columns={"factor_value": fname})
+            composite = composite.merge(processed, on="ticker", how="left")
 
         factor_cols = [c for c in composite.columns if c != "ticker"]
 
@@ -779,109 +751,79 @@ class USMultiFactorStrategy:
         effective_cat_weights = self._get_regime_cat_weights(date)
         composite = self._compute_scores(composite, factor_cols, sector_df, category_weights=effective_cat_weights)
 
-        composite = composite.drop_nulls(subset=["score"])
+        composite = composite.dropna(subset=["score"])
 
         # 5. Trend threshold filter: MOM_12M < -1.0 → score penalty
         if "MOM_12M" in composite.columns:
-            mom12 = composite.get_column("MOM_12M").to_numpy()
-            score = composite.get_column("score").to_numpy()
-            trend_mask = mom12 < -1.0
-            if trend_mask.any():
-                penalty = np.clip(1.0 + 0.3 * mom12[trend_mask], 0.3, 0.7)
-                score[trend_mask] *= penalty
-                composite = composite.with_columns(pl.Series("score", score))
-                n_penalized = trend_mask.sum()
+            mom12 = composite["MOM_12M"]
+            trend_penalty_mask = mom12 < -1.0
+            if trend_penalty_mask.any():
+                penalty = np.clip(1.0 + 0.3 * mom12[trend_penalty_mask], 0.3, 0.7)
+                composite.loc[trend_penalty_mask, "score"] *= penalty
+                n_penalized = trend_penalty_mask.sum()
                 logger.info(f"Trend filter: {n_penalized} stocks penalized")
 
         # 6. Sector-level trend filter: sector median MOM_12M < -0.5
         if "MOM_12M" in composite.columns and sector_df is not None:
-            sec_merged = composite.select(["ticker", "MOM_12M", "score"]).join(
-                sector_df.select(["ticker", "sector"]), on="ticker", how="left"
-            ).with_columns(pl.col("sector").fill_null("Unknown"))
-
-            sec_mom = sec_merged.group_by("sector").agg(
-                pl.col("MOM_12M").median().alias("med_mom")
+            sec_merged = composite[["ticker", "MOM_12M", "score"]].merge(
+                sector_df[["ticker", "sector"]], on="ticker", how="left"
             )
-            bad_sectors_df = sec_mom.filter(pl.col("med_mom") < -0.5)
-            if bad_sectors_df.height > 0:
-                bad_sectors = bad_sectors_df.get_column("sector").to_list()
-                bad_tickers = sec_merged.filter(
-                    pl.col("sector").is_in(bad_sectors)
-                ).get_column("ticker").to_list()
-                bad_tickers_set = set(bad_tickers)
-
-                # Build penalty map: sector -> penalty value
-                sec_penalty_map = {}
-                for row in bad_sectors_df.iter_rows(named=True):
-                    sec = row["sector"]
-                    med = max(-3.0, min(-0.5, row["med_mom"]))
-                    penalty_val = 0.8 + (med - (-0.5)) / (-2.0 - (-0.5)) * (0.4 - 0.8)
-                    sec_penalty_map[sec] = max(0.4, min(0.8, penalty_val))
-
-                # Build ticker -> sector lookup
-                ticker_to_sec = dict(zip(
-                    sec_merged.get_column("ticker").to_list(),
-                    sec_merged.get_column("sector").to_list(),
-                ))
-
-                tickers_col = composite.get_column("ticker").to_list()
-                score = composite.get_column("score").to_numpy()
-                n_penalized = 0
-                for i, t in enumerate(tickers_col):
-                    if t in bad_tickers_set:
-                        sec = ticker_to_sec.get(t, "Unknown")
-                        pen = sec_penalty_map.get(sec, 1.0)
-                        score[i] *= pen
-                        n_penalized += 1
-                if n_penalized > 0:
-                    composite = composite.with_columns(pl.Series("score", score))
+            sec_merged["sector"] = sec_merged["sector"].fillna("Unknown")
+            sec_mom = sec_merged.groupby("sector")["MOM_12M"].median()
+            bad_sectors = sec_mom[sec_mom < -0.5].index.tolist()
+            if bad_sectors:
+                bad_mask = sec_merged["sector"].isin(bad_sectors)
+                bad_tickers = sec_merged.loc[bad_mask, "ticker"].tolist()
+                ticker_mask = composite["ticker"].isin(bad_tickers)
+                if ticker_mask.any():
+                    ticker_to_sec = sec_merged.set_index("ticker")["sector"]
+                    sec_penalty_map = sec_mom[bad_sectors].clip(-3.0, -0.5)
+                    sec_penalty_val = 0.8 + (sec_penalty_map - (-0.5)) / (-2.0 - (-0.5)) * (0.4 - 0.8)
+                    sec_penalty_val = sec_penalty_val.clip(0.4, 0.8)
+                    stock_secs = ticker_to_sec.reindex(composite.loc[ticker_mask, "ticker"])
+                    stock_penalty = stock_secs.map(sec_penalty_val).values
+                    composite.loc[ticker_mask, "score"] *= stock_penalty
                     logger.info(
                         f"Sector trend filter: {len(bad_sectors)} sectors "
                         f"({', '.join(bad_sectors[:5])}), "
-                        f"{n_penalized} stocks penalized"
+                        f"{ticker_mask.sum()} stocks penalized"
                     )
 
-        logger.info(f"{date} US scoring done: {composite.height} valid stocks")
+        logger.info(f"{date} US scoring done: {len(composite)} valid stocks")
 
         # ML scoring blend (if enabled and trained)
         if self._ml_enabled and self._ml_scorer is not None and self._ml_scorer.model is not None:
             try:
-                # Build feature matrix (convert to pandas for ML scorer)
-                feature_cols = self._ml_scorer.feature_cols
-                feature_data = {"ticker": composite.get_column("ticker").to_list()}
-                for col in feature_cols:
-                    if col in composite.columns:
-                        feature_data[col] = composite.get_column(col).to_list()
-                    else:
-                        feature_data[col] = [0.0] * composite.height
-                feature_pd = pd.DataFrame(feature_data)
+                # Build feature matrix aligned with composite rows
+                feature_df = composite[["ticker"]].copy()
+                for col in self._ml_scorer.feature_cols:
+                    feature_df[col] = composite[col] if col in composite.columns else 0.0
                 ml_scores = self._ml_scorer.predict(
-                    feature_pd[feature_cols]
+                    feature_df[self._ml_scorer.feature_cols]
                 ).values
-                linear_scores = composite.get_column("score").to_numpy()
+                linear_scores = composite["score"].values
                 alpha = self._ml_blend_ratio
-                blended = (1 - alpha) * linear_scores + alpha * ml_scores
-                composite = composite.with_columns(pl.Series("score", blended))
+                composite["score"] = (1 - alpha) * linear_scores + alpha * ml_scores
                 logger.info(f"ML blend applied: α={alpha:.1f}")
             except Exception as e:
                 logger.warning(f"ML scoring failed, using linear only: {e}")
 
         # 记录因子截面用于 ML 训练
         if self._ml_enabled:
-            self._ml_factor_history[date] = composite.clone()
+            self._ml_factor_history[date] = composite.copy()
 
         # 保留空头独立因子列（供 _compute_short_score 使用）
         keep_cols = ["ticker", "score"]
         for col in US_SHORT_FACTOR_WEIGHTS:
             if col != "BORROW_COST" and col in composite.columns:
                 keep_cols.append(col)
-        return composite.select(keep_cols)
+        return composite[keep_cols]
 
     # ----------------------------------------------------------
     # Short-side independent scoring
     # ----------------------------------------------------------
 
-    def _compute_short_score(self, composite: pl.DataFrame) -> np.ndarray:
+    def _compute_short_score(self, composite: pd.DataFrame) -> pd.Series:
         """
         Compute independent short score from dedicated short factors.
 
@@ -889,10 +831,10 @@ class USMultiFactorStrategy:
         "will go down" using a separate factor subset and fixed weights.
 
         Returns:
-            numpy array aligned with composite rows, higher = more suitable for shorting.
+            Series indexed like composite, higher = more suitable for shorting.
         """
         weights = US_SHORT_FACTOR_WEIGHTS
-        short_score = np.zeros(composite.height)
+        short_score = pd.Series(0.0, index=composite.index)
         n_factors = 0
 
         # Factor direction mapping for short prediction:
@@ -914,20 +856,17 @@ class USMultiFactorStrategy:
                 logger.debug(f"_compute_short_score: {factor_name} not in composite, skipping")
                 continue
 
-            raw = composite.get_column(factor_name).to_numpy().astype(float)
+            raw = composite[factor_name].copy()
             d = direction.get(factor_name, 1)
             vals = raw * d
 
             # Z-score within the short candidate pool
-            valid = ~np.isnan(vals)
-            if valid.sum() == 0:
-                continue
-            mean = np.nanmean(vals)
-            std = np.nanstd(vals)
+            mean = vals.mean()
+            std = vals.std()
             if std > 1e-10:
-                z = np.where(valid, (vals - mean) / std, 0.0)
+                z = (vals - mean) / std
             else:
-                z = np.zeros(composite.height)
+                z = pd.Series(0.0, index=composite.index)
 
             short_score += w * z
             n_factors += 1
@@ -938,14 +877,13 @@ class USMultiFactorStrategy:
 
         # BORROW_COST factor (negative weight — penalize expensive borrows)
         if "BORROW_COST" in composite.columns and "BORROW_COST" in weights:
-            bc = composite.get_column("BORROW_COST").to_numpy().astype(float)
-            bc_valid = ~np.isnan(bc)
-            bc_mean = np.nanmean(bc)
-            bc_std = np.nanstd(bc)
+            bc = composite["BORROW_COST"]
+            bc_mean = bc.mean()
+            bc_std = bc.std()
             if bc_std > 1e-10:
-                bc_z = np.where(bc_valid, (bc - bc_mean) / bc_std, 0.0)
+                bc_z = (bc - bc_mean) / bc_std
             else:
-                bc_z = np.zeros(composite.height)
+                bc_z = pd.Series(0.0, index=composite.index)
             short_score += weights["BORROW_COST"] * bc_z
 
         return short_score
@@ -973,8 +911,8 @@ class USMultiFactorStrategy:
     MAX_SECTOR_NET_WEIGHT = 0.15
 
     def _select_from_scores(
-        self, composite: pl.DataFrame, prev_holdings: set[str],
-    ) -> pl.DataFrame:
+        self, composite: pd.DataFrame, prev_holdings: set[str],
+    ) -> pd.DataFrame:
         """
         Dispatch to MVO optimizer or TopN fallback based on US_USE_OPTIMIZER.
 
@@ -983,26 +921,26 @@ class USMultiFactorStrategy:
         """
         if self._use_optimizer and self._optimizer is not None:
             result = self._select_from_scores_mvo(composite, prev_holdings)
-            if result is not None and not result.is_empty():
+            if result is not None and not result.empty:
                 return result
             logger.warning("MVO 失败，降级到 Top-N + Softmax")
         return self._select_from_scores_topn(composite, prev_holdings)
 
     def _select_from_scores_mvo(
-        self, composite: pl.DataFrame, prev_holdings: set[str],
-    ) -> pl.DataFrame | None:
+        self, composite: pd.DataFrame, prev_holdings: set[str],
+    ) -> pd.DataFrame | None:
         """
         MVO-based portfolio construction using risk model + optimizer.
 
         Returns:
             DataFrame[ticker, score, weight, side] or None if optimization fails.
         """
-        empty = pl.DataFrame(schema={"ticker": pl.Utf8, "score": pl.Float64, "weight": pl.Float64, "side": pl.Utf8})
-        if composite.is_empty():
+        empty = pd.DataFrame(columns=["ticker", "score", "weight", "side"])
+        if composite.empty:
             return empty
 
         date = self._last_date
-        universe = composite.get_column("ticker").to_list()
+        universe = composite["ticker"].tolist()
 
         # 1. Estimate covariance matrix
         cov_matrix, cov_tickers = self._risk_model.estimate(date, universe)
@@ -1010,13 +948,10 @@ class USMultiFactorStrategy:
             logger.warning(f"MVO: 协方差矩阵有效股票不足 ({len(cov_tickers)})")
             return None
 
-        # 2. Build score dict (only tickers in cov)
+        # 2. Build score vector (only tickers in cov)
         cov_set = set(cov_tickers)
-        scored = composite.filter(pl.col("ticker").is_in(cov_set))
-        scores = dict(zip(
-            scored.get_column("ticker").to_list(),
-            scored.get_column("score").to_list(),
-        ))
+        scored = composite[composite["ticker"].isin(cov_set)].copy()
+        scores = scored.set_index("ticker")["score"]
 
         # 3. Build previous weights dict
         prev_weights = {}
@@ -1026,11 +961,8 @@ class USMultiFactorStrategy:
         # 4. Build sector map
         sector_map = {}
         sector_df = self._get_cached_sector_df()
-        if sector_df is not None and not sector_df.is_empty():
-            sector_map = dict(zip(
-                sector_df.get_column("ticker").to_list(),
-                sector_df.get_column("sector").to_list(),
-            ))
+        if sector_df is not None and not sector_df.empty:
+            sector_map = dict(zip(sector_df["ticker"], sector_df["sector"]))
 
         # 5. Run optimizer
         opt_weights = self._optimizer.optimize(
@@ -1046,36 +978,35 @@ class USMultiFactorStrategy:
             return None
 
         # 6. Build output DataFrame
-        score_map = dict(zip(
-            composite.get_column("ticker").to_list(),
-            composite.get_column("score").to_list(),
-        ))
-        tickers = list(opt_weights.keys())
-        result = pl.DataFrame({
-            "ticker": tickers,
-            "score": [score_map.get(t, 0.0) for t in tickers],
-            "weight": [opt_weights[t] for t in tickers],
-            "side": ["LONG" if opt_weights[t] > 0 else "SHORT" for t in tickers],
-        })
+        rows = []
+        score_map = dict(zip(composite["ticker"], composite["score"]))
+        for ticker, weight in opt_weights.items():
+            rows.append({
+                "ticker": ticker,
+                "score": score_map.get(ticker, 0.0),
+                "weight": weight,
+                "side": "LONG" if weight > 0 else "SHORT",
+            })
+
+        result = pd.DataFrame(rows)
 
         # Store weights for next period's turnover penalty
         self._prev_weights_dict = opt_weights
 
-        weights = result.get_column("weight")
-        n_long = (weights > 0).sum()
-        n_short = (weights < 0).sum()
-        net = weights.sum()
-        gross = weights.abs().sum()
+        n_long = (result["weight"] > 0).sum()
+        n_short = (result["weight"] < 0).sum()
+        net = result["weight"].sum()
+        gross = result["weight"].abs().sum()
         logger.info(
             f"MVO selection: {n_long}L/{n_short}S, net={net:.2f}, "
             f"gross={gross:.2f}, regime={self._last_regime_strength:.2f}"
         )
 
-        return result.select(["ticker", "score", "weight", "side"])
+        return result[["ticker", "score", "weight", "side"]]
 
     def _select_from_scores_topn(
-        self, composite: pl.DataFrame, prev_holdings: set[str],
-    ) -> pl.DataFrame:
+        self, composite: pd.DataFrame, prev_holdings: set[str],
+    ) -> pd.DataFrame:
         """
         Top-N + Softmax fallback (original v3 implementation).
 
@@ -1085,215 +1016,189 @@ class USMultiFactorStrategy:
         Returns:
             DataFrame[ticker, score, weight, side].
         """
-        empty = pl.DataFrame(schema={"ticker": pl.Utf8, "score": pl.Float64, "weight": pl.Float64, "side": pl.Utf8})
-        if composite.is_empty():
+        empty = pd.DataFrame(columns=["ticker", "score", "weight", "side"])
+        if composite.empty:
             return empty
 
-        composite = composite.sort("score", descending=True)
+        composite = composite.copy()
+        composite = composite.sort_values("score", ascending=False)
         tau = US_WEIGHT_TEMPERATURE
         strength = self._last_regime_strength
 
         # === Long leg ===
-        long_qualified = composite.filter(pl.col("score") >= self.min_select_score)
+        # Long count is FIXED (not regime-dynamic) to preserve v3 behavior.
+        # Regime strength only controls short gate and short allocation.
+        long_qualified = composite[composite["score"] >= self.min_select_score]
         long_n = US_LONG_N if US_SHORT_ENABLED else self.n_holdings
         effective_long_n = long_n
 
-        long_selected = long_qualified.head(effective_long_n)
+        long_selected = long_qualified.head(effective_long_n).copy()
         min_w = 1.0 / (max(long_n, 1) * 3)
 
         if not US_SHORT_ENABLED:
-            if long_selected.height > 0:
-                weights = self._softmax_weights(
-                    long_selected.get_column("score").to_numpy(), tau, min_w
+            if len(long_selected) > 0:
+                long_selected["weight"] = self._softmax_weights(
+                    long_selected["score"].values, tau, min_w
                 )
-                long_selected = long_selected.with_columns([
-                    pl.Series("weight", weights),
-                    pl.lit("LONG").alias("side"),
-                ])
-                return long_selected.select(["ticker", "score", "weight", "side"])
-            return empty
+                long_selected["side"] = "LONG"
+            return long_selected[["ticker", "score", "weight", "side"]] if len(long_selected) > 0 else empty
 
         # === Short leg v5: independent short factor model (always-on) ===
-        short_selected = pl.DataFrame()
+        short_selected = pd.DataFrame()
 
         # Build short candidate pool: mcap >= $10B (historical market cap)
         short_date = getattr(self, '_last_date', '')
         mktcap_df = self._get_cached_mktcap_df(short_date)
 
-        short_pool = composite.clone()
-        if mktcap_df is not None and not mktcap_df.is_empty():
-            short_pool = short_pool.join(
-                mktcap_df.select(["ticker", "market_cap"]), on="ticker", how="left"
+        short_pool = composite.copy()
+        if mktcap_df is not None and not mktcap_df.empty:
+            short_pool = short_pool.merge(
+                mktcap_df[["ticker", "market_cap"]], on="ticker", how="left"
             )
-            before_n = short_pool.height
-            short_pool = short_pool.with_columns(
-                pl.col("market_cap").fill_null(0.0)
-            ).filter(pl.col("market_cap") >= US_SHORT_MIN_MCAP)
+            before_n = len(short_pool)
+            short_pool = short_pool[
+                short_pool["market_cap"].fillna(0) >= US_SHORT_MIN_MCAP
+            ]
             logger.debug(
-                f"Short mcap filter: {before_n} → {short_pool.height} "
+                f"Short mcap filter: {before_n} → {len(short_pool)} "
                 f"(>= ${US_SHORT_MIN_MCAP/1e9:.0f}B)"
             )
 
             # Assign tiered borrow cost
-            borrow_cost = np.full(short_pool.height, 0.015)
-            mcap_arr = short_pool.get_column("market_cap").to_numpy()
+            short_pool["BORROW_COST"] = 0.015  # default
             for mcap_threshold, rate in sorted(
                 US_SHORT_BORROW_FEE_TIERS.items(), reverse=True
             ):
-                borrow_cost[mcap_arr >= mcap_threshold] = rate
-            short_pool = short_pool.with_columns(pl.Series("BORROW_COST", borrow_cost))
+                short_pool.loc[
+                    short_pool["market_cap"] >= mcap_threshold, "BORROW_COST"
+                ] = rate
         else:
             logger.debug("Short pool: no mktcap data, using all stocks with default borrow cost")
-            short_pool = short_pool.with_columns(pl.lit(0.015).alias("BORROW_COST"))
+            short_pool["BORROW_COST"] = 0.015
 
-        if short_pool.height < 3:
-            logger.info(f"Short pool too small ({short_pool.height}), skipping shorts")
+        if len(short_pool) < 3:
+            logger.info(f"Short pool too small ({len(short_pool)}), skipping shorts")
         else:
             # Compute independent short score
-            short_scores = self._compute_short_score(short_pool)
-            short_pool = short_pool.with_columns(pl.Series("short_score", short_scores))
+            short_pool["short_score"] = self._compute_short_score(short_pool)
 
             # INTERSECTION filter (3 conditions):
             # 1. short_score > Nth percentile
-            score_cutoff = float(np.nanquantile(short_scores, 1.0 - US_SHORT_SCORE_PCT))
+            score_cutoff = short_pool["short_score"].quantile(
+                1.0 - US_SHORT_SCORE_PCT
+            )
             # 2. EPS_REVISION gatekeeper: worst N%
             # 3. composite score <= 0 (don't short stocks the long model likes)
-            base_filter = (pl.col("short_score") >= score_cutoff) & (pl.col("score") <= 0)
+            base_mask = (
+                (short_pool["short_score"] >= score_cutoff)
+                & (short_pool["score"] <= 0)
+            )
             if "EPS_REVISION" in short_pool.columns:
-                eps_vals = short_pool.get_column("EPS_REVISION").to_numpy()
-                eps_cutoff = float(np.nanquantile(eps_vals[~np.isnan(eps_vals)], US_SHORT_EPS_REV_PCT)) if np.any(~np.isnan(eps_vals)) else 0.0
-                candidates = short_pool.filter(
-                    base_filter & (pl.col("EPS_REVISION") <= eps_cutoff)
+                eps_cutoff = short_pool["EPS_REVISION"].quantile(
+                    US_SHORT_EPS_REV_PCT
                 )
+                candidates = short_pool[
+                    base_mask & (short_pool["EPS_REVISION"] <= eps_cutoff)
+                ]
             else:
                 logger.warning("Short selection: EPS_REVISION not available, using short_score only")
-                candidates = short_pool.filter(base_filter)
+                candidates = short_pool[base_mask]
 
-            candidates = candidates.sort("short_score", descending=True)
-            short_selected = candidates.head(US_SHORT_N)
+            candidates = candidates.sort_values("short_score", ascending=False)
+            short_selected = candidates.head(US_SHORT_N).copy()
 
             logger.info(
-                f"Short selection: {short_pool.height} pool → "
-                f"{candidates.height} candidates → {short_selected.height} selected "
-                f"(regime={strength:.2f})"
-            )
+                f"Short selection: {len(short_pool)} pool → "
+                    f"{len(candidates)} candidates → {len(short_selected)} selected "
+                    f"(regime={strength:.2f})"
+                )
 
-        if long_selected.height == 0 and short_selected.height == 0:
+        if len(long_selected) == 0 and len(short_selected) == 0:
             return empty
 
         # === Weight allocation (fixed net exposure, v3 behavior) ===
-        has_shorts = short_selected.height > 0
+        has_shorts = len(short_selected) > 0
         if has_shorts:
-            net_exp = US_NET_EXPOSURE
+            net_exp = US_NET_EXPOSURE  # fixed 0.6 = 80% long / 20% short
             long_total = (1.0 + net_exp) / 2.0
             short_total = (1.0 - net_exp) / 2.0
         else:
+            # No shorts: all weight to longs
             net_exp = 1.0
             long_total = 1.0
             short_total = 0.0
 
-        if long_selected.height > 0:
-            long_weights = self._softmax_weights(
-                long_selected.get_column("score").to_numpy(), tau, min_w
+        if len(long_selected) > 0:
+            long_selected["weight"] = self._softmax_weights(
+                long_selected["score"].values, tau, min_w
             ) * long_total
-            long_selected = long_selected.with_columns([
-                pl.Series("weight", long_weights),
-                pl.lit("LONG").alias("side"),
-            ])
+            long_selected["side"] = "LONG"
 
         if has_shorts:
-            if "short_score" in short_selected.columns:
-                short_scores_arr = short_selected.get_column("short_score").to_numpy()
-            else:
-                short_scores_arr = -short_selected.get_column("score").to_numpy()
+            # Softmax weights (v3 behavior): worse short_score → higher weight
+            short_scores = short_selected["short_score"].values if "short_score" in short_selected.columns else -short_selected["score"].values
             short_min_w = 1.0 / (max(US_SHORT_N, 1) * 3)
-            short_weights = -self._softmax_weights(
-                short_scores_arr, tau, short_min_w
+            short_selected["weight"] = -self._softmax_weights(
+                short_scores, tau, short_min_w
             ) * short_total
-            short_selected = short_selected.with_columns([
-                pl.Series("weight", short_weights),
-                pl.lit("SHORT").alias("side"),
-            ])
+            short_selected["side"] = "SHORT"
 
-        # Combine long and short
-        # Ensure consistent columns for concat
-        out_cols = ["ticker", "score", "weight", "side"]
-        parts = []
-        if long_selected.height > 0:
-            extra = [c for c in long_selected.columns if c not in out_cols]
-            parts.append(long_selected.drop(extra) if extra else long_selected.select(out_cols))
-        if has_shorts:
-            extra = [c for c in short_selected.columns if c not in out_cols]
-            parts.append(short_selected.drop(extra) if extra else short_selected.select(out_cols))
-
-        if not parts:
-            return empty
-        result = pl.concat(parts)
+        result = pd.concat(
+            [long_selected] + ([short_selected] if has_shorts else []),
+            ignore_index=True,
+        )
 
         # === Soft sector cap: clip sectors exceeding MAX_SECTOR_NET_WEIGHT ===
         sector_df = self._get_cached_sector_df()
-        if sector_df is not None and not result.is_empty():
-            result = result.join(sector_df, on="ticker", how="left").with_columns(
-                pl.col("sector").fill_null("Unknown")
-            )
+        if sector_df is not None and not result.empty:
+            result = result.merge(sector_df, on="ticker", how="left")
+            result["sector"] = result["sector"].fillna("Unknown")
 
-            # Use numpy for iterative sector cap (3 iterations to converge)
-            tickers = result.get_column("ticker").to_list()
-            weights_arr = result.get_column("weight").to_numpy().copy()
-            sectors = result.get_column("sector").to_list()
-
-            for _ in range(3):
-                # Compute sector net weights
-                sector_net = {}
-                for i, sec in enumerate(sectors):
-                    sector_net[sec] = sector_net.get(sec, 0.0) + weights_arr[i]
-
-                any_over = False
-                for sec, net_w in sector_net.items():
-                    if abs(net_w) <= self.MAX_SECTOR_NET_WEIGHT:
-                        continue
-                    any_over = True
-                    if net_w > self.MAX_SECTOR_NET_WEIGHT:
-                        scale = self.MAX_SECTOR_NET_WEIGHT / net_w
-                        for i in range(len(sectors)):
-                            if sectors[i] == sec and weights_arr[i] > 0:
-                                weights_arr[i] *= scale
-                    elif net_w < -self.MAX_SECTOR_NET_WEIGHT:
-                        scale = self.MAX_SECTOR_NET_WEIGHT / abs(net_w)
-                        for i in range(len(sectors)):
-                            if sectors[i] == sec and weights_arr[i] < 0:
-                                weights_arr[i] *= scale
-                if not any_over:
+            for _ in range(3):  # iterate to converge
+                sector_net = result.groupby("sector")["weight"].sum()
+                over = sector_net[sector_net.abs() > self.MAX_SECTOR_NET_WEIGHT]
+                if over.empty:
                     break
+                for sec, net_w in over.items():
+                    mask = result["sector"] == sec
+                    if net_w > self.MAX_SECTOR_NET_WEIGHT:
+                        # Scale down longs in this sector
+                        long_mask = mask & (result["weight"] > 0)
+                        if long_mask.any():
+                            scale = self.MAX_SECTOR_NET_WEIGHT / net_w
+                            result.loc[long_mask, "weight"] *= scale
+                    elif net_w < -self.MAX_SECTOR_NET_WEIGHT:
+                        short_mask = mask & (result["weight"] < 0)
+                        if short_mask.any():
+                            scale = self.MAX_SECTOR_NET_WEIGHT / abs(net_w)
+                            result.loc[short_mask, "weight"] *= scale
 
             # Renormalize to target totals
-            long_sum = weights_arr[weights_arr > 0].sum()
-            short_sum = weights_arr[weights_arr < 0].sum()
+            long_sum = result.loc[result["weight"] > 0, "weight"].sum()
+            short_sum = result.loc[result["weight"] < 0, "weight"].sum()
             if long_sum > 0:
-                weights_arr[weights_arr > 0] *= long_total / long_sum
+                result.loc[result["weight"] > 0, "weight"] *= long_total / long_sum
             if short_sum < 0:
-                weights_arr[weights_arr < 0] *= short_total / abs(short_sum)
+                result.loc[result["weight"] < 0, "weight"] *= short_total / abs(short_sum)
 
-            result = result.with_columns(pl.Series("weight", weights_arr))
             if "sector" in result.columns:
-                result = result.drop("sector")
+                result = result.drop(columns=["sector"])
 
-        weights_col = result.get_column("weight")
-        n_long = (weights_col > 0).sum()
-        n_short = (weights_col < 0).sum()
+        n_long = (result["weight"] > 0).sum()
+        n_short = (result["weight"] < 0).sum()
         logger.info(
             f"L/S selection (sector cap {self.MAX_SECTOR_NET_WEIGHT:.0%}): "
             f"{n_long}L / {n_short}S, net={net_exp:.0%}, regime={strength:.2f}"
         )
-        # Keep only standard output columns
+        # Drop extra columns, keep only standard output
         out_cols = ["ticker", "score", "weight", "side"]
-        return result.select([c for c in out_cols if c in result.columns])
+        return result[[c for c in out_cols if c in result.columns]]
 
     # ----------------------------------------------------------
     # Public API: select_stocks
     # ----------------------------------------------------------
 
-    def select_stocks(self, date: str) -> pl.DataFrame:
+    def select_stocks(self, date: str) -> pd.DataFrame:
         """
         Run full stock selection for a single date.
 
@@ -1306,21 +1211,17 @@ class USMultiFactorStrategy:
         self._last_date = date
         composite = self._compute_scores_for_date(date)
         selected = self._select_from_scores(composite, self._prev_holdings)
-        self._prev_holdings = set(selected.get_column("ticker").to_list()) if selected.height > 0 else set()
+        self._prev_holdings = set(selected["ticker"].tolist()) if len(selected) > 0 else set()
         # Update prev_weights_dict for next period's turnover penalty
-        if selected.height > 0:
-            self._prev_weights_dict = dict(zip(
-                selected.get_column("ticker").to_list(),
-                selected.get_column("weight").to_list(),
-            ))
+        if len(selected) > 0:
+            self._prev_weights_dict = dict(zip(selected["ticker"], selected["weight"]))
         else:
             self._prev_weights_dict = {}
 
-        if selected.height > 0:
-            scores = selected.get_column("score")
+        if len(selected) > 0:
             logger.info(
-                f"US selection done: {selected.height} stocks, "
-                f"score range [{scores.min():.3f}, {scores.max():.3f}]"
+                f"US selection done: {len(selected)} stocks, "
+                f"score range [{selected['score'].min():.3f}, {selected['score'].max():.3f}]"
             )
         else:
             logger.info("US selection done: 0 stocks (empty portfolio)")
@@ -1367,7 +1268,7 @@ class USMultiFactorStrategy:
         if not dates:
             logger.debug("_get_all_trade_dates: 无交易日数据，返回空列表")
             return []
-        return [d.strftime("%Y-%m-%d") for d in dates]
+        return pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d").tolist()
 
     # ----------------------------------------------------------
     # Adaptive rebalancing helpers
@@ -1381,7 +1282,7 @@ class USMultiFactorStrategy:
         self, start_date: str, end_date: str,
         cancel_check: Optional[callable] = None,
         max_workers: int = 0,
-    ) -> dict[str, pl.DataFrame]:
+    ) -> dict[str, pd.DataFrame]:
         """
         Generate selection signals for the full backtest period (pure monthly rebalance).
 
@@ -1396,11 +1297,9 @@ class USMultiFactorStrategy:
         """
         rebalance_dates = self.get_rebalance_dates(start_date, end_date)
 
-        import datetime as _dt
         # Look back for prior rebalance date
-        start_dt = _dt.datetime.strptime(start_date, "%Y-%m-%d")
-        prior_start = (start_dt - _dt.timedelta(days=62)).strftime("%Y-%m-%d")
-        prior_end = (start_dt - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+        prior_start = (pd.to_datetime(start_date) - pd.DateOffset(months=2)).strftime("%Y-%m-%d")
+        prior_end = (pd.to_datetime(start_date) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         prior_dates = self.get_rebalance_dates(prior_start, prior_end)
         if prior_dates:
             last_prior = prior_dates[-1]
@@ -1413,11 +1312,12 @@ class USMultiFactorStrategy:
         # Check for existing preloaded data
         existing_bulk = USFactorBase._static_cache.get("_bulk_daily")
         if existing_bulk is not None and not existing_bulk.empty:
-            price_start_needed = start_dt - _dt.timedelta(days=400)
+            price_start_needed = (
+                pd.to_datetime(start_date) - pd.Timedelta(days=400)
+            )
             cached_min = existing_bulk["trade_date"].min()
             cached_max = existing_bulk["trade_date"].max()
-            end_dt = _dt.datetime.strptime(end_date, "%Y-%m-%d")
-            if cached_min <= price_start_needed and cached_max >= end_dt:
+            if cached_min <= price_start_needed and cached_max >= pd.to_datetime(end_date):
                 logger.info(
                     f"Using cached US backtest data ({len(existing_bulk)} rows, "
                     f"{cached_min.strftime('%Y-%m-%d')}~{cached_max.strftime('%Y-%m-%d')})"
@@ -1478,9 +1378,8 @@ class USMultiFactorStrategy:
         self,
         rebalance_dates: list[str],
         cancel_check: Optional[callable] = None,
-    ) -> dict[str, pl.DataFrame]:
+    ) -> dict[str, pd.DataFrame]:
         """Serial signal generation with rolling ML training."""
-        import datetime as _dt
         from services.config import US_ML_RETRAIN_INTERVAL, US_ML_FORWARD_DAYS
 
         signals = {}
@@ -1497,9 +1396,9 @@ class USMultiFactorStrategy:
                 and len(self._ml_factor_history) >= 6
             ):
                 # train_end = current date - forward_days (prevent look-ahead)
-                dt_ts = _dt.datetime.strptime(dt, "%Y-%m-%d")
+                dt_ts = pd.to_datetime(dt)
                 train_end = (
-                    dt_ts - _dt.timedelta(days=US_ML_FORWARD_DAYS + 5)
+                    dt_ts - pd.Timedelta(days=US_ML_FORWARD_DAYS + 5)
                 ).strftime("%Y-%m-%d")
                 try:
                     all_factors = [f for fs in self.FACTOR_CATEGORIES.values() for f in fs]
@@ -1520,7 +1419,7 @@ class USMultiFactorStrategy:
             try:
                 result = self.select_stocks(dt)
                 signals[dt] = result
-                if result.is_empty():
+                if result.empty:
                     logger.info(f"{dt} empty portfolio signal")
             except Exception as e:
                 logger.warning(f"{dt} selection failed: {e}")
@@ -1531,7 +1430,7 @@ class USMultiFactorStrategy:
         rebalance_dates: list[str],
         max_workers: int,
         cancel_check: Optional[callable] = None,
-    ) -> dict[str, pl.DataFrame]:
+    ) -> dict[str, pd.DataFrame]:
         """
         Parallel signal generation: multi-thread factor computation → serial top-N selection.
         Each worker thread gets its own DB connection to avoid 'another command in progress'.
@@ -1540,11 +1439,11 @@ class USMultiFactorStrategy:
         t0 = time.time()
 
         # Phase 1: Parallel factor computation
-        composites: dict[str, pl.DataFrame] = {}
+        composites: dict[str, pd.DataFrame] = {}
         effective_workers = min(max_workers, len(rebalance_dates))
         logger.info(f"US parallel factors: {len(rebalance_dates)} dates, {effective_workers} threads")
 
-        def _compute_with_own_connection(dt: str) -> pl.DataFrame:
+        def _compute_with_own_connection(dt: str) -> pd.DataFrame:
             """每个线程关闭继承的连接，让 Django 自动创建独立连接。"""
             connections.close_all()
             try:
@@ -1573,7 +1472,7 @@ class USMultiFactorStrategy:
                     logger.info(f"[{n_done}/{n_total}] {dt} 因子计算完成: {n_stocks} stocks, {time.time()-t0:.0f}s elapsed")
                 except Exception as e:
                     logger.warning(f"[{n_done}/{n_total}] {dt} factor computation failed: {e}")
-                    composites[dt] = pl.DataFrame(schema={"ticker": pl.Utf8, "score": pl.Float64})
+                    composites[dt] = pd.DataFrame(columns=["ticker", "score"])
 
         connections.close_all()
 
@@ -1589,10 +1488,10 @@ class USMultiFactorStrategy:
             composite = composites[dt]
             selected = self._select_from_scores(composite, prev_holdings)
             signals[dt] = selected
-            prev_holdings = set(selected.get_column("ticker").to_list()) if selected.height > 0 else set()
+            prev_holdings = set(selected["ticker"].tolist()) if len(selected) > 0 else set()
 
-            n_sel = selected.height
-            if selected.is_empty():
+            n_sel = len(selected)
+            if selected.empty:
                 logger.info(f"[{i+1}/{len(composites)}] {dt} empty portfolio signal")
             else:
                 logger.info(f"[{i+1}/{len(composites)}] {dt} 选股完成: {n_sel} stocks")

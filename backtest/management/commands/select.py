@@ -38,16 +38,11 @@ class Command(BaseCommand):
 
         elapsed = time.time() - t0
 
-        # Handle both polars (US) and pandas (CN) results
-        is_empty = (result is None or
-                    (hasattr(result, 'is_empty') and result.is_empty()) or
-                    (hasattr(result, 'empty') and result.empty))
-        if is_empty:
+        if result is None or result.empty:
             console.print(f"[yellow]无选股结果 ({elapsed:.1f}s)[/yellow]")
             return
 
-        n_stocks = result.height if hasattr(result, 'height') else len(result)
-        console.print(f"[green]选出 {n_stocks} 只股票 ({elapsed:.1f}s)[/green]\n")
+        console.print(f"[green]选出 {len(result)} 只股票 ({elapsed:.1f}s)[/green]\n")
         show = result.head(top) if top > 0 else result
 
         t = Table()
@@ -58,13 +53,7 @@ class Command(BaseCommand):
         t.add_column("Score", justify="right")
         t.add_column("Weight", justify="right")
 
-        # Use iter_rows for polars, iterrows for pandas
-        if hasattr(show, 'iter_rows'):
-            rows_iter = enumerate(show.iter_rows(named=True), 1)
-        else:
-            rows_iter = ((i, row.to_dict()) for i, (_, row) in enumerate(show.iterrows(), 1))
-
-        for i, row in rows_iter:
+        for i, (_, row) in enumerate(show.iterrows(), 1):
             cols = [str(i)]
             if "side" in result.columns:
                 side = str(row.get("side", ""))
@@ -78,20 +67,10 @@ class Command(BaseCommand):
         console.print(t)
 
         if "side" in result.columns:
-            if hasattr(result, 'get_column'):
-                # polars
-                import polars as pl
-                weights = result.get_column("weight")
-                n_long = (weights > 0).sum()
-                n_short = (weights < 0).sum()
-                long_total = result.filter(pl.col("weight") > 0).get_column("weight").sum()
-                short_total = result.filter(pl.col("weight") < 0).get_column("weight").sum()
-            else:
-                # pandas
-                n_long = (result["weight"] > 0).sum()
-                n_short = (result["weight"] < 0).sum()
-                long_total = result.loc[result["weight"] > 0, "weight"].sum()
-                short_total = result.loc[result["weight"] < 0, "weight"].sum()
+            n_long = (result["weight"] > 0).sum()
+            n_short = (result["weight"] < 0).sum()
+            long_total = result.loc[result["weight"] > 0, "weight"].sum()
+            short_total = result.loc[result["weight"] < 0, "weight"].sum()
             console.print(
                 f"  [green]Long: {n_long} ({long_total:.1%})[/green]  "
                 f"[red]Short: {n_short} ({short_total:+.1%})[/red]  "

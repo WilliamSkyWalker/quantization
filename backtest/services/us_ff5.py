@@ -19,7 +19,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import polars as pl
 
 from services.config import LOG_LEVEL, PROJECT_ROOT
 
@@ -34,33 +33,20 @@ class FF5Analyzer:
     """Fama-French 五因子回归分析器。"""
 
     def __init__(self):
-        self._factors: pl.DataFrame | None = None
+        self._factors: pd.DataFrame | None = None
 
-    def _load_factors(self) -> pl.DataFrame:
+    def _load_factors(self) -> pd.DataFrame:
         """加载 FF5 日度因子数据（自动下载缓存）。"""
         if self._factors is not None:
             return self._factors
 
-        cache_path = _CACHE_DIR / "ff5_daily.parquet"
-        csv_cache_path = _CACHE_DIR / "ff5_daily.csv"
+        cache_path = _CACHE_DIR / "ff5_daily.csv"
         if cache_path.exists():
             import time
             age_days = (time.time() - cache_path.stat().st_mtime) / 86400
             if age_days < 30:
-                self._factors = pl.read_parquet(cache_path)
-                logger.info(f"FF5 loaded from cache: {self._factors.height} days")
-                return self._factors
-        # Fallback: read legacy CSV cache
-        if csv_cache_path.exists():
-            import time
-            age_days = (time.time() - csv_cache_path.stat().st_mtime) / 86400
-            if age_days < 30:
-                pdf = pd.read_csv(csv_cache_path, index_col=0, parse_dates=True)
-                pdf = pdf.reset_index().rename(columns={"index": "date"})
-                self._factors = pl.from_pandas(pdf).with_columns(
-                    pl.col("date").cast(pl.Date)
-                )
-                logger.info(f"FF5 loaded from CSV cache: {self._factors.height} days")
+                self._factors = pd.read_csv(cache_path, index_col=0, parse_dates=True)
+                logger.info(f"FF5 loaded from cache: {len(self._factors)} days")
                 return self._factors
 
         # Download from Kenneth French library
@@ -72,7 +58,7 @@ class FF5Analyzer:
             data = resp.read()
         except Exception as e:
             logger.error(f"FF5 download failed: {e}")
-            return pl.DataFrame()
+            return pd.DataFrame()
 
         # Extract CSV from zip
         try:
@@ -82,7 +68,7 @@ class FF5Analyzer:
                     raw = f.read().decode("utf-8")
         except Exception as e:
             logger.error(f"FF5 extract failed: {e}")
-            return pl.DataFrame()
+            return pd.DataFrame()
 
         # Parse — skip header rows, find the data start
         lines = raw.strip().split("\n")
@@ -95,48 +81,44 @@ class FF5Analyzer:
 
         if data_start is None:
             logger.error("FF5: cannot find data start in CSV")
-            return pl.DataFrame()
+            return pd.DataFrame()
 
         # Read only data rows
-        dates, mkt_rfs, smbs, hmls, rmws, cmas, rfs = [], [], [], [], [], [], []
+        data_rows = []
         for line in lines[data_start:]:
             parts = [p.strip() for p in line.split(",")]
             if len(parts) < 7 or not parts[0].isdigit():
                 logger.debug("_load_factors: 遇到非数据行，停止解析")
                 break
             try:
-                from datetime import datetime as _dt
-                dt = _dt.strptime(parts[0], "%Y%m%d").date()
-                dates.append(dt)
-                mkt_rfs.append(float(parts[1]) / 100)
-                smbs.append(float(parts[2]) / 100)
-                hmls.append(float(parts[3]) / 100)
-                rmws.append(float(parts[4]) / 100)
-                cmas.append(float(parts[5]) / 100)
-                rfs.append(float(parts[6]) / 100)
+                date = pd.to_datetime(parts[0], format="%Y%m%d")
+                mkt_rf = float(parts[1]) / 100  # Convert from percentage
+                smb = float(parts[2]) / 100
+                hml = float(parts[3]) / 100
+                rmw = float(parts[4]) / 100
+                cma = float(parts[5]) / 100
+                rf = float(parts[6]) / 100
+                data_rows.append({
+                    "date": date, "Mkt-RF": mkt_rf, "SMB": smb,
+                    "HML": hml, "RMW": rmw, "CMA": cma, "RF": rf,
+                })
             except (ValueError, IndexError):
-                logger.debug("_load_factors: 解析 FF5 数据行失败，跳过")
+                logger.debug(f"_load_factors: 解析 FF5 数据行失败，跳过")
                 continue
 
-        if not dates:
+        if not data_rows:
             logger.error("FF5: no valid data rows")
-            return pl.DataFrame()
+            return pd.DataFrame()
 
-        df = pl.DataFrame({
-            "date": dates,
-            "Mkt-RF": mkt_rfs, "SMB": smbs, "HML": hmls,
-            "RMW": rmws, "CMA": cmas, "RF": rfs,
-        }).sort("date")
+        df = pd.DataFrame(data_rows)
+        df = df.set_index("date").sort_index()
 
-        # Cache as parquet
+        # Cache
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        df.write_parquet(cache_path)
+        df.to_csv(cache_path)
 
         self._factors = df
-        logger.info(
-            f"FF5 factors loaded: {df.height} days "
-            f"({df['date'][0]} ~ {df['date'][-1]})"
-        )
+        logger.info(f"FF5 factors loaded: {len(df)} days ({df.index[0].date()} ~ {df.index[-1].date()})")
         return df
 
     def analyze(
@@ -148,7 +130,7 @@ class FF5Analyzer:
         对策略 NAV 做 FF5 回归。
 
         Args:
-            strategy_nav: 策略日净值 Series（DatetimeIndex）— 来自 engine 层。
+            strategy_nav: 策略日净值 Series（DatetimeIndex）。
             freq: "full" 做全期一次回归，"quarterly" 每季度分别回归。
 
         Returns:
@@ -157,31 +139,26 @@ class FF5Analyzer:
                 - quarterly: [{period, alpha, t_stat, betas, r_squared}, ...]
         """
         ff5 = self._load_factors()
-        if ff5.is_empty():
+        if ff5.empty:
             logger.warning("analyze: FF5 因子数据为空，无法执行回归")
             return {"error": "FF5 data not available"}
 
-        # 策略日收益率 — pd.Series → polars
+        # 策略日收益率
         nav = strategy_nav.copy()
         nav.index = pd.to_datetime(nav.index)
         strat_ret = nav.pct_change().dropna()
-
-        strat_df = pl.DataFrame({
-            "date": [d.date() if hasattr(d, 'date') else d for d in strat_ret.index],
-            "strategy": strat_ret.values,
-        }).with_columns(pl.col("date").cast(pl.Date))
+        strat_ret.name = "strategy"
 
         # 合并
-        merged = strat_df.join(ff5, on="date", how="inner").drop_nulls()
+        merged = pd.DataFrame(strat_ret).join(ff5, how="inner")
+        merged = merged.dropna()
 
-        if merged.height < 30:
-            logger.warning(f"analyze: 重叠数据不足({merged.height}/30)，无法执行 FF5 回归")
-            return {"error": f"Insufficient overlapping data: {merged.height} days"}
+        if len(merged) < 30:
+            logger.warning(f"analyze: 重叠数据不足({len(merged)}/30)，无法执行 FF5 回归")
+            return {"error": f"Insufficient overlapping data: {len(merged)} days"}
 
         # 超额收益 = 策略收益 - 无风险利率
-        merged = merged.with_columns(
-            (pl.col("strategy") - pl.col("RF")).alias("excess_ret")
-        )
+        merged["excess_ret"] = merged["strategy"] - merged["RF"]
 
         result = {}
 
@@ -195,33 +172,25 @@ class FF5Analyzer:
 
         # 季度回归
         if freq == "quarterly":
-            # Add quarter label: YYYY-Q1/Q2/Q3/Q4
-            merged = merged.with_columns(
-                (
-                    pl.col("date").dt.year().cast(pl.Utf8)
-                    + "Q"
-                    + pl.col("date").dt.quarter().cast(pl.Utf8)
-                ).alias("quarter")
-            )
+            merged["quarter"] = merged.index.to_period("Q")
             quarterly = []
-            for q_label in merged.get_column("quarter").unique().sort().to_list():
-                grp = merged.filter(pl.col("quarter") == q_label)
-                if grp.height < 15:
-                    logger.debug(f"analyze: 季度 {q_label} 数据不足({grp.height}/15)，跳过")
+            for q, grp in merged.groupby("quarter"):
+                if len(grp) < 15:
+                    logger.debug(f"analyze: 季度 {q} 数据不足({len(grp)}/15)，跳过")
                     continue
                 qreg = self._run_regression(grp)
-                qreg["period"] = q_label
+                qreg["period"] = str(q)
                 quarterly.append(qreg)
             result["quarterly"] = quarterly
 
         return result
 
     @staticmethod
-    def _run_regression(df: pl.DataFrame) -> dict:
+    def _run_regression(df: pd.DataFrame) -> dict:
         """OLS 回归: excess_ret ~ Mkt-RF + SMB + HML + RMW + CMA"""
-        y = df.get_column("excess_ret").to_numpy()
+        y = df["excess_ret"].values
         factor_names = ["Mkt-RF", "SMB", "HML", "RMW", "CMA"]
-        X = df.select(factor_names).to_numpy()
+        X = df[factor_names].values
         # Add intercept
         X = np.column_stack([np.ones(len(X)), X])
 

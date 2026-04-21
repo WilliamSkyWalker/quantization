@@ -37,37 +37,17 @@ class Command(BaseCommand):
 
         elapsed = time.time() - t0
 
-        is_empty = (result is None or
-                    (hasattr(result, 'is_empty') and result.is_empty()) or
-                    (hasattr(result, 'empty') and result.empty))
-        if is_empty:
+        if result is None or result.empty:
             console.print(f"[yellow]无选股结果 ({elapsed:.1f}s)[/yellow]")
             return
 
-        if hasattr(result, 'filter'):
-            # polars
-            import polars as pl
-            row = result.filter(pl.col(id_col) == stock)
-            n_result = result.height
-            if row.is_empty():
-                top5 = result.get_column(id_col).head(5).to_list()
-                console.print(f"[yellow]{stock} 未入选 Top-N ({elapsed:.1f}s)[/yellow]")
-                console.print(f"  入选 {n_result} 只: {', '.join(top5)}...")
-            else:
-                r = row.row(0, named=True)
-                rank = int((result.get_column("score") >= r["score"]).sum())
-                console.print(f"\n[green]{stock} 入选! ({elapsed:.1f}s)[/green]")
-                console.print(f"  得分: {r['score']:.4f} (排名 {rank}/{n_result})")
-                console.print(f"  权重: {r['weight']*100:.2f}%")
+        row = result[result[id_col] == stock]
+        if row.empty:
+            console.print(f"[yellow]{stock} 未入选 Top-N ({elapsed:.1f}s)[/yellow]")
+            console.print(f"  入选 {len(result)} 只: {', '.join(result[id_col].head(5).tolist())}...")
         else:
-            # pandas
-            row = result[result[id_col] == stock]
-            if row.empty:
-                console.print(f"[yellow]{stock} 未入选 Top-N ({elapsed:.1f}s)[/yellow]")
-                console.print(f"  入选 {len(result)} 只: {', '.join(result[id_col].head(5).tolist())}...")
-            else:
-                r = row.iloc[0]
-                rank = (result["score"] >= r["score"]).sum()
-                console.print(f"\n[green]{stock} 入选! ({elapsed:.1f}s)[/green]")
-                console.print(f"  得分: {r['score']:.4f} (排名 {rank}/{len(result)})")
-                console.print(f"  权重: {r['weight']*100:.2f}%")
+            r = row.iloc[0]
+            rank = (result["score"] >= r["score"]).sum()
+            console.print(f"\n[green]{stock} 入选! ({elapsed:.1f}s)[/green]")
+            console.print(f"  得分: {r['score']:.4f} (排名 {rank}/{len(result)})")
+            console.print(f"  权重: {r['weight']*100:.2f}%")

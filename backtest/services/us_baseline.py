@@ -17,7 +17,7 @@ import time
 from typing import Optional
 
 import numpy as np
-import polars as pl
+import pandas as pd
 
 from services.config import LOG_LEVEL
 from stocks.services.factors.us_base import USFactorBase
@@ -63,20 +63,17 @@ class USBaselineStrategy:
         end_date: str,
         cancel_check: Optional[callable] = None,
         max_workers: int = 0,
-    ) -> dict[str, pl.DataFrame]:
+    ) -> dict[str, pd.DataFrame]:
         """Generate monthly L/S signals using full factor scoring."""
-        import datetime as _dt
         t0 = time.time()
 
         # Preload data (delegates to USMultiFactorStrategy's machinery)
         existing_bulk = USFactorBase._static_cache.get("_bulk_daily")
         if existing_bulk is not None and not existing_bulk.empty:
-            start_dt = _dt.datetime.strptime(start_date, "%Y-%m-%d")
-            price_start = start_dt - _dt.timedelta(days=400)
+            price_start = pd.to_datetime(start_date) - pd.Timedelta(days=400)
             cached_min = existing_bulk["trade_date"].min()
             cached_max = existing_bulk["trade_date"].max()
-            end_dt = _dt.datetime.strptime(end_date, "%Y-%m-%d")
-            if cached_min <= price_start and cached_max >= end_dt:
+            if cached_min <= price_start and cached_max >= pd.to_datetime(end_date):
                 logger.info("Using cached data for Alpha v2")
                 USFactorBase._date_cache.clear()
                 if USFactorBase._static_cache.get("_rolling_indexed") is None:
@@ -94,10 +91,12 @@ class USBaselineStrategy:
         rebalance_dates = self._get_month_end_dates(start_date, end_date)
 
         # Look back for prior month-end
-        start_dt = _dt.datetime.strptime(start_date, "%Y-%m-%d")
-        # Approximate 2 months back
-        prior_start = (start_dt - _dt.timedelta(days=62)).strftime("%Y-%m-%d")
-        prior_end = (start_dt - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+        prior_start = (
+            pd.to_datetime(start_date) - pd.DateOffset(months=2)
+        ).strftime("%Y-%m-%d")
+        prior_end = (
+            pd.to_datetime(start_date) - pd.Timedelta(days=1)
+        ).strftime("%Y-%m-%d")
         prior_dates = self._get_month_end_dates(prior_start, prior_end)
         if prior_dates:
             rebalance_dates = [prior_dates[-1]] + rebalance_dates
@@ -127,19 +126,19 @@ class USBaselineStrategy:
             try:
                 result = self._select_for_date(dt)
                 signals[dt] = result
-                n_long = (result.get_column("weight") > 0).sum() if not result.is_empty() else 0
-                n_short = (result.get_column("weight") < 0).sum() if not result.is_empty() else 0
+                n_long = (result["weight"] > 0).sum() if not result.empty else 0
+                n_short = (result["weight"] < 0).sum() if not result.empty else 0
                 logger.info(f"[{i+1}/{n_dates}] {dt}: {n_long}L / {n_short}S")
             except Exception as e:
                 logger.warning(f"{dt} Alpha v2 selection failed: {e}")
-                signals[dt] = pl.DataFrame(schema={"ticker": pl.Utf8, "weight": pl.Float64})
+                signals[dt] = pd.DataFrame(columns=["ticker", "weight"])
 
         USFactorBase.clear_date_cache()
         elapsed = time.time() - t0
         logger.info(f"Alpha v2 signals done: {len(signals)} periods ({elapsed:.1f}s)")
         return signals
 
-    def _select_for_date(self, date: str) -> pl.DataFrame:
+    def _select_for_date(self, date: str) -> pd.DataFrame:
         """
         Use USMultiFactorStrategy's full scoring + selection (top-N + small short).
         Delegates entirely to v1's select_stocks which already handles
@@ -172,14 +171,7 @@ class USBaselineStrategy:
         if not dates:
             logger.debug(f"_get_month_end_dates: {start_date}~{end_date} 无交易日数据，返回空列表")
             return []
-        df = pl.DataFrame({
-            "trade_date": [d if hasattr(d, 'year') else d for d in dates],
-        }).with_columns(pl.col("trade_date").cast(pl.Date))
-        # Extract year-month, group and take max date per month
-        df = df.with_columns(
-            pl.col("trade_date").dt.strftime("%Y-%m").alias("ym")
-        )
-        month_ends = df.group_by("ym").agg(
-            pl.col("trade_date").max().alias("trade_date")
-        ).sort("trade_date")
-        return month_ends.get_column("trade_date").cast(pl.Utf8).to_list()
+        df = pd.DataFrame({"trade_date": pd.to_datetime(dates)})
+        df["ym"] = df["trade_date"].dt.to_period("M")
+        month_ends = df.groupby("ym")["trade_date"].max()
+        return sorted(month_ends.dt.strftime("%Y-%m-%d").tolist())

@@ -136,9 +136,7 @@ class Command(BaseCommand):
             console.print(yearly)
 
         trades = result.get("trades")
-        if trades is not None and hasattr(trades, 'height') and trades.height > 0:
-            console.print(f"  总交易笔数: {trades.height}")
-        elif trades is not None and hasattr(trades, 'empty') and not trades.empty:
+        if trades is not None and not trades.empty:
             console.print(f"  总交易笔数: {len(trades)}")
 
         # 存库

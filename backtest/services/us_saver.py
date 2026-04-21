@@ -66,37 +66,8 @@ def _serialize_nav(nav: pd.Series) -> list[dict]:
 
 
 def _serialize_trades(trades, market: str) -> list[dict]:
-    """交易记录 DataFrame → JSON list (supports polars and pandas)"""
-    if trades is None:
-        logger.debug("_serialize_trades: 交易记录为空")
-        return []
-
-    # polars DataFrame
-    try:
-        import polars as pl
-        if isinstance(trades, pl.DataFrame):
-            if trades.is_empty():
-                return []
-            ticker_col = "ticker" if market == "us" else "ts_code"
-            data = []
-            for row in trades.iter_rows(named=True):
-                entry = {
-                    "date": str(row.get("date", "")),
-                    "ticker": row.get(ticker_col, ""),
-                    "direction": row.get("direction", ""),
-                    "price": round(float(row.get("price", 0) or 0), 2),
-                }
-                vol = row.get("volume", 0)
-                entry["volume"] = int(vol) if vol is not None else 0
-                amt = row.get("amount", 0)
-                entry["amount"] = round(float(amt or 0), 2) if amt is not None else 0
-                data.append(entry)
-            return data
-    except ImportError:
-        pass
-
-    # pandas DataFrame fallback
-    if isinstance(trades, pd.DataFrame) and trades.empty:
+    """交易记录 DataFrame → JSON list"""
+    if trades is None or (isinstance(trades, pd.DataFrame) and trades.empty):
         logger.debug("_serialize_trades: 交易记录为空")
         return []
 

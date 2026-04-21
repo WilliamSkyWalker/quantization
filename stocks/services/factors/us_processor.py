@@ -1,5 +1,5 @@
 """
-美股因子处理流水线（polars 版本）
+美股因子处理流水线
 
 实现截面因子的标准化处理流程：
     1. 去极值（MAD 法）
@@ -13,14 +13,14 @@
 import logging
 
 import numpy as np
-import polars as pl
+import pandas as pd
 
 from services.config import LOG_LEVEL
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
 
-_industry_dummies_cache: dict[tuple, np.ndarray] = {}
+_industry_dummies_cache: dict[tuple, pd.DataFrame] = {}
 
 
 def clear_neutralize_cache() -> None:
@@ -31,18 +31,14 @@ def clear_neutralize_cache() -> None:
 # 去极值：MAD 法
 # ============================================================
 
-def winsorize_mad(values: np.ndarray, n: float = 5.0) -> np.ndarray:
-    """MAD 去极值（numpy 数组操作）。"""
-    valid = values[~np.isnan(values)]
-    if len(valid) == 0:
-        return values
-    median = np.median(valid)
-    mad = np.median(np.abs(valid - median))
+def winsorize_mad(series: pd.Series, n: float = 5.0) -> pd.Series:
+    median = series.median()
+    mad = (series - median).abs().median()
     if mad == 0:
-        return values
+        return series
     upper = median + n * 1.4826 * mad
     lower = median - n * 1.4826 * mad
-    return np.clip(values, lower, upper)
+    return series.clip(lower=lower, upper=upper)
 
 
 # ============================================================
@@ -50,14 +46,14 @@ def winsorize_mad(values: np.ndarray, n: float = 5.0) -> np.ndarray:
 # ============================================================
 
 def neutralize(
-    factor_values: np.ndarray,
-    sectors: np.ndarray | None = None,
-    ln_mktcap: np.ndarray | None = None,
+    factor_df: pd.DataFrame,
+    industry_col: str = "sector",
+    mktcap_col: str = "ln_mktcap",
     mode: str = "full",
     nonlinear_size: bool = False,
-) -> np.ndarray:
+) -> pd.Series:
     """
-    行业市值中性化（纯 numpy 操作）。
+    行业市值中性化。
 
     mode:
         "full"      — GICS sector 哑变量 + ln(mktcap) 回归
@@ -65,48 +61,45 @@ def neutralize(
         "none"      — 跳过中性化
     """
     if mode == "none":
-        return factor_values
+        return factor_df["factor_value"]
 
-    valid_mask = ~np.isnan(factor_values)
-    if ln_mktcap is not None:
-        valid_mask &= ~np.isnan(ln_mktcap)
+    required_cols = ["factor_value", mktcap_col]
+    if mode == "full":
+        required_cols.append(industry_col)
 
-    n_valid = valid_mask.sum()
-    if n_valid < 10:
-        logger.warning(f"中性化样本不足({n_valid}只)，跳过中性化")
-        return factor_values
+    df = factor_df.dropna(subset=required_cols).copy()
+    if len(df) < 10:
+        logger.warning(f"中性化样本不足({len(df)}只)，跳过中性化")
+        return factor_df["factor_value"]
 
-    y = factor_values[valid_mask]
+    if mode == "full":
+        idx_key = (tuple(df.index), "dummies")
+        cached = _industry_dummies_cache.get(idx_key)
+        if cached is not None:
+            industry_dummies = cached
+        else:
+            industry_dummies = pd.get_dummies(df[industry_col], prefix="sec", drop_first=True)
+            _industry_dummies_cache[idx_key] = industry_dummies
+        X = pd.concat([industry_dummies, df[[mktcap_col]]], axis=1).astype(float)
+    else:
+        X = df[[mktcap_col]].astype(float).copy()
 
-    # 构建 X 矩阵
-    x_parts = [np.ones((n_valid, 1))]  # intercept
+    if nonlinear_size:
+        X["ln_mktcap_sq"] = X[mktcap_col] ** 2
 
-    if mode == "full" and sectors is not None:
-        valid_sectors = sectors[valid_mask]
-        unique_sectors = np.unique(valid_sectors)
-        if len(unique_sectors) > 1:
-            # one-hot (drop first)
-            for sec in unique_sectors[1:]:
-                x_parts.append((valid_sectors == sec).astype(float).reshape(-1, 1))
-
-    if ln_mktcap is not None:
-        mc = ln_mktcap[valid_mask].reshape(-1, 1)
-        x_parts.append(mc)
-        if nonlinear_size:
-            x_parts.append(mc ** 2)
-
-    X = np.hstack(x_parts)
+    X.insert(0, "const", 1.0)
+    y = df["factor_value"].values
 
     try:
-        XtX_inv = np.linalg.pinv(X.T @ X)
-        beta = XtX_inv @ X.T @ y
-        residuals = y - X @ beta
+        XtX_inv = np.linalg.pinv(X.values.T @ X.values)
+        beta = XtX_inv @ X.values.T @ y
+        residuals = y - X.values @ beta
     except np.linalg.LinAlgError:
         logger.warning("中性化回归求解失败，返回原始因子值")
-        return factor_values
+        return factor_df["factor_value"]
 
-    result = factor_values.copy()
-    result[valid_mask] = residuals
+    result = factor_df["factor_value"].copy()
+    result.loc[df.index] = residuals
     return result
 
 
@@ -114,35 +107,23 @@ def neutralize(
 # 标准化
 # ============================================================
 
-def rank_percentile(values: np.ndarray) -> np.ndarray:
-    """Rank percentile 标准化（numpy）。"""
-    valid = ~np.isnan(values)
-    n = valid.sum()
+def rank_percentile(series: pd.Series) -> pd.Series:
+    n = series.count()
     if n <= 1:
-        result = np.zeros_like(values)
-        result[~valid] = np.nan
-        return result
-    ranks = np.zeros_like(values)
-    ranks[valid] = np.argsort(np.argsort(values[valid])).astype(float) + 1
+        logger.debug(f"rank_percentile: 有效样本数不足({n})，返回零值")
+        return series * 0.0
+    ranks = series.rank(method="average")
     uniform = (ranks - 0.5) / n
-    result = (uniform - 0.5) * 6.0
-    result[~valid] = np.nan
-    return result
+    return (uniform - 0.5) * 6.0
 
 
-def zscore(values: np.ndarray) -> np.ndarray:
-    """Z-Score 标准化（numpy）。"""
-    valid = ~np.isnan(values)
-    vals = values[valid]
-    if len(vals) == 0:
-        return values
-    mean = np.mean(vals)
-    std = np.std(vals, ddof=1)
-    if std == 0 or np.isnan(std):
-        return np.zeros_like(values)
-    result = values.copy()
-    result[valid] = (vals - mean) / std
-    return result
+def zscore(series: pd.Series) -> pd.Series:
+    mean = series.mean()
+    std = series.std()
+    if std == 0 or pd.isna(std):
+        logger.debug("zscore: 标准差为零或NaN，返回零值")
+        return series * 0.0
+    return (series - mean) / std
 
 
 # ============================================================
@@ -150,9 +131,9 @@ def zscore(values: np.ndarray) -> np.ndarray:
 # ============================================================
 
 def process_factor(
-    factor_df: pl.DataFrame,
-    industry_df: pl.DataFrame = None,
-    mktcap_df: pl.DataFrame = None,
+    factor_df: pd.DataFrame,
+    industry_df: pd.DataFrame = None,
+    mktcap_df: pd.DataFrame = None,
     do_winsorize: bool = True,
     do_neutralize: bool = True,
     do_zscore: bool = True,
@@ -160,74 +141,76 @@ def process_factor(
     neutralize_mode: str = "full",
     nonlinear_size: bool = False,
     standardize_mode: str = "zscore",
-) -> pl.DataFrame:
+) -> pd.DataFrame:
     """
     因子处理完整流水线：去极值 → 中性化 → 标准化。
 
     Args:
-        factor_df: pl.DataFrame[ticker, factor_value]
-        industry_df: pl.DataFrame[ticker, sector]（GICS sector）
-        mktcap_df: pl.DataFrame[ticker, market_cap]
+        factor_df: DataFrame[ticker, factor_value]
+        industry_df: DataFrame[ticker, sector]（GICS sector）
+        mktcap_df: DataFrame[ticker, market_cap]
     """
-    df = factor_df.select(["ticker", "factor_value"])
-    values = df["factor_value"].to_numpy().astype(np.float64)
+    df = factor_df[["ticker", "factor_value"]].copy()
 
     # 1. 去极值
     if do_winsorize:
-        values = winsorize_mad(values, n=mad_n)
+        valid_mask = df["factor_value"].notna()
+        df.loc[valid_mask, "factor_value"] = winsorize_mad(
+            df.loc[valid_mask, "factor_value"], n=mad_n
+        )
 
     # 2. 中性化
     actually_neutralized = False
     effective_mode = neutralize_mode if do_neutralize else "none"
-
-    if effective_mode != "none" and mktcap_df is not None and not mktcap_df.is_empty():
-        tickers = df["ticker"].to_list()
-
-        # 获取 ln(mktcap)
-        mc_joined = df.select("ticker").join(
-            mktcap_df.select(["ticker", "market_cap"]), on="ticker", how="left"
+    if effective_mode != "none" and mktcap_df is not None:
+        df = df.merge(
+            mktcap_df[["ticker", "market_cap"]], on="ticker", how="left"
         )
-        mc_vals = mc_joined["market_cap"].cast(pl.Float64, strict=False).to_numpy()
-        mc_vals = np.where((mc_vals is None) | (np.isnan(mc_vals)) | (mc_vals <= 0), 1.0, mc_vals)
-        ln_mc = np.log(mc_vals)
+        df["market_cap"] = pd.to_numeric(df["market_cap"], errors="coerce")
+        df["ln_mktcap"] = np.log(df["market_cap"].fillna(1).clip(lower=1).astype(float))
 
-        # 获取 sector
-        sectors = None
-        if effective_mode == "full" and industry_df is not None and not industry_df.is_empty():
-            sec_joined = df.select("ticker").join(
-                industry_df.select(["ticker", "sector"]), on="ticker", how="left"
+        if effective_mode == "full" and industry_df is not None:
+            df = df.merge(
+                industry_df[["ticker", "sector"]], on="ticker", how="left"
             )
-            sectors = sec_joined["sector"].fill_null("Unknown").to_numpy()
-        elif effective_mode == "full" and (industry_df is None or industry_df.is_empty()):
+        elif effective_mode == "full" and industry_df is None:
             effective_mode = "size_only"
 
-        values = neutralize(values, sectors=sectors, ln_mktcap=ln_mc,
-                            mode=effective_mode, nonlinear_size=nonlinear_size)
+        df["factor_value"] = neutralize(
+            df, industry_col="sector", mode=effective_mode,
+            nonlinear_size=nonlinear_size,
+        )
         actually_neutralized = True
+        df = df[["ticker", "factor_value"]]
 
     # 2.5 二次去极值
     if actually_neutralized and do_winsorize:
-        values = winsorize_mad(values, n=mad_n)
+        valid_mask = df["factor_value"].notna()
+        df.loc[valid_mask, "factor_value"] = winsorize_mad(
+            df.loc[valid_mask, "factor_value"], n=mad_n
+        )
 
     # 3. 标准化
     if do_zscore:
+        valid_mask = df["factor_value"].notna()
         if standardize_mode == "rank":
-            values = rank_percentile(values)
+            df.loc[valid_mask, "factor_value"] = rank_percentile(
+                df.loc[valid_mask, "factor_value"]
+            )
         else:
-            values = zscore(values)
-        values = np.clip(values, -3.0, 3.0)
+            df.loc[valid_mask, "factor_value"] = zscore(
+                df.loc[valid_mask, "factor_value"]
+            )
+        df["factor_value"] = df["factor_value"].clip(lower=-3.0, upper=3.0)
 
-    return pl.DataFrame({
-        "ticker": df["ticker"],
-        "factor_value": values,
-    })
+    return df
 
 
 def process_all_factors(
-    factor_dict: dict[str, pl.DataFrame],
-    industry_df: pl.DataFrame = None,
-    mktcap_df: pl.DataFrame = None,
-) -> dict[str, pl.DataFrame]:
+    factor_dict: dict[str, pd.DataFrame],
+    industry_df: pd.DataFrame = None,
+    mktcap_df: pd.DataFrame = None,
+) -> dict[str, pd.DataFrame]:
     result = {}
     for name, df in factor_dict.items():
         logger.info(f"US 处理因子: {name}")
