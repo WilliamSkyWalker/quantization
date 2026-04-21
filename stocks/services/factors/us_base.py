@@ -420,28 +420,31 @@ class USFactorBase(ABC):
             return key, df
 
         def _load_revenue_segment():
-            cols = ["ticker", "date", "segment", "revenue", "segment_type"]
+            cols = ["ticker", "date", "segment_name", "revenue", "segment_type"]
             seg_start = (pd.to_datetime(start_date) - pd.Timedelta(days=3*365)).strftime("%Y-%m-%d")
             return _load_generic("us_revenue_segment", USRevenueSegment, cols,
                                  seg_start, end_date, "date",
                                  cache_key="_bulk_revenue_segment", order_by=["ticker", "date"])
 
         def _load_dark_pool():
-            cols = ["ticker", "date", "short_volume", "total_volume"]
+            cols = ["ticker", "date", "otc_short", "otc_total", "dpi"]
             return _load_generic("us_dark_pool_volume", USDarkPoolVolume, cols,
                                  analyst_start, end_date, "date",
                                  cache_key="_bulk_dark_pool", order_by=["ticker", "date"])
 
         def _load_esg():
+            # fiscal_year 是整数，不能用日期范围查。直接全量加载。
+            t0 = time.time()
             cols = ["ticker", "fiscal_year", "esg_risk_rating"]
-            return _load_generic("us_esg_rating", USESGRating, cols,
-                                 "2010-01-01", end_date, "fiscal_year",
-                                 cache_key="_bulk_esg")
+            rows = list(USESGRating.objects.values_list(*cols))
+            df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
+            logger.info(f"  _bulk_esg: {len(df)} 行, {time.time()-t0:.1f}s")
+            return "_bulk_esg", df
 
         def _load_lobbying():
-            cols = ["ticker", "year", "amount"]
+            cols = ["ticker", "date", "amount"]
             return _load_generic("us_lobbying", USLobbying, cols,
-                                 "2010-01-01", end_date, "year",
+                                 "2010-01-01", end_date, "date",
                                  cache_key="_bulk_lobbying")
 
         def _load_gov_contract():
@@ -458,10 +461,10 @@ class USFactorBase(ABC):
                                  cache_key="_bulk_congress")
 
         def _load_employee():
-            cols = ["ticker", "date", "employee_count"]
+            cols = ["ticker", "filing_date", "employee_count"]
             return _load_generic("us_employee_count", USEmployeeCount, cols,
-                                 fin_start, end_date, "date",
-                                 cache_key="_bulk_employee", order_by=["ticker", "date"])
+                                 fin_start, end_date, "filing_date",
+                                 cache_key="_bulk_employee", order_by=["ticker", "filing_date"])
 
         def _load_shares_float():
             cols = ["ticker", "free_float", "float_shares", "outstanding_shares"]
