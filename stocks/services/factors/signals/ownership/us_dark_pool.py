@@ -61,17 +61,11 @@ class DarkPoolShort(AlphaSignal):
                 & (bulk["date"] >= start_ts)
                 & (bulk["date"] <= date_ts)
             )
-            df = bulk.loc[mask, ["ticker", "short_volume", "total_volume"]].copy()
+            df = bulk.loc[mask, ["ticker", "dpi"]].copy()
             if df.empty:
                 logger.warning(f"DarkPoolShort({date}): 缓存中无暗池数据")
                 return pd.DataFrame(columns=["ticker", "factor_value"])
-            df["short_volume"] = pd.to_numeric(df["short_volume"], errors="coerce")
-            df["total_volume"] = pd.to_numeric(df["total_volume"], errors="coerce")
-            df["dpi"] = np.where(
-                df["total_volume"] > 0,
-                df["short_volume"] / df["total_volume"],
-                np.nan,
-            )
+            df["dpi"] = pd.to_numeric(df["dpi"], errors="coerce")
             return self._agg_dpi(df, date)
 
         # ---- fallback ORM ----

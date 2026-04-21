@@ -52,7 +52,7 @@ def _fetch_segments(date: str, tickers: list[str], seg_type: str) -> pd.DataFram
             & (bulk["segment_type"] == seg_type)
             & (bulk["revenue"].notna())
         )
-        df = bulk[mask][["ticker", "date", "segment", "revenue"]].copy()
+        df = bulk[mask][["ticker", "date", "segment_name", "revenue"]].copy()
         if df.empty:
             return df
         # 每只股票取最新 date 的所有 segments
@@ -74,7 +74,7 @@ def _fetch_segments(date: str, tickers: list[str], seg_type: str) -> pd.DataFram
         revenue__isnull=False,
     ).values_list("ticker", "date", "segment_name", "revenue")
 
-    df = pd.DataFrame(list(qs), columns=["ticker", "date", "segment", "revenue"])
+    df = pd.DataFrame(list(qs), columns=["ticker", "date", "segment_name", "revenue"])
     if df.empty:
         return df
 
@@ -245,7 +245,7 @@ class SegmentGrowthDisp(AlphaSignal):
                 & (bulk["segment_type"] == "product")
                 & (bulk["revenue"].notna())
             )
-            df = bulk[mask][["ticker", "date", "segment", "revenue"]].copy()
+            df = bulk[mask][["ticker", "date", "segment_name", "revenue"]].copy()
         else:
             # ---- ORM fallback ----
             logger.debug("SegmentGrowthDisp: 缓存未命中，回退 ORM 查询")
@@ -259,7 +259,7 @@ class SegmentGrowthDisp(AlphaSignal):
                 revenue__isnull=False,
             ).values_list("ticker", "date", "segment_name", "revenue")
 
-            df = pd.DataFrame(list(qs), columns=["ticker", "date", "segment", "revenue"])
+            df = pd.DataFrame(list(qs), columns=["ticker", "date", "segment_name", "revenue"])
             if not df.empty:
                 df["date"] = pd.to_datetime(df["date"])
                 df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce")
@@ -286,8 +286,8 @@ class SegmentGrowthDisp(AlphaSignal):
             if yoy_date is None:
                 continue
 
-            now_segs = grp[grp["date"] == now_date].set_index("segment")["revenue"]
-            yoy_segs = grp[grp["date"] == yoy_date].set_index("segment")["revenue"]
+            now_segs = grp[grp["date"] == now_date].set_index("segment_name")["revenue"]
+            yoy_segs = grp[grp["date"] == yoy_date].set_index("segment_name")["revenue"]
 
             # 只取两期都有的 segment
             common = now_segs.index.intersection(yoy_segs.index)

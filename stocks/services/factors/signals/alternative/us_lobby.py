@@ -59,8 +59,8 @@ class LobbyIntensity(AlphaSignal):
         if cache is not None and not cache.empty:
             mask = (
                 cache["ticker"].isin(tickers)
-                & (cache["year"] >= start_ts)
-                & (cache["year"] <= date_ts)
+                & (cache["date"] >= start_ts)
+                & (cache["date"] <= date_ts)
                 & cache["amount"].notna()
                 & (cache["amount"] > 0)
             )
