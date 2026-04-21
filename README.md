@@ -241,8 +241,14 @@ python3 cli.py polymarket history --min-volume 1000000      # Polymarket 历史
 | 全项目日志覆盖 | 106 个 Python 文件所有 return/continue/break/except 分支加 logger | ✅ |
 | P0 行业内验证 | EPS_REVISION 行业内 ICIR=0.43，确认截面选股 alpha 存在 | ✅ |
 | P0.5 MVO 优化器 | Ledoit-Wolf 风险模型 + cvxpy/OSQP MVO 替换 Top-N + Softmax | ✅ |
+| 性能优化 (2026-04-21) | 并行预加载 + parquet 缓存 + multiprocessing spawn + 因子向量化 | ✅ |
+| 因子扩展 (2026-04-21) | 81 因子（59 AlphaSignal + 22 legacy）+ 10 张新表预加载 + 20 因子缓存改造 | ✅ |
+| 因子分析框架 | 逐年 IC/ICIR + Fama-MacBeth + 因子衰减 + 慢因子 profile | ✅ |
+| PRICE_TARGET_RATIO v2 | 前瞻偏差修复：<2021 Forward EP / ≥2021 per-analyst PT detail | ✅ |
+| 滚动 IC v2 | 连续权重（EMA + ICIR 缩放 + 置信度）替代二值 +1/-1 | ✅ |
+| CLI 统一 | cli.py 删除，全部迁移到 Django management commands | ✅ |
 | P1 空头 v5 | 独立因子模型 + Regime 渐进 + 融券约束 + 止损，待回测 | 🔄 |
-| 待办 | P0 因子优化 / P2 噪音清理 / P3 权重分级 / P4 鲁棒性 / P5 实盘 | 📋 |
+| 待办 | 回测验证 / 因子权重分级 / 回测鲁棒性 / 实盘 | 📋 |
 
 **当前待办（按优先级）：**
 
@@ -252,28 +258,31 @@ python3 cli.py polymarket history --min-volume 1000000      # Polymarket 历史
 - 约束：净敞口 0.6 / 总杠杆 ≤ 1.0 / 单股 [-5%, +15%] / 行业 gross ≤ 25%
 - `US_USE_OPTIMIZER=0` 一键回退 Top-N + Softmax
 
-**P0 — 因子优化（与 P0 架构并行）：**
-1. EPS_REVISION v2 四维复合（方向×幅度×广度×加速度）
-2. ACCRUALS v2 拆分、BP v2 R&D 调整、REV_5D v2 条件反转、ROE_TTM v2 趋势
+**因子分析结果（2026-04-21，79 因子 × 168 月）：**
 
-**P1 — 因子全面补强（17 大类，~70 个新因子）：**
-- T1（现有 FMP 数据可做）：QMJ 完整化（Piotroski/Beneish/Altman）+ Value 进阶（Asset Growth/NOA/Composite Issuance/EV 系列）+ Momentum 进阶（Residual Mom/52W High/SUE/PEAD）+ 防御（BAB/MAX）+ 流动性（Amihud）+ 分析师进阶 + 空头侧补强（Short Interest/融券费率/HF Crowding）
-- T2（需补数据源）：期权（IV Skew/Put-Call/RNS/VRP）+ 微结构（RV/OFI/Kyle's λ）+ NLP（Earnings Call Tone/10-K Sentiment/FinBERT）+ 另类（Google Trends/Patent/Job Postings）+ 宏观增强
-- T3（探索）：ESG/治理 + Crowding + ML 生成因子（Autoencoder/SHAP/BERT/CNN）
+| 级别 | ICIR 阈值 | 数量 | 代表因子 |
+|------|----------|------|---------|
+| T1 强信号 | ≥ 0.3 | 9 | FREE_FLOAT_PCT(+0.46), TURN_20D(+0.45), PIOTROSKI_F(+0.40), SUE_PEAD(+0.38), EV_TO_FCF(+0.37) |
+| T2 有信号 | 0.15-0.3 | 21 | ESG_RISK, MOM_12M, DIV_YIELD, PROFIT_STB, TSMOM, INDUSTRY_MOM 等 |
+| T3 弱信号 | 0.05-0.15 | 20 | PRICE_52W_HIGH, GROSS_MARGIN, OHLSON_O 等 |
+| 方向翻转 | <0.05 但单年 >0.5 | 12 | EPS_REVISION, BP, MOM_1M, VOL_20D, ALTMAN_Z, BENEISH_M（滚动 IC 处理） |
+| 真噪音 | <0.05 且无信号 | 1 | GEO_CONCENTRATION |
 
-**P1 — 空头 v5**：独立因子模型 + Regime 渐进 + 融券约束 + 15% 止损（待回测）
+**当前待办（按优先级）：**
 
-**P2 — 噪音清理**：移除 IV_SKEW/PUT_CALL_RATIO/NEWS_SENTIMENT/POLYMARKET_SENT
+**P0 — 回测验证（滚动 IC v2 + MVO + 81 因子）：**
+- 跑 2012-2025 完整回测，对比 v3 基线
+- 验证滚动 IC v2 连续权重的效果
 
-**P3 — 权重分级**：ICIR>0.3→2.0, 0.15-0.3→1.0, <0.15→0.5
+**P1 — 因子权重分级**：基于 ICIR 分析结果，T1 因子权重 2.0，T2 因子 1.0，T3 因子 0.5
 
-**P3 — 方法论强化**：Fama-MacBeth 截面回归 + 多重检验校正（T≥3.0）+ Gram-Schmidt 正交化 + Barra-style 风格分解 + Regime-dependent 因子轮动（HMM）
+**P2 — 回测鲁棒性**：换手率控制 + 滑点敏感性 + Regime 参数扰动
 
-**P4 — 回测鲁棒性**：换手率控制（MVO 自动解决）+ 滑点敏感性 + Regime 参数扰动
+**P3 — 数据修复**：INSIDER_NET_BUY 数据缺失 / INST_OWNERSHIP_DELTA 覆盖不足
 
-**P5 — ML Blend 修复**：降 blend 比例 + 增正则化 + 延长窗口（当前拖累 α 7.6%，已关闭）
+**P4 — 空头 v5**：独立因子模型 + Regime 渐进 + 融券约束 + 15% 止损
 
-**P6 — 工程与实盘**：增量采集自动化 + Alpaca 模拟盘已接入 + 实盘验证 3-6 月
+**P5 — 工程与实盘**：增量采集自动化 + Alpaca 模拟盘已接入 + 实盘验证 3-6 月
 
 **P7 — 长期架构升级**：
 - PCA 统计风险因子（Barra 开源替代，前 20-30 主成分作风格因子）
