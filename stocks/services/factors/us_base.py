@@ -17,6 +17,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+import polars as pl
 
 from services.config import LOG_LEVEL
 from stocks.models import (
@@ -94,11 +95,11 @@ class USFactorBase(ABC):
     def _load_or_query(cls, table: str, model, cols: list[str],
                        start: str, end: str, date_field: str,
                        order_by: list[str] | None = None,
-                       extra_filters: dict | None = None) -> pd.DataFrame:
+                       extra_filters: dict | None = None) -> pl.DataFrame:
         """
         先找可用 parquet 缓存（范围包含即命中），没有则查 Django ORM 后存缓存。
         DB 冷查询时，若日期跨度 >= _SHARD_THRESHOLD_YEARS 年，按年分片并行查询。
-        所有表都会缓存到 parquet，后续直接读文件。
+        返回 polars DataFrame。
         """
         import time
         from services.config import PROJECT_ROOT
@@ -106,11 +107,19 @@ class USFactorBase(ABC):
         hit = cls._find_cache(table, start, end)
         if hit:
             t0 = time.time()
-            df = pd.read_parquet(hit)
+            df = pl.read_parquet(hit)
             if date_field in df.columns:
-                df[date_field] = pd.to_datetime(df[date_field])
-                df = df[(df[date_field] >= start) & (df[date_field] <= end)]
-            logger.info(f"US 预加载 {table}: {len(df)} 行 (parquet 缓存 {hit.name}, {time.time()-t0:.1f}s)")
+                # polars 日期过滤
+                dt_col = df[date_field]
+                if dt_col.dtype == pl.Utf8:
+                    df = df.with_columns(pl.col(date_field).str.to_date().alias(date_field))
+                elif dt_col.dtype == pl.Datetime:
+                    df = df.with_columns(pl.col(date_field).cast(pl.Date))
+                df = df.filter(
+                    (pl.col(date_field) >= pl.lit(start).str.to_date())
+                    & (pl.col(date_field) <= pl.lit(end).str.to_date())
+                )
+            logger.info(f"US 预加载 {table}: {df.height} 行 (parquet 缓存 {hit.name}, {time.time()-t0:.1f}s)")
             return df
 
         t0 = time.time()
@@ -123,20 +132,20 @@ class USFactorBase(ABC):
         else:
             df = cls._query_single(model, cols, start, end, date_field, order_by, extra_filters)
 
-        logger.info(f"US 预加载 {table}: {len(df)} 行 (DB 查询, {time.time()-t0:.1f}s)")
+        logger.info(f"US 预加载 {table}: {df.height} 行 (DB 查询, {time.time()-t0:.1f}s)")
 
-        if not df.empty:
+        if df.height > 0:
             cache_dir = PROJECT_ROOT / "cache"
             cache_dir.mkdir(exist_ok=True)
             path = cache_dir / f"{table}_{start}_{end}.parquet"
-            df.to_parquet(path, index=False)
+            df.write_parquet(path)
             logger.info(f"  → 已缓存到 {path.name}")
         return df
 
     @classmethod
     def _query_single(cls, model, cols, start, end, date_field, order_by,
-                      extra_filters=None):
-        """单次 ORM 查询。"""
+                      extra_filters=None) -> pl.DataFrame:
+        """单次 ORM 查询，返回 polars DataFrame。"""
         filters = {
             f"{date_field}__gte": start,
             f"{date_field}__lte": end,
@@ -146,12 +155,15 @@ class USFactorBase(ABC):
         qs = model.objects.filter(**filters)
         if order_by:
             qs = qs.order_by(*order_by)
-        return pd.DataFrame(qs.values_list(*cols), columns=cols)
+        rows = list(qs.values_list(*cols))
+        if not rows:
+            return pl.DataFrame(schema={c: pl.Utf8 for c in cols})
+        return pl.DataFrame(rows, schema=cols, orient="row")
 
     @classmethod
     def _query_sharded(cls, model, cols, start, end, date_field, order_by,
-                       extra_filters=None):
-        """按年分片，ThreadPoolExecutor 并发查询，pd.concat 合并。"""
+                       extra_filters=None) -> pl.DataFrame:
+        """按年分片，ThreadPoolExecutor 并发查询，pl.concat 合并。"""
         from django.db import connections
 
         start_ts = pd.to_datetime(start)
@@ -174,7 +186,10 @@ class USFactorBase(ABC):
             qs = model.objects.filter(**filters)
             if order_by:
                 qs = qs.order_by(*order_by)
-            return pd.DataFrame(qs.values_list(*cols), columns=cols)
+            rows = list(qs.values_list(*cols))
+            if not rows:
+                return pl.DataFrame(schema={c: pl.Utf8 for c in cols})
+            return pl.DataFrame(rows, schema=cols, orient="row")
 
         connections.close_all()
 
@@ -187,7 +202,7 @@ class USFactorBase(ABC):
                 shard_range = futures[future]
                 try:
                     part = future.result()
-                    if not part.empty:
+                    if part.height > 0:
                         parts.append(part)
                 except Exception as exc:
                     logger.warning(f"分片查询 {shard_range} 失败: {exc}")
@@ -195,16 +210,15 @@ class USFactorBase(ABC):
         connections.close_all()
 
         if not parts:
-            return pd.DataFrame(columns=cols)
+            return pl.DataFrame(schema={c: pl.Utf8 for c in cols})
 
-        df = pd.concat(parts, ignore_index=True)
+        df = pl.concat(parts)
         if order_by:
             sort_cols = [c.lstrip("-") for c in order_by]
-            ascending = [not c.startswith("-") for c in order_by]
-            valid_sort = [c for c in sort_cols if c in df.columns]
-            if valid_sort:
-                valid_asc = ascending[:len(valid_sort)]
-                df = df.sort_values(valid_sort, ascending=valid_asc).reset_index(drop=True)
+            descending = [c.startswith("-") for c in order_by]
+            valid = [(c, d) for c, d in zip(sort_cols, descending) if c in df.columns]
+            if valid:
+                df = df.sort([v[0] for v in valid], descending=[v[1] for v in valid])
         return df
 
     @classmethod
@@ -246,26 +260,37 @@ class USFactorBase(ABC):
                 "us_financial_data", USFinancialData, fin_cols,
                 fin_start, end_date, "filing_date",
             )
-            if not df.empty:
-                df["filing_date"] = pd.to_datetime(df["filing_date"])
-                df["date"] = pd.to_datetime(df["date"])
-                _FILING_LAG_BUFFER = pd.Timedelta(days=45)
-                bad_mask = df["filing_date"] <= df["date"]
-                n_fixed = bad_mask.sum()
+            if df.height > 0:
+                # 日期转换
+                df = df.with_columns([
+                    pl.col("filing_date").cast(pl.Date, strict=False),
+                    pl.col("date").cast(pl.Date, strict=False),
+                ])
+                # filing_date 修正
+                bad = df.filter(pl.col("filing_date") <= pl.col("date"))
+                n_fixed = bad.height
                 if n_fixed > 0:
-                    df.loc[bad_mask, "filing_date"] = df.loc[bad_mask, "date"] + _FILING_LAG_BUFFER
+                    df = df.with_columns(
+                        pl.when(pl.col("filing_date") <= pl.col("date"))
+                        .then(pl.col("date").dt.offset_by("45d"))
+                        .otherwise(pl.col("filing_date"))
+                        .alias("filing_date")
+                    )
                     logger.info(f"Filing date 修正: {n_fixed} 条")
-                for col in ["revenue", "gross_profit", "operating_income", "net_income",
-                            "total_stockholders_equity", "weighted_average_shs_out"]:
+                # 数值转换
+                num_cols = ["revenue", "gross_profit", "operating_income", "net_income",
+                            "total_stockholders_equity", "weighted_average_shs_out"]
+                for col in num_cols:
                     if col in df.columns:
-                        df[col] = pd.to_numeric(df[col], errors="coerce")
-                rev = df["revenue"].replace(0, np.nan)
-                df["gross_margin"] = df["gross_profit"] / rev
-                df["operating_margin"] = df["operating_income"] / rev
-                equity = df["total_stockholders_equity"].replace(0, np.nan)
-                df["roe"] = df["net_income"] / equity
-                df["weighted_avg_shares"] = df["weighted_average_shs_out"]
-            logger.info(f"  _bulk_financial: {len(df)} 行, {time.time()-t0:.1f}s")
+                        df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False))
+                # 衍生列
+                df = df.with_columns([
+                    (pl.col("gross_profit") / pl.when(pl.col("revenue") == 0).then(None).otherwise(pl.col("revenue"))).alias("gross_margin"),
+                    (pl.col("operating_income") / pl.when(pl.col("revenue") == 0).then(None).otherwise(pl.col("revenue"))).alias("operating_margin"),
+                    (pl.col("net_income") / pl.when(pl.col("total_stockholders_equity") == 0).then(None).otherwise(pl.col("total_stockholders_equity"))).alias("roe"),
+                    pl.col("weighted_average_shs_out").alias("weighted_avg_shares"),
+                ])
+            logger.info(f"  _bulk_financial: {df.height} 行, {time.time()-t0:.1f}s")
             return "_bulk_financial", df
 
         def _load_daily_price():
@@ -279,12 +304,19 @@ class USFactorBase(ABC):
                 price_start, end_date, "trade_date",
                 order_by=["ticker", "trade_date"],
             )
-            if not df.empty:
-                df["trade_date"] = pd.to_datetime(df["trade_date"])
-                df["adj_close"] = pd.to_numeric(df["adj_close"], errors="coerce")
-                df["close"] = pd.to_numeric(df["close"], errors="coerce")
-                df["adj_close"] = df["adj_close"].fillna(df["close"])
-            logger.info(f"  _bulk_daily: {len(df)} 行, {time.time()-t0:.1f}s")
+            if df.height > 0:
+                df = df.with_columns([
+                    pl.col("trade_date").cast(pl.Date, strict=False),
+                    pl.col("adj_close").cast(pl.Float64, strict=False),
+                    pl.col("close").cast(pl.Float64, strict=False),
+                ])
+                df = df.with_columns(
+                    pl.when(pl.col("adj_close").is_null())
+                    .then(pl.col("close"))
+                    .otherwise(pl.col("adj_close"))
+                    .alias("adj_close")
+                )
+            logger.info(f"  _bulk_daily: {df.height} 行, {time.time()-t0:.1f}s")
             return "_bulk_daily", df
 
         def _load_index():
@@ -296,10 +328,12 @@ class USFactorBase(ABC):
                 order_by=["trade_date"],
                 extra_filters={"index_code": "^GSPC"},
             )
-            if not df.empty:
-                df["trade_date"] = pd.to_datetime(df["trade_date"])
-                df["close"] = pd.to_numeric(df["close"], errors="coerce")
-            logger.info(f"  _bulk_index: {len(df)} 行, {time.time()-t0:.1f}s")
+            if df.height > 0:
+                df = df.with_columns([
+                    pl.col("trade_date").cast(pl.Date, strict=False),
+                    pl.col("close").cast(pl.Float64, strict=False),
+                ])
+            logger.info(f"  _bulk_index: {df.height} 行, {time.time()-t0:.1f}s")
             return "_bulk_index", df
 
         def _load_analyst():
@@ -310,9 +344,9 @@ class USFactorBase(ABC):
                 analyst_start, end_date, "date",
                 order_by=["ticker", "date"],
             )
-            if not df.empty:
-                df["date"] = pd.to_datetime(df["date"])
-            logger.info(f"  _bulk_analyst: {len(df)} 行, {time.time()-t0:.1f}s")
+            if df.height > 0:
+                df = df.with_columns(pl.col("date").cast(pl.Date, strict=False))
+            logger.info(f"  _bulk_analyst: {df.height} 行, {time.time()-t0:.1f}s")
             return "_bulk_analyst", df
 
         def _load_earnings_surprise():
@@ -323,9 +357,9 @@ class USFactorBase(ABC):
                 es_start, end_date, "date",
                 order_by=["ticker", "date"],
             )
-            if not df.empty:
-                df["date"] = pd.to_datetime(df["date"])
-            logger.info(f"  _bulk_earnings_surprise: {len(df)} 行, {time.time()-t0:.1f}s")
+            if df.height > 0:
+                df = df.with_columns(pl.col("date").cast(pl.Date, strict=False))
+            logger.info(f"  _bulk_earnings_surprise: {df.height} 行, {time.time()-t0:.1f}s")
             return "_bulk_earnings_surprise", df
 
         def _load_eps_estimate():
@@ -337,9 +371,9 @@ class USFactorBase(ABC):
                 ee_start, end_date, "date",
                 order_by=["ticker", "date"],
             )
-            if not df.empty:
-                df["date"] = pd.to_datetime(df["date"])
-            logger.info(f"  _bulk_eps_estimate: {len(df)} 行, {time.time()-t0:.1f}s")
+            if df.height > 0:
+                df = df.with_columns(pl.col("date").cast(pl.Date, strict=False))
+            logger.info(f"  _bulk_eps_estimate: {df.height} 行, {time.time()-t0:.1f}s")
             return "_bulk_eps_estimate", df
 
         def _load_dividends():
@@ -351,9 +385,9 @@ class USFactorBase(ABC):
                 order_by=["ticker", "date"],
                 extra_filters={"action_type": "dividend"},
             )
-            if not df.empty:
-                df["date"] = pd.to_datetime(df["date"])
-            logger.info(f"  _bulk_dividends: {len(df)} 行, {time.time()-t0:.1f}s")
+            if df.height > 0:
+                df = df.with_columns(pl.col("date").cast(pl.Date, strict=False))
+            logger.info(f"  _bulk_dividends: {df.height} 行, {time.time()-t0:.1f}s")
             return "_bulk_dividends", df
 
         def _load_mktcap():
@@ -368,11 +402,14 @@ class USFactorBase(ABC):
                     "market_capitalization__gt": 0,
                 },
             )
-            if not df.empty:
-                df["date"] = pd.to_datetime(df["date"])
-                df.rename(columns={"market_capitalization": "market_cap"}, inplace=True)
-                df["market_cap"] = pd.to_numeric(df["market_cap"], errors="coerce")
-            logger.info(f"  _bulk_mktcap: {len(df)} 行, {time.time()-t0:.1f}s")
+            if df.height > 0:
+                df = df.with_columns([
+                    pl.col("date").cast(pl.Date, strict=False),
+                    pl.col("market_capitalization").cast(pl.Float64, strict=False).alias("market_cap"),
+                ])
+                if "market_capitalization" in df.columns:
+                    df = df.drop("market_capitalization")
+            logger.info(f"  _bulk_mktcap: {df.height} 行, {time.time()-t0:.1f}s")
             return "_bulk_mktcap", df
 
         def _load_insider():
@@ -389,15 +426,19 @@ class USFactorBase(ABC):
                     "transaction_type__in": insider_types,
                 },
             )
-            if not df.empty:
-                df["filing_date"] = pd.to_datetime(df["filing_date"])
-                is_acquire = df["acquisition_or_disposition"] == "A"
-                df["net_value"] = np.where(
-                    is_acquire,
-                    df["securities_transacted"] * df["price"],
-                    -df["securities_transacted"] * df["price"],
+            if df.height > 0:
+                df = df.with_columns([
+                    pl.col("filing_date").cast(pl.Date, strict=False),
+                    pl.col("securities_transacted").cast(pl.Float64, strict=False),
+                    pl.col("price").cast(pl.Float64, strict=False),
+                ])
+                df = df.with_columns(
+                    pl.when(pl.col("acquisition_or_disposition") == "A")
+                    .then(pl.col("securities_transacted") * pl.col("price"))
+                    .otherwise(-pl.col("securities_transacted") * pl.col("price"))
+                    .alias("net_value")
                 )
-                df = df[["ticker", "filing_date", "net_value"]]
+                df = df.select(["ticker", "filing_date", "net_value"])
             logger.info(f"  _bulk_insider: {len(df)} 行, {time.time()-t0:.1f}s")
             return "_bulk_insider", df
 
@@ -439,77 +480,94 @@ class USFactorBase(ABC):
     @classmethod
     def precompute_rolling_stats(cls):
         """
-        一次性预计算动量/技术因子所需的 rolling 统计量。
+        一次性预计算动量/技术因子所需的 rolling 统计量（polars 多线程）。
         必须在 preload_for_backtest() 之后调用。
         """
         import time
         t0 = time.time()
 
         bulk_daily = cls._static_cache.get("_bulk_daily")
-        if bulk_daily is None or bulk_daily.empty:
+        if bulk_daily is None or (isinstance(bulk_daily, pl.DataFrame) and bulk_daily.is_empty()):
             logger.debug("precompute_rolling_stats: 预加载日线数据为空，跳过rolling预计算")
             return
 
-        df = bulk_daily[["ticker", "trade_date", "adj_close", "close",
-                         "change_percent", "volume"]].copy()
-        df = df.sort_values(["ticker", "trade_date"])
+        df = bulk_daily.select(["ticker", "trade_date", "adj_close", "close",
+                                "change_percent", "volume"])
 
-        for col in ["adj_close", "close", "change_percent", "volume"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+        # 类型转换
+        df = df.with_columns([
+            pl.col("adj_close").cast(pl.Float64, strict=False),
+            pl.col("close").cast(pl.Float64, strict=False),
+            pl.col("change_percent").cast(pl.Float64, strict=False),
+            pl.col("volume").cast(pl.Float64, strict=False),
+        ])
 
-        # FMP /stable/ 端点不返回 adjClose，用 close 填充（FMP close 已是 split-adjusted）
-        df["adj_close"] = df["adj_close"].fillna(df["close"])
-
-        g = df.groupby("ticker", sort=False)
-
-        # 从 adj_close 计算收益率（change_percent 可能为 NULL，yfinance 不一定提供）
-        df["ret"] = g["adj_close"].transform(lambda x: x.pct_change())
-        # 如果 change_percent 有值则优先使用（更精确）
-        has_pct = df["change_percent"].notna()
-        if has_pct.any():
-            df.loc[has_pct, "ret"] = df.loc[has_pct, "change_percent"] / 100.0
-        df["log_ret"] = np.log1p(df["ret"].clip(-0.99, None))
-
-        # 用 adj_close 计算美元交易额（代替 A股的 turnover_rate）
-        df["dollar_volume"] = df["adj_close"] * df["volume"]
-
-        # 5-day cumulative return (REV_5D)
-        df["cum_ret_5d"] = np.expm1(
-            g["log_ret"].transform(lambda x: x.rolling(5, min_periods=3).sum())
-        )
-        # 20-day cumulative return (RESIDUAL_MOM)
-        df["cum_ret_20d"] = np.expm1(
-            g["log_ret"].transform(lambda x: x.rolling(20, min_periods=10).sum())
-        )
-        # 20-day rolling mean dollar volume (TURN_20D proxy)
-        df["dvol_20d"] = g["dollar_volume"].transform(
-            lambda x: x.rolling(20, min_periods=10).mean()
-        )
-        # 20-day rolling std of returns (VOL_20D)
-        df["vol_20d"] = g["ret"].transform(
-            lambda x: x.rolling(20, min_periods=10).std()
-        )
-        # 60-day rolling mean adj_close (PRICE_DEV_60D)
-        df["ma60_adj"] = g["adj_close"].transform(
-            lambda x: x.rolling(60, min_periods=30).mean()
+        # adj_close 填充
+        df = df.with_columns(
+            pl.when(pl.col("adj_close").is_null())
+            .then(pl.col("close"))
+            .otherwise(pl.col("adj_close"))
+            .alias("adj_close")
         )
 
-        # 存储为 MultiIndex (trade_date, ticker) 以便 xs() 快速查找
-        keep_cols = ["adj_close", "cum_ret_5d", "cum_ret_20d",
+        df = df.sort(["ticker", "trade_date"])
+
+        # 收益率：优先用 change_percent，否则从 adj_close 算
+        df = df.with_columns(
+            pl.col("adj_close").pct_change().over("ticker").alias("ret_from_price"),
+        )
+        df = df.with_columns(
+            pl.when(pl.col("change_percent").is_not_null())
+            .then(pl.col("change_percent") / 100.0)
+            .otherwise(pl.col("ret_from_price"))
+            .alias("ret")
+        )
+        df = df.with_columns(
+            (pl.col("ret").clip(-0.99, None) + 1.0).log().alias("log_ret"),
+            (pl.col("adj_close") * pl.col("volume")).alias("dollar_volume"),
+        )
+
+        # rolling 统计量（polars 自动多线程）
+        df = df.with_columns([
+            # 5-day cumulative return (REV_5D)
+            (pl.col("log_ret").rolling_sum(5, min_periods=3).over("ticker").exp() - 1.0)
+            .alias("cum_ret_5d"),
+            # 20-day cumulative return (RESIDUAL_MOM)
+            (pl.col("log_ret").rolling_sum(20, min_periods=10).over("ticker").exp() - 1.0)
+            .alias("cum_ret_20d"),
+            # 20-day rolling mean dollar volume (TURN_20D proxy)
+            pl.col("dollar_volume").rolling_mean(20, min_periods=10).over("ticker")
+            .alias("dvol_20d"),
+            # 20-day rolling std of returns (VOL_20D)
+            pl.col("ret").rolling_std(20, min_periods=10).over("ticker")
+            .alias("vol_20d"),
+            # 60-day rolling mean adj_close (PRICE_DEV_60D)
+            pl.col("adj_close").rolling_mean(60, min_periods=30).over("ticker")
+            .alias("ma60_adj"),
+        ])
+
+        # 存储（polars DataFrame，用 filter 代替 xs）
+        keep_cols = ["ticker", "trade_date", "adj_close", "cum_ret_5d", "cum_ret_20d",
                      "dvol_20d", "vol_20d", "ma60_adj", "volume", "dollar_volume"]
-        df_indexed = df[["ticker", "trade_date"] + keep_cols].copy()
-        df_indexed = df_indexed.set_index(["trade_date", "ticker"]).sort_index()
-        cls._static_cache["_rolling_indexed"] = df_indexed
+        cls._static_cache["_rolling_indexed"] = df.select(keep_cols)
 
         # 预计算月末复权收盘价（MOM_1M/3M/12M 使用）
-        df_me = df[["ticker", "trade_date", "adj_close"]].copy()
-        df_me["year_month"] = df_me["trade_date"].dt.to_period("M")
-        idx = df_me.groupby(["ticker", "year_month"])["trade_date"].idxmax()
-        month_ends = df_me.loc[idx, ["ticker", "year_month", "adj_close"]].reset_index(drop=True)
+        df_me = df.select(["ticker", "trade_date", "adj_close"])
+        # 提取年月
+        df_me = df_me.with_columns(
+            pl.col("trade_date").cast(pl.Date).dt.strftime("%Y-%m").alias("year_month")
+        )
+        # 每个 (ticker, year_month) 取 trade_date 最大的那条
+        month_ends = (
+            df_me.sort("trade_date")
+            .group_by(["ticker", "year_month"])
+            .last()
+            .select(["ticker", "year_month", "adj_close"])
+        )
         cls._static_cache["_month_end_prices"] = month_ends
 
         logger.info(
-            f"US 预计算 rolling stats + 月末价格: {len(df)} 行, {time.time()-t0:.1f}s"
+            f"US 预计算 rolling stats + 月末价格: {df.height} 行, {time.time()-t0:.1f}s"
         )
 
     # ----------------------------------------------------------
@@ -517,39 +575,42 @@ class USFactorBase(ABC):
     # ----------------------------------------------------------
     def _get_rolling_for_date(
         self, date: str, tickers: Optional[set[str]] = None,
-    ) -> Optional[pd.DataFrame]:
+    ) -> Optional[pl.DataFrame]:
         """从预计算的 rolling stats 中提取指定日期的截面数据。"""
         ri = self._static_cache.get("_rolling_indexed")
         if ri is None:
             logger.debug("_get_rolling_for_date: rolling预计算数据不存在")
             return None
-        date_ts = pd.to_datetime(date)
+        date_val = pd.to_datetime(date).date()
         try:
-            day = ri.xs(date_ts, level="trade_date")
-            if tickers:
-                day = day[day.index.isin(tickers)]
-            return day
-        except KeyError:
+            day = ri.filter(pl.col("trade_date").cast(pl.Date) == date_val)
+        except Exception:
+            logger.debug(f"_get_rolling_for_date: 日期 {date} 过滤失败")
+            return None
+        if day.is_empty():
             logger.debug(f"_get_rolling_for_date: 日期 {date} 不在rolling数据中")
             return None
+        if tickers:
+            day = day.filter(pl.col("ticker").is_in(list(tickers)))
+        return day
 
     def _get_month_end_adj_close(
         self, date: str, months_ago: int, tickers: Optional[set[str]] = None,
-    ) -> Optional[pd.DataFrame]:
+    ) -> Optional[pl.DataFrame]:
         """从预计算的月末价格中提取 N 月前月末的复权收盘价。"""
         me = self._static_cache.get("_month_end_prices")
         if me is None:
             logger.debug("_get_month_end_adj_close: 月末价格预计算数据不存在")
             return None
         target = pd.to_datetime(date) - pd.DateOffset(months=months_ago)
-        target_period = target.to_period("M")
-        result = me[me["year_month"] == target_period]
+        target_ym = target.strftime("%Y-%m")
+        result = me.filter(pl.col("year_month") == target_ym)
         if tickers:
-            result = result[result["ticker"].isin(tickers)]
-        if result.empty:
+            result = result.filter(pl.col("ticker").is_in(list(tickers)))
+        if result.is_empty():
             logger.debug(f"_get_month_end_adj_close: {months_ago}月前月末无价格数据")
             return None
-        return result[["ticker", "adj_close"]].copy()
+        return result.select(["ticker", "adj_close"])
 
     # ----------------------------------------------------------
     # 初始化
@@ -558,312 +619,255 @@ class USFactorBase(ABC):
         pass
 
     @abstractmethod
-    def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
+    def compute(self, date: str, universe: pl.DataFrame) -> pl.DataFrame:
         """
         计算因子值（截面计算）。
 
         Args:
             date: 计算日期，格式 YYYY-MM-DD。
-            universe: 股票池 DataFrame，至少包含 ticker 列。
+            universe: polars DataFrame，至少包含 ticker 列。
 
         Returns:
-            DataFrame，包含 ticker 和 factor_value 两列。
+            polars DataFrame，包含 ticker 和 factor_value 两列。
         """
         raise NotImplementedError
 
     # ----------------------------------------------------------
     # 行业映射
     # ----------------------------------------------------------
-    def get_industry_map_cached(self) -> pd.DataFrame:
-        """获取 GICS 行业映射（缓存）。返回 DataFrame[ticker, sector, industry]。"""
+    def get_industry_map_cached(self) -> pl.DataFrame:
+        """获取 GICS 行业映射（缓存）。返回 pl.DataFrame[ticker, sector, industry]。"""
         cached = self._static_cache.get("industry_map")
         if cached is not None:
-            return cached.copy()
+            return cached
         from stocks.models import USIndustryClass
-        result = pd.DataFrame(
-            USIndustryClass.objects.values("ticker", "sector", "industry")
-        )
+        rows = list(USIndustryClass.objects.values_list("ticker", "sector", "industry"))
+        result = pl.DataFrame(rows, schema=["ticker", "sector", "industry"], orient="row") if rows else pl.DataFrame(schema={"ticker": pl.Utf8, "sector": pl.Utf8, "industry": pl.Utf8})
         self._static_cache["industry_map"] = result
-        return result.copy()
+        return result
 
     # ----------------------------------------------------------
     # 通用数据获取工具（全部从缓存读取，preload_for_backtest 必须先调用）
     # ----------------------------------------------------------
 
-    def get_latest_financial(
-        self,
-        date: str,
-        columns: list[str],
-        universe_tickers: Optional[list[str]] = None,
-    ) -> pd.DataFrame:
-        """
-        获取截止到指定日期的最新财务数据（按 filing_date，防止未来函数）。
+    def _pl_empty(self, cols: list[str]) -> pl.DataFrame:
+        """创建空 polars DataFrame。"""
+        return pl.DataFrame(schema={c: pl.Utf8 if c == "ticker" else pl.Float64 for c in cols})
 
-        Returns:
-            DataFrame，包含 ticker, filing_date, period 和请求的列。
-        """
+    def _filter_tickers(self, df: pl.DataFrame, tickers: Optional[list[str]]) -> pl.DataFrame:
+        if tickers:
+            return df.filter(pl.col("ticker").is_in(tickers))
+        return df
+
+    def get_latest_financial(
+        self, date: str, columns: list[str],
+        universe_tickers: Optional[list[str]] = None,
+    ) -> pl.DataFrame:
+        """获取截止到指定日期的最新财务数据（按 filing_date）。"""
         cache_key = ("financial", date)
         cached = self._date_cache.get(cache_key)
         if cached is not None:
-            df = cached
-            if universe_tickers:
-                df = df[df["ticker"].isin(universe_tickers)]
-            return df[["ticker", "filing_date", "date", "period"] + [c for c in columns if c in df.columns]].copy()
+            df = self._filter_tickers(cached, universe_tickers)
+            keep = ["ticker", "filing_date", "date", "period"] + [c for c in columns if c in df.columns]
+            return df.select(keep)
 
         bulk_fin = self._static_cache.get("_bulk_financial")
-        if bulk_fin is None or bulk_fin.empty:
-            logger.warning("get_latest_financial: 缓存为空，请先调用 preload_for_backtest()")
-            return pd.DataFrame()
+        if bulk_fin is None or (isinstance(bulk_fin, pl.DataFrame) and bulk_fin.is_empty()):
+            logger.warning("get_latest_financial: 缓存为空")
+            return self._pl_empty(["ticker"] + columns)
 
-        date_ts = pd.to_datetime(date)
-        df = bulk_fin[bulk_fin["filing_date"] <= date_ts].copy()
-        df = df.sort_values("date", ascending=False).drop_duplicates(subset=["ticker"], keep="first")
+        date_val = pd.to_datetime(date).date()
+        df = bulk_fin.filter(pl.col("filing_date").cast(pl.Date) <= date_val)
+        df = df.sort("date", descending=True).unique(subset=["ticker"], keep="first")
         self._date_cache[cache_key] = df
-        if universe_tickers:
-            df = df[df["ticker"].isin(universe_tickers)]
-        return df[["ticker", "filing_date", "date", "period"] + [c for c in columns if c in df.columns]].copy()
+        df = self._filter_tickers(df, universe_tickers)
+        keep = ["ticker", "filing_date", "date", "period"] + [c for c in columns if c in df.columns]
+        return df.select(keep)
 
     def get_ttm_value(
-        self,
-        date: str,
-        field: str,
+        self, date: str, field: str,
         universe_tickers: Optional[list[str]] = None,
-    ) -> pd.DataFrame:
-        """
-        计算 TTM（Trailing Twelve Months）指标：最近 4 个季度的 field 求和。
-
-        Returns:
-            DataFrame[ticker, ttm_value]
-        """
+    ) -> pl.DataFrame:
+        """计算 TTM 指标：最近 4 个季度的 field 求和。"""
         cache_key = ("ttm", date, field)
         cached = self._date_cache.get(cache_key)
         if cached is not None:
-            if universe_tickers:
-                return cached[cached["ticker"].isin(universe_tickers)].copy()
-            return cached.copy()
+            return self._filter_tickers(cached, universe_tickers)
 
         bulk_fin = self._static_cache.get("_bulk_financial")
-        if bulk_fin is not None and not bulk_fin.empty:
-            date_ts = pd.to_datetime(date)
-            df = bulk_fin[bulk_fin["filing_date"] <= date_ts].copy()
-            if universe_tickers:
-                df = df[df["ticker"].isin(universe_tickers)]
-            # 取每只股票最近4个季度
-            df = df.sort_values("date", ascending=False)
-            df = df.groupby("ticker").head(4)
-            # 统计有效季度数和求和
-            result = df.groupby("ticker").agg(
-                ttm_value=(field, "sum"),
-                n_quarters=(field, "count"),
-            ).reset_index()
-            # 至少需要3个季度才计算TTM（4Q最佳，3Q可接受）
-            result.loc[result["n_quarters"] < 3, "ttm_value"] = np.nan
-            result = result[["ticker", "ttm_value"]]
-            self._date_cache[cache_key] = result
-            return result.copy()
+        if bulk_fin is None or (isinstance(bulk_fin, pl.DataFrame) and bulk_fin.is_empty()):
+            logger.warning("get_ttm_value: 缓存为空")
+            return self._pl_empty(["ticker", "ttm_value"])
 
-        logger.warning("get_ttm_value: 缓存为空，请先调用 preload_for_backtest()")
-        return pd.DataFrame(columns=["ticker", "ttm_value"])
+        date_val = pd.to_datetime(date).date()
+        df = bulk_fin.filter(pl.col("filing_date").cast(pl.Date) <= date_val)
+        if universe_tickers:
+            df = df.filter(pl.col("ticker").is_in(universe_tickers))
+        # 每个 ticker 取最近 4 季
+        df = df.sort("date", descending=True).group_by("ticker").head(4)
+        result = df.group_by("ticker").agg([
+            pl.col(field).sum().alias("ttm_value"),
+            pl.col(field).count().alias("n_quarters"),
+        ])
+        # 至少 3 个季度
+        result = result.with_columns(
+            pl.when(pl.col("n_quarters") < 3).then(None).otherwise(pl.col("ttm_value")).alias("ttm_value")
+        ).select(["ticker", "ttm_value"])
+        self._date_cache[cache_key] = result
+        return result
 
     def get_close_on_date(
-        self,
-        date: str,
-        universe_tickers: Optional[list[str]] = None,
-    ) -> pd.DataFrame:
-        """
-        获取指定日期的复权收盘价。
-
-        Returns:
-            DataFrame[ticker, adj_close]
-        """
+        self, date: str, universe_tickers: Optional[list[str]] = None,
+    ) -> pl.DataFrame:
+        """获取指定日期的复权收盘价。"""
         cache_key = ("close", date)
         cached = self._date_cache.get(cache_key)
         if cached is not None:
-            if universe_tickers:
-                return cached[cached["ticker"].isin(universe_tickers)].copy()
-            return cached.copy()
+            return self._filter_tickers(cached, universe_tickers)
 
         bulk_daily = self._static_cache.get("_bulk_daily")
-        if bulk_daily is not None and not bulk_daily.empty:
-            date_ts = pd.to_datetime(date)
-            day_df = bulk_daily[bulk_daily["trade_date"] == date_ts].copy()
-            # adj_close 可能全为 NaN（FMP bulk 数据），回退到 close
-            if day_df["adj_close"].notna().sum() == 0 and "close" in day_df.columns:
-                logger.debug("get_close_on_date: adj_close 全为空，回退到 close")
-                day_df["adj_close"] = day_df["close"]
-            df = day_df[["ticker", "adj_close"]].copy()
-            df["adj_close"] = pd.to_numeric(df["adj_close"], errors="coerce")
-            self._date_cache[cache_key] = df
-            if universe_tickers:
-                df = df[df["ticker"].isin(universe_tickers)]
-            return df.copy()
+        if bulk_daily is None or (isinstance(bulk_daily, pl.DataFrame) and bulk_daily.is_empty()):
+            logger.warning("get_close_on_date: 缓存为空")
+            return self._pl_empty(["ticker", "adj_close"])
 
-        logger.warning("get_close_on_date: 缓存为空，请先调用 preload_for_backtest()")
-        return pd.DataFrame(columns=["ticker", "adj_close"])
+        date_val = pd.to_datetime(date).date()
+        day_df = bulk_daily.filter(pl.col("trade_date").cast(pl.Date) == date_val)
+        # adj_close 填充
+        day_df = day_df.with_columns(
+            pl.when(pl.col("adj_close").is_null())
+            .then(pl.col("close"))
+            .otherwise(pl.col("adj_close"))
+            .alias("adj_close")
+        )
+        df = day_df.select(["ticker", "adj_close"]).with_columns(
+            pl.col("adj_close").cast(pl.Float64, strict=False)
+        )
+        self._date_cache[cache_key] = df
+        return self._filter_tickers(df, universe_tickers)
 
     def get_price_history(
-        self,
-        end_date: str,
-        lookback_days: int,
+        self, end_date: str, lookback_days: int,
         universe_tickers: Optional[list[str]] = None,
         columns: Optional[list[str]] = None,
-    ) -> pd.DataFrame:
+    ) -> pl.DataFrame:
         """获取截止到指定日期的历史行情。"""
         cache_key = ("price_hist", end_date, lookback_days)
         cached = self._date_cache.get(cache_key)
         if cached is not None:
-            df = cached
-            if universe_tickers:
-                df = df[df["ticker"].isin(universe_tickers)]
+            df = self._filter_tickers(cached, universe_tickers)
             if columns:
                 keep = ["ticker", "trade_date"] + [c for c in columns if c in df.columns]
-                df = df[keep]
-            return df.copy()
+                df = df.select(keep)
+            return df
 
-        start_dt = pd.to_datetime(end_date) - pd.Timedelta(days=lookback_days)
-        start_date = start_dt.strftime("%Y-%m-%d")
+        end_val = pd.to_datetime(end_date).date()
+        start_val = (pd.to_datetime(end_date) - pd.Timedelta(days=lookback_days)).date()
 
         bulk_daily = self._static_cache.get("_bulk_daily")
-        if bulk_daily is not None and not bulk_daily.empty:
-            end_ts = pd.to_datetime(end_date)
-            mask = (bulk_daily["trade_date"] >= start_dt) & (bulk_daily["trade_date"] <= end_ts)
-            result = bulk_daily[mask].copy()
-            if universe_tickers:
-                result = result[result["ticker"].isin(universe_tickers)]
-            self._date_cache[cache_key] = result
-            if columns:
-                keep = ["ticker", "trade_date"] + [c for c in columns if c in result.columns]
-                result = result[keep]
-            return result.copy()
+        if bulk_daily is None or (isinstance(bulk_daily, pl.DataFrame) and bulk_daily.is_empty()):
+            logger.warning("get_price_history: 缓存为空")
+            return pl.DataFrame()
 
-        logger.warning("get_price_history: 缓存为空，请先调用 preload_for_backtest()")
-        return pd.DataFrame()
+        result = bulk_daily.filter(
+            (pl.col("trade_date").cast(pl.Date) >= start_val)
+            & (pl.col("trade_date").cast(pl.Date) <= end_val)
+        )
+        if universe_tickers:
+            result = result.filter(pl.col("ticker").is_in(universe_tickers))
+        self._date_cache[cache_key] = result
+        if columns:
+            keep = ["ticker", "trade_date"] + [c for c in columns if c in result.columns]
+            result = result.select(keep)
+        return result
 
     def get_month_end_price(
-        self,
-        date: str,
-        months_ago: int,
+        self, date: str, months_ago: int,
         universe_tickers: Optional[list[str]] = None,
-    ) -> pd.DataFrame:
-        """
-        获取 N 个月前月末的复权收盘价。
-
-        Returns:
-            DataFrame[ticker, adj_close]
-        """
-        # 优先使用预计算
-        precomputed = self._get_month_end_adj_close(date, months_ago,
-                                                     set(universe_tickers) if universe_tickers else None)
+    ) -> pl.DataFrame:
+        """获取 N 个月前月末的复权收盘价。"""
+        precomputed = self._get_month_end_adj_close(
+            date, months_ago, set(universe_tickers) if universe_tickers else None
+        )
         if precomputed is not None:
             return precomputed
 
         cache_key = ("month_end", date, months_ago)
         cached = self._date_cache.get(cache_key)
         if cached is not None:
-            if universe_tickers:
-                return cached[cached["ticker"].isin(universe_tickers)].copy()
-            return cached.copy()
+            return self._filter_tickers(cached, universe_tickers)
 
         target_date = pd.to_datetime(date) - pd.DateOffset(months=months_ago)
-        month_start = target_date.replace(day=1)
-        month_end = month_start + pd.DateOffset(months=1) - pd.Timedelta(days=1)
+        month_start = target_date.replace(day=1).date()
+        month_end_val = (target_date.replace(day=1) + pd.DateOffset(months=1) - pd.Timedelta(days=1)).date()
 
         bulk_daily = self._static_cache.get("_bulk_daily")
-        if bulk_daily is not None and not bulk_daily.empty:
-            mask = (bulk_daily["trade_date"] >= month_start) & (bulk_daily["trade_date"] <= month_end)
-            df = bulk_daily[mask].copy()
-            if universe_tickers:
-                df = df[df["ticker"].isin(universe_tickers)]
-            if df.empty:
-                logger.debug(f"get_month_end_price: 预加载数据中 {months_ago}月前月末无数据")
-                self._date_cache[cache_key] = df
-                return df
-            df["adj_close"] = pd.to_numeric(df["adj_close"], errors="coerce")
-            df = df.sort_values("trade_date", ascending=False).drop_duplicates(subset=["ticker"], keep="first")
-            result = df[["ticker", "adj_close"]].copy()
-            self._date_cache[cache_key] = result
-            return result.copy()
+        if bulk_daily is None or (isinstance(bulk_daily, pl.DataFrame) and bulk_daily.is_empty()):
+            logger.warning("get_month_end_price: 缓存为空")
+            return self._pl_empty(["ticker", "adj_close"])
 
-        logger.warning("get_month_end_price: 缓存为空，请先调用 preload_for_backtest()")
-        return pd.DataFrame(columns=["ticker", "adj_close"])
+        df = bulk_daily.filter(
+            (pl.col("trade_date").cast(pl.Date) >= month_start)
+            & (pl.col("trade_date").cast(pl.Date) <= month_end_val)
+        )
+        if universe_tickers:
+            df = df.filter(pl.col("ticker").is_in(universe_tickers))
+        if df.is_empty():
+            self._date_cache[cache_key] = df
+            return df
+
+        df = df.with_columns(pl.col("adj_close").cast(pl.Float64, strict=False))
+        result = df.sort("trade_date", descending=True).unique(subset=["ticker"], keep="first")
+        result = result.select(["ticker", "adj_close"])
+        self._date_cache[cache_key] = result
+        return self._filter_tickers(result, universe_tickers)
 
     def get_market_cap(
-        self,
-        date: str,
-        universe_tickers: Optional[list[str]] = None,
-    ) -> pd.DataFrame:
-        """
-        获取历史市值（消除前瞻偏差）。
-
-        方法：us_enterprise_value 季度 market_cap，取 <= date 最近一条。
-        回退链：预加载 _bulk_mktcap → SQL 查 us_enterprise_value → us_stock_basic 静态快照。
-
-        Returns:
-            DataFrame[ticker, market_cap]
-        """
+        self, date: str, universe_tickers: Optional[list[str]] = None,
+    ) -> pl.DataFrame:
+        """获取历史市值（消除前瞻偏差）。"""
         cache_key = ("mktcap_hist", date)
         cached = self._date_cache.get(cache_key)
         if cached is not None:
-            df = cached
-            if universe_tickers:
-                df = df[df["ticker"].isin(universe_tickers)]
-            return df.copy()
+            return self._filter_tickers(cached, universe_tickers)
 
-        date_ts = pd.to_datetime(date)
-
-        # 1. Try historical market cap from preloaded us_enterprise_value (季度, take last <= date)
+        date_val = pd.to_datetime(date).date()
         bulk_mktcap = self._static_cache.get("_bulk_mktcap")
-        if bulk_mktcap is not None and not bulk_mktcap.empty:
-            valid = bulk_mktcap[bulk_mktcap["date"] <= date_ts]
-            if not valid.empty:
-                df = (
-                    valid.sort_values("date")
-                    .drop_duplicates(subset=["ticker"], keep="last")
-                    [["ticker", "market_cap"]]
-                )
+        if bulk_mktcap is not None and not (isinstance(bulk_mktcap, pl.DataFrame) and bulk_mktcap.is_empty()):
+            valid = bulk_mktcap.filter(pl.col("date").cast(pl.Date) <= date_val)
+            if not valid.is_empty():
+                df = valid.sort("date").unique(subset=["ticker"], keep="last").select(["ticker", "market_cap"])
                 self._date_cache[cache_key] = df
-                if universe_tickers:
-                    df = df[df["ticker"].isin(universe_tickers)]
-                return df.copy()
-            else:
-                logger.debug(f"get_market_cap: no historical mktcap data before {date}")
+                return self._filter_tickers(df, universe_tickers)
 
-        # 2. 缓存无数据
-        logger.warning(f"get_market_cap: 缓存为空，请先调用 preload_for_backtest()")
-        return pd.DataFrame(columns=["ticker", "market_cap"])
+        logger.warning(f"get_market_cap: 缓存为空")
+        return self._pl_empty(["ticker", "market_cap"])
 
     def get_dividends(
-        self,
-        date: str,
-        lookback_days: int = 365,
+        self, date: str, lookback_days: int = 365,
         universe_tickers: Optional[list[str]] = None,
-    ) -> pd.DataFrame:
-        """
-        获取过去 N 天的股息数据。
-
-        Returns:
-            DataFrame[ticker, total_dividend] — trailing 期间内累计每股股息
-        """
+    ) -> pl.DataFrame:
+        """获取过去 N 天的股息数据。"""
         cache_key = ("dividends", date, lookback_days)
         cached = self._date_cache.get(cache_key)
         if cached is not None:
-            if universe_tickers:
-                return cached[cached["ticker"].isin(universe_tickers)].copy()
-            return cached.copy()
+            return self._filter_tickers(cached, universe_tickers)
 
-        date_ts = pd.to_datetime(date)
-        start_ts = date_ts - pd.Timedelta(days=lookback_days)
+        date_val = pd.to_datetime(date).date()
+        start_val = (pd.to_datetime(date) - pd.Timedelta(days=lookback_days)).date()
 
         bulk_div = self._static_cache.get("_bulk_dividends")
-        if bulk_div is not None and not bulk_div.empty:
-            mask = (bulk_div["date"] >= start_ts) & (bulk_div["date"] <= date_ts)
-            df = bulk_div[mask].copy()
-            if universe_tickers:
-                df = df[df["ticker"].isin(universe_tickers)]
-            result = df.groupby("ticker")["dividend"].sum().reset_index()
-            result.columns = ["ticker", "total_dividend"]
-            self._date_cache[cache_key] = result
-            return result.copy()
+        if bulk_div is None or (isinstance(bulk_div, pl.DataFrame) and bulk_div.is_empty()):
+            logger.warning("get_dividends: 缓存为空")
+            return self._pl_empty(["ticker", "total_dividend"])
 
-        logger.warning("get_dividends: 缓存为空，请先调用 preload_for_backtest()")
-        return pd.DataFrame(columns=["ticker", "total_dividend"])
+        df = bulk_div.filter(
+            (pl.col("date").cast(pl.Date) >= start_val)
+            & (pl.col("date").cast(pl.Date) <= date_val)
+        )
+        if universe_tickers:
+            df = df.filter(pl.col("ticker").is_in(universe_tickers))
+        result = df.group_by("ticker").agg(
+            pl.col("dividend").sum().alias("total_dividend")
+        )
+        self._date_cache[cache_key] = result
+        return self._filter_tickers(result, universe_tickers)

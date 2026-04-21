@@ -1,15 +1,18 @@
 """美股盈利因子: EARNINGS_SURPRISE, EPS_REVISION"""
 
 import logging
+from datetime import datetime, timedelta
 
 import numpy as np
-import pandas as pd
+import polars as pl
 
 from services.config import LOG_LEVEL
 from stocks.services.factors.us_base import USFactorBase
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
+
+_EMPTY = pl.DataFrame(schema={"ticker": pl.Utf8, "factor_value": pl.Float64})
 
 
 class EarningsSurprise(USFactorBase):
@@ -27,38 +30,42 @@ class EarningsSurprise(USFactorBase):
     # 回看窗口：只取最近 120 天内公布的最近一次 earnings
     _LOOKBACK_DAYS = 120
 
-    def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
-        tickers = universe["ticker"].tolist()
-        date_ts = pd.to_datetime(date)
-        start_ts = date_ts - pd.Timedelta(days=self._LOOKBACK_DAYS)
+    def compute(self, date: str, universe: pl.DataFrame) -> pl.DataFrame:
+        tickers = universe["ticker"].to_list()
+        date_ts = datetime.strptime(date, "%Y-%m-%d") if isinstance(date, str) else date
+        start_ts = date_ts - timedelta(days=self._LOOKBACK_DAYS)
 
         # 从预加载数据获取
         bulk = self._static_cache.get("_bulk_earnings_surprise")
-        if bulk is None or bulk.empty:
+        if bulk is None or bulk.is_empty():
             logger.debug("EarningsSurprise.compute: 缓存为空")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
-        mask = (bulk["date"] >= start_ts) & (bulk["date"] <= date_ts)
-        df = bulk[mask].copy()
-
-        if df.empty:
-            logger.debug("EarningsSurprise.compute: 无盈利惊喜数据")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
-
-        if tickers:
-            df = df[df["ticker"].isin(tickers)]
-
-        df = df.dropna(subset=["surprise_pct"])
-        if df.empty:
-            logger.debug("EarningsSurprise.compute: surprise_pct 全部为空")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
-
-        # 取每只股票最近一次的 surprise_pct
-        df = df.sort_values("date", ascending=False).drop_duplicates(
-            subset=["ticker"], keep="first"
+            return _EMPTY.clone()
+        df = bulk.filter(
+            (pl.col("date") >= start_ts) & (pl.col("date") <= date_ts)
         )
 
-        result = df[["ticker", "surprise_pct"]].copy()
-        result.columns = ["ticker", "factor_value"]
+        if df.is_empty():
+            logger.debug("EarningsSurprise.compute: 无盈利惊喜数据")
+            return _EMPTY.clone()
+
+        if tickers:
+            df = df.filter(pl.col("ticker").is_in(tickers))
+
+        df = df.drop_nulls(subset=["surprise_pct"])
+        if df.is_empty():
+            logger.debug("EarningsSurprise.compute: surprise_pct 全部为空")
+            return _EMPTY.clone()
+
+        # 取每只股票最近一次的 surprise_pct
+        df = (
+            df.sort("date", descending=True)
+            .unique(subset=["ticker"], keep="first")
+        )
+
+        result = df.select([
+            pl.col("ticker"),
+            pl.col("surprise_pct").alias("factor_value"),
+        ])
         return result
 
 
@@ -78,53 +85,64 @@ class EpsRevision(USFactorBase):
     name = "EPS_REVISION"
     description = "EPS 共识预期修正 (最近季 vs 上一季，仅用已过去 fiscal period)"
 
-    def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
-        tickers = universe["ticker"].tolist()
-        date_ts = pd.to_datetime(date)
+    def compute(self, date: str, universe: pl.DataFrame) -> pl.DataFrame:
+        tickers = universe["ticker"].to_list()
+        date_ts = datetime.strptime(date, "%Y-%m-%d") if isinstance(date, str) else date
 
         bulk = self._static_cache.get("_bulk_eps_estimate")
-        if bulk is None or bulk.empty:
+        if bulk is None or bulk.is_empty():
             logger.debug("EpsRevision.compute: 缓存为空")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
+            return _EMPTY.clone()
 
-        df = bulk.copy()
-        df["date"] = pd.to_datetime(df["date"])
+        df = bulk.clone()
+        df = df.with_columns(pl.col("date").cast(pl.Date, strict=False))
         if tickers:
-            df = df[df["ticker"].isin(tickers)]
+            df = df.filter(pl.col("ticker").is_in(tickers))
 
-        if df.empty:
+        if df.is_empty():
             logger.debug("EpsRevision.compute: 过滤 ticker 后无数据")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
+            return _EMPTY.clone()
 
         # 只用已过去的 fiscal period（防前瞻）
-        df = df[df["date"] <= date_ts].copy()
-        if df.empty:
+        df = df.filter(pl.col("date") <= date_ts)
+        if df.is_empty():
             logger.debug("EpsRevision.compute: 无已过去 fiscal period 的 EPS 数据")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
+            return _EMPTY.clone()
 
         # 每只股票取最近 2 个 fiscal period
-        df = df.sort_values("date", ascending=False)
-        df["rank"] = df.groupby("ticker").cumcount()
-        recent = df[df["rank"] == 0][["ticker", "estimated_eps_avg"]].copy()
-        prev = df[df["rank"] == 1][["ticker", "estimated_eps_avg"]].copy()
-
-        if recent.empty or prev.empty:
-            logger.debug("EpsRevision.compute: 不足 2 个 fiscal period")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
-
-        merged = recent.merge(
-            prev, on="ticker", suffixes=("_recent", "_prev"),
+        df = df.sort("date", descending=True)
+        df = df.with_columns(
+            pl.lit(1).cum_sum().over("ticker").alias("rank") - 1
+        )
+        recent = (
+            df.filter(pl.col("rank") == 0)
+            .select(["ticker", "estimated_eps_avg"])
+            .rename({"estimated_eps_avg": "estimated_eps_avg_recent"})
+        )
+        prev = (
+            df.filter(pl.col("rank") == 1)
+            .select(["ticker", "estimated_eps_avg"])
+            .rename({"estimated_eps_avg": "estimated_eps_avg_prev"})
         )
 
-        if merged.empty:
-            return pd.DataFrame(columns=["ticker", "factor_value"])
+        if recent.is_empty() or prev.is_empty():
+            logger.debug("EpsRevision.compute: 不足 2 个 fiscal period")
+            return _EMPTY.clone()
+
+        merged = recent.join(prev, on="ticker", how="inner")
+
+        if merged.is_empty():
+            return _EMPTY.clone()
 
         # Revision = (recent - prev) / |prev|
-        merged["factor_value"] = np.where(
-            merged["estimated_eps_avg_prev"].abs() > 0.01,
-            (merged["estimated_eps_avg_recent"] - merged["estimated_eps_avg_prev"])
-            / merged["estimated_eps_avg_prev"].abs(),
-            0.0,
+        merged = merged.with_columns(
+            pl.when(pl.col("estimated_eps_avg_prev").abs() > 0.01)
+            .then(
+                (pl.col("estimated_eps_avg_recent") - pl.col("estimated_eps_avg_prev"))
+                / pl.col("estimated_eps_avg_prev").abs()
+            )
+            .otherwise(0.0)
+            .alias("factor_value")
         )
 
-        return merged[["ticker", "factor_value"]]
+        return merged.select(["ticker", "factor_value"])

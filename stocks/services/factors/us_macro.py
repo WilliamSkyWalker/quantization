@@ -6,16 +6,19 @@
 """
 
 import logging
+from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
-import pandas as pd
+import polars as pl
 
 from services.config import LOG_LEVEL
 from stocks.services.factors.us_base import USFactorBase
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
+
+_EMPTY = pl.DataFrame(schema={"ticker": pl.Utf8, "factor_value": pl.Float64})
 
 # FRED indicator codes (与 fred_downloader.py 的 FRED_SERIES_MAP 对应)
 # 注意：us_macro_indicator.indicator_code 存储的是 FRED 原生 ID
@@ -41,9 +44,9 @@ def _get_indicator_zscore(
     lag_days: int = 30,
 ) -> float:
     """获取指定宏观指标在 date 时的 Z-score。"""
-    date_ts = pd.to_datetime(date)
-    end_date = (date_ts - pd.Timedelta(days=lag_days)).strftime("%Y-%m-%d")
-    start_date = (date_ts - pd.Timedelta(days=lag_days + window * 31 + 60)).strftime("%Y-%m-%d")
+    date_ts = datetime.strptime(date, "%Y-%m-%d") if isinstance(date, str) else date
+    end_date = (date_ts - timedelta(days=lag_days)).strftime("%Y-%m-%d")
+    start_date = (date_ts - timedelta(days=lag_days + window * 31 + 60)).strftime("%Y-%m-%d")
 
     sql = (
         "SELECT report_date, value FROM us_macro_indicator "
@@ -51,12 +54,12 @@ def _get_indicator_zscore(
         "ORDER BY report_date"
     )
     df = db.query(sql, params={"code": indicator_code, "start": start_date, "end": end_date})
-    if df.empty or len(df) < 6:
+    if df.is_empty() or df.height < 6:
         logger.debug(f"_get_indicator_zscore: {indicator_code} 数据不足6条，返回0.0")
         return 0.0
 
-    df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    vals = df["value"].dropna().values
+    df = df.with_columns(pl.col("value").cast(pl.Float64, strict=False))
+    vals = df.drop_nulls(subset=["value"])["value"].to_numpy()
     if len(vals) < 6:
         logger.debug(f"_get_indicator_zscore: {indicator_code} 有效值不足6条，返回0.0")
         return 0.0
@@ -74,9 +77,9 @@ def _get_indicator_delta_zscore(
     window: int = _ZSCORE_WINDOW, lag_days: int = 30,
 ) -> float:
     """获取指标 N 月变化量的 Z-score。"""
-    date_ts = pd.to_datetime(date)
-    end_date = (date_ts - pd.Timedelta(days=lag_days)).strftime("%Y-%m-%d")
-    start_date = (date_ts - pd.Timedelta(days=lag_days + (window + delta_months) * 31 + 60)).strftime("%Y-%m-%d")
+    date_ts = datetime.strptime(date, "%Y-%m-%d") if isinstance(date, str) else date
+    end_date = (date_ts - timedelta(days=lag_days)).strftime("%Y-%m-%d")
+    start_date = (date_ts - timedelta(days=lag_days + (window + delta_months) * 31 + 60)).strftime("%Y-%m-%d")
 
     sql = (
         "SELECT report_date, value FROM us_macro_indicator "
@@ -84,12 +87,12 @@ def _get_indicator_delta_zscore(
         "ORDER BY report_date"
     )
     df = db.query(sql, params={"code": indicator_code, "start": start_date, "end": end_date})
-    if df.empty or len(df) < delta_months + 6:
+    if df.is_empty() or df.height < delta_months + 6:
         logger.debug(f"_get_indicator_delta_zscore: {indicator_code} 数据不足，返回0.0")
         return 0.0
 
-    df["value"] = pd.to_numeric(df["value"], errors="coerce").dropna()
-    vals = df["value"].values
+    df = df.with_columns(pl.col("value").cast(pl.Float64, strict=False))
+    vals = df.drop_nulls(subset=["value"])["value"].to_numpy()
     if len(vals) < delta_months + 6:
         logger.debug(f"_get_indicator_delta_zscore: {indicator_code} 有效值不足，返回0.0")
         return 0.0
@@ -139,23 +142,39 @@ _EXTR_SENSITIVITY = {
 
 
 class _USMacroFactorBase(USFactorBase):
-    """宏观因子基类：信号 × 行业敏感度 → 个股因子值。"""
+    """宏观因子基类：信号 x 行业敏感度 -> 个股因子值。"""
 
     _sensitivity_map: dict = {}
 
     def _compute_signal(self, date: str) -> float:
         raise NotImplementedError
 
-    def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
+    def compute(self, date: str, universe: pl.DataFrame) -> pl.DataFrame:
         signal = self._compute_signal(date)
         ind_map = self.get_industry_map_cached()
 
-        tickers = universe["ticker"].tolist()
-        df = universe[["ticker"]].merge(ind_map[["ticker", "sector"]], on="ticker", how="left")
+        df = universe.select("ticker").join(
+            ind_map.select(["ticker", "sector"]),
+            on="ticker",
+            how="left",
+        )
 
-        df["sensitivity"] = df["sector"].map(self._sensitivity_map).fillna(0.0)
-        df["factor_value"] = signal * df["sensitivity"]
-        return df[["ticker", "factor_value"]]
+        # Map sector to sensitivity using replace_strict
+        df = df.with_columns(
+            pl.col("sector")
+            .replace_strict(_sensitivity_map_to_use(self._sensitivity_map), default=0.0)
+            .cast(pl.Float64)
+            .alias("sensitivity")
+        )
+        df = df.with_columns(
+            (pl.lit(signal) * pl.col("sensitivity")).alias("factor_value")
+        )
+        return df.select(["ticker", "factor_value"])
+
+
+def _sensitivity_map_to_use(m: dict) -> dict:
+    """Ensure all values are float for polars replace_strict."""
+    return {k: float(v) for k, v in m.items()}
 
 
 class USMacroCycle(_USMacroFactorBase):

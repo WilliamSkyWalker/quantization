@@ -13,6 +13,7 @@ yfinance>=0.2.0
 
 # 数据处理
 pandas>=2.0.0
+polars>=1.0.0
 numpy>=1.24.0
 
 # 数据库

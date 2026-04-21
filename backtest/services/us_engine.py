@@ -22,6 +22,7 @@ from typing import Optional, Callable
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import matplotlib
 
 matplotlib.use("Agg")
@@ -54,6 +55,16 @@ from stocks.models import USStockBasic, USDailyPrice, USIndexDaily
 
 logger = logging.getLogger(__name__)
 logger.setLevel(LOG_LEVEL)
+
+
+def _is_na(val) -> bool:
+    """Check if a value is None or NaN (replaces pd.isna for scalar checks)."""
+    if val is None:
+        return True
+    try:
+        return np.isnan(val)
+    except (TypeError, ValueError):
+        return False
 
 plt.rcParams["font.sans-serif"] = ["Arial", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
@@ -92,7 +103,7 @@ class USBacktestEngine:
 
     def run(
         self,
-        signals: dict[str, pd.DataFrame],
+        signals: dict[str, pl.DataFrame],
         start_date: str,
         end_date: str,
         cancel_check: Optional[Callable[[], bool]] = None,
@@ -134,7 +145,7 @@ class USBacktestEngine:
         all_tickers = set()
         for df_sig in signals.values():
             ensure_not_cancelled()
-            all_tickers.update(df_sig["ticker"].tolist())
+            all_tickers.update(df_sig.get_column("ticker").to_list())
         all_tickers.discard("_INDEX_HEDGE")  # virtual ticker, handled separately
         price_cache = self._load_prices(list(all_tickers), start_date, end_date)
 
@@ -180,7 +191,10 @@ class USBacktestEngine:
             if signal_idx < len(signal_dates) and today_str >= signal_dates[signal_idx]:
                 new_signal = signals[signal_dates[signal_idx]]
                 raw_weights = dict(
-                    zip(new_signal["ticker"], new_signal["weight"])
+                    zip(
+                        new_signal.get_column("ticker").to_list(),
+                        new_signal.get_column("weight").to_list(),
+                    )
                 )
 
                 # --- Risk control 1: Volatility targeting ---
@@ -264,7 +278,7 @@ class USBacktestEngine:
                 total_value = cash
                 for ticker, shares in positions.items():
                     info = price_cache.get((ticker, today_str))
-                    if info and info["adj_close"] and not pd.isna(info["adj_close"]):
+                    if info and info["adj_close"] and not _is_na(info["adj_close"]):
                         px = info["adj_close"]
                     else:
                         px = last_close.get(ticker, 0)
@@ -287,7 +301,7 @@ class USBacktestEngine:
                         continue
 
                     close_px = info["adj_close"]
-                    if not close_px or pd.isna(close_px) or close_px <= 0:
+                    if not close_px or _is_na(close_px) or close_px <= 0:
                         logger.debug(f"run: {ticker} 在 {today_str} 收盘价无效，跳过")
                         continue
 
@@ -432,7 +446,7 @@ class USBacktestEngine:
                     continue
                 px = last_close.get(ticker, 0)
                 info = price_cache.get((ticker, today_str))
-                if info and info["adj_close"] and not pd.isna(info["adj_close"]):
+                if info and info["adj_close"] and not _is_na(info["adj_close"]):
                     px = info["adj_close"]
 
                 # Tiered borrow fee
@@ -481,7 +495,7 @@ class USBacktestEngine:
                 if (
                     info
                     and info["adj_close"]
-                    and not pd.isna(info["adj_close"])
+                    and not _is_na(info["adj_close"])
                 ):
                     close_px = info["adj_close"]
                     last_close[ticker] = close_px
@@ -517,8 +531,14 @@ class USBacktestEngine:
         result = {
             "nav": nav,
             "benchmark_nav": benchmark_nav,
-            "trades": pd.DataFrame(trades),
-            "turnover": pd.DataFrame(turnover_list),
+            "trades": pl.DataFrame(trades) if trades else pl.DataFrame(
+                schema={"date": pl.Utf8, "ticker": pl.Utf8, "direction": pl.Utf8,
+                         "volume": pl.Float64, "price": pl.Float64,
+                         "amount": pl.Float64, "fees": pl.Float64}
+            ),
+            "turnover": pl.DataFrame(turnover_list) if turnover_list else pl.DataFrame(
+                schema={"date": pl.Utf8, "turnover": pl.Float64}
+            ),
             "stats": stats,
         }
 
@@ -578,34 +598,38 @@ class USBacktestEngine:
             return {}
 
         cols = ["ticker", "trade_date", "open", "close", "adj_close", "high", "low", "volume"]
-        df = pd.DataFrame(
+        rows = list(
             USDailyPrice.objects.filter(
                 ticker__in=tickers,
                 trade_date__gte=start_date,
                 trade_date__lte=end_date,
-            ).values_list(*cols),
-            columns=cols,
+            ).values_list(*cols)
         )
 
-        if df.empty:
+        if not rows:
             logger.warning("No price data loaded from us_daily_price")
             return {}
 
-        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
-        df["adj_close"] = df["adj_close"].fillna(df["close"])
-        df["open"] = df["open"].fillna(df["close"])
-        df["high"] = df["high"].fillna(df["close"])
-        df["low"] = df["low"].fillna(df["close"])
+        df = pl.DataFrame(rows, schema=cols, orient="row")
+
+        # Convert trade_date to string, fill nulls
+        df = df.with_columns([
+            pl.col("trade_date").cast(pl.Date).cast(pl.Utf8).alias("trade_date"),
+            pl.col("adj_close").fill_null(pl.col("close")),
+            pl.col("open").fill_null(pl.col("close")),
+            pl.col("high").fill_null(pl.col("close")),
+            pl.col("low").fill_null(pl.col("close")),
+        ])
 
         cache = {}
-        for row in df.itertuples(index=False):
-            cache[(row.ticker, row.trade_date)] = {
-                "open": row.open,
-                "close": row.close,
-                "adj_close": row.adj_close,
-                "high": row.high,
-                "low": row.low,
-                "volume": row.volume,
+        for row in df.iter_rows(named=True):
+            cache[(row["ticker"], row["trade_date"])] = {
+                "open": row["open"],
+                "close": row["close"],
+                "adj_close": row["adj_close"],
+                "high": row["high"],
+                "low": row["low"],
+                "volume": row["volume"],
             }
 
         logger.info(f"Price cache loaded: {len(cache)} entries for {len(tickers)} tickers")
@@ -637,34 +661,37 @@ class USBacktestEngine:
             Benchmark NAV Series (DatetimeIndex), normalized to start at 1.0.
         """
         bm_cols = ["trade_date", "close"]
-        df = pd.DataFrame(
+        rows = list(
             USIndexDaily.objects.filter(
                 index_code=self.benchmark,
                 trade_date__gte=start_date,
                 trade_date__lte=end_date,
             )
             .order_by("trade_date")
-            .values_list(*bm_cols),
-            columns=bm_cols,
+            .values_list(*bm_cols)
         )
 
-        if df.empty:
+        if not rows:
             logger.warning(
                 f"No benchmark data for {self.benchmark}, "
                 "returning empty Series"
             )
             return pd.Series(dtype=float)
 
-        df["trade_date"] = pd.to_datetime(df["trade_date"])
-        df = df.set_index("trade_date").sort_index()
-        first_close = df["close"].iloc[0]
+        df = pl.DataFrame(rows, schema=bm_cols, orient="row").sort("trade_date")
+        first_close = df["close"][0]
         if first_close and first_close > 0:
-            df["nav"] = df["close"] / first_close
+            df = df.with_columns(
+                (pl.col("close") / first_close).alias("nav")
+            )
         else:
-            df["nav"] = 1.0
+            df = df.with_columns(pl.lit(1.0).alias("nav"))
 
-        logger.info(f"Benchmark: {self.benchmark} ({len(df)} trade days)")
-        return df["nav"]
+        logger.info(f"Benchmark: {self.benchmark} ({df.height} trade days)")
+
+        # Convert to pd.Series with DatetimeIndex (needed by matplotlib/stats)
+        dates = pd.to_datetime(df.get_column("trade_date").to_list())
+        return pd.Series(df.get_column("nav").to_numpy(), index=dates, name="nav")
 
     # ----------------------------------------------------------
     # Performance statistics
@@ -744,7 +771,7 @@ class USBacktestEngine:
             "sharpe_ratio": sharpe,
             "max_drawdown": max_drawdown,
             "max_drawdown_date": (
-                str(max_dd_date.date()) if pd.notna(max_dd_date) else ""
+                str(max_dd_date.date()) if not _is_na(max_dd_date) else ""
             ),
             "calmar_ratio": calmar,
             "win_rate": win_rate,
@@ -786,7 +813,7 @@ class USBacktestEngine:
         return stats
 
     @staticmethod
-    def summary(result: dict) -> pd.DataFrame:
+    def summary(result: dict) -> pl.DataFrame:
         """
         Format backtest statistics into a readable DataFrame.
 
@@ -801,45 +828,51 @@ class USBacktestEngine:
             nav = result.get("nav")
             if nav is None or nav.empty:
                 logger.debug("summary: NAV 为空，返回空 DataFrame")
-                return pd.DataFrame()
+                return pl.DataFrame(schema={"Metric": pl.Utf8, "Value": pl.Utf8})
             # Recompute if stats missing
+            trades = result.get("trades")
+            if isinstance(trades, pl.DataFrame):
+                trades_list = trades.to_dicts()
+            else:
+                trades_list = []
+            turnover = result.get("turnover")
+            if isinstance(turnover, pl.DataFrame):
+                turnover_list = turnover.to_dicts()
+            else:
+                turnover_list = []
             stats = USBacktestEngine._compute_stats(
                 nav,
                 result.get("benchmark_nav"),
-                result.get("trades", pd.DataFrame()).to_dict("records")
-                if isinstance(result.get("trades"), pd.DataFrame)
-                else [],
-                result.get("turnover", pd.DataFrame()).to_dict("records")
-                if isinstance(result.get("turnover"), pd.DataFrame)
-                else [],
+                trades_list,
+                turnover_list,
             )
 
-        metrics = {
-            "Total Return": f"{stats.get('total_return', 0):.2%}",
-            "Annual Return": f"{stats.get('annual_return', 0):.2%}",
-            "Annual Volatility": f"{stats.get('annual_volatility', 0):.2%}",
-            "Sharpe Ratio": f"{stats.get('sharpe_ratio', 0):.2f}",
-            "Max Drawdown": f"{stats.get('max_drawdown', 0):.2%}",
-            "Max Drawdown Date": stats.get("max_drawdown_date", ""),
-            "Calmar Ratio": f"{stats.get('calmar_ratio', 0):.2f}",
-            "Daily Win Rate": f"{stats.get('win_rate', 0):.2%}",
-            "Total Trades": stats.get("total_trades", 0),
-            "Avg Turnover": f"{stats.get('avg_turnover', 0):.2%}",
-            "Annual Turnover": f"{stats.get('annual_turnover', 0):.2%}",
-            "Trade Days": stats.get("trade_days", 0),
-        }
+        metrics = [
+            ("Total Return", f"{stats.get('total_return', 0):.2%}"),
+            ("Annual Return", f"{stats.get('annual_return', 0):.2%}"),
+            ("Annual Volatility", f"{stats.get('annual_volatility', 0):.2%}"),
+            ("Sharpe Ratio", f"{stats.get('sharpe_ratio', 0):.2f}"),
+            ("Max Drawdown", f"{stats.get('max_drawdown', 0):.2%}"),
+            ("Max Drawdown Date", str(stats.get("max_drawdown_date", ""))),
+            ("Calmar Ratio", f"{stats.get('calmar_ratio', 0):.2f}"),
+            ("Daily Win Rate", f"{stats.get('win_rate', 0):.2%}"),
+            ("Total Trades", str(stats.get("total_trades", 0))),
+            ("Avg Turnover", f"{stats.get('avg_turnover', 0):.2%}"),
+            ("Annual Turnover", f"{stats.get('annual_turnover', 0):.2%}"),
+            ("Trade Days", str(stats.get("trade_days", 0))),
+        ]
 
         # Benchmark comparison
         if "benchmark_annual_return" in stats:
-            metrics["Benchmark Annual Return"] = (
-                f"{stats['benchmark_annual_return']:.2%}"
+            metrics.append(
+                ("Benchmark Annual Return", f"{stats['benchmark_annual_return']:.2%}")
             )
-            metrics["Excess Annual Return"] = (
-                f"{stats.get('excess_annual_return', 0):.2%}"
+            metrics.append(
+                ("Excess Annual Return", f"{stats.get('excess_annual_return', 0):.2%}")
             )
 
-        return pd.DataFrame(
-            list(metrics.items()), columns=["Metric", "Value"]
+        return pl.DataFrame(
+            {"Metric": [m[0] for m in metrics], "Value": [m[1] for m in metrics]}
         )
 
     # ----------------------------------------------------------

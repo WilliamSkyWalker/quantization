@@ -51,14 +51,14 @@ def select_stocks(request):
         strategy = USMultiFactorStrategy(_db)
         task_manager.update_progress(task_id, 30, '计算因子...')
         result = strategy.select_stocks(date)
-        if result is None or result.empty:
+        if result is None or result.is_empty():
             logger.debug(f"select_stocks: 美股选股结果为空, date={date}")
             return {'date': date, 'count': 0, 'data': []}
         task_manager.update_progress(task_id, 90, '生成结果...')
         return {
             'date': date,
-            'count': len(result),
-            'data': result.to_dict(orient='records'),
+            'count': result.height,
+            'data': result.to_dicts(),
         }
 
     tid = task_manager.submit('美股选股', _run)
@@ -124,8 +124,8 @@ def backtest_run(request):
                 bench_data.append({'date': str(dt)[:10], 'nav': round(float(val), 6)})
 
         trade_data = []
-        if trades is not None and not trades.empty:
-            trade_data = trades.head(2000).to_dict(orient='records')
+        if trades is not None and not trades.is_empty():
+            trade_data = trades.head(2000).to_dicts()
 
         return {
             'nav': nav_data,
@@ -184,14 +184,14 @@ def paper_trade(request):
             trade_date = date
 
         result = strategy.select_stocks(trade_date)
-        if result is None or result.empty:
+        if result is None or result.is_empty():
             logger.debug(f"paper_trade: 美股模拟交易无选股结果, date={trade_date}")
             return {'message': '无选股结果', 'trades': 0}
 
         task_manager.update_progress(task_id, 60, '执行调仓...')
         trader = USPaperTrader(_db)
         trader.connect()
-        trades = trader.sync_position(result[['ticker', 'weight']])
+        trades = trader.sync_position(result.select(['ticker', 'weight']).to_pandas())
         trader.update_nav()
 
         return {
@@ -264,14 +264,14 @@ def alpaca_trade(request):
             trade_date = date
 
         result = strategy.select_stocks(trade_date)
-        if result is None or result.empty:
+        if result is None or result.is_empty():
             logger.debug(f"alpaca_trade: 无选股结果, date={trade_date}")
             return {'message': '无选股结果', 'trades': 0}
 
         task_manager.update_progress(task_id, 60, '提交 Alpaca 订单...')
         trader = AlpacaTrader(_db)
         trader.connect()
-        trades = trader.sync_position(result[['ticker', 'weight']])
+        trades = trader.sync_position(result.select(['ticker', 'weight']).to_pandas())
         trader.update_nav()
 
         return {
@@ -294,13 +294,13 @@ def alpaca_reconcile(request):
 
     strategy = USMultiFactorStrategy(_db)
     result = strategy.select_stocks(date)
-    if result is None or result.empty:
+    if result is None or result.is_empty():
         logger.debug(f"alpaca_reconcile: 无选股结果, date={date}")
         return Response({'message': '无选股结果', 'data': []})
 
     trader = AlpacaTrader(_db)
     trader.connect()
-    diff = trader.reconcile(result[['ticker', 'weight']])
+    diff = trader.reconcile(result.select(['ticker', 'weight']).to_pandas())
     return Response({'data': diff.to_dict(orient='records') if not diff.empty else []})
 
 

@@ -1,9 +1,10 @@
 """美股分析师因子: US_ANALYST_RATING, US_ANALYST_COVERAGE"""
 
 import logging
+from datetime import datetime, timedelta
 
 import numpy as np
-import pandas as pd
+import polars as pl
 
 from services.config import LOG_LEVEL
 from stocks.services.factors.us_base import USFactorBase
@@ -23,43 +24,52 @@ _RATING_MAP = {
 # 回看窗口
 _LOOKBACK_DAYS = 120
 
+_EMPTY = pl.DataFrame(schema={"ticker": pl.Utf8, "factor_value": pl.Float64})
+
 
 class USAnalystRating(USFactorBase):
     """Analyst Rating: mean rating score over trailing window"""
     name = "US_ANALYST_RATING"
     description = "分析师共识评级"
 
-    def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
-        tickers = universe["ticker"].tolist()
-        date_ts = pd.to_datetime(date)
-        start_ts = date_ts - pd.Timedelta(days=_LOOKBACK_DAYS)
+    def compute(self, date: str, universe: pl.DataFrame) -> pl.DataFrame:
+        tickers = universe["ticker"].to_list()
+        date_ts = datetime.strptime(date, "%Y-%m-%d") if isinstance(date, str) else date
+        start_ts = date_ts - timedelta(days=_LOOKBACK_DAYS)
 
         # 从预加载数据获取
         bulk_ar = self._static_cache.get("_bulk_analyst")
-        if bulk_ar is None or bulk_ar.empty:
+        if bulk_ar is None or bulk_ar.is_empty():
             logger.debug("USAnalystRating.compute: 缓存为空")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
-        mask = (bulk_ar["date"] >= start_ts) & (bulk_ar["date"] <= date_ts)
-        df = bulk_ar[mask].copy()
+            return _EMPTY.clone()
+        df = bulk_ar.filter(
+            (pl.col("date") >= start_ts) & (pl.col("date") <= date_ts)
+        )
 
-        if df.empty:
+        if df.is_empty():
             logger.debug("USAnalystRating.compute: 无分析师推荐数据")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
+            return _EMPTY.clone()
 
         if tickers:
-            df = df[df["ticker"].isin(tickers)]
+            df = df.filter(pl.col("ticker").is_in(tickers))
 
-        # 映射评级到数值
-        df["score"] = df["new_grade"].str.strip().map(_RATING_MAP)
-        df = df.dropna(subset=["score"])
+        # 映射评级到数值 — 用 polars replace (old->new map)
+        df = df.with_columns(
+            pl.col("new_grade").str.strip_chars()
+            .replace_strict(_RATING_MAP, default=None)
+            .cast(pl.Float64, strict=False)
+            .alias("score")
+        )
+        df = df.drop_nulls(subset=["score"])
 
-        if df.empty:
+        if df.is_empty():
             logger.debug("USAnalystRating.compute: 评级映射后无有效数据")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
+            return _EMPTY.clone()
 
-        result = df.groupby("ticker")["score"].mean().reset_index()
-        result.columns = ["ticker", "factor_value"]
-        return result
+        result = df.group_by("ticker").agg(
+            pl.col("score").mean().alias("factor_value")
+        )
+        return result.select(["ticker", "factor_value"])
 
 
 class USAnalystCoverage(USFactorBase):
@@ -67,26 +77,30 @@ class USAnalystCoverage(USFactorBase):
     name = "US_ANALYST_COVERAGE"
     description = "分析师覆盖度"
 
-    def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
-        tickers = universe["ticker"].tolist()
-        date_ts = pd.to_datetime(date)
-        start_ts = date_ts - pd.Timedelta(days=_LOOKBACK_DAYS)
+    def compute(self, date: str, universe: pl.DataFrame) -> pl.DataFrame:
+        tickers = universe["ticker"].to_list()
+        date_ts = datetime.strptime(date, "%Y-%m-%d") if isinstance(date, str) else date
+        start_ts = date_ts - timedelta(days=_LOOKBACK_DAYS)
 
         bulk_ar = self._static_cache.get("_bulk_analyst")
-        if bulk_ar is None or bulk_ar.empty:
+        if bulk_ar is None or bulk_ar.is_empty():
             logger.debug("USAnalystCoverage.compute: 缓存为空")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
-        mask = (bulk_ar["date"] >= start_ts) & (bulk_ar["date"] <= date_ts)
-        df = bulk_ar[mask].copy()
+            return _EMPTY.clone()
+        df = bulk_ar.filter(
+            (pl.col("date") >= start_ts) & (pl.col("date") <= date_ts)
+        )
 
-        if df.empty:
+        if df.is_empty():
             logger.debug("USAnalystCoverage.compute: 无分析师推荐数据")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
+            return _EMPTY.clone()
 
         if tickers:
-            df = df[df["ticker"].isin(tickers)]
+            df = df.filter(pl.col("ticker").is_in(tickers))
 
-        result = df.groupby("ticker")["grading_company"].nunique().reset_index()
-        result.columns = ["ticker", "n_firms"]
-        result["factor_value"] = np.log1p(result["n_firms"])
-        return result[["ticker", "factor_value"]]
+        result = df.group_by("ticker").agg(
+            pl.col("grading_company").n_unique().alias("n_firms")
+        )
+        result = result.with_columns(
+            pl.col("n_firms").cast(pl.Float64).log1p().alias("factor_value")
+        )
+        return result.select(["ticker", "factor_value"])

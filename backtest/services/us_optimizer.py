@@ -27,7 +27,7 @@ import logging
 
 import cvxpy as cp
 import numpy as np
-import pandas as pd
+import polars as pl
 
 from services.config import (
     US_RISK_AVERSION,
@@ -79,7 +79,7 @@ class USPortfolioOptimizer:
 
     def optimize(
         self,
-        scores: pd.Series,
+        scores: dict[str, float],
         cov_matrix: np.ndarray,
         cov_tickers: list[str],
         prev_weights: dict[str, float] | None = None,
@@ -90,7 +90,7 @@ class USPortfolioOptimizer:
         Run MVO optimization.
 
         Args:
-            scores: Series indexed by ticker, values are composite scores.
+            scores: Dict {ticker: composite_score}.
             cov_matrix: N×N covariance matrix (aligned with cov_tickers).
             cov_tickers: Ticker list aligned with cov_matrix rows/cols.
             prev_weights: Previous period weights {ticker: weight}.
@@ -101,13 +101,13 @@ class USPortfolioOptimizer:
             Dict {ticker: weight}. Positive = long, negative = short.
             Empty dict if optimization fails.
         """
-        if scores.empty:
+        if not scores:
             logger.warning("USPortfolioOptimizer: 空 scores")
             return {}
 
         # Align: only use tickers that have both score and covariance data
         cov_set = set(cov_tickers)
-        common_tickers = [t for t in scores.index if t in cov_set]
+        common_tickers = [t for t in scores if t in cov_set]
 
         if len(common_tickers) < 2:
             logger.warning(
@@ -120,7 +120,7 @@ class USPortfolioOptimizer:
         idx = [ticker_to_cov_idx[t] for t in common_tickers]
         n = len(common_tickers)
 
-        mu = scores.loc[common_tickers].values.astype(np.float64)
+        mu = np.array([scores[t] for t in common_tickers], dtype=np.float64)
         sigma = cov_matrix[np.ix_(idx, idx)].astype(np.float64)
 
         # Regularize: ensure positive semi-definite

@@ -8,9 +8,10 @@
 """
 
 import logging
+from datetime import datetime, timedelta
 
 import numpy as np
-import pandas as pd
+import polars as pl
 
 from services.config import LOG_LEVEL
 from stocks.services.factors.us_base import USFactorBase
@@ -20,37 +21,39 @@ logger.setLevel(LOG_LEVEL)
 
 _LOOKBACK_DAYS = 90
 
+_EMPTY = pl.DataFrame(schema={"ticker": pl.Utf8, "factor_value": pl.Float64})
+
 
 class InsiderNetBuy(USFactorBase):
     """Insider Net Buy: net insider purchases / market cap over trailing 90 days"""
     name = "INSIDER_NET_BUY"
     description = "内部人净买入 (Form 4，近90天净买入/市值)"
 
-    def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
-        tickers = universe["ticker"].tolist()
-        date_ts = pd.to_datetime(date)
+    def compute(self, date: str, universe: pl.DataFrame) -> pl.DataFrame:
+        tickers = universe["ticker"].to_list()
 
         # 尝试从预加载缓存获取（回测模式）
         insider_data = self._get_insider_data(date, tickers)
-        if insider_data.empty:
+        if insider_data.is_empty():
             logger.debug("InsiderNetBuy.compute: 无内部人交易数据")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
+            return _EMPTY.clone()
 
         # 市值
         mktcap = self.get_market_cap(date, tickers)
-        if mktcap.empty:
+        if mktcap.is_empty():
             logger.debug("InsiderNetBuy.compute: 无市值数据")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
+            return _EMPTY.clone()
 
-        df = insider_data.merge(mktcap, on="ticker", how="inner")
-        df["factor_value"] = np.where(
-            df["market_cap"] > 0,
-            df["net_value"] / df["market_cap"],
-            0.0,
+        df = insider_data.join(mktcap, on="ticker", how="inner")
+        df = df.with_columns(
+            pl.when(pl.col("market_cap") > 0)
+            .then(pl.col("net_value") / pl.col("market_cap"))
+            .otherwise(0.0)
+            .alias("factor_value")
         )
-        return df[["ticker", "factor_value"]]
+        return df.select(["ticker", "factor_value"])
 
-    def _get_insider_data(self, date: str, tickers: list[str]) -> pd.DataFrame:
+    def _get_insider_data(self, date: str, tickers: list[str]) -> pl.DataFrame:
         """
         获取内部人交易数据（从 us_insider_trade 表）。
 
@@ -59,22 +62,24 @@ class InsiderNetBuy(USFactorBase):
         - D (Disposition) = 卖出，金额为负
         - net_value = SUM(signed_value)
         """
-        date_ts = pd.to_datetime(date)
-        start_ts = date_ts - pd.Timedelta(days=_LOOKBACK_DAYS)
+        date_ts = datetime.strptime(date, "%Y-%m-%d") if isinstance(date, str) else date
+        start_ts = date_ts - timedelta(days=_LOOKBACK_DAYS)
 
         # 优先从预加载缓存获取
         bulk_insider = self._static_cache.get("_bulk_insider")
-        if bulk_insider is not None and not bulk_insider.empty:
-            mask = (bulk_insider["filing_date"] >= start_ts) & \
-                   (bulk_insider["filing_date"] <= date_ts)
-            df = bulk_insider[mask].copy()
-            if not df.empty:
-                df = df[df["ticker"].isin(tickers)]
-                if not df.empty:
-                    result = df.groupby("ticker")["net_value"].sum().reset_index()
+        if bulk_insider is not None and not bulk_insider.is_empty():
+            df = bulk_insider.filter(
+                (pl.col("filing_date") >= start_ts) & (pl.col("filing_date") <= date_ts)
+            )
+            if not df.is_empty():
+                df = df.filter(pl.col("ticker").is_in(tickers))
+                if not df.is_empty():
+                    result = df.group_by("ticker").agg(
+                        pl.col("net_value").sum().alias("net_value")
+                    )
                     return result
             logger.debug(f"_get_insider_data: 预加载缓存中 {date} 近90天无数据")
-            return pd.DataFrame(columns=["ticker", "net_value"])
+            return pl.DataFrame(schema={"ticker": pl.Utf8, "net_value": pl.Float64})
 
         logger.warning("_get_insider_data: 缓存为空，请先调用 preload_for_backtest()")
-        return pd.DataFrame(columns=["ticker", "net_value"])
+        return pl.DataFrame(schema={"ticker": pl.Utf8, "net_value": pl.Float64})

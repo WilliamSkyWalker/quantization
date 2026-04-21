@@ -20,7 +20,7 @@ Beta 映射：
 import logging
 
 import numpy as np
-import pandas as pd
+import polars as pl
 
 from services.config import (
     LOG_LEVEL,
@@ -117,11 +117,11 @@ class USRegimeDetector:
                 trade_date__lte=date,
             ).order_by("-trade_date").values_list("trade_date", "close")[:lookback]
         )
-        df = pd.DataFrame(rows, columns=["trade_date", "close"]) if rows else pd.DataFrame()
-        if df.empty or len(df) < US_REGIME_MA_WINDOW:
-            logger.debug(f"_trend_score: 数据不足({len(df) if not df.empty else 0}/{US_REGIME_MA_WINDOW})，返回中性 0.5")
+        if not rows or len(rows) < US_REGIME_MA_WINDOW:
+            logger.debug(f"_trend_score: 数据不足({len(rows) if rows else 0}/{US_REGIME_MA_WINDOW})，返回中性 0.5")
             return 0.5
-        prices = pd.to_numeric(df["close"], errors="coerce").dropna().values
+        df = pl.DataFrame(rows, schema=["trade_date", "close"], orient="row")
+        prices = df.get_column("close").cast(pl.Float64, strict=False).drop_nulls().to_numpy()
         if len(prices) < US_REGIME_MA_WINDOW:
             logger.debug(f"_trend_score: 有效价格不足({len(prices)}/{US_REGIME_MA_WINDOW})，返回中性 0.5")
             return 0.5
@@ -144,11 +144,11 @@ class USRegimeDetector:
                 report_date__lte=date,
             ).order_by("-report_date").values_list("value", flat=True)[:_VIX_LOOKBACK_DAYS + 10]
         )
-        df = pd.DataFrame({"value": rows}) if rows else pd.DataFrame()
-        if df.empty or len(df) < 20:
-            logger.debug(f"_vol_score: VIX 数据不足({len(df) if not df.empty else 0}/20)，返回中性 0.5")
+        if not rows or len(rows) < 20:
+            logger.debug(f"_vol_score: VIX 数据不足({len(rows) if rows else 0}/20)，返回中性 0.5")
             return 0.5
-        vals = pd.to_numeric(df["value"], errors="coerce").dropna().values
+        df = pl.DataFrame({"value": rows})
+        vals = df.get_column("value").cast(pl.Float64, strict=False).drop_nulls().to_numpy()
         if len(vals) < 20:
             logger.debug(f"_vol_score: VIX 有效值不足({len(vals)}/20)，返回中性 0.5")
             return 0.5
@@ -167,15 +167,15 @@ class USRegimeDetector:
                 report_date__lte=date,
             ).order_by("-report_date").values_list("value", flat=True)[:5]
         )
-        df = pd.DataFrame({"value": rows}) if rows else pd.DataFrame()
-        if df.empty:
+        if not rows:
             logger.debug("_credit_score: 利差数据为空，返回中性 0.5")
             return 0.5
-        spread = pd.to_numeric(df["value"], errors="coerce").dropna()
-        if spread.empty:
+        df = pl.DataFrame({"value": rows})
+        spread = df.get_column("value").cast(pl.Float64, strict=False).drop_nulls()
+        if len(spread) == 0:
             logger.debug("_credit_score: 利差有效值为空，返回中性 0.5")
             return 0.5
-        v = float(spread.iloc[0])
+        v = float(spread[0])
         if v >= 0.5:
             return 1.0
         elif v <= -0.5:
@@ -197,9 +197,11 @@ class USRegimeDetector:
             logger.debug("_crowding_score: rolling_indexed 缓存为空，返回中性 0.5")
             return 0.5  # 无数据时中性
 
-        date_ts = pd.to_datetime(date)
+        import datetime as _dt
+        date_ts = _dt.datetime.strptime(date, "%Y-%m-%d")
 
         # 获取最近 252 天的动量（20d cumulative return）截面标准差
+        # NOTE: ri is a pandas DataFrame with MultiIndex from factor layer
         try:
             # 取最近的日期
             available_dates = ri.index.get_level_values("trade_date").unique()

@@ -13,10 +13,11 @@
 
 import json
 import logging
+from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
-import pandas as pd
+import polars as pl
 
 from services.config import LOG_LEVEL
 from stocks.services.factors.us_base import USFactorBase
@@ -28,26 +29,28 @@ _LOOKBACK_DAYS = 14       # 回看天数
 _TIME_DECAY = 0.3         # 指数衰减系数（越大衰减越快）
 _DIRECTION_MAP = {"bullish": 1.0, "bearish": -1.0, "neutral": 0.0}
 
+_EMPTY = pl.DataFrame(schema={"ticker": pl.Utf8, "factor_value": pl.Float64})
+
 
 class PolymarketSent(USFactorBase):
     """Polymarket Sentiment: per-ticker sentiment from prediction market alerts"""
     name = "POLYMARKET_SENT"
     description = "Polymarket 预测市场情感因子"
 
-    def compute(self, date: str, universe: pd.DataFrame) -> pd.DataFrame:
-        tickers = set(universe["ticker"].tolist())
-        date_ts = pd.to_datetime(date)
-        start_ts = date_ts - pd.Timedelta(days=_LOOKBACK_DAYS)
+    def compute(self, date: str, universe: pl.DataFrame) -> pl.DataFrame:
+        tickers = set(universe["ticker"].to_list())
+        date_ts = datetime.strptime(date, "%Y-%m-%d") if isinstance(date, str) else date
+        start_ts = date_ts - timedelta(days=_LOOKBACK_DAYS)
 
         # 查询 polymarket_alert
         alerts = self._get_alerts(start_ts, date_ts)
-        if alerts.empty:
+        if alerts.is_empty():
             logger.debug("PolymarketSent.compute: 无Polymarket alerts数据")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
+            return _EMPTY.clone()
 
         # 解析 affected_tickers JSON，构建 per-ticker 信号
         records = []
-        for _, row in alerts.iterrows():
+        for row in alerts.iter_rows(named=True):
             tickers_json = row.get("affected_tickers")
             if not tickers_json:
                 logger.debug("PolymarketSent.compute: alert affected_tickers为空，跳过")
@@ -63,7 +66,9 @@ class PolymarketSent(USFactorBase):
                 continue
 
             llm_conf = float(row.get("llm_confidence") or 0)
-            created = pd.to_datetime(row.get("created_at"))
+            created = row.get("created_at")
+            if isinstance(created, str):
+                created = datetime.fromisoformat(created)
             days_ago = (date_ts - created).total_seconds() / 86400
             if days_ago < 0:
                 logger.debug("PolymarketSent.compute: alert日期在计算日之后，跳过")
@@ -86,15 +91,16 @@ class PolymarketSent(USFactorBase):
 
         if not records:
             logger.debug("PolymarketSent.compute: 解析后无有效情感记录")
-            return pd.DataFrame(columns=["ticker", "factor_value"])
+            return _EMPTY.clone()
 
-        df = pd.DataFrame(records)
+        df = pl.DataFrame(records)
         # 聚合：每只股票的所有 alert 信号求和
-        result = df.groupby("ticker")["score"].sum().reset_index()
-        result.columns = ["ticker", "factor_value"]
-        return result
+        result = df.group_by("ticker").agg(
+            pl.col("score").sum().alias("factor_value")
+        )
+        return result.select(["ticker", "factor_value"])
 
-    def _get_alerts(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    def _get_alerts(self, start: datetime, end: datetime) -> pl.DataFrame:
         """获取时间范围内的 polymarket alerts。"""
         cache_key = ("pm_alerts", start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
         cached = self._date_cache.get(cache_key)
@@ -112,9 +118,13 @@ class PolymarketSent(USFactorBase):
             ).order_by("-created_at").values(
                 "affected_tickers", "llm_confidence", "llm_sentiment", "created_at"
             )
-            df = pd.DataFrame(qs)
+            rows = list(qs)
+            if rows:
+                df = pl.DataFrame(rows)
+            else:
+                df = pl.DataFrame()
         except Exception as e:
             logger.debug(f"PolymarketSent: 查询失败: {e}")
-            df = pd.DataFrame()
+            df = pl.DataFrame()
         self._date_cache[cache_key] = df
         return df

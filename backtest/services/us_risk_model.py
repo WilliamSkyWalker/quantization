@@ -16,7 +16,7 @@ import logging
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
+import polars as pl
 from sklearn.covariance import LedoitWolf
 
 from services.config import US_COV_LOOKBACK, US_MIN_HISTORY_DAYS, LOG_LEVEL
@@ -123,37 +123,53 @@ class USRiskModel:
         Returns:
             (returns_matrix, valid_tickers) or (None, []) if insufficient data.
         """
+        import datetime as _dt
         from stocks.services.factors.us_base import USFactorBase
 
-        bulk_daily = USFactorBase._static_cache.get("_bulk_daily")
-        if bulk_daily is None or bulk_daily.empty:
+        bulk_daily_pd = USFactorBase._static_cache.get("_bulk_daily")
+        if bulk_daily_pd is None or bulk_daily_pd.empty:
             logger.warning("USRiskModel: _bulk_daily 缓存为空")
             return None, []
 
-        date_ts = pd.to_datetime(date)
-        start_ts = date_ts - pd.Timedelta(days=int(self.lookback * 1.5))
+        # Convert from pandas cache to polars for processing
+        date_ts = _dt.datetime.strptime(date, "%Y-%m-%d")
+        start_ts = date_ts - _dt.timedelta(days=int(self.lookback * 1.5))
 
-        # Filter to date range and universe
+        # Filter in pandas first (avoids full copy to polars)
         mask = (
-            (bulk_daily["trade_date"] >= start_ts)
-            & (bulk_daily["trade_date"] <= date_ts)
-            & (bulk_daily["ticker"].isin(universe))
+            (bulk_daily_pd["trade_date"] >= start_ts)
+            & (bulk_daily_pd["trade_date"] <= date_ts)
+            & (bulk_daily_pd["ticker"].isin(universe))
         )
-        df = bulk_daily.loc[mask, ["ticker", "trade_date", "adj_close"]].copy()
-        if df.empty:
+        subset_pd = bulk_daily_pd.loc[mask, ["ticker", "trade_date", "adj_close"]]
+        if subset_pd.empty:
             logger.warning(f"USRiskModel: {date} 无价格数据")
             return None, []
 
-        # Pivot to wide format: rows=dates, cols=tickers
-        df["adj_close"] = pd.to_numeric(df["adj_close"], errors="coerce")
-        pivot = df.pivot_table(
-            index="trade_date", columns="ticker", values="adj_close", aggfunc="last",
+        # Convert to polars for pivot
+        df = pl.from_pandas(subset_pd).with_columns(
+            pl.col("adj_close").cast(pl.Float64, strict=False)
         )
-        pivot = pivot.sort_index()
 
-        # Keep only tickers with enough history
-        valid_counts = pivot.notna().sum()
-        valid_tickers = valid_counts[valid_counts >= self.min_days].index.tolist()
+        # Pivot to wide format: rows=dates, cols=tickers
+        pivot = (
+            df.sort("trade_date")
+            .group_by(["trade_date", "ticker"])
+            .agg(pl.col("adj_close").last())
+            .pivot(on="ticker", index="trade_date", values="adj_close")
+            .sort("trade_date")
+        )
+
+        # Get ticker columns (everything except trade_date)
+        ticker_cols = [c for c in pivot.columns if c != "trade_date"]
+
+        # Keep only tickers with enough non-null history
+        valid_tickers = []
+        for col in ticker_cols:
+            non_null = pivot.get_column(col).is_not_null().sum()
+            if non_null >= self.min_days:
+                valid_tickers.append(col)
+
         if len(valid_tickers) < 2:
             logger.warning(
                 f"USRiskModel: {date} 只有 {len(valid_tickers)} 只股票有 "
@@ -161,32 +177,40 @@ class USRiskModel:
             )
             return None, []
 
-        pivot = pivot[valid_tickers]
+        pivot = pivot.select(["trade_date"] + valid_tickers)
 
         # Take last `lookback` trading days
         pivot = pivot.tail(self.lookback + 1)
 
-        # Forward-fill small gaps (max 5 days), then drop remaining NaN rows
-        pivot = pivot.ffill(limit=5)
+        # Forward-fill small gaps (max 5 days)
+        for col in valid_tickers:
+            pivot = pivot.with_columns(
+                pl.col(col).forward_fill(limit=5)
+            )
+
+        # Convert to numpy for log returns calculation
+        price_np = pivot.select(valid_tickers).to_numpy()  # T×N
 
         # Compute daily log returns
-        returns = np.log(pivot / pivot.shift(1))
-        returns = returns.iloc[1:]  # drop first NaN row
-        returns = returns.dropna(axis=1, how="any")
+        returns_np = np.log(price_np[1:] / price_np[:-1])
 
-        if returns.shape[1] < 2:
-            logger.warning(f"USRiskModel: {date} 收益矩阵列数不足 ({returns.shape[1]})")
+        # Drop columns (tickers) that have any NaN
+        col_mask = ~np.isnan(returns_np).any(axis=0)
+        if col_mask.sum() < 2:
+            logger.warning(f"USRiskModel: {date} 收益矩阵列数不足 ({col_mask.sum()})")
             return None, []
 
-        valid_tickers = returns.columns.tolist()
-        returns_np = returns.values  # T×N
+        returns_np = returns_np[:, col_mask]
+        valid_tickers = [valid_tickers[i] for i in range(len(valid_tickers)) if col_mask[i]]
 
         # Sanity check: clip extreme returns (>50% daily = data error)
         returns_np = np.clip(returns_np, -0.5, 0.5)
 
+        # Get date range for logging
+        dates_col = pivot.get_column("trade_date")
         logger.debug(
             f"USRiskModel returns matrix: {returns_np.shape[0]}×{returns_np.shape[1]}, "
-            f"date range {returns.index[0].strftime('%Y-%m-%d')}~{returns.index[-1].strftime('%Y-%m-%d')}"
+            f"date range {dates_col[1]}~{dates_col[-1]}"
         )
         return returns_np, valid_tickers
 
@@ -195,8 +219,12 @@ class USRiskModel:
         try:
             _CACHE_DIR.mkdir(parents=True, exist_ok=True)
             path = _CACHE_DIR / f"cov_{date}.parquet"
-            df = pd.DataFrame(cov, index=tickers, columns=tickers)
-            df.to_parquet(path)
+            # Store tickers as first column, then cov columns named by ticker
+            data = {"_ticker": tickers}
+            for i, t in enumerate(tickers):
+                data[t] = cov[:, i].tolist()
+            df = pl.DataFrame(data)
+            df.write_parquet(path)
             logger.debug(f"Cov saved: {path}")
         except Exception as e:
             logger.debug(f"Cov cache save failed: {e}")
@@ -207,9 +235,18 @@ class USRiskModel:
         if not path.exists():
             return None, []
         try:
-            df = pd.read_parquet(path)
-            tickers = df.index.tolist()
-            return df.values, tickers
+            df = pl.read_parquet(path)
+            if "_ticker" in df.columns:
+                # New polars format
+                tickers = df.get_column("_ticker").to_list()
+                cov = df.select([c for c in df.columns if c != "_ticker"]).to_numpy()
+            else:
+                # Legacy pandas format (has row index as first column or no _ticker)
+                import pandas as _pd
+                pdf = _pd.read_parquet(path)
+                tickers = pdf.index.tolist()
+                cov = pdf.values
+            return cov, tickers
         except Exception as e:
             logger.debug(f"Cov cache load failed: {e}")
             return None, []
