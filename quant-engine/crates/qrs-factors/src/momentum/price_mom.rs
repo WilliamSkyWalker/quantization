@@ -17,8 +17,8 @@ impl Factor for Mom1M {
 
     fn compute(&self, date: Date, cache: &DataCache) -> FactorResult {
         let mut result = FactorResult::default();
-        for (tid, d, stats) in cache.daily_prices.iter() {
-            if d != date || !stats.adj_close.is_finite() || stats.adj_close <= 0.0 {
+        for (tid, stats) in cache.daily_prices.iter_date(date) {
+            if !stats.adj_close.is_finite() || stats.adj_close <= 0.0 {
                 continue;
             }
             if let Some(prev) = cache.get_month_end_price(tid, date, 1) {
@@ -46,8 +46,8 @@ impl Factor for Mom3M {
 
     fn compute(&self, date: Date, cache: &DataCache) -> FactorResult {
         let mut result = FactorResult::default();
-        for (tid, d, stats) in cache.daily_prices.iter() {
-            if d != date || !stats.adj_close.is_finite() || stats.adj_close <= 0.0 {
+        for (tid, stats) in cache.daily_prices.iter_date(date) {
+            if !stats.adj_close.is_finite() || stats.adj_close <= 0.0 {
                 continue;
             }
             if let Some(prev) = cache.get_month_end_price(tid, date, 3) {

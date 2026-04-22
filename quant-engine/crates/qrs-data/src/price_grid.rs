@@ -144,6 +144,27 @@ impl PriceGrid {
         })
     }
 
+    /// Iterate entries within a date range [start, end] for all tickers.
+    /// Much faster than iter() + filter for windowed factors (35-day lookback etc).
+    pub fn iter_date_range(&self, start: Date, end: Date) -> impl Iterator<Item = (TickerId, Date, &PriceBar)> + '_ {
+        // Find the index range for dates
+        let di_start = self.idx_to_date.partition_point(|d| *d < start);
+        let di_end = self.idx_to_date.partition_point(|d| *d <= end);
+
+        (0..self.n_tickers).flat_map(move |tid| {
+            let ticker = TickerId(tid as u32);
+            (di_start..di_end).filter_map(move |di| {
+                let idx = tid * self.n_dates + di;
+                let bar = &self.data[idx];
+                if bar.close != 0.0 {
+                    Some((ticker, self.idx_to_date[di], bar))
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
     /// Total allocated capacity.
     pub fn capacity(&self) -> usize {
         self.data.len()
