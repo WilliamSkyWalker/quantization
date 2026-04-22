@@ -1,6 +1,6 @@
 //! Growth factors: NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y
 
-use qrs_core::types::{Date, FactorResult, TickerId};
+use qrs_core::types::{Date, FactorResult};
 use qrs_data::cache::DataCache;
 
 use crate::registry::Factor;

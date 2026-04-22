@@ -1,6 +1,6 @@
 //! Analyst factors: US_ANALYST_RATING, US_ANALYST_COVERAGE
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use qrs_core::types::{Date, FactorResult};
 use qrs_data::cache::DataCache;

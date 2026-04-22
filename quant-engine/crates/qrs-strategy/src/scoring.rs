@@ -51,7 +51,7 @@ pub fn compute_scores(
             let mut weight_denom = 0.0;
 
             for (fname, fvals) in processed_factors {
-                let fcat = match factor_categories.get(fname.as_str()) {
+                let _fcat = match factor_categories.get(fname.as_str()) {
                     Some(c) if c == cat => c,
                     _ => continue,
                 };

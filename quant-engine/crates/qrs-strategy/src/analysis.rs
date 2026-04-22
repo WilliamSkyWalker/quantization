@@ -4,7 +4,6 @@ use std::collections::HashMap;
 
 use qrs_core::types::{Date, TickerId};
 use rustc_hash::FxHashMap;
-use tracing::info;
 
 /// Compute Spearman rank correlation (IC) between factor values and forward returns.
 pub fn spearman_ic(

@@ -9,12 +9,11 @@
 
 use std::collections::BTreeMap;
 
-use chrono::NaiveDate;
 use qrs_core::config::Config;
 use qrs_core::types::{Date, TickerId};
 use qrs_data::cache::DataCache;
 use rustc_hash::FxHashMap;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// A single trade record.
 #[derive(Debug, Clone)]

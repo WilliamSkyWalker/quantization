@@ -287,7 +287,7 @@ fn cmd_factors(cache_dir: &PathBuf, date_str: &str) {
     let factors = qrs_factors::registry::all_factors();
     info!("{} factors registered", factors.len());
 
-    let proc_config = qrs_factors::processor::ProcessConfig::default();
+    let _proc_config = qrs_factors::processor::ProcessConfig::default();
 
     println!("\n{:<20} {:>6} {:>10} {:>10} {:>10}   Top 5 / Bottom 5",
         "Factor", "N", "Mean", "Median", "Std");
@@ -296,12 +296,12 @@ fn cmd_factors(cache_dir: &PathBuf, date_str: &str) {
     for factor in &factors {
         let t0 = std::time::Instant::now();
         let raw = factor.compute(date, &cache);
-        let compute_ms = t0.elapsed().as_millis();
+        let _compute_ms = t0.elapsed().as_millis();
 
         // Process (winsorize + zscore, skip neutralize for now since sector_map is empty)
         let mut cfg = qrs_factors::processor::ProcessConfig::default();
         cfg.do_neutralize = false; // TODO: need sector_map populated
-        let processed = qrs_factors::processor::process_factor(
+        let _processed = qrs_factors::processor::process_factor(
             &raw,
             &cache.sector_map,
             &rustc_hash::FxHashMap::default(), // mktcap map not needed without neutralize

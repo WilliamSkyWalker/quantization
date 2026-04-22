@@ -1,6 +1,6 @@
 //! Ownership factors: DARK_POOL_SHORT, INST_OWNERSHIP_DELTA
 
-use qrs_core::types::{Date, FactorResult, TickerId};
+use qrs_core::types::{Date, FactorResult};
 use qrs_data::cache::DataCache;
 use crate::registry::Factor;
 

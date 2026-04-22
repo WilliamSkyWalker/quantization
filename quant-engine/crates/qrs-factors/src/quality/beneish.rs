@@ -55,7 +55,7 @@ impl Factor for BeneishM {
             let ocf_now = f(now, "operating_cash_flow").unwrap_or(0.0);
             let tl_now = f(now, "total_liabilities").unwrap_or(0.0);
             let tca_now = f(now, "total_current_assets").unwrap_or(0.0);
-            let tcl_now = f(now, "total_current_liabilities").unwrap_or(0.0);
+            let _tcl_now = f(now, "total_current_liabilities").unwrap_or(0.0);
 
             // DSRI: Days Sales in Receivables Index
             let dsri = if ar_yoy.abs() > 1e-6 && rev_yoy.abs() > 1e-6 {
