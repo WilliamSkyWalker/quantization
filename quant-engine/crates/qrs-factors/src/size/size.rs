@@ -31,8 +31,13 @@ impl Factor for FreeFloatPct {
     fn category(&self) -> &'static str { "size" }
     fn inherent_direction(&self) -> i8 { 0 }
     fn ic_window_months(&self) -> u32 { 36 }
-    fn compute(&self, _date: Date, _cache: &DataCache) -> FactorResult {
-        // TODO: Needs shares_float table loaded into DataCache
-        FactorResult::default()
+    fn compute(&self, _date: Date, cache: &DataCache) -> FactorResult {
+        let mut result = FactorResult::default();
+        for (&tid, sf) in &cache.shares_float {
+            if sf.free_float.is_finite() && sf.free_float > 0.0 {
+                result.insert(tid, sf.free_float);
+            }
+        }
+        result
     }
 }

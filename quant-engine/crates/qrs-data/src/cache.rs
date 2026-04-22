@@ -101,6 +101,66 @@ pub struct EvRecord {
     pub enterprise_value: f64,
 }
 
+/// Shares float (snapshot).
+#[derive(Debug, Clone)]
+pub struct SharesFloat {
+    pub free_float: f64,       // percentage 0-100
+    pub float_shares: f64,
+    pub outstanding_shares: f64,
+}
+
+/// Dark pool volume record.
+#[derive(Debug, Clone)]
+pub struct DarkPoolRecord {
+    pub date: Date,
+    pub dpi: f64,              // dark pool indicator = otc_short / otc_total
+}
+
+/// Institutional holder record (13F).
+#[derive(Debug, Clone)]
+pub struct InstitutionalRecord {
+    pub date: Date,
+    pub number_of_13f_shares: f64,
+}
+
+/// Employee count record.
+#[derive(Debug, Clone)]
+pub struct EmployeeRecord {
+    pub filing_date: Date,
+    pub employee_count: f64,
+}
+
+/// Congress trade record.
+#[derive(Debug, Clone)]
+pub struct CongressRecord {
+    pub date: Date,
+    pub is_purchase: bool,
+}
+
+/// Government contract record.
+#[derive(Debug, Clone)]
+pub struct GovContractRecord {
+    pub year: i32,
+    pub quarter: i32,
+    pub amount: f64,
+}
+
+/// Lobbying record.
+#[derive(Debug, Clone)]
+pub struct LobbyingRecord {
+    pub date: Date,
+    pub amount: f64,
+}
+
+/// Revenue segment record.
+#[derive(Debug, Clone)]
+pub struct RevenueSegmentRecord {
+    pub date: Date,
+    pub segment_name: String,
+    pub revenue: f64,
+    pub segment_type: String, // "product" or "geographic"
+}
+
 /// Central data cache — immutable after construction.
 pub struct DataCache {
     // Price data — flat 2D array for O(1) lookup
@@ -121,6 +181,17 @@ pub struct DataCache {
     pub eps_estimates: FxHashMap<TickerId, Vec<EpsEstimate>>,
     pub dividends: FxHashMap<TickerId, Vec<DividendRecord>>,
     pub insider_trades: FxHashMap<TickerId, Vec<InsiderTrade>>,
+
+    // Alternative data tables
+    pub shares_float: FxHashMap<TickerId, SharesFloat>,
+    pub dark_pool: FxHashMap<TickerId, Vec<DarkPoolRecord>>,
+    pub institutional: FxHashMap<TickerId, Vec<InstitutionalRecord>>,
+    pub esg_ratings: FxHashMap<TickerId, f64>,          // latest numeric rating
+    pub employee_counts: FxHashMap<TickerId, Vec<EmployeeRecord>>,
+    pub congress_trades: FxHashMap<TickerId, Vec<CongressRecord>>,
+    pub gov_contracts: FxHashMap<TickerId, Vec<GovContractRecord>>,
+    pub lobbying: FxHashMap<TickerId, Vec<LobbyingRecord>>,
+    pub revenue_segments: FxHashMap<TickerId, Vec<RevenueSegmentRecord>>,
 
     // Static metadata
     pub sector_map: FxHashMap<TickerId, SectorId>,

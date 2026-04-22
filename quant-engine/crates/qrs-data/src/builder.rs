@@ -75,6 +75,15 @@ pub fn build_cache_ranged(cache_dir: &Path, start: Option<Date>, end: Option<Dat
     let eps_estimates = load_eps_estimates(cache_dir, &interner)?;
     let dividends = load_dividends(cache_dir, &interner)?;
     let insider_trades = load_insider_trades(cache_dir, &interner)?;
+    let shares_float = load_shares_float(cache_dir, &interner)?;
+    let dark_pool = load_dark_pool(cache_dir, &interner)?;
+    let institutional = load_institutional(cache_dir, &interner)?;
+    let esg_ratings = load_esg_ratings(cache_dir, &interner)?;
+    let employee_counts = load_employee_counts(cache_dir, &interner)?;
+    let congress_trades = load_congress_trades(cache_dir, &interner)?;
+    let gov_contracts = load_gov_contracts(cache_dir, &interner)?;
+    let lobbying = load_lobbying(cache_dir, &interner)?;
+    let revenue_segments = load_revenue_segments(cache_dir, &interner)?;
 
     info!("Phase 2: {:.1}s", t1.elapsed().as_secs_f64());
 
@@ -109,6 +118,15 @@ pub fn build_cache_ranged(cache_dir: &Path, start: Option<Date>, end: Option<Dat
         eps_estimates,
         dividends,
         insider_trades,
+        shares_float,
+        dark_pool,
+        institutional,
+        esg_ratings,
+        employee_counts,
+        congress_trades,
+        gov_contracts,
+        lobbying,
+        revenue_segments,
         sector_map: FxHashMap::default(),
         industry_map: FxHashMap::default(),
         ipo_dates: FxHashMap::default(),
@@ -884,5 +902,260 @@ fn load_insider_trades(
     for records in map.values_mut() {
         records.sort_by(|a, b| b.filing_date.cmp(&a.filing_date));
     }
+    Ok(map)
+}
+
+// ===== Alternative data loaders =====
+
+fn load_shares_float(
+    cache_dir: &Path,
+    interner: &SharedInterner,
+) -> Result<FxHashMap<TickerId, SharesFloat>> {
+    let path = match loader::find_snapshot_cache(cache_dir, "us_shares_float") {
+        Some(p) => p,
+        None => { warn!("us_shares_float_all.parquet not found"); return Ok(FxHashMap::default()); }
+    };
+    let df = loader::load_parquet(&path)?;
+    let tickers = get_str_col(&df, "ticker")?;
+    let ff = get_f64_col(&df, "free_float");
+    let fs = get_f64_col(&df, "float_shares");
+    let os = get_f64_col(&df, "outstanding_shares");
+    let mut map = FxHashMap::default();
+    for i in 0..df.height() {
+        let tid = interner.intern(tickers.get(i).unwrap_or(""));
+        map.insert(tid, SharesFloat {
+            free_float: opt_f64(ff[i]),
+            float_shares: opt_f64(fs[i]),
+            outstanding_shares: opt_f64(os[i]),
+        });
+    }
+    info!("Shares float: {} tickers", map.len());
+    Ok(map)
+}
+
+fn load_dark_pool(
+    cache_dir: &Path,
+    interner: &SharedInterner,
+) -> Result<FxHashMap<TickerId, Vec<DarkPoolRecord>>> {
+    let path = match loader::find_any_cache_file(cache_dir, "us_dark_pool_volume") {
+        Some(p) => p,
+        None => { warn!("us_dark_pool_volume not found"); return Ok(FxHashMap::default()); }
+    };
+    let df = loader::load_parquet(&path)?;
+    let tickers = get_str_col(&df, "ticker")?;
+    let dates = get_date_col(&df, "date")?;
+    let dpi = get_f64_col(&df, "dpi");
+    let mut map: FxHashMap<TickerId, Vec<DarkPoolRecord>> = FxHashMap::default();
+    for i in 0..df.height() {
+        let tid = interner.intern(tickers.get(i).unwrap_or(""));
+        let date = match dates[i] { Some(d) => d, None => continue };
+        if let Some(d) = dpi[i] {
+            if d.is_finite() {
+                map.entry(tid).or_default().push(DarkPoolRecord { date, dpi: d });
+            }
+        }
+    }
+    for v in map.values_mut() { v.sort_by(|a, b| b.date.cmp(&a.date)); }
+    info!("Dark pool: {} tickers", map.len());
+    Ok(map)
+}
+
+fn load_institutional(
+    cache_dir: &Path,
+    interner: &SharedInterner,
+) -> Result<FxHashMap<TickerId, Vec<InstitutionalRecord>>> {
+    let path = match loader::find_any_cache_file(cache_dir, "us_institutional_holder") {
+        Some(p) => p,
+        None => { return Ok(FxHashMap::default()); }
+    };
+    let df = loader::load_parquet(&path)?;
+    let tickers = get_str_col(&df, "ticker")?;
+    let dates = get_date_col(&df, "date")?;
+    let shares = get_f64_col(&df, "number_of_13f_shares");
+    let mut map: FxHashMap<TickerId, Vec<InstitutionalRecord>> = FxHashMap::default();
+    for i in 0..df.height() {
+        let tid = interner.intern(tickers.get(i).unwrap_or(""));
+        let date = match dates[i] { Some(d) => d, None => continue };
+        map.entry(tid).or_default().push(InstitutionalRecord {
+            date,
+            number_of_13f_shares: opt_f64(shares[i]),
+        });
+    }
+    for v in map.values_mut() { v.sort_by(|a, b| b.date.cmp(&a.date)); }
+    info!("Institutional: {} tickers", map.len());
+    Ok(map)
+}
+
+fn load_esg_ratings(
+    cache_dir: &Path,
+    interner: &SharedInterner,
+) -> Result<FxHashMap<TickerId, f64>> {
+    let path = match loader::find_snapshot_cache(cache_dir, "us_esg_rating") {
+        Some(p) => p,
+        None => { return Ok(FxHashMap::default()); }
+    };
+    let df = loader::load_parquet(&path)?;
+    let tickers = get_str_col(&df, "ticker")?;
+    let ratings = get_str_values(&df, "esg_risk_rating");
+    // Map letter ratings to numeric: A+=10, A=9, ... D=1
+    fn rating_to_num(s: &str) -> Option<f64> {
+        match s.trim() {
+            "AAA" => Some(10.0), "AA" => Some(9.0), "A" => Some(8.0),
+            "BBB" => Some(7.0), "BB" => Some(6.0), "B" => Some(5.0),
+            "CCC" => Some(4.0), "CC" => Some(3.0), "C" => Some(2.0),
+            "D" => Some(1.0),
+            _ => s.parse::<f64>().ok(), // Some sources store numeric directly
+        }
+    }
+    // Keep latest per ticker (last row wins since parquet may have multiple fiscal years)
+    let mut map = FxHashMap::default();
+    for i in 0..df.height() {
+        let tid = interner.intern(tickers.get(i).unwrap_or(""));
+        if let Some(v) = rating_to_num(&ratings[i]) {
+            map.insert(tid, v);
+        }
+    }
+    info!("ESG ratings: {} tickers", map.len());
+    Ok(map)
+}
+
+fn load_employee_counts(
+    cache_dir: &Path,
+    interner: &SharedInterner,
+) -> Result<FxHashMap<TickerId, Vec<EmployeeRecord>>> {
+    let path = match loader::find_any_cache_file(cache_dir, "us_employee_count") {
+        Some(p) => p,
+        None => { return Ok(FxHashMap::default()); }
+    };
+    let df = loader::load_parquet(&path)?;
+    let tickers = get_str_col(&df, "ticker")?;
+    let dates = get_date_col(&df, "filing_date")?;
+    let counts = get_f64_col(&df, "employee_count");
+    let mut map: FxHashMap<TickerId, Vec<EmployeeRecord>> = FxHashMap::default();
+    for i in 0..df.height() {
+        let tid = interner.intern(tickers.get(i).unwrap_or(""));
+        let date = match dates[i] { Some(d) => d, None => continue };
+        if let Some(c) = counts[i] {
+            if c.is_finite() && c > 0.0 {
+                map.entry(tid).or_default().push(EmployeeRecord { filing_date: date, employee_count: c });
+            }
+        }
+    }
+    for v in map.values_mut() { v.sort_by(|a, b| b.filing_date.cmp(&a.filing_date)); }
+    info!("Employee counts: {} tickers", map.len());
+    Ok(map)
+}
+
+fn load_congress_trades(
+    cache_dir: &Path,
+    interner: &SharedInterner,
+) -> Result<FxHashMap<TickerId, Vec<CongressRecord>>> {
+    let path = match loader::find_any_cache_file(cache_dir, "us_congress_trade") {
+        Some(p) => p,
+        None => { return Ok(FxHashMap::default()); }
+    };
+    let df = loader::load_parquet(&path)?;
+    let tickers = get_str_col(&df, "ticker")?;
+    let dates = get_date_col(&df, "transaction_date")?;
+    let types = get_str_values(&df, "type");
+    let mut map: FxHashMap<TickerId, Vec<CongressRecord>> = FxHashMap::default();
+    for i in 0..df.height() {
+        let tid = interner.intern(tickers.get(i).unwrap_or(""));
+        let date = match dates[i] { Some(d) => d, None => continue };
+        let is_purchase = types[i].to_lowercase().contains("purchase");
+        map.entry(tid).or_default().push(CongressRecord { date, is_purchase });
+    }
+    for v in map.values_mut() { v.sort_by(|a, b| b.date.cmp(&a.date)); }
+    info!("Congress trades: {} tickers", map.len());
+    Ok(map)
+}
+
+fn load_gov_contracts(
+    cache_dir: &Path,
+    interner: &SharedInterner,
+) -> Result<FxHashMap<TickerId, Vec<GovContractRecord>>> {
+    let path = match loader::find_snapshot_cache(cache_dir, "us_gov_contract") {
+        Some(p) => p,
+        None => { return Ok(FxHashMap::default()); }
+    };
+    let df = loader::load_parquet(&path)?;
+    let tickers = get_str_col(&df, "ticker")?;
+    let years = get_f64_col(&df, "year");
+    let quarters = get_f64_col(&df, "quarter");
+    let amounts = get_f64_col(&df, "amount");
+    let mut map: FxHashMap<TickerId, Vec<GovContractRecord>> = FxHashMap::default();
+    for i in 0..df.height() {
+        let tid = interner.intern(tickers.get(i).unwrap_or(""));
+        if let (Some(y), Some(q), Some(a)) = (years[i], quarters[i], amounts[i]) {
+            if a.is_finite() {
+                map.entry(tid).or_default().push(GovContractRecord {
+                    year: y as i32, quarter: q as i32, amount: a,
+                });
+            }
+        }
+    }
+    for v in map.values_mut() { v.sort_by(|a, b| (b.year, b.quarter).cmp(&(a.year, a.quarter))); }
+    info!("Gov contracts: {} tickers", map.len());
+    Ok(map)
+}
+
+fn load_lobbying(
+    cache_dir: &Path,
+    interner: &SharedInterner,
+) -> Result<FxHashMap<TickerId, Vec<LobbyingRecord>>> {
+    let path = match loader::find_any_cache_file(cache_dir, "us_lobbying") {
+        Some(p) => p,
+        None => { return Ok(FxHashMap::default()); }
+    };
+    let df = loader::load_parquet(&path)?;
+    let tickers = get_str_col(&df, "ticker")?;
+    let dates = get_date_col(&df, "date")?;
+    let amounts = get_f64_col(&df, "amount");
+    let mut map: FxHashMap<TickerId, Vec<LobbyingRecord>> = FxHashMap::default();
+    for i in 0..df.height() {
+        let tid = interner.intern(tickers.get(i).unwrap_or(""));
+        let date = match dates[i] { Some(d) => d, None => continue };
+        if let Some(a) = amounts[i] {
+            if a.is_finite() && a > 0.0 {
+                map.entry(tid).or_default().push(LobbyingRecord { date, amount: a });
+            }
+        }
+    }
+    for v in map.values_mut() { v.sort_by(|a, b| b.date.cmp(&a.date)); }
+    info!("Lobbying: {} tickers", map.len());
+    Ok(map)
+}
+
+fn load_revenue_segments(
+    cache_dir: &Path,
+    interner: &SharedInterner,
+) -> Result<FxHashMap<TickerId, Vec<RevenueSegmentRecord>>> {
+    let path = match loader::find_any_cache_file(cache_dir, "us_revenue_segment") {
+        Some(p) => p,
+        None => { return Ok(FxHashMap::default()); }
+    };
+    let df = loader::load_parquet(&path)?;
+    let tickers = get_str_col(&df, "ticker")?;
+    let dates = get_date_col(&df, "date")?;
+    let names = get_str_values(&df, "segment_name");
+    let revenues = get_f64_col(&df, "revenue");
+    let types = get_str_values(&df, "segment_type");
+    let mut map: FxHashMap<TickerId, Vec<RevenueSegmentRecord>> = FxHashMap::default();
+    for i in 0..df.height() {
+        let tid = interner.intern(tickers.get(i).unwrap_or(""));
+        let date = match dates[i] { Some(d) => d, None => continue };
+        if let Some(r) = revenues[i] {
+            if r.is_finite() {
+                map.entry(tid).or_default().push(RevenueSegmentRecord {
+                    date,
+                    segment_name: names[i].clone(),
+                    revenue: r,
+                    segment_type: types[i].clone(),
+                });
+            }
+        }
+    }
+    for v in map.values_mut() { v.sort_by(|a, b| b.date.cmp(&a.date)); }
+    info!("Revenue segments: {} tickers", map.len());
     Ok(map)
 }
