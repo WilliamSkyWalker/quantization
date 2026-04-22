@@ -233,6 +233,26 @@ fn opt_f64(v: Option<f64>) -> f64 {
     v.unwrap_or(f64::NAN)
 }
 
+/// Create a Polars Date literal from NaiveDate.
+/// Polars Date = i32 days since 1970-01-01.
+/// (NaiveDate::lit() wrongly produces Datetime, not Date.)
+fn date_lit(d: Date) -> polars::prelude::Expr {
+    use chrono::Datelike;
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+    let days = (d - epoch).num_days() as i32;
+    polars::prelude::Expr::Literal(polars::prelude::LiteralValue::Date(days))
+}
+
+/// Create a Polars Datetime literal from NaiveDateTime (for Datetime[ms] columns).
+fn datetime_lit(dt: chrono::NaiveDateTime) -> polars::prelude::Expr {
+    let ms = dt.and_utc().timestamp_millis();
+    polars::prelude::Expr::Literal(polars::prelude::LiteralValue::DateTime(
+        ms,
+        polars::prelude::TimeUnit::Milliseconds,
+        None,
+    ))
+}
+
 // ===== Loaders =====
 
 fn load_daily_prices(
@@ -249,10 +269,10 @@ fn load_daily_prices(
         let mut lazy = polars::prelude::LazyFrame::scan_parquet(&path, Default::default())
             .map_err(|e| QrsError::DataLoad(format!("Scan parquet: {e}")))?;
         if let Some(s) = date_start {
-            lazy = lazy.filter(polars::prelude::col("trade_date").gt_eq(polars::prelude::lit(s)));
+            lazy = lazy.filter(polars::prelude::col("trade_date").gt_eq(date_lit(s)));
         }
         if let Some(e) = date_end {
-            lazy = lazy.filter(polars::prelude::col("trade_date").lt_eq(polars::prelude::lit(e)));
+            lazy = lazy.filter(polars::prelude::col("trade_date").lt_eq(date_lit(e)));
         }
         let result = lazy.collect()
             .map_err(|e| QrsError::DataLoad(format!("Collect filtered parquet: {e}")))?;
@@ -362,12 +382,14 @@ fn load_rolling_stats_into(
         let mut lazy = polars::prelude::LazyFrame::scan_parquet(&path, Default::default())
             .map_err(|e| QrsError::DataLoad(format!("Scan rolling parquet: {e}")))?;
         if let Some(s) = date_start {
-            let s_dt = s.and_hms_opt(0, 0, 0).unwrap();
-            lazy = lazy.filter(polars::prelude::col("trade_date").gt_eq(polars::prelude::lit(s_dt)));
+            lazy = lazy.filter(polars::prelude::col("trade_date").gt_eq(
+                datetime_lit(s.and_hms_opt(0, 0, 0).unwrap())
+            ));
         }
         if let Some(e) = date_end {
-            let e_dt = e.and_hms_opt(23, 59, 59).unwrap();
-            lazy = lazy.filter(polars::prelude::col("trade_date").lt_eq(polars::prelude::lit(e_dt)));
+            lazy = lazy.filter(polars::prelude::col("trade_date").lt_eq(
+                datetime_lit(e.and_hms_opt(23, 59, 59).unwrap())
+            ));
         }
         let result = lazy.collect()
             .map_err(|e| QrsError::DataLoad(format!("Collect filtered rolling: {e}")))?;
