@@ -357,7 +357,8 @@ fn cmd_analyze(
         .expect("Invalid end date");
 
     info!("Loading data...");
-    let cache = builder::build_cache(cache_dir).expect("Failed to build DataCache");
+    let cache = builder::build_cache_ranged(cache_dir, Some(start), Some(end))
+        .expect("Failed to build DataCache");
 
     let factors = qrs_factors::registry::all_factors();
     info!("{} factors registered", factors.len());
@@ -491,7 +492,8 @@ fn cmd_backtest(
         .expect("Invalid end date (expected YYYY-MM-DD)");
 
     info!("Loading data...");
-    let cache = builder::build_cache(cache_dir).expect("Failed to build DataCache");
+    let cache = builder::build_cache_ranged(cache_dir, Some(start), Some(end))
+        .expect("Failed to build DataCache");
 
     // Get all registered factors
     let factors = qrs_factors::registry::all_factors();

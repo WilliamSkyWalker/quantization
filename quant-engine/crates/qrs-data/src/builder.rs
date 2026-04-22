@@ -34,16 +34,32 @@ impl SharedInterner {
 unsafe impl Sync for SharedInterner {}
 
 /// Build a complete DataCache from the parquet cache directory.
+/// If `start` and `end` are provided, only loads data needed for that range
+/// (with lookback for factor computation).
 pub fn build_cache(cache_dir: &Path) -> Result<DataCache> {
-    info!("Building DataCache from {}", cache_dir.display());
+    build_cache_ranged(cache_dir, None, None)
+}
+
+/// Build DataCache with optional date range filtering.
+/// Adds 2-year lookback before start for factor computation needs.
+pub fn build_cache_ranged(cache_dir: &Path, start: Option<Date>, end: Option<Date>) -> Result<DataCache> {
+    // Add lookback: factors need ~2 years of history before the start date
+    let load_start = start.map(|s| s - chrono::Duration::days(800)); // ~2.2 years
+    let load_end = end;
+
+    if let (Some(s), Some(e)) = (load_start, load_end) {
+        info!("Building DataCache from {} (date range: {} to {})", cache_dir.display(), s, e);
+    } else {
+        info!("Building DataCache from {} (full range)", cache_dir.display());
+    }
     let t0 = std::time::Instant::now();
 
     let interner = SharedInterner::new();
 
     // Phase 1: Load daily prices + merge rolling stats into same HashMap
-    let mut daily_prices = load_daily_prices(cache_dir, &interner)?;
+    let mut daily_prices = load_daily_prices(cache_dir, &interner, load_start, load_end)?;
     let index_prices = load_index_prices(cache_dir)?;
-    let rolling_stats = load_rolling_stats_into(cache_dir, &interner, &mut daily_prices)?;
+    let rolling_stats = load_rolling_stats_into(cache_dir, &interner, &mut daily_prices, load_start, load_end)?;
     let month_end_prices = compute_month_end_prices(&daily_prices);
 
     info!("Phase 1: {:.1}s — {} daily prices ({} with rolling stats)",
@@ -222,10 +238,31 @@ fn opt_f64(v: Option<f64>) -> f64 {
 fn load_daily_prices(
     cache_dir: &Path,
     interner: &SharedInterner,
+    date_start: Option<Date>,
+    date_end: Option<Date>,
 ) -> Result<FxHashMap<(TickerId, Date), PriceBar>> {
     let path = loader::find_any_cache_file(cache_dir, "us_daily_price")
         .ok_or_else(|| QrsError::ParquetNotFound("us_daily_price_*.parquet".into()))?;
-    let df = loader::load_parquet(&path)?;
+
+    // Use Polars lazy scan with predicate pushdown for date filtering
+    let df = if date_start.is_some() || date_end.is_some() {
+        let mut lazy = polars::prelude::LazyFrame::scan_parquet(&path, Default::default())
+            .map_err(|e| QrsError::DataLoad(format!("Scan parquet: {e}")))?;
+        if let Some(s) = date_start {
+            lazy = lazy.filter(polars::prelude::col("trade_date").gt_eq(polars::prelude::lit(s)));
+        }
+        if let Some(e) = date_end {
+            lazy = lazy.filter(polars::prelude::col("trade_date").lt_eq(polars::prelude::lit(e)));
+        }
+        let result = lazy.collect()
+            .map_err(|e| QrsError::DataLoad(format!("Collect filtered parquet: {e}")))?;
+        info!("Loaded {} (filtered): {} rows x {} cols",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            result.height(), result.width());
+        result
+    } else {
+        loader::load_parquet(&path)?
+    };
 
     let tickers = get_str_col(&df, "ticker")?;
     let dates = get_date_col(&df, "trade_date")?;
@@ -311,13 +348,34 @@ fn load_rolling_stats_into(
     cache_dir: &Path,
     interner: &SharedInterner,
     daily_prices: &mut FxHashMap<(TickerId, Date), PriceBar>,
+    date_start: Option<Date>,
+    date_end: Option<Date>,
 ) -> Result<usize> {
     let path = cache_dir.join("_rolling_indexed.parquet");
     if !path.exists() {
         warn!("_rolling_indexed.parquet not found, rolling stats will be empty");
         return Ok(0);
     }
-    let df = loader::load_parquet(&path)?;
+
+    // Use lazy scan with date filtering (trade_date is Datetime[ms] here)
+    let df = if date_start.is_some() || date_end.is_some() {
+        let mut lazy = polars::prelude::LazyFrame::scan_parquet(&path, Default::default())
+            .map_err(|e| QrsError::DataLoad(format!("Scan rolling parquet: {e}")))?;
+        if let Some(s) = date_start {
+            let s_dt = s.and_hms_opt(0, 0, 0).unwrap();
+            lazy = lazy.filter(polars::prelude::col("trade_date").gt_eq(polars::prelude::lit(s_dt)));
+        }
+        if let Some(e) = date_end {
+            let e_dt = e.and_hms_opt(23, 59, 59).unwrap();
+            lazy = lazy.filter(polars::prelude::col("trade_date").lt_eq(polars::prelude::lit(e_dt)));
+        }
+        let result = lazy.collect()
+            .map_err(|e| QrsError::DataLoad(format!("Collect filtered rolling: {e}")))?;
+        info!("Loaded _rolling_indexed (filtered): {} rows", result.height());
+        result
+    } else {
+        loader::load_parquet(&path)?
+    };
 
     let tickers = get_str_col(&df, "ticker")?;
     let dates = get_date_col(&df, "trade_date")?;
