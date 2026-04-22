@@ -140,15 +140,24 @@ fn select_large_cap(
 
     if candidates.is_empty() { return vec![]; }
 
-    // Large cap scoring: quality + momentum
+    // Large cap scoring: balanced quality + momentum + analyst
     let tier1_factors = [
-        ("PIOTROSKI_F", 2.0),
+        // Quality (solid foundation)
+        ("PIOTROSKI_F", 1.5),
         ("ROE_TTM", 1.5),
-        ("EARNINGS_SURPRISE", 1.5),
-        ("MOM_12M", 1.5),
         ("PROFIT_STB", 1.0),
-        ("EV_TO_FCF", 1.0),
-        ("BUYBACK_YIELD", 1.0),
+        // Momentum (trend following)
+        ("MOM_12M", 2.0),
+        ("MOM_3M", 1.0),
+        ("PRICE_52W_HIGH", 1.0),
+        // Analyst / earnings signals
+        ("EARNINGS_SURPRISE", 2.0),
+        ("EPS_REVISION", 1.5),
+        ("PRICE_TARGET_RATIO", 1.5),
+        // Growth acceleration
+        ("REVENUE_ACCELERATION", 2.5),  // 2nd derivative — key signal for NVDA-type stocks
+        ("REVENUE_GROWTH", 1.5),
+        ("EARNINGS_GROWTH", 1.5),
     ];
 
     let mut scored: Vec<(TickerId, f64)> = candidates.iter()
