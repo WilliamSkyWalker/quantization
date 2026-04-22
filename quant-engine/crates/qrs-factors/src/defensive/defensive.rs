@@ -17,7 +17,7 @@ impl Factor for MaxRet {
         let mut result = FactorResult::default();
         // Group daily returns by ticker
         let mut ticker_rets: rustc_hash::FxHashMap<qrs_core::types::TickerId, Vec<f64>> = Default::default();
-        for (&(tid, d), bar) in &cache.daily_prices {
+        for (tid, d, bar) in cache.daily_prices.iter() {
             if d >= start && d <= date && bar.change_percent.is_finite() {
                 ticker_rets.entry(tid).or_default().push(bar.change_percent / 100.0);
             }
@@ -72,7 +72,7 @@ impl Factor for DownsideBeta {
         // For each ticker, compute downside beta
         // We need daily returns per ticker aligned with down days
         let mut ticker_rets: rustc_hash::FxHashMap<qrs_core::types::TickerId, Vec<(Date, f64)>> = Default::default();
-        for (&(tid, d), bar) in &cache.daily_prices {
+        for (tid, d, bar) in cache.daily_prices.iter() {
             if d >= start && d <= date && bar.change_percent.is_finite() {
                 ticker_rets.entry(tid).or_default().push((d, bar.change_percent / 100.0));
             }

@@ -7,7 +7,7 @@ use rustc_hash::FxHashMap;
 use qrs_core::types::{Date, SectorId, SectorInterner, TickerId, TickerInterner, YearMonth};
 
 /// Daily OHLCV bar + precomputed rolling statistics (merged to avoid duplicate 33M-entry HashMap).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct PriceBar {
     pub open: f64,
     pub high: f64,
@@ -103,8 +103,8 @@ pub struct EvRecord {
 
 /// Central data cache — immutable after construction.
 pub struct DataCache {
-    // Price data
-    pub daily_prices: FxHashMap<(TickerId, Date), PriceBar>,
+    // Price data — flat 2D array for O(1) lookup
+    pub daily_prices: crate::price_grid::PriceGrid,
     pub index_prices: FxHashMap<(String, Date), f64>,
 
     // Month-end prices for momentum factors
@@ -140,7 +140,7 @@ impl DataCache {
     /// Get adjusted close price for a ticker on a date.
     pub fn get_close(&self, ticker: TickerId, date: Date) -> Option<f64> {
         self.daily_prices
-            .get(&(ticker, date))
+            .get(ticker, date)
             .map(|bar| bar.adj_close)
     }
 
@@ -211,7 +211,7 @@ impl DataCache {
 
     /// Get rolling stats for a ticker on a date (same as daily price bar, which includes rolling fields).
     pub fn get_rolling_stats(&self, ticker: TickerId, date: Date) -> Option<&PriceBar> {
-        self.daily_prices.get(&(ticker, date)).filter(|bar| bar.cum_ret_5d.is_finite())
+        self.daily_prices.get(ticker, date).filter(|bar| bar.cum_ret_5d.is_finite())
     }
 
     /// Get dividends in trailing period.

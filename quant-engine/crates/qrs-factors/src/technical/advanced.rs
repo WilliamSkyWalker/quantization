@@ -16,7 +16,7 @@ impl Factor for Rsi14 {
         let start = date - chrono::Duration::days(40);
         let mut result = FactorResult::default();
         let mut ticker_rets: rustc_hash::FxHashMap<TickerId, Vec<f64>> = Default::default();
-        for (&(tid, d), bar) in &cache.daily_prices {
+        for (tid, d, bar) in cache.daily_prices.iter() {
             if d >= start && d <= date && bar.change_percent.is_finite() {
                 ticker_rets.entry(tid).or_default().push(bar.change_percent / 100.0);
             }
@@ -50,7 +50,7 @@ impl Factor for VolumeRatio {
         let start = date - chrono::Duration::days(35);
         let mut result = FactorResult::default();
         let mut ticker_vols: rustc_hash::FxHashMap<TickerId, Vec<(Date, f64)>> = Default::default();
-        for (&(tid, d), bar) in &cache.daily_prices {
+        for (tid, d, bar) in cache.daily_prices.iter() {
             if d >= start && d <= date && bar.volume.is_finite() && bar.volume > 0.0 {
                 ticker_vols.entry(tid).or_default().push((d, bar.volume));
             }
@@ -77,8 +77,8 @@ impl Factor for Volatility21D {
     fn compute(&self, date: Date, cache: &DataCache) -> FactorResult {
         // Use vol_20d from merged rolling stats if available
         let mut result = FactorResult::default();
-        for (&(tid, d), bar) in &cache.daily_prices {
-            if d == date && bar.vol_20d.is_finite() {
+        for (tid, bar) in cache.daily_prices.iter_date(date) {
+            if true && bar.vol_20d.is_finite() {
                 let ann_vol = bar.vol_20d * (252.0f64).sqrt();
                 if ann_vol.is_finite() { result.insert(tid, ann_vol); }
             }
@@ -99,7 +99,7 @@ impl Factor for PvTrend {
         let start = date - chrono::Duration::days(35);
         let mut result = FactorResult::default();
         let mut ticker_data: rustc_hash::FxHashMap<TickerId, Vec<(f64, f64)>> = Default::default();
-        for (&(tid, d), bar) in &cache.daily_prices {
+        for (tid, d, bar) in cache.daily_prices.iter() {
             if d >= start && d <= date && bar.change_percent.is_finite() && bar.volume.is_finite() {
                 ticker_data.entry(tid).or_default().push((bar.change_percent / 100.0, bar.volume));
             }

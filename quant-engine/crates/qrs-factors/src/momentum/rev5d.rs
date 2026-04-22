@@ -16,10 +16,7 @@ impl Factor for Rev5D {
 
     fn compute(&self, date: Date, cache: &DataCache) -> FactorResult {
         let mut result = FactorResult::default();
-        for (&(tid, d), stats) in &cache.daily_prices {
-            if d != date {
-                continue;
-            }
+        for (tid, stats) in cache.daily_prices.iter_date(date) {
             let ret5 = stats.cum_ret_5d;
             if ret5.is_finite() {
                 result.insert(tid, -ret5); // Reversal: negate

@@ -17,7 +17,7 @@ impl Factor for Mom1M {
 
     fn compute(&self, date: Date, cache: &DataCache) -> FactorResult {
         let mut result = FactorResult::default();
-        for (&(tid, d), stats) in &cache.daily_prices {
+        for (tid, d, stats) in cache.daily_prices.iter() {
             if d != date || !stats.adj_close.is_finite() || stats.adj_close <= 0.0 {
                 continue;
             }
@@ -46,7 +46,7 @@ impl Factor for Mom3M {
 
     fn compute(&self, date: Date, cache: &DataCache) -> FactorResult {
         let mut result = FactorResult::default();
-        for (&(tid, d), stats) in &cache.daily_prices {
+        for (tid, d, stats) in cache.daily_prices.iter() {
             if d != date || !stats.adj_close.is_finite() || stats.adj_close <= 0.0 {
                 continue;
             }
@@ -77,9 +77,8 @@ impl Factor for Mom12M {
     fn compute(&self, date: Date, cache: &DataCache) -> FactorResult {
         let mut result = FactorResult::default();
         // Collect tickers that have rolling stats on this date
-        let tickers_on_date: Vec<_> = cache.daily_prices.keys()
-            .filter(|&&(_, d)| d == date)
-            .map(|&(tid, _)| tid)
+        let tickers_on_date: Vec<_> = cache.daily_prices.iter_date(date)
+            .map(|(tid, _)| tid)
             .collect();
 
         for tid in tickers_on_date {

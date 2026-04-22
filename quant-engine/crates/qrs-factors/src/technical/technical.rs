@@ -17,10 +17,7 @@ impl Factor for Turn20D {
 
     fn compute(&self, date: Date, cache: &DataCache) -> FactorResult {
         let mut result = FactorResult::default();
-        for (&(tid, d), stats) in &cache.daily_prices {
-            if d != date {
-                continue;
-            }
+        for (tid, stats) in cache.daily_prices.iter_date(date) {
             let dvol = stats.dvol_20d;
             if dvol.is_finite() && dvol > 0.0 {
                 result.insert(tid, (1.0 + dvol).ln());
@@ -42,10 +39,7 @@ impl Factor for Vol20D {
 
     fn compute(&self, date: Date, cache: &DataCache) -> FactorResult {
         let mut result = FactorResult::default();
-        for (&(tid, d), stats) in &cache.daily_prices {
-            if d != date {
-                continue;
-            }
+        for (tid, stats) in cache.daily_prices.iter_date(date) {
             let vol = stats.vol_20d;
             if vol.is_finite() {
                 result.insert(tid, -vol); // Inverse: low vol = good

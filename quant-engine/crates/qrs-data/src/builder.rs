@@ -6,7 +6,6 @@ use std::sync::Mutex;
 
 use chrono::NaiveDate;
 use polars::prelude::*;
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use tracing::{info, warn};
 
@@ -15,6 +14,7 @@ use qrs_core::types::{Date, SectorInterner, TickerId, TickerInterner, YearMonth}
 
 use crate::cache::*;
 use crate::loader;
+use crate::price_grid::PriceGrid;
 
 /// Thread-safe ticker interner wrapper for parallel loading.
 struct SharedInterner(Mutex<TickerInterner>);
@@ -238,7 +238,7 @@ fn opt_f64(v: Option<f64>) -> f64 {
 /// Polars Date = i32 days since 1970-01-01.
 /// (NaiveDate::lit() wrongly produces Datetime, not Date.)
 fn date_lit(d: Date) -> polars::prelude::Expr {
-    use chrono::Datelike;
+    
     let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
     let days = (d - epoch).num_days() as i32;
     polars::prelude::Expr::Literal(polars::prelude::LiteralValue::Date(days))
@@ -261,7 +261,7 @@ fn load_daily_prices(
     interner: &SharedInterner,
     date_start: Option<Date>,
     date_end: Option<Date>,
-) -> Result<FxHashMap<(TickerId, Date), PriceBar>> {
+) -> Result<PriceGrid> {
     let path = loader::find_any_cache_file(cache_dir, "us_daily_price")
         .ok_or_else(|| QrsError::ParquetNotFound("us_daily_price_*.parquet".into()))?;
 
@@ -297,7 +297,7 @@ fn load_daily_prices(
 
     let n = df.height();
 
-    // Phase A: Pre-intern all unique tickers (single-threaded, fast — only ~13K unique)
+    // Phase A: Pre-intern all unique tickers
     {
         let mut seen = std::collections::HashSet::new();
         for i in 0..n {
@@ -309,54 +309,43 @@ fn load_daily_prices(
         }
     }
 
-    // Phase B: Build TickerId array (lock-free reads since all tickers pre-interned)
+    // Phase B: Build TickerId array
     let ticker_ids: Vec<Option<TickerId>> = (0..n)
         .map(|i| tickers_col.get(i).and_then(|t| interner.0.lock().unwrap().get_id(t)))
         .collect();
 
-    // Phase C: Parallel HashMap build — split into chunks, build sub-maps, merge
-    let chunk_size = (n / rayon::current_num_threads().max(1)).max(100_000);
-    let chunks: Vec<_> = (0..n).step_by(chunk_size)
-        .map(|start| start..n.min(start + chunk_size))
-        .collect();
+    // Phase C: Collect unique dates for PriceGrid dimensions
+    let max_ticker_id = ticker_ids.iter().filter_map(|t| t.map(|t| t.0)).max().unwrap_or(0) as usize + 1;
+    let mut unique_dates: Vec<Date> = dates.iter().filter_map(|d| *d).collect();
+    unique_dates.sort();
+    unique_dates.dedup();
 
-    let sub_maps: Vec<FxHashMap<(TickerId, Date), PriceBar>> = chunks
-        .par_iter()
-        .map(|range| {
-            let mut m = FxHashMap::default();
-            m.reserve(range.len());
-            for i in range.clone() {
-                let tid = match ticker_ids[i] { Some(t) => t, None => continue };
-                let date = match dates[i] { Some(d) => d, None => continue };
-                let close_val = opt_f64(close[i]);
-                let adj = adj_close[i].unwrap_or(close_val);
-                m.insert((tid, date), PriceBar {
-                    open: opt_f64(open[i]),
-                    high: opt_f64(high[i]),
-                    low: opt_f64(low[i]),
-                    close: close_val,
-                    adj_close: adj,
-                    volume: opt_f64(volume[i]),
-                    change_percent: opt_f64(change_pct[i]),
-                    cum_ret_5d: f64::NAN, cum_ret_20d: f64::NAN,
-                    dvol_20d: f64::NAN, vol_20d: f64::NAN,
-                    ma60_adj: f64::NAN, dollar_volume: f64::NAN,
-                });
-            }
-            m
-        })
-        .collect();
+    // Phase D: Build PriceGrid (single contiguous allocation, then parallel fill)
+    let mut grid = PriceGrid::new(max_ticker_id, &unique_dates);
 
-    // Merge sub-maps
-    let total_len: usize = sub_maps.iter().map(|m| m.len()).sum();
-    let mut map = FxHashMap::default();
-    map.reserve(total_len);
-    for sub in sub_maps {
-        map.extend(sub);
+    for i in 0..n {
+        let tid = match ticker_ids[i] { Some(t) => t, None => continue };
+        let date = match dates[i] { Some(d) => d, None => continue };
+        let close_val = opt_f64(close[i]);
+        let adj = adj_close[i].unwrap_or(close_val);
+        grid.insert(tid, date, PriceBar {
+            open: opt_f64(open[i]),
+            high: opt_f64(high[i]),
+            low: opt_f64(low[i]),
+            close: close_val,
+            adj_close: adj,
+            volume: opt_f64(volume[i]),
+            change_percent: opt_f64(change_pct[i]),
+            cum_ret_5d: f64::NAN, cum_ret_20d: f64::NAN,
+            dvol_20d: f64::NAN, vol_20d: f64::NAN,
+            ma60_adj: f64::NAN, dollar_volume: f64::NAN,
+        });
     }
 
-    info!("Daily prices: {} entries (parallel build)", map.len());
-    Ok(map)
+    info!("Daily prices: {} entries in PriceGrid ({}x{}, {:.0}MB)",
+        grid.len(), max_ticker_id, unique_dates.len(),
+        grid.memory_bytes() as f64 / 1024.0 / 1024.0);
+    Ok(grid)
 }
 
 fn load_index_prices(cache_dir: &Path) -> Result<FxHashMap<(String, Date), f64>> {
@@ -391,7 +380,7 @@ fn load_index_prices(cache_dir: &Path) -> Result<FxHashMap<(String, Date), f64>>
 fn load_rolling_stats_into(
     cache_dir: &Path,
     interner: &SharedInterner,
-    daily_prices: &mut FxHashMap<(TickerId, Date), PriceBar>,
+    daily_prices: &mut PriceGrid,
     date_start: Option<Date>,
     date_end: Option<Date>,
 ) -> Result<usize> {
@@ -445,9 +434,9 @@ fn load_rolling_stats_into(
             None => continue,
         };
         let tid = interner.intern(ticker_str);
-        let key = (tid, date);
+        let _key = (tid, date);
 
-        if let Some(bar) = daily_prices.get_mut(&key) {
+        if let Some(bar) = daily_prices.get_mut(tid, date) {
             // Merge rolling stats into existing PriceBar
             bar.cum_ret_5d = opt_f64(cum_ret_5d[i]);
             bar.cum_ret_20d = opt_f64(cum_ret_20d[i]);
@@ -471,14 +460,13 @@ fn load_rolling_stats_into(
 
 /// Compute month-end prices from daily prices (replacing pandas Period-based parquet).
 fn compute_month_end_prices(
-    daily: &FxHashMap<(TickerId, Date), PriceBar>,
+    daily: &PriceGrid,
 ) -> FxHashMap<(TickerId, YearMonth), f64> {
     use chrono::Datelike;
 
-    // Group by (ticker, year-month), keep the latest date's adj_close
     let mut latest: FxHashMap<(TickerId, YearMonth), (Date, f64)> = FxHashMap::default();
 
-    for (&(tid, date), bar) in daily {
+    for (tid, date, bar) in daily.iter() {
         let ym = YearMonth::new(date.year(), date.month());
         let price = if bar.adj_close.is_finite() {
             bar.adj_close

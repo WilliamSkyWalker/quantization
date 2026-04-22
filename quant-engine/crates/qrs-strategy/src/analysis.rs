@@ -70,11 +70,11 @@ pub fn compute_forward_returns(
 
     let mut result = FxHashMap::default();
     // For each ticker with a price on `date` and `future_date`
-    for (&(tid, d), bar) in &cache.daily_prices {
-        if d != date || !bar.close.is_finite() || bar.close <= 0.0 {
+    for (tid, bar) in cache.daily_prices.iter_date(date) {
+        if !bar.close.is_finite() || bar.close <= 0.0 {
             continue;
         }
-        if let Some(future_bar) = cache.daily_prices.get(&(tid, future_date)) {
+        if let Some(future_bar) = cache.daily_prices.get(tid, future_date) {
             if future_bar.close.is_finite() && future_bar.close > 0.0 {
                 let ret = future_bar.close / bar.close - 1.0;
                 if ret.is_finite() {

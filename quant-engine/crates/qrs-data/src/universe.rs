@@ -34,31 +34,21 @@ pub fn get_clean_universe(
     let mut universe = FxHashSet::default();
 
     // Collect tickers that traded on this date (have a close price)
-    let mut candidates: Vec<(TickerId, f64, f64)> = Vec::new(); // (ticker, close, volume)
-
-    for (&(tid, d), bar) in &cache.daily_prices {
-        if d != date {
-            continue;
-        }
-        if !bar.close.is_finite() || bar.close <= 0.0 {
-            continue;
-        }
-        if !bar.volume.is_finite() || bar.volume <= 0.0 {
-            continue;
-        }
-        candidates.push((tid, bar.close, bar.volume));
-    }
+    let candidates: Vec<(TickerId, f64, f64)> = cache.daily_prices.iter_date(date)
+        .filter(|(_, bar)| bar.close.is_finite() && bar.close > 0.0 && bar.volume.is_finite() && bar.volume > 0.0)
+        .map(|(tid, bar)| (tid, bar.close, bar.volume))
+        .collect();
 
     for (tid, close, volume) in candidates {
         // Market cap filter (from enterprise_values)
-        let mktcap = match cache.get_market_cap(tid, date) {
+        let _mktcap = match cache.get_market_cap(tid, date) {
             Some(m) if m >= filter.min_market_cap => m,
             _ => continue,
         };
 
         // Dollar volume filter: use dvol_20d from rolling stats if available,
         // otherwise use today's close * volume as approximation
-        let dvol = cache.daily_prices.get(&(tid, date))
+        let dvol = cache.daily_prices.get(tid, date)
             .and_then(|bar| {
                 if bar.dvol_20d.is_finite() && bar.dvol_20d > 0.0 {
                     Some(bar.dvol_20d)
