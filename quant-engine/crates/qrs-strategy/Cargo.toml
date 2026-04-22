@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 qrs-core = { path = "../qrs-core" }
 qrs-data = { path = "../qrs-data" }
+polars = { workspace = true }
 qrs-factors = { path = "../qrs-factors" }
 rayon = { workspace = true }
 tracing = { workspace = true }

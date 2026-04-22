@@ -78,6 +78,10 @@ enum Commands {
         #[arg(long, default_value = "../output/rust")]
         output: PathBuf,
 
+        /// Path to cache directory.
+        #[arg(long, default_value = "../cache")]
+        cache_dir: PathBuf,
+
         /// Disable MVO optimizer, use TopN + Softmax.
         #[arg(long)]
         no_optimizer: bool,
@@ -94,6 +98,10 @@ enum Commands {
 
         #[arg(long)]
         end: String,
+
+        /// Path to cache directory.
+        #[arg(long, default_value = "../cache")]
+        cache_dir: PathBuf,
 
         /// Number of worker threads.
         #[arg(long, default_value = "0")]
@@ -152,19 +160,21 @@ fn main() {
         Commands::Backtest {
             start,
             end,
-            output: _,
+            output,
+            cache_dir,
             no_optimizer: _,
-            no_short: _,
+            no_short,
         } => {
-            info!("TODO: backtest --start {start} --end {end}");
+            cmd_backtest(&_config, &cache_dir, &start, &end, &output, no_short);
         }
         Commands::Analyze {
             start,
             end,
+            cache_dir,
             workers: _,
-            output: _,
+            output,
         } => {
-            info!("TODO: analyze --start {start} --end {end}");
+            cmd_analyze(&cache_dir, &start, &end, &output);
         }
     }
 }
@@ -332,6 +342,348 @@ fn cmd_factors(cache_dir: &PathBuf, date_str: &str) {
             bottom5.join(", "),
         );
     }
+}
+
+fn cmd_analyze(
+    cache_dir: &PathBuf,
+    start_str: &str,
+    end_str: &str,
+    output_dir: &PathBuf,
+) {
+    let start = chrono::NaiveDate::parse_from_str(start_str, "%Y-%m-%d")
+        .expect("Invalid start date");
+    let end = chrono::NaiveDate::parse_from_str(end_str, "%Y-%m-%d")
+        .expect("Invalid end date");
+
+    info!("Loading data...");
+    let cache = builder::build_cache(cache_dir).expect("Failed to build DataCache");
+
+    let factors = qrs_factors::registry::all_factors();
+    info!("{} factors registered", factors.len());
+
+    // Determine monthly rebalance dates
+    use chrono::Datelike;
+    let rebalance_dates: Vec<chrono::NaiveDate> = {
+        let mut dates = Vec::new();
+        let mut last_ym = (0i32, 0u32);
+        let trade_dates: Vec<_> = cache.trading_days.iter()
+            .filter(|&&d| d >= start && d <= end)
+            .copied()
+            .collect();
+        for &d in trade_dates.iter().rev() {
+            let ym = (d.year(), d.month());
+            if ym != last_ym {
+                dates.push(d);
+                last_ym = ym;
+            }
+        }
+        dates.reverse();
+        dates
+    };
+    info!("{} dates for analysis", rebalance_dates.len());
+
+    // Build factor panel: date -> {factor_name -> {ticker -> value}}
+    let proc_config = qrs_factors::processor::ProcessConfig {
+        do_neutralize: false,
+        ..Default::default()
+    };
+
+    let t0 = std::time::Instant::now();
+    let mut factor_panel: std::collections::HashMap<
+        chrono::NaiveDate,
+        std::collections::HashMap<String, rustc_hash::FxHashMap<qrs_core::types::TickerId, f64>>,
+    > = std::collections::HashMap::new();
+
+    for (i, &date) in rebalance_dates.iter().enumerate() {
+        let mut date_factors = std::collections::HashMap::new();
+        for f in &factors {
+            let raw = f.compute(date, &cache);
+            if raw.is_empty() {
+                continue;
+            }
+            let processed = qrs_factors::processor::process_factor(
+                &raw,
+                &cache.sector_map,
+                &rustc_hash::FxHashMap::default(),
+                &proc_config,
+            );
+            if !processed.is_empty() {
+                date_factors.insert(f.name().to_string(), processed);
+            }
+        }
+        factor_panel.insert(date, date_factors);
+
+        if (i + 1) % 12 == 0 || i + 1 == rebalance_dates.len() {
+            info!(
+                "Panel {}/{} ({:.1}s)",
+                i + 1,
+                rebalance_dates.len(),
+                t0.elapsed().as_secs_f64(),
+            );
+        }
+    }
+
+    let panel_time = t0.elapsed().as_secs_f64();
+    info!("Factor panel: {:.1}s", panel_time);
+
+    // Compute IC (1-month horizon = 21 trading days)
+    info!("Computing IC (horizon=21d)...");
+    let ic_summaries = qrs_strategy::analysis::compute_ic_panel(&factor_panel, &cache, 21);
+
+    // Print results
+    println!("\n{}", "=".repeat(90));
+    println!("FACTOR ANALYSIS: {} to {} ({} months)", start, end, rebalance_dates.len());
+    println!("{}", "=".repeat(90));
+
+    println!(
+        "\n{:<30} {:>5} {:>9} {:>9} {:>7} {:>7} {:>6}",
+        "Factor", "N", "Mean IC", "Std IC", "ICIR", "t-stat", "%Pos"
+    );
+    println!("{}", "-".repeat(90));
+
+    for s in &ic_summaries {
+        let star = if s.t_stat.abs() > 3.0 {
+            "***"
+        } else if s.t_stat.abs() > 2.0 {
+            "**"
+        } else {
+            ""
+        };
+        println!(
+            "{:<30} {:>5} {:>9.4} {:>9.4} {:>+7.3} {:>+7.2} {:>5.0}% {}",
+            s.factor_name,
+            s.n_months,
+            s.mean_ic,
+            s.std_ic,
+            s.icir,
+            s.t_stat,
+            s.pct_positive * 100.0,
+            star,
+        );
+    }
+
+    // Save to CSV
+    std::fs::create_dir_all(output_dir).ok();
+    let csv_path = output_dir.join(format!("ic_summary_{start}_{end}.csv"));
+    let mut csv = String::from("factor,n_months,mean_ic,std_ic,icir,t_stat,pct_positive\n");
+    for s in &ic_summaries {
+        csv.push_str(&format!(
+            "{},{},{:.6},{:.6},{:.6},{:.6},{:.4}\n",
+            s.factor_name, s.n_months, s.mean_ic, s.std_ic, s.icir, s.t_stat, s.pct_positive,
+        ));
+    }
+    std::fs::write(&csv_path, csv).ok();
+    info!("IC summary saved to {}", csv_path.display());
+}
+
+fn cmd_backtest(
+    config: &qrs_core::config::Config,
+    cache_dir: &PathBuf,
+    start_str: &str,
+    end_str: &str,
+    output_dir: &PathBuf,
+    no_short: bool,
+) {
+    let start = chrono::NaiveDate::parse_from_str(start_str, "%Y-%m-%d")
+        .expect("Invalid start date (expected YYYY-MM-DD)");
+    let end = chrono::NaiveDate::parse_from_str(end_str, "%Y-%m-%d")
+        .expect("Invalid end date (expected YYYY-MM-DD)");
+
+    info!("Loading data...");
+    let cache = builder::build_cache(cache_dir).expect("Failed to build DataCache");
+
+    // Get all registered factors
+    let factors = qrs_factors::registry::all_factors();
+    info!("{} factors registered", factors.len());
+
+    // Build factor category map
+    let mut factor_categories = std::collections::HashMap::new();
+    let mut factor_weights_map = std::collections::HashMap::new();
+    for f in &factors {
+        factor_categories.insert(f.name().to_string(), f.category().to_string());
+        let w = if f.inherent_direction() == -1 { -1.0 } else { 1.0 };
+        factor_weights_map.insert(f.name().to_string(), w);
+    }
+
+    // Determine rebalance dates (monthly: last trading day of each month)
+    use chrono::Datelike;
+    let rebalance_dates: Vec<chrono::NaiveDate> = {
+        let mut dates = Vec::new();
+        let mut last_ym = (0i32, 0u32);
+        let trade_dates: Vec<_> = cache.trading_days.iter()
+            .filter(|&&d| d >= start && d <= end)
+            .copied()
+            .collect();
+        for &d in trade_dates.iter().rev() {
+            let ym = (d.year(), d.month());
+            if ym != last_ym {
+                dates.push(d);
+                last_ym = ym;
+            }
+        }
+        dates.reverse();
+        dates
+    };
+    info!("{} rebalance dates (monthly)", rebalance_dates.len());
+
+    // Generate signals for each rebalance date
+    let mut signals = std::collections::BTreeMap::new();
+    let proc_config = qrs_factors::processor::ProcessConfig {
+        do_neutralize: false, // Simplified: skip neutralize (no sector_map)
+        ..Default::default()
+    };
+
+    let t0 = std::time::Instant::now();
+    for (i, &date) in rebalance_dates.iter().enumerate() {
+        // Compute all factors
+        let mut processed_factors = std::collections::HashMap::new();
+        for f in &factors {
+            let raw = f.compute(date, &cache);
+            if raw.is_empty() {
+                continue;
+            }
+            let processed = qrs_factors::processor::process_factor(
+                &raw,
+                &cache.sector_map,
+                &rustc_hash::FxHashMap::default(),
+                &proc_config,
+            );
+            if !processed.is_empty() {
+                processed_factors.insert(f.name().to_string(), processed);
+            }
+        }
+
+        // Score
+        let scores = qrs_strategy::scoring::compute_scores(
+            &processed_factors,
+            &factor_weights_map,
+            &factor_categories,
+            &config.category_weights,
+            config.strategy.min_valid_categories,
+            config.strategy.missing_factor_threshold,
+            config.strategy.missing_factor_max_penalty,
+        );
+
+        // Select portfolio
+        let short_enabled = config.short.enabled && !no_short;
+        let (long_w, short_w) = qrs_strategy::scoring::select_portfolio(
+            &scores,
+            config.strategy.long_n,
+            if short_enabled { config.short.short_n } else { 0 },
+            short_enabled,
+            config.short.net_exposure,
+            config.strategy.weight_temperature,
+        );
+
+        // Merge weights
+        let mut combined = long_w;
+        combined.extend(short_w);
+
+        if !combined.is_empty() {
+            signals.insert(date, combined);
+        }
+
+        if (i + 1) % 12 == 0 || i + 1 == rebalance_dates.len() {
+            let elapsed = t0.elapsed().as_secs_f64();
+            info!(
+                "Signal {}/{}: {} scored, {} selected ({:.1}s total)",
+                i + 1,
+                rebalance_dates.len(),
+                scores.len(),
+                signals.get(&date).map(|s| s.len()).unwrap_or(0),
+                elapsed,
+            );
+        }
+    }
+
+    let signal_time = t0.elapsed().as_secs_f64();
+    info!("Signal generation: {:.1}s ({} signals)", signal_time, signals.len());
+
+    // Run backtest
+    let engine = qrs_backtest::engine::BacktestEngine::from_config(config);
+    let result = engine.run(&signals, &cache, start, end);
+
+    // Print results
+    println!("\n{}", "=".repeat(70));
+    println!("BACKTEST RESULTS: {} to {}", start, end);
+    println!("{}", "=".repeat(70));
+
+    let s = &result.stats;
+    println!("Total Return:       {:>10.2}%", s.total_return * 100.0);
+    println!("Annual Return:      {:>10.2}%", s.annual_return * 100.0);
+    println!("Annual Volatility:  {:>10.2}%", s.annual_volatility * 100.0);
+    println!("Sharpe Ratio:       {:>10.2}", s.sharpe_ratio);
+    println!("Max Drawdown:       {:>10.2}%", s.max_drawdown * 100.0);
+    println!("Calmar Ratio:       {:>10.2}", s.calmar_ratio);
+    println!("Win Rate:           {:>10.2}%", s.win_rate * 100.0);
+    println!("Total Trades:       {:>10}", s.total_trades);
+    println!("Annual Turnover:    {:>10.2}%", s.annual_turnover * 100.0);
+    println!("Benchmark Return:   {:>10.2}%", s.benchmark_annual_return * 100.0);
+    println!("Excess Return:      {:>10.2}%", s.excess_annual_return * 100.0);
+
+    // Yearly breakdown
+    if result.nav.len() > 252 {
+        println!("\nYearly Returns:");
+        println!("{:>6} {:>10} {:>10} {:>10}", "Year", "Strategy", "S&P 500", "Excess");
+        println!("{}", "-".repeat(42));
+
+        let mut year_start_nav = result.nav[0].1;
+        let mut year_start_bm = result.benchmark_nav.first().map(|(_, n)| *n).unwrap_or(1.0);
+        let mut last_year = result.nav[0].0.year();
+
+        for &(date, nav) in &result.nav {
+            if date.year() != last_year {
+                // Print previous year
+                let strat_ret = nav / year_start_nav - 1.0;
+                // Find benchmark nav at this point
+                let bm_nav = result.benchmark_nav.iter()
+                    .rev()
+                    .find(|(d, _)| d.year() == last_year)
+                    .map(|(_, n)| *n)
+                    .unwrap_or(year_start_bm);
+                let bm_ret = bm_nav / year_start_bm - 1.0;
+
+                println!(
+                    "{:>6} {:>9.2}% {:>9.2}% {:>9.2}%",
+                    last_year,
+                    strat_ret * 100.0,
+                    bm_ret * 100.0,
+                    (strat_ret - bm_ret) * 100.0,
+                );
+
+                year_start_nav = nav;
+                year_start_bm = bm_nav;
+                last_year = date.year();
+            }
+        }
+        // Print last year
+        if let Some(&(_, last_nav)) = result.nav.last() {
+            let strat_ret = last_nav / year_start_nav - 1.0;
+            let bm_nav = result.benchmark_nav.last().map(|(_, n)| *n).unwrap_or(year_start_bm);
+            let bm_ret = bm_nav / year_start_bm - 1.0;
+            println!(
+                "{:>6} {:>9.2}% {:>9.2}% {:>9.2}%",
+                last_year,
+                strat_ret * 100.0,
+                bm_ret * 100.0,
+                (strat_ret - bm_ret) * 100.0,
+            );
+        }
+    }
+
+    // Save NAV to CSV
+    std::fs::create_dir_all(output_dir).ok();
+    let nav_path = output_dir.join("nav.csv");
+    let mut csv = String::from("date,nav,benchmark\n");
+    for &(date, nav) in &result.nav {
+        let bm = result.benchmark_nav.iter()
+            .find(|(d, _)| *d == date)
+            .map(|(_, n)| *n)
+            .unwrap_or(f64::NAN);
+        csv.push_str(&format!("{},{:.6},{:.6}\n", date, nav, bm));
+    }
+    std::fs::write(&nav_path, csv).ok();
+    info!("NAV saved to {}", nav_path.display());
 }
 
 fn estimate_memory(cache: &qrs_data::cache::DataCache) -> f64 {
