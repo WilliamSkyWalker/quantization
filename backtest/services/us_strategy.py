@@ -17,8 +17,16 @@ Rebalancing:
 
 import logging
 import multiprocessing as mp
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# macOS: 禁用 fork 安全检查（Apple 官方环境变量）
+# Django 社区 + CPython issue #84559 推荐方案
+# 解决多线程进程 fork 后 Obj-C runtime crash
+import sys
+if sys.platform == "darwin":
+    os.environ["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "YES"
 from typing import Optional
 
 import numpy as np

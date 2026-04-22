@@ -21,6 +21,10 @@ import sys
 import time
 from pathlib import Path
 
+# macOS: 禁用 fork 安全检查（Apple 官方环境变量，仅 macOS）
+if sys.platform == "darwin":
+    os.environ["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "YES"
+
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
