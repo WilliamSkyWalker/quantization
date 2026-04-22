@@ -226,13 +226,12 @@ pub fn fama_macbeth(
 
         let fmap = &factor_panel[&date];
 
-        // Identify factors with high coverage (>= 50% of tickers with forward returns)
-        let min_coverage = fwd_rets.len() / 2;
+        // Use all factors with >= 30 tickers overlapping forward returns
         let mut avail_factors: Vec<&str> = Vec::new();
         for fname in &factor_names {
             if let Some(fvals) = fmap.get(fname) {
                 let common = fvals.keys().filter(|t| fwd_rets.contains_key(t)).count();
-                if common >= min_coverage.max(100) {
+                if common >= 30 {
                     avail_factors.push(fname);
                 }
             }
@@ -242,13 +241,8 @@ pub fn fama_macbeth(
             continue;
         }
 
-        // Build common ticker set: tickers in forward returns AND all high-coverage factors
-        let mut common_tickers: Vec<TickerId> = fwd_rets.keys().copied().collect();
-        for fname in &avail_factors {
-            if let Some(fvals) = fmap.get(*fname) {
-                common_tickers.retain(|t| fvals.contains_key(t));
-            }
-        }
+        // Use ALL tickers with forward returns. Missing factor values → 0 (z-score mean).
+        let common_tickers: Vec<TickerId> = fwd_rets.keys().copied().collect();
         if common_tickers.len() < 100 {
             continue;
         }
@@ -270,7 +264,10 @@ pub fn fama_macbeth(
 
         for (j, fname) in avail_factors.iter().enumerate() {
             let fvals = &fmap[*fname];
-            let raw: Vec<f64> = common_tickers.iter().map(|t| fvals[t]).collect();
+            // Missing → 0.0 (will become 0 after z-score = cross-sectional mean)
+            let raw: Vec<f64> = common_tickers.iter()
+                .map(|t| fvals.get(t).copied().unwrap_or(0.0))
+                .collect();
 
             // Z-score standardize
             let mean = raw.iter().sum::<f64>() / n as f64;
