@@ -536,17 +536,33 @@ fn cmd_backtest(
         ..Default::default()
     };
 
+    let universe_filter = qrs_data::universe::UniverseFilter::default();
+
     let t0 = std::time::Instant::now();
     for (i, &date) in rebalance_dates.iter().enumerate() {
-        // Compute all factors
+        // Get clean universe for this date
+        let universe = qrs_data::universe::get_clean_universe(date, &cache, &universe_filter);
+        if universe.is_empty() {
+            continue;
+        }
+
+        // Compute all factors, filtered to universe
         let mut processed_factors = std::collections::HashMap::new();
         for f in &factors {
             let raw = f.compute(date, &cache);
             if raw.is_empty() {
                 continue;
             }
+            // Filter to universe only
+            let filtered: rustc_hash::FxHashMap<qrs_core::types::TickerId, f64> = raw
+                .into_iter()
+                .filter(|(tid, _)| universe.contains(tid))
+                .collect();
+            if filtered.is_empty() {
+                continue;
+            }
             let processed = qrs_factors::processor::process_factor(
-                &raw,
+                &filtered,
                 &cache.sector_map,
                 &rustc_hash::FxHashMap::default(),
                 &proc_config,
@@ -624,49 +640,46 @@ fn cmd_backtest(
     println!("Benchmark Return:   {:>10.2}%", s.benchmark_annual_return * 100.0);
     println!("Excess Return:      {:>10.2}%", s.excess_annual_return * 100.0);
 
-    // Yearly breakdown
-    if result.nav.len() > 252 {
+    // Yearly breakdown: group NAV by year, compute year-end / year-start - 1
+    if result.nav.len() > 100 {
         println!("\nYearly Returns:");
         println!("{:>6} {:>10} {:>10} {:>10}", "Year", "Strategy", "S&P 500", "Excess");
         println!("{}", "-".repeat(42));
 
-        let mut year_start_nav = result.nav[0].1;
-        let mut year_start_bm = result.benchmark_nav.first().map(|(_, n)| *n).unwrap_or(1.0);
-        let mut last_year = result.nav[0].0.year();
+        use chrono::Datelike;
+        // Collect last NAV of each year
+        let mut year_ends: std::collections::BTreeMap<i32, f64> = std::collections::BTreeMap::new();
+        let mut bm_year_ends: std::collections::BTreeMap<i32, f64> = std::collections::BTreeMap::new();
 
         for &(date, nav) in &result.nav {
-            if date.year() != last_year {
-                // Print previous year
-                let strat_ret = nav / year_start_nav - 1.0;
-                // Find benchmark nav at this point
-                let bm_nav = result.benchmark_nav.iter()
-                    .rev()
-                    .find(|(d, _)| d.year() == last_year)
-                    .map(|(_, n)| *n)
-                    .unwrap_or(year_start_bm);
-                let bm_ret = bm_nav / year_start_bm - 1.0;
-
-                println!(
-                    "{:>6} {:>9.2}% {:>9.2}% {:>9.2}%",
-                    last_year,
-                    strat_ret * 100.0,
-                    bm_ret * 100.0,
-                    (strat_ret - bm_ret) * 100.0,
-                );
-
-                year_start_nav = nav;
-                year_start_bm = bm_nav;
-                last_year = date.year();
-            }
+            year_ends.insert(date.year(), nav);
         }
-        // Print last year
-        if let Some(&(_, last_nav)) = result.nav.last() {
-            let strat_ret = last_nav / year_start_nav - 1.0;
-            let bm_nav = result.benchmark_nav.last().map(|(_, n)| *n).unwrap_or(year_start_bm);
-            let bm_ret = bm_nav / year_start_bm - 1.0;
+        for &(date, nav) in &result.benchmark_nav {
+            bm_year_ends.insert(date.year(), nav);
+        }
+
+        let years: Vec<i32> = year_ends.keys().copied().collect();
+        for (i, &year) in years.iter().enumerate() {
+            let nav_end = year_ends[&year];
+            let nav_start = if i == 0 {
+                result.nav[0].1
+            } else {
+                year_ends[&years[i - 1]]
+            };
+
+            let bm_end = bm_year_ends.get(&year).copied().unwrap_or(1.0);
+            let bm_start = if i == 0 {
+                result.benchmark_nav.first().map(|(_, n)| *n).unwrap_or(1.0)
+            } else {
+                bm_year_ends.get(&years[i - 1]).copied().unwrap_or(1.0)
+            };
+
+            let strat_ret = if nav_start > 0.0 { nav_end / nav_start - 1.0 } else { 0.0 };
+            let bm_ret = if bm_start > 0.0 { bm_end / bm_start - 1.0 } else { 0.0 };
+
             println!(
                 "{:>6} {:>9.2}% {:>9.2}% {:>9.2}%",
-                last_year,
+                year,
                 strat_ret * 100.0,
                 bm_ret * 100.0,
                 (strat_ret - bm_ret) * 100.0,
