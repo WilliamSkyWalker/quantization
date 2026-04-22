@@ -530,10 +530,9 @@ fn cmd_backtest(
 
     // Generate signals for each rebalance date
     let mut signals = std::collections::BTreeMap::new();
-    let proc_config = qrs_factors::processor::ProcessConfig {
-        do_neutralize: false, // Simplified: skip neutralize (no sector_map)
-        ..Default::default()
-    };
+
+    // Category-specific neutralize modes (from Python config)
+    let cat_neutralize_overrides = &config.factor_processing.category_neutralize_overrides;
 
     let universe_filter = qrs_data::universe::UniverseFilter::default();
 
@@ -544,6 +543,11 @@ fn cmd_backtest(
         if universe.is_empty() {
             continue;
         }
+
+        // Build market_cap map for universe tickers (needed for neutralization)
+        let mktcap_map: rustc_hash::FxHashMap<qrs_core::types::TickerId, f64> = universe.iter()
+            .filter_map(|&tid| cache.get_market_cap(tid, date).map(|m| (tid, m)))
+            .collect();
 
         // Compute all factors in parallel (rayon), filtered to universe
         let processed_factors: std::collections::HashMap<String, rustc_hash::FxHashMap<qrs_core::types::TickerId, f64>> = factors
@@ -556,11 +560,29 @@ fn cmd_backtest(
                     .filter(|(tid, _)| universe.contains(tid))
                     .collect();
                 if filtered.is_empty() { return None; }
+
+                // Per-category neutralize mode
+                let cat = f.category();
+                let neut_mode = cat_neutralize_overrides
+                    .get(cat)
+                    .map(|s| s.as_str())
+                    .unwrap_or(&config.factor_processing.neutralize_mode);
+
+                let proc_cfg = qrs_factors::processor::ProcessConfig {
+                    do_winsorize: true,
+                    do_neutralize: neut_mode != "none",
+                    do_standardize: true,
+                    mad_n: 5.0,
+                    neutralize_mode: neut_mode.to_string(),
+                    nonlinear_size: config.factor_processing.nonlinear_size,
+                    standardize_mode: config.factor_processing.standardize_mode.clone(),
+                };
+
                 let processed = qrs_factors::processor::process_factor(
                     &filtered,
                     &cache.sector_map,
-                    &rustc_hash::FxHashMap::default(),
-                    &proc_config,
+                    &mktcap_map,
+                    &proc_cfg,
                 );
                 if processed.is_empty() { None } else { Some((f.name().to_string(), processed)) }
             })
