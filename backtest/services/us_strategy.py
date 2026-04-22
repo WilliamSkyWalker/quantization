@@ -429,12 +429,14 @@ class USMultiFactorStrategy:
     # _INHERENT_REVERSE_SET / _NEVER_REVERSE_SET / _ROLLING_IC_WINDOW / _ROLLING_IC_DEFAULT
     # 已改为 __init__ 中实例属性，由 AlphaSignal registry 推导 + legacy 硬编码合并生成。
 
-    # ICIR 分级权重（来自 2012-2025 因子分析，固定不变）
+    # ICIR 分级权重（来自 2012-2025 因子分析 + momentum 提权平衡）
     _ICIR_TIER_WEIGHTS = {
-        # T1 强信号 (|ICIR| >= 0.3)
+        # T1 强信号 (|ICIR| >= 0.3 或 momentum 提权)
         "FREE_FLOAT_PCT": 2.0, "TURN_20D": 2.0, "PIOTROSKI_F": 2.0,
         "SUE_PEAD": 2.0, "EV_TO_FCF": 2.0, "AMIHUD_ILLIQ": 2.0,
         "COMPOSITE_EQUITY_ISSUANCE": 2.0, "ROE_TTM": 2.0, "EARNINGS_SURPRISE": 2.0,
+        # Momentum 提权到 T1（平衡 quality/value 偏重，避免牛市跑输）
+        "MOM_12M": 2.0, "TSMOM": 2.0, "INDUSTRY_MOM": 2.0,
         # T2 有信号 (0.15 <= |ICIR| < 0.3) → 默认 1.0，不列出
         # T3 弱信号 (0.05 <= |ICIR| < 0.15)
         "PRICE_52W_HIGH": 0.5, "VOLUME_RATIO": 0.5, "GROSS_MARGIN": 0.5,
