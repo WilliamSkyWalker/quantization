@@ -463,6 +463,26 @@ fn cmd_analyze(
         );
     }
 
+    // Fama-MacBeth regression
+    info!("Computing Fama-MacBeth (horizon=21d)...");
+    let fm_summaries = qrs_strategy::analysis::fama_macbeth(&factor_panel, &cache, 21);
+
+    println!("\n\n{:<30} {:>5} {:>12} {:>12} {:>8}",
+        "Factor (FM)", "N", "Mean γ", "Std γ", "t-stat");
+    println!("{}", "-".repeat(75));
+
+    for s in &fm_summaries {
+        let star = if s.t_stat.abs() > 3.0 { "***" }
+            else if s.t_stat.abs() > 2.0 { "**" }
+            else { "" };
+        println!(
+            "{:<30} {:>5} {:>12.6} {:>12.6} {:>+7.2} {}",
+            s.factor_name, s.n_months, s.mean_gamma, s.std_gamma, s.t_stat, star,
+        );
+    }
+
+    println!("\n> Harvey-Liu-Zhu (2016): |t| > 3.0 for statistical significance.");
+
     // Save to CSV
     std::fs::create_dir_all(output_dir).ok();
     let csv_path = output_dir.join(format!("ic_summary_{start}_{end}.csv"));
@@ -474,7 +494,17 @@ fn cmd_analyze(
         ));
     }
     std::fs::write(&csv_path, csv).ok();
-    info!("IC summary saved to {}", csv_path.display());
+
+    let fm_path = output_dir.join(format!("fama_macbeth_{start}_{end}.csv"));
+    let mut fm_csv = String::from("factor,n_months,mean_gamma,std_gamma,t_stat\n");
+    for s in &fm_summaries {
+        fm_csv.push_str(&format!(
+            "{},{},{:.8},{:.8},{:.4}\n",
+            s.factor_name, s.n_months, s.mean_gamma, s.std_gamma, s.t_stat,
+        ));
+    }
+    std::fs::write(&fm_path, fm_csv).ok();
+    info!("Saved IC → {}, FM → {}", csv_path.display(), fm_path.display());
 }
 
 fn cmd_backtest(
