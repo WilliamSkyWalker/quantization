@@ -1485,7 +1485,7 @@ class USMultiFactorStrategy:
         from django.db import connections
         t0 = time.time()
 
-        effective_workers = min(max_workers, 3)  # 内存限制：每个 worker ~5.5GB
+        effective_workers = min(max_workers, 2)  # 内存限制：每个 worker ~6GB，24GB RAM 最多 2 个
         logger.info(f"US spawn factors: {len(rebalance_dates)} dates, {effective_workers} workers")
 
         # 确保 rolling stats parquet 缓存存在（供 worker 读取）
