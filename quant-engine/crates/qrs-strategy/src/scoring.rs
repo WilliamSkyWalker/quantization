@@ -125,54 +125,57 @@ pub fn compute_scores(
     result
 }
 
-/// Select top-N long and bottom-N short from scores.
-/// Returns: (long_weights, short_weights) as HashMap<TickerId, f64>.
+/// Select top-N long-only portfolio from scores.
+/// Returns: (long_weights, empty_short) as HashMap<TickerId, f64>.
+/// Single stock capped at max_single_weight, excess redistributed.
 pub fn select_portfolio(
     scores: &FxHashMap<TickerId, f64>,
     long_n: usize,
-    short_n: usize,
-    short_enabled: bool,
-    net_exposure: f64,
     temperature: f64,
-) -> (FxHashMap<TickerId, f64>, FxHashMap<TickerId, f64>) {
+    max_single_weight: f64, // e.g. 0.10 (10% per stock)
+) -> FxHashMap<TickerId, f64> {
     let mut sorted: Vec<(TickerId, f64)> = scores
         .iter()
         .map(|(&t, &s)| (t, s))
-        .filter(|(_, s)| s.is_finite())
+        .filter(|(_, s)| s.is_finite() && *s > 0.0)
         .collect();
     sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Long side: top N with positive scores
-    let long_candidates: Vec<(TickerId, f64)> = sorted
-        .iter()
-        .filter(|(_, s)| *s > 0.0)
-        .take(long_n)
-        .copied()
-        .collect();
-
-    let long_total = (1.0 + net_exposure) / 2.0;
-    let long_weights = softmax_weights(&long_candidates, temperature, long_total);
-
-    // Short side
-    let mut short_weights = FxHashMap::default();
-    if short_enabled && short_n > 0 {
-        let short_candidates: Vec<(TickerId, f64)> = sorted
-            .iter()
-            .rev()
-            .filter(|(_, s)| *s <= 0.0)
-            .take(short_n)
-            .map(|&(t, s)| (t, -s)) // Negate for softmax (higher weight to more negative)
-            .collect();
-
-        let short_total = (1.0 - net_exposure) / 2.0;
-        short_weights = softmax_weights(&short_candidates, temperature, short_total);
-        // Negate weights for short positions
-        for v in short_weights.values_mut() {
-            *v = -*v;
-        }
+    let candidates: Vec<(TickerId, f64)> = sorted.into_iter().take(long_n).collect();
+    if candidates.is_empty() {
+        return FxHashMap::default();
     }
 
-    (long_weights, short_weights)
+    // Softmax weights, total = 1.0 (fully invested long-only)
+    let mut weights = softmax_weights(&candidates, temperature, 1.0);
+
+    // Cap single stock weight, redistribute excess
+    let mut iterations = 0;
+    loop {
+        let mut excess = 0.0;
+        let mut uncapped = 0;
+        for v in weights.values_mut() {
+            if *v > max_single_weight {
+                excess += *v - max_single_weight;
+                *v = max_single_weight;
+            } else {
+                uncapped += 1;
+            }
+        }
+        if excess < 1e-6 || uncapped == 0 || iterations > 10 {
+            break;
+        }
+        // Redistribute excess proportionally to uncapped stocks
+        let add_each = excess / uncapped as f64;
+        for v in weights.values_mut() {
+            if *v < max_single_weight {
+                *v += add_each;
+            }
+        }
+        iterations += 1;
+    }
+
+    weights
 }
 
 /// Apply softmax weighting to candidates.

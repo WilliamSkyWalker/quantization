@@ -577,20 +577,13 @@ fn cmd_backtest(
             config.strategy.missing_factor_max_penalty,
         );
 
-        // Select portfolio
-        let short_enabled = config.short.enabled && !no_short;
-        let (long_w, short_w) = qrs_strategy::scoring::select_portfolio(
+        // Select long-only portfolio with single stock cap
+        let combined = qrs_strategy::scoring::select_portfolio(
             &scores,
             config.strategy.long_n,
-            if short_enabled { config.short.short_n } else { 0 },
-            short_enabled,
-            config.short.net_exposure,
             config.strategy.weight_temperature,
+            config.optimizer.max_long_weight, // 15% per stock cap
         );
-
-        // Merge weights
-        let mut combined = long_w;
-        combined.extend(short_w);
 
         if !combined.is_empty() {
             signals.insert(date, combined);
