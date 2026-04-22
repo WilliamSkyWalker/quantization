@@ -345,6 +345,7 @@ impl BacktestEngine {
         cache.get_close(ticker, date).filter(|p| p.is_finite() && *p > 0.0)
     }
 
+
     fn portfolio_value(
         &self,
         positions: &FxHashMap<TickerId, f64>,
