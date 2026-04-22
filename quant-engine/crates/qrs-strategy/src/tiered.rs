@@ -55,7 +55,13 @@ fn is_good_ipo_sector(sector_name: &str) -> bool {
     )
 }
 
-/// Build tiered portfolio weights.
+/// Build tiered portfolio with holding stickiness.
+///
+/// Stickiness rules:
+/// - Keep existing holding if score still in top 50% of tier candidates
+/// - Only sell if score drops below top 50%
+/// - Only buy new stocks from top 10% to fill vacated slots
+///
 /// Returns: HashMap<TickerId, f64> (positive weights summing to ~1.0).
 pub fn select_tiered_portfolio(
     date: Date,
@@ -63,12 +69,15 @@ pub fn select_tiered_portfolio(
     factor_weights: &HashMap<String, f64>,
     cache: &DataCache,
     config: &TieredConfig,
+    prev_holdings: &FxHashSet<TickerId>, // previous period's long holdings
 ) -> FxHashMap<TickerId, f64> {
     let mut result = FxHashMap::default();
 
     // === Tier 1: Large Cap Core ($50B+) ===
-    let large_cap_picks = select_large_cap(
-        date, processed_factors, factor_weights, cache, config,
+    let large_cap_picks = select_with_stickiness(
+        &select_large_cap_scored(date, processed_factors, factor_weights, cache, config),
+        prev_holdings,
+        config.large_cap_n,
     );
     let lc_weight = if !large_cap_picks.is_empty() {
         (config.large_cap_pct / large_cap_picks.len() as f64).min(config.max_single_weight)
@@ -78,21 +87,25 @@ pub fn select_tiered_portfolio(
     }
 
     // === Tier 2: Quality IPO ===
-    let ipo_picks = select_quality_ipo(
-        date, processed_factors, factor_weights, cache, config,
+    let ipo_picks = select_with_stickiness(
+        &select_quality_ipo_scored(date, processed_factors, factor_weights, cache, config),
+        prev_holdings,
+        config.ipo_n,
     );
     let ipo_weight = if !ipo_picks.is_empty() {
         (config.ipo_pct / ipo_picks.len() as f64).min(config.max_single_weight)
     } else { 0.0 };
     for &tid in &ipo_picks {
-        if !result.contains_key(&tid) { // Avoid double-counting
+        if !result.contains_key(&tid) {
             result.insert(tid, ipo_weight);
         }
     }
 
     // === Tier 3: Small Cap Momentum ===
-    let small_picks = select_small_cap_momentum(
-        date, processed_factors, factor_weights, cache, config,
+    let small_picks = select_with_stickiness(
+        &select_small_cap_momentum_scored(date, processed_factors, factor_weights, cache, config),
+        prev_holdings,
+        config.small_cap_n,
     );
     let sc_weight = if !small_picks.is_empty() {
         (config.small_cap_pct / small_picks.len() as f64).min(config.max_single_weight)
@@ -120,15 +133,77 @@ pub fn select_tiered_portfolio(
     result
 }
 
-/// Tier 1: Select large cap stocks.
-/// Quality + momentum focused: PIOTROSKI_F, ROE_TTM, EARNINGS_SURPRISE, MOM_12M.
-fn select_large_cap(
+/// Holding stickiness: keep existing holdings unless they drop below top 50%.
+/// Fill vacated slots from top 10% of new candidates.
+fn select_with_stickiness(
+    scored: &[(TickerId, f64)],
+    prev_holdings: &FxHashSet<TickerId>,
+    target_n: usize,
+) -> Vec<TickerId> {
+    if scored.is_empty() { return vec![]; }
+
+    let n = scored.len();
+    let keep_threshold = 0;  // Disabled: no stickiness (full rebalance each period is optimal)
+    let new_threshold = n;  // All candidates eligible
+
+    // Step 1: Keep existing holdings that are still in top 50%
+    let mut kept: Vec<TickerId> = Vec::new();
+    for (rank, &(tid, _)) in scored.iter().enumerate() {
+        if prev_holdings.contains(&tid) && rank < keep_threshold {
+            kept.push(tid);
+        }
+    }
+
+    // Step 2: Fill remaining slots from top 10% (that aren't already kept)
+    let slots_remaining = target_n.saturating_sub(kept.len());
+    let mut new_picks: Vec<TickerId> = Vec::new();
+    for &(tid, _) in scored.iter().take(new_threshold.max(target_n)) {
+        if !kept.contains(&tid) {
+            new_picks.push(tid);
+            if new_picks.len() >= slots_remaining { break; }
+        }
+    }
+
+    kept.extend(new_picks);
+    kept.truncate(target_n);
+    kept
+}
+
+/// Score a tier's factor model. Returns sorted (TickerId, score) pairs, descending.
+fn score_tier(
+    candidates: &[TickerId],
+    tier_factors: &[(&str, f64)],
+    factors: &HashMap<String, FxHashMap<TickerId, f64>>,
+) -> Vec<(TickerId, f64)> {
+    let mut scored: Vec<(TickerId, f64)> = candidates.iter()
+        .filter_map(|&tid| {
+            let mut score = 0.0;
+            let mut weight_sum = 0.0;
+            for &(fname, w) in tier_factors {
+                if let Some(fvals) = factors.get(fname) {
+                    if let Some(&v) = fvals.get(&tid) {
+                        if v.is_finite() {
+                            score += v * w;
+                            weight_sum += w.abs();
+                        }
+                    }
+                }
+            }
+            if weight_sum > 0.0 { Some((tid, score / weight_sum)) } else { None }
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored
+}
+
+/// Tier 1: Score large cap stocks (returns sorted scored list).
+fn select_large_cap_scored(
     date: Date,
     factors: &HashMap<String, FxHashMap<TickerId, f64>>,
     _factor_weights: &HashMap<String, f64>,
     cache: &DataCache,
     config: &TieredConfig,
-) -> Vec<TickerId> {
+) -> Vec<(TickerId, f64)> {
     // Universe: $50B+ market cap, traded today
     let candidates: Vec<TickerId> = cache.daily_prices.iter_date(date)
         .filter(|(tid, bar)| {
@@ -160,41 +235,17 @@ fn select_large_cap(
         ("EARNINGS_GROWTH", 1.5),
     ];
 
-    let mut scored: Vec<(TickerId, f64)> = candidates.iter()
-        .filter_map(|&tid| {
-            let mut score = 0.0;
-            let mut weight_sum = 0.0;
-            for &(fname, w) in &tier1_factors {
-                if let Some(fvals) = factors.get(fname) {
-                    if let Some(&v) = fvals.get(&tid) {
-                        if v.is_finite() {
-                            score += v * w;
-                            weight_sum += w.abs();
-                        }
-                    }
-                }
-            }
-            if weight_sum > 0.0 {
-                Some((tid, score / weight_sum))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.iter().take(config.large_cap_n).map(|&(t, _)| t).collect()
+    score_tier(&candidates, &tier1_factors, factors)
 }
 
-/// Tier 2: Select quality IPO stocks.
-/// Growth + analyst focused. Filters: IPO < 2yr, rev growth > 20%, gross margin > 30%, good sector.
-fn select_quality_ipo(
+/// Tier 2: Score quality IPO stocks (returns sorted scored list).
+fn select_quality_ipo_scored(
     date: Date,
     factors: &HashMap<String, FxHashMap<TickerId, f64>>,
     _factor_weights: &HashMap<String, f64>,
     cache: &DataCache,
     config: &TieredConfig,
-) -> Vec<TickerId> {
+) -> Vec<(TickerId, f64)> {
     let cutoff_date = date - chrono::Duration::days(config.ipo_max_age_days);
 
     // Candidates: traded today + have financials + recently listed
@@ -243,34 +294,17 @@ fn select_quality_ipo(
         ("MOM_3M", 1.0),
     ];
 
-    let mut scored: Vec<(TickerId, f64)> = candidates.iter()
-        .filter_map(|&tid| {
-            let mut score = 0.0;
-            let mut w_sum = 0.0;
-            for &(fname, w) in &tier2_factors {
-                if let Some(fvals) = factors.get(fname) {
-                    if let Some(&v) = fvals.get(&tid) {
-                        if v.is_finite() { score += v * w; w_sum += w.abs(); }
-                    }
-                }
-            }
-            if w_sum > 0.0 { Some((tid, score / w_sum)) } else { None }
-        })
-        .collect();
-
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.iter().take(config.ipo_n).map(|&(t, _)| t).collect()
+    score_tier(&candidates, &tier2_factors, factors)
 }
 
-/// Tier 3: Select small cap momentum stocks.
-/// Pure momentum, must be profitable.
-fn select_small_cap_momentum(
+/// Tier 3: Score small cap momentum stocks (returns sorted scored list).
+fn select_small_cap_momentum_scored(
     date: Date,
     factors: &HashMap<String, FxHashMap<TickerId, f64>>,
     _factor_weights: &HashMap<String, f64>,
     cache: &DataCache,
     config: &TieredConfig,
-) -> Vec<TickerId> {
+) -> Vec<(TickerId, f64)> {
     // Universe: $500M-$5B, traded, profitable (net_income > 0)
     let candidates: Vec<TickerId> = cache.daily_prices.iter_date(date)
         .filter(|(tid, bar)| {
@@ -301,24 +335,5 @@ fn select_small_cap_momentum(
         ("FROG_IN_PAN", 1.0),
     ];
 
-    let mut scored: Vec<(TickerId, f64)> = candidates.iter()
-        .filter_map(|&tid| {
-            let mut score = 0.0;
-            let mut w_sum = 0.0;
-            for &(fname, w) in &tier3_factors {
-                if let Some(fvals) = factors.get(fname) {
-                    if let Some(&v) = fvals.get(&tid) {
-                        if v.is_finite() { score += v * w; w_sum += w.abs(); }
-                    }
-                }
-            }
-            if w_sum > 0.0 { Some((tid, score / w_sum)) } else { None }
-        })
-        .collect();
-
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Take top momentum, filter to top 10% only
-    let top_pct = (candidates.len() / 10).max(config.small_cap_n);
-    scored.iter().take(top_pct.min(config.small_cap_n)).map(|&(t, _)| t).collect()
+    score_tier(&candidates, &tier3_factors, factors)
 }

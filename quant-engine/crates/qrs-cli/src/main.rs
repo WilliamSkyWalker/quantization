@@ -560,6 +560,7 @@ fn cmd_backtest(
 
     // Generate signals for each rebalance date
     let mut signals = std::collections::BTreeMap::new();
+    let mut prev_holdings: rustc_hash::FxHashSet<qrs_core::types::TickerId> = Default::default();
 
     // Category-specific neutralize modes (from Python config)
     let cat_neutralize_overrides = &config.factor_processing.category_neutralize_overrides;
@@ -636,7 +637,13 @@ fn cmd_backtest(
         let tiered_config = qrs_strategy::tiered::TieredConfig::default();
         let mut combined = qrs_strategy::tiered::select_tiered_portfolio(
             date, &processed_factors, &factor_weights_map, &cache, &tiered_config,
+            &prev_holdings,
         );
+        // Update prev_holdings for next period's stickiness
+        prev_holdings = combined.keys()
+            .filter(|t| combined.get(t).map(|&w| w > 0.0).unwrap_or(false))
+            .copied()
+            .collect();
 
         // Regime-adaptive short overlay
         if !no_short {
