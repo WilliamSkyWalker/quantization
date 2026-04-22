@@ -1751,6 +1751,7 @@ dependencies = [
  "qrs-data",
  "qrs-factors",
  "qrs-strategy",
+ "rayon",
  "rustc-hash",
  "serde_json",
  "tracing",

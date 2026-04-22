@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 use chrono::NaiveDate;
 use polars::prelude::*;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use tracing::{info, warn};
 
@@ -284,7 +285,7 @@ fn load_daily_prices(
         loader::load_parquet(&path)?
     };
 
-    let tickers = get_str_col(&df, "ticker")?;
+    let tickers_col = get_str_col(&df, "ticker")?;
     let dates = get_date_col(&df, "trade_date")?;
     let open = get_f64_col(&df, "open");
     let high = get_f64_col(&df, "high");
@@ -294,44 +295,67 @@ fn load_daily_prices(
     let volume = get_f64_col(&df, "volume");
     let change_pct = get_f64_col(&df, "change_percent");
 
-    let mut map = FxHashMap::default();
-    map.reserve(df.height());
+    let n = df.height();
 
-    for i in 0..df.height() {
-        let ticker_str = match tickers.get(i) {
-            Some(t) => t,
-            None => continue,
-        };
-        let date = match dates[i] {
-            Some(d) => d,
-            None => continue,
-        };
-        let close_val = opt_f64(close[i]);
-        // adj_close is all NULL in this parquet, fall back to close
-        let adj = adj_close[i].unwrap_or(close_val);
-
-        let tid = interner.intern(ticker_str);
-        map.insert(
-            (tid, date),
-            PriceBar {
-                open: opt_f64(open[i]),
-                high: opt_f64(high[i]),
-                low: opt_f64(low[i]),
-                close: close_val,
-                adj_close: adj,
-                volume: opt_f64(volume[i]),
-                change_percent: opt_f64(change_pct[i]),
-                cum_ret_5d: f64::NAN,
-                cum_ret_20d: f64::NAN,
-                dvol_20d: f64::NAN,
-                vol_20d: f64::NAN,
-                ma60_adj: f64::NAN,
-                dollar_volume: f64::NAN,
-            },
-        );
+    // Phase A: Pre-intern all unique tickers (single-threaded, fast — only ~13K unique)
+    {
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..n {
+            if let Some(t) = tickers_col.get(i) {
+                if seen.insert(t.as_ptr()) {
+                    interner.intern(t);
+                }
+            }
+        }
     }
 
-    info!("Daily prices: {} entries", map.len());
+    // Phase B: Build TickerId array (lock-free reads since all tickers pre-interned)
+    let ticker_ids: Vec<Option<TickerId>> = (0..n)
+        .map(|i| tickers_col.get(i).and_then(|t| interner.0.lock().unwrap().get_id(t)))
+        .collect();
+
+    // Phase C: Parallel HashMap build — split into chunks, build sub-maps, merge
+    let chunk_size = (n / rayon::current_num_threads().max(1)).max(100_000);
+    let chunks: Vec<_> = (0..n).step_by(chunk_size)
+        .map(|start| start..n.min(start + chunk_size))
+        .collect();
+
+    let sub_maps: Vec<FxHashMap<(TickerId, Date), PriceBar>> = chunks
+        .par_iter()
+        .map(|range| {
+            let mut m = FxHashMap::default();
+            m.reserve(range.len());
+            for i in range.clone() {
+                let tid = match ticker_ids[i] { Some(t) => t, None => continue };
+                let date = match dates[i] { Some(d) => d, None => continue };
+                let close_val = opt_f64(close[i]);
+                let adj = adj_close[i].unwrap_or(close_val);
+                m.insert((tid, date), PriceBar {
+                    open: opt_f64(open[i]),
+                    high: opt_f64(high[i]),
+                    low: opt_f64(low[i]),
+                    close: close_val,
+                    adj_close: adj,
+                    volume: opt_f64(volume[i]),
+                    change_percent: opt_f64(change_pct[i]),
+                    cum_ret_5d: f64::NAN, cum_ret_20d: f64::NAN,
+                    dvol_20d: f64::NAN, vol_20d: f64::NAN,
+                    ma60_adj: f64::NAN, dollar_volume: f64::NAN,
+                });
+            }
+            m
+        })
+        .collect();
+
+    // Merge sub-maps
+    let total_len: usize = sub_maps.iter().map(|m| m.len()).sum();
+    let mut map = FxHashMap::default();
+    map.reserve(total_len);
+    for sub in sub_maps {
+        map.extend(sub);
+    }
+
+    info!("Daily prices: {} entries (parallel build)", map.len());
     Ok(map)
 }
 

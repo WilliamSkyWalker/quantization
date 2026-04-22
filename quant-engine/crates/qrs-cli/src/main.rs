@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use rayon::prelude::*;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -397,22 +398,21 @@ fn cmd_analyze(
     > = std::collections::HashMap::new();
 
     for (i, &date) in rebalance_dates.iter().enumerate() {
-        let mut date_factors = std::collections::HashMap::new();
-        for f in &factors {
-            let raw = f.compute(date, &cache);
-            if raw.is_empty() {
-                continue;
-            }
-            let processed = qrs_factors::processor::process_factor(
-                &raw,
-                &cache.sector_map,
-                &rustc_hash::FxHashMap::default(),
-                &proc_config,
-            );
-            if !processed.is_empty() {
-                date_factors.insert(f.name().to_string(), processed);
-            }
-        }
+        // Parallel factor computation for each date
+        let date_factors: std::collections::HashMap<String, rustc_hash::FxHashMap<qrs_core::types::TickerId, f64>> = factors
+            .par_iter()
+            .filter_map(|f| {
+                let raw = f.compute(date, &cache);
+                if raw.is_empty() { return None; }
+                let processed = qrs_factors::processor::process_factor(
+                    &raw,
+                    &cache.sector_map,
+                    &rustc_hash::FxHashMap::default(),
+                    &proc_config,
+                );
+                if processed.is_empty() { None } else { Some((f.name().to_string(), processed)) }
+            })
+            .collect();
         factor_panel.insert(date, date_factors);
 
         if (i + 1) % 12 == 0 || i + 1 == rebalance_dates.len() {
@@ -546,31 +546,26 @@ fn cmd_backtest(
             continue;
         }
 
-        // Compute all factors, filtered to universe
-        let mut processed_factors = std::collections::HashMap::new();
-        for f in &factors {
-            let raw = f.compute(date, &cache);
-            if raw.is_empty() {
-                continue;
-            }
-            // Filter to universe only
-            let filtered: rustc_hash::FxHashMap<qrs_core::types::TickerId, f64> = raw
-                .into_iter()
-                .filter(|(tid, _)| universe.contains(tid))
-                .collect();
-            if filtered.is_empty() {
-                continue;
-            }
-            let processed = qrs_factors::processor::process_factor(
-                &filtered,
-                &cache.sector_map,
-                &rustc_hash::FxHashMap::default(),
-                &proc_config,
-            );
-            if !processed.is_empty() {
-                processed_factors.insert(f.name().to_string(), processed);
-            }
-        }
+        // Compute all factors in parallel (rayon), filtered to universe
+        let processed_factors: std::collections::HashMap<String, rustc_hash::FxHashMap<qrs_core::types::TickerId, f64>> = factors
+            .par_iter()
+            .filter_map(|f| {
+                let raw = f.compute(date, &cache);
+                if raw.is_empty() { return None; }
+                let filtered: rustc_hash::FxHashMap<qrs_core::types::TickerId, f64> = raw
+                    .into_iter()
+                    .filter(|(tid, _)| universe.contains(tid))
+                    .collect();
+                if filtered.is_empty() { return None; }
+                let processed = qrs_factors::processor::process_factor(
+                    &filtered,
+                    &cache.sector_map,
+                    &rustc_hash::FxHashMap::default(),
+                    &proc_config,
+                );
+                if processed.is_empty() { None } else { Some((f.name().to_string(), processed)) }
+            })
+            .collect();
 
         // Score
         let scores = qrs_strategy::scoring::compute_scores(
