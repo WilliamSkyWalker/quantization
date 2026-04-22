@@ -632,33 +632,37 @@ fn cmd_backtest(
             config.strategy.missing_factor_max_penalty,
         );
 
-        // Regime-adaptive short exposure
-        let short_config = qrs_strategy::short::ShortConfig::default();
-        let regime_scale = qrs_strategy::short::regime_short_scale(date, &cache, 60);
-        let short_exposure = short_config.base_short_exposure * regime_scale;
-        let long_exposure = 1.0 - short_exposure;
-
-        // Select long portfolio (scaled by regime)
-        let mut combined = qrs_strategy::scoring::select_portfolio(
-            &scores,
-            config.strategy.long_n,
-            config.strategy.weight_temperature,
-            config.optimizer.max_long_weight,
+        // === Tiered portfolio: 60% large cap + 25% IPO + 15% small cap ===
+        let tiered_config = qrs_strategy::tiered::TieredConfig::default();
+        let mut combined = qrs_strategy::tiered::select_tiered_portfolio(
+            date, &processed_factors, &factor_weights_map, &cache, &tiered_config,
         );
-        // Scale long weights to long_exposure
-        for v in combined.values_mut() {
-            *v *= long_exposure;
-        }
 
-        // Compute short scores and select short portfolio
-        if !no_short && short_exposure > 0.01 {
-            let short_scores = qrs_strategy::short::compute_short_scores(
-                &processed_factors, &scores, &cache, date, &short_config,
-            );
-            let short_weights = qrs_strategy::short::select_short_portfolio(
-                &short_scores, &short_config, short_exposure,
-            );
-            combined.extend(short_weights);
+        // Regime-adaptive short overlay
+        if !no_short {
+            let short_config = qrs_strategy::short::ShortConfig::default();
+            let regime_scale = qrs_strategy::short::regime_short_scale(date, &cache, 60);
+            let short_exposure = short_config.base_short_exposure * regime_scale;
+
+            if short_exposure > 0.01 {
+                // Scale long weights down to make room for shorts
+                let long_total: f64 = combined.values().filter(|v| **v > 0.0).sum();
+                let target_long = 1.0 - short_exposure;
+                if long_total > 0.0 {
+                    let scale = target_long / long_total;
+                    for v in combined.values_mut() {
+                        if *v > 0.0 { *v *= scale; }
+                    }
+                }
+
+                let short_scores = qrs_strategy::short::compute_short_scores(
+                    &processed_factors, &scores, &cache, date, &short_config,
+                );
+                let short_weights = qrs_strategy::short::select_short_portfolio(
+                    &short_scores, &short_config, short_exposure,
+                );
+                combined.extend(short_weights);
+            }
         }
 
         if !combined.is_empty() {
