@@ -386,7 +386,7 @@ fn cmd_analyze(
 
     // Build factor panel: date -> {factor_name -> {ticker -> value}}
     let proc_config = qrs_factors::processor::ProcessConfig {
-        do_neutralize: false,
+        do_neutralize: false, // IC analysis uses raw (non-neutralized) factors
         ..Default::default()
     };
 
@@ -500,12 +500,12 @@ fn cmd_backtest(
 
     // Build factor category map
     let mut factor_categories = std::collections::HashMap::new();
-    let mut factor_weights_map = std::collections::HashMap::new();
     for f in &factors {
         factor_categories.insert(f.name().to_string(), f.category().to_string());
-        let w = if f.inherent_direction() == -1 { -1.0 } else { 1.0 };
-        factor_weights_map.insert(f.name().to_string(), w);
     }
+
+    // Rolling IC state for dynamic factor weighting
+    let mut rolling_ic = qrs_strategy::rolling_ic::RollingIcState::new();
 
     // Determine rebalance dates (monthly: last trading day of each month)
     use chrono::Datelike;
@@ -570,7 +570,7 @@ fn cmd_backtest(
 
                 let proc_cfg = qrs_factors::processor::ProcessConfig {
                     do_winsorize: true,
-                    do_neutralize: neut_mode != "none",
+                    do_neutralize: false, // Disabled: alpha comes from sector allocation, not stock selection
                     do_standardize: true,
                     mad_n: 5.0,
                     neutralize_mode: neut_mode.to_string(),
@@ -587,6 +587,9 @@ fn cmd_backtest(
                 if processed.is_empty() { None } else { Some((f.name().to_string(), processed)) }
             })
             .collect();
+
+        // Update rolling IC weights (uses previous period's snapshot + current returns)
+        let factor_weights_map = rolling_ic.update(date, &processed_factors, &cache);
 
         // Score
         let scores = qrs_strategy::scoring::compute_scores(
