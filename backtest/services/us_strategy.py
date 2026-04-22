@@ -941,11 +941,18 @@ class USMultiFactorStrategy:
             logger.warning("MVO 失败，降级到 Top-N + Softmax")
         return self._select_from_scores_topn(composite, prev_holdings)
 
+    # MVO 候选池大小（先用 score 排名预筛，再在候选池上跑 MVO）
+    _MVO_LONG_CANDIDATES = 50    # 多头候选：Top N
+    _MVO_SHORT_CANDIDATES = 30   # 空头候选：Bottom M
+
     def _select_from_scores_mvo(
         self, composite: pd.DataFrame, prev_holdings: set[str],
     ) -> pd.DataFrame | None:
         """
         MVO-based portfolio construction using risk model + optimizer.
+
+        先用 score 排名预筛候选池（Top 50 + Bottom 30 ≈ 80 只），
+        再在候选池上跑 MVO（80 变量 vs 全 universe 3000+ 变量，提速 ~50x）。
 
         Returns:
             DataFrame[ticker, score, weight, side] or None if optimization fails.
@@ -955,17 +962,35 @@ class USMultiFactorStrategy:
             return empty
 
         date = self._last_date
-        universe = composite["ticker"].tolist()
 
-        # 1. Estimate covariance matrix
-        cov_matrix, cov_tickers = self._risk_model.estimate(date, universe)
+        # 0. 预筛候选池（score 排名 Top + Bottom + prev_holdings）
+        sorted_comp = composite.sort_values("score", ascending=False)
+        long_candidates = sorted_comp.head(self._MVO_LONG_CANDIDATES)
+        short_candidates = sorted_comp.tail(self._MVO_SHORT_CANDIDATES) if US_SHORT_ENABLED else pd.DataFrame()
+
+        # 保留上期持仓（减少换手）
+        prev_tickers = set(self._prev_weights_dict.keys()) if hasattr(self, '_prev_weights_dict') else set()
+        candidate_tickers = set(long_candidates["ticker"].tolist())
+        if not short_candidates.empty:
+            candidate_tickers |= set(short_candidates["ticker"].tolist())
+        candidate_tickers |= prev_tickers  # 上期持仓也纳入候选
+
+        # 过滤 composite 到候选池
+        candidates = composite[composite["ticker"].isin(candidate_tickers)].copy()
+        candidate_list = candidates["ticker"].tolist()
+
+        logger.debug(f"MVO 候选池: {len(candidate_list)} 只 "
+                     f"(long={len(long_candidates)}, short={len(short_candidates)}, prev={len(prev_tickers)})")
+
+        # 1. Estimate covariance matrix（只对候选池）
+        cov_matrix, cov_tickers = self._risk_model.estimate(date, candidate_list)
         if len(cov_tickers) < 2:
             logger.warning(f"MVO: 协方差矩阵有效股票不足 ({len(cov_tickers)})")
             return None
 
         # 2. Build score vector (only tickers in cov)
         cov_set = set(cov_tickers)
-        scored = composite[composite["ticker"].isin(cov_set)].copy()
+        scored = candidates[candidates["ticker"].isin(cov_set)].copy()
         scores = scored.set_index("ticker")["score"]
 
         # 3. Build previous weights dict
@@ -979,7 +1004,7 @@ class USMultiFactorStrategy:
         if sector_df is not None and not sector_df.empty:
             sector_map = dict(zip(sector_df["ticker"], sector_df["sector"]))
 
-        # 5. Run optimizer
+        # 5. Run optimizer（~80 变量，秒级求解）
         opt_weights = self._optimizer.optimize(
             scores=scores,
             cov_matrix=cov_matrix,
