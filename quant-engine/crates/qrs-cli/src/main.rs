@@ -632,13 +632,34 @@ fn cmd_backtest(
             config.strategy.missing_factor_max_penalty,
         );
 
-        // Select long-only portfolio with single stock cap
-        let combined = qrs_strategy::scoring::select_portfolio(
+        // Regime-adaptive short exposure
+        let short_config = qrs_strategy::short::ShortConfig::default();
+        let regime_scale = qrs_strategy::short::regime_short_scale(date, &cache, 60);
+        let short_exposure = short_config.base_short_exposure * regime_scale;
+        let long_exposure = 1.0 - short_exposure;
+
+        // Select long portfolio (scaled by regime)
+        let mut combined = qrs_strategy::scoring::select_portfolio(
             &scores,
             config.strategy.long_n,
             config.strategy.weight_temperature,
-            config.optimizer.max_long_weight, // 15% per stock cap
+            config.optimizer.max_long_weight,
         );
+        // Scale long weights to long_exposure
+        for v in combined.values_mut() {
+            *v *= long_exposure;
+        }
+
+        // Compute short scores and select short portfolio
+        if !no_short && short_exposure > 0.01 {
+            let short_scores = qrs_strategy::short::compute_short_scores(
+                &processed_factors, &scores, &cache, date, &short_config,
+            );
+            let short_weights = qrs_strategy::short::select_short_portfolio(
+                &short_scores, &short_config, short_exposure,
+            );
+            combined.extend(short_weights);
+        }
 
         if !combined.is_empty() {
             signals.insert(date, combined);

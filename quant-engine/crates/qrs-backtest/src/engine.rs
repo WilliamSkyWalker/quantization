@@ -310,7 +310,58 @@ impl BacktestEngine {
                     turnover,
                 });
 
+                // Track short entry prices
+                for (&ticker, &weight) in raw_weights {
+                    if weight < 0.0 && !short_entry_prices.contains_key(&ticker) {
+                        if let Some(px) = self.get_close(ticker, today, cache) {
+                            short_entry_prices.insert(ticker, px);
+                        }
+                    }
+                }
+                // Remove entry prices for closed shorts
+                short_entry_prices.retain(|t, _| {
+                    positions.get(t).map(|&s| s < 0.0).unwrap_or(false)
+                });
+
                 signal_idx += 1;
+            }
+
+            // === Daily short stop-loss check ===
+            if self.short_stop_loss > 0.0 {
+                let mut to_cover: Vec<(TickerId, f64, f64)> = Vec::new(); // (ticker, shares, price)
+                for (&ticker, &shares) in &positions {
+                    if shares >= 0.0 { continue; } // Only check shorts
+                    let entry = match short_entry_prices.get(&ticker) {
+                        Some(&e) => e,
+                        None => continue,
+                    };
+                    let current = match self.get_close(ticker, today, cache) {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let loss_pct = current / entry - 1.0; // positive = price went up = loss for short
+                    if loss_pct >= self.short_stop_loss {
+                        to_cover.push((ticker, shares, current));
+                    }
+                }
+                for (ticker, shares, current_px) in to_cover {
+                    let cover_vol = shares.abs();
+                    let exec_price = current_px * (1.0 + self.slippage);
+                    let amount = cover_vol * exec_price;
+                    let fees = amount * self.buy_commission;
+                    cash -= amount + fees;
+                    positions.remove(&ticker);
+                    short_entry_prices.remove(&ticker);
+                    trades.push(TradeRecord {
+                        date: today,
+                        ticker,
+                        direction: "STOP_COVER".to_string(),
+                        volume: cover_vol,
+                        price: exec_price,
+                        amount,
+                        fees,
+                    });
+                }
             }
 
             // === Daily NAV ===
