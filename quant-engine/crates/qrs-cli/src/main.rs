@@ -219,7 +219,8 @@ fn cmd_load(cache_dir: &PathBuf) {
             println!("  Tickers:           {}", cache.ticker_interner.len());
             println!("  Trading days:      {}", cache.trading_days.len());
             println!("  Daily prices:      {}", cache.daily_prices.len());
-            println!("  Rolling stats:     {}", cache.rolling_stats.len());
+            let rolling_count = cache.daily_prices.values().filter(|b| b.cum_ret_5d.is_finite()).count();
+            println!("  Rolling stats:     {} (merged into daily prices)", rolling_count);
             println!("  Month-end prices:  {}", cache.month_end_prices.len());
             println!(
                 "  Financials:        {} tickers, {} records",
@@ -693,8 +694,7 @@ fn estimate_memory(cache: &qrs_data::cache::DataCache) -> f64 {
     // PriceBar = 7 * 8 = 56 bytes, key = 4 + 4 = 8 bytes, overhead ~16
     bytes += cache.daily_prices.len() * 80;
 
-    // Rolling stats: similar
-    bytes += cache.rolling_stats.len() * 96;
+    // Rolling stats merged into daily_prices — no extra allocation
 
     // Month-end prices: (TickerId + YearMonth + f64)
     bytes += cache.month_end_prices.len() * 24;

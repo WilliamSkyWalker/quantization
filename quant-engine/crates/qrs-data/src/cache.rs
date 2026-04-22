@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 
 use qrs_core::types::{Date, SectorId, SectorInterner, TickerId, TickerInterner, YearMonth};
 
-/// Daily OHLCV bar.
+/// Daily OHLCV bar + precomputed rolling statistics (merged to avoid duplicate 33M-entry HashMap).
 #[derive(Debug, Clone)]
 pub struct PriceBar {
     pub open: f64,
@@ -16,20 +16,17 @@ pub struct PriceBar {
     pub adj_close: f64,
     pub volume: f64,
     pub change_percent: f64,
-}
-
-/// Precomputed rolling statistics for a (ticker, date).
-#[derive(Debug, Clone)]
-pub struct RollingStats {
-    pub adj_close: f64,
+    // Rolling stats (merged from _rolling_indexed.parquet, NaN if not available)
     pub cum_ret_5d: f64,
     pub cum_ret_20d: f64,
     pub dvol_20d: f64,
     pub vol_20d: f64,
     pub ma60_adj: f64,
-    pub volume: f64,
     pub dollar_volume: f64,
 }
+
+/// Legacy alias for code that still references RollingStats.
+pub type RollingStats = PriceBar;
 
 /// Financial statement record (one quarter).
 #[derive(Debug, Clone)]
@@ -110,8 +107,7 @@ pub struct DataCache {
     pub daily_prices: FxHashMap<(TickerId, Date), PriceBar>,
     pub index_prices: FxHashMap<(String, Date), f64>,
 
-    // Precomputed rolling statistics
-    pub rolling_stats: FxHashMap<(TickerId, Date), RollingStats>,
+    // Month-end prices for momentum factors
     pub month_end_prices: FxHashMap<(TickerId, YearMonth), f64>,
 
     // Financial data (sorted by date desc per ticker)
@@ -213,9 +209,9 @@ impl DataCache {
         self.month_end_prices.get(&(ticker, ym)).copied()
     }
 
-    /// Get rolling stats for a ticker on a date.
-    pub fn get_rolling_stats(&self, ticker: TickerId, date: Date) -> Option<&RollingStats> {
-        self.rolling_stats.get(&(ticker, date))
+    /// Get rolling stats for a ticker on a date (same as daily price bar, which includes rolling fields).
+    pub fn get_rolling_stats(&self, ticker: TickerId, date: Date) -> Option<&PriceBar> {
+        self.daily_prices.get(&(ticker, date)).filter(|bar| bar.cum_ret_5d.is_finite())
     }
 
     /// Get dividends in trailing period.

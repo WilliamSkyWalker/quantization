@@ -2,6 +2,7 @@
 //! Converts Polars DataFrames into the HashMap-based DataCache.
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use chrono::NaiveDate;
 use polars::prelude::*;
@@ -14,26 +15,51 @@ use qrs_core::types::{Date, SectorInterner, TickerId, TickerInterner, YearMonth}
 use crate::cache::*;
 use crate::loader;
 
+/// Thread-safe ticker interner wrapper for parallel loading.
+struct SharedInterner(Mutex<TickerInterner>);
+
+impl SharedInterner {
+    fn new() -> Self {
+        Self(Mutex::new(TickerInterner::new()))
+    }
+    fn intern(&self, ticker: &str) -> TickerId {
+        self.0.lock().unwrap().intern(ticker)
+    }
+    fn into_inner(self) -> TickerInterner {
+        self.0.into_inner().unwrap()
+    }
+}
+
+// Safety: SharedInterner uses Mutex internally
+unsafe impl Sync for SharedInterner {}
+
 /// Build a complete DataCache from the parquet cache directory.
 pub fn build_cache(cache_dir: &Path) -> Result<DataCache> {
     info!("Building DataCache from {}", cache_dir.display());
     let t0 = std::time::Instant::now();
 
-    let mut interner = TickerInterner::new();
-    let mut sector_interner = SectorInterner::new();
+    let interner = SharedInterner::new();
 
-    // Load core tables
-    let daily_prices = load_daily_prices(cache_dir, &mut interner)?;
+    // Phase 1: Load daily prices + merge rolling stats into same HashMap
+    let mut daily_prices = load_daily_prices(cache_dir, &interner)?;
     let index_prices = load_index_prices(cache_dir)?;
-    let rolling_stats = load_rolling_stats(cache_dir, &mut interner)?;
+    let rolling_stats = load_rolling_stats_into(cache_dir, &interner, &mut daily_prices)?;
     let month_end_prices = compute_month_end_prices(&daily_prices);
-    let (financials, key_metrics) = load_financials(cache_dir, &mut interner)?;
-    let enterprise_values = load_enterprise_values(cache_dir, &mut interner)?;
-    let analyst_recs = load_analyst_recs(cache_dir, &mut interner)?;
-    let earnings_surprises = load_earnings_surprises(cache_dir, &mut interner)?;
-    let eps_estimates = load_eps_estimates(cache_dir, &mut interner)?;
-    let dividends = load_dividends(cache_dir, &mut interner)?;
-    let insider_trades = load_insider_trades(cache_dir, &mut interner)?;
+
+    info!("Phase 1: {:.1}s — {} daily prices ({} with rolling stats)",
+        t0.elapsed().as_secs_f64(), daily_prices.len(), rolling_stats);
+
+    // Phase 2: Load remaining tables sequentially (small tables, fast)
+    let t1 = std::time::Instant::now();
+    let (financials, key_metrics) = load_financials(cache_dir, &interner)?;
+    let enterprise_values = load_enterprise_values(cache_dir, &interner)?;
+    let analyst_recs = load_analyst_recs(cache_dir, &interner)?;
+    let earnings_surprises = load_earnings_surprises(cache_dir, &interner)?;
+    let eps_estimates = load_eps_estimates(cache_dir, &interner)?;
+    let dividends = load_dividends(cache_dir, &interner)?;
+    let insider_trades = load_insider_trades(cache_dir, &interner)?;
+
+    info!("Phase 2: {:.1}s", t1.elapsed().as_secs_f64());
 
     // Build trading calendar from index prices
     let mut trading_days: Vec<Date> = index_prices
@@ -43,19 +69,20 @@ pub fn build_cache(cache_dir: &Path) -> Result<DataCache> {
         .collect();
     trading_days.sort();
 
+    let final_interner = interner.into_inner();
+
     info!(
-        "DataCache built in {:.1}s: {} tickers, {} trading days, {} daily prices, {} rolling stats",
+        "DataCache built in {:.1}s: {} tickers, {} trading days, {} daily prices ({} with rolling stats)",
         t0.elapsed().as_secs_f64(),
-        interner.len(),
+        final_interner.len(),
         trading_days.len(),
         daily_prices.len(),
-        rolling_stats.len(),
+        rolling_stats,
     );
 
     Ok(DataCache {
         daily_prices,
         index_prices,
-        rolling_stats,
         month_end_prices,
         financials,
         key_metrics,
@@ -65,13 +92,13 @@ pub fn build_cache(cache_dir: &Path) -> Result<DataCache> {
         eps_estimates,
         dividends,
         insider_trades,
-        sector_map: FxHashMap::default(),  // TODO: load from industry class
+        sector_map: FxHashMap::default(),
         industry_map: FxHashMap::default(),
-        ipo_dates: FxHashMap::default(),   // TODO: load from stock basic
-        is_active: FxHashMap::default(),   // TODO: load from stock basic
+        ipo_dates: FxHashMap::default(),
+        is_active: FxHashMap::default(),
         trading_days,
-        ticker_interner: interner,
-        sector_interner,
+        ticker_interner: final_interner,
+        sector_interner: SectorInterner::new(),
     })
 }
 
@@ -194,7 +221,7 @@ fn opt_f64(v: Option<f64>) -> f64 {
 
 fn load_daily_prices(
     cache_dir: &Path,
-    interner: &mut TickerInterner,
+    interner: &SharedInterner,
 ) -> Result<FxHashMap<(TickerId, Date), PriceBar>> {
     let path = loader::find_any_cache_file(cache_dir, "us_daily_price")
         .ok_or_else(|| QrsError::ParquetNotFound("us_daily_price_*.parquet".into()))?;
@@ -237,6 +264,12 @@ fn load_daily_prices(
                 adj_close: adj,
                 volume: opt_f64(volume[i]),
                 change_percent: opt_f64(change_pct[i]),
+                cum_ret_5d: f64::NAN,
+                cum_ret_20d: f64::NAN,
+                dvol_20d: f64::NAN,
+                vol_20d: f64::NAN,
+                ma60_adj: f64::NAN,
+                dollar_volume: f64::NAN,
             },
         );
     }
@@ -272,30 +305,31 @@ fn load_index_prices(cache_dir: &Path) -> Result<FxHashMap<(String, Date), f64>>
     Ok(map)
 }
 
-fn load_rolling_stats(
+/// Load rolling stats from _rolling_indexed.parquet and merge into existing daily_prices.
+/// Returns count of entries updated.
+fn load_rolling_stats_into(
     cache_dir: &Path,
-    interner: &mut TickerInterner,
-) -> Result<FxHashMap<(TickerId, Date), RollingStats>> {
+    interner: &SharedInterner,
+    daily_prices: &mut FxHashMap<(TickerId, Date), PriceBar>,
+) -> Result<usize> {
     let path = cache_dir.join("_rolling_indexed.parquet");
     if !path.exists() {
         warn!("_rolling_indexed.parquet not found, rolling stats will be empty");
-        return Ok(FxHashMap::default());
+        return Ok(0);
     }
     let df = loader::load_parquet(&path)?;
 
     let tickers = get_str_col(&df, "ticker")?;
-    let dates = get_date_col(&df, "trade_date")?; // Datetime[ms] handled by get_date_col
-    let adj_close = get_f64_col(&df, "adj_close");
+    let dates = get_date_col(&df, "trade_date")?;
+    let rs_adj_close = get_f64_col(&df, "adj_close");
     let cum_ret_5d = get_f64_col(&df, "cum_ret_5d");
     let cum_ret_20d = get_f64_col(&df, "cum_ret_20d");
     let dvol_20d = get_f64_col(&df, "dvol_20d");
     let vol_20d = get_f64_col(&df, "vol_20d");
     let ma60_adj = get_f64_col(&df, "ma60_adj");
-    let volume = get_f64_col(&df, "volume");
     let dollar_volume = get_f64_col(&df, "dollar_volume");
 
-    let mut map = FxHashMap::default();
-    map.reserve(df.height());
+    let mut updated = 0usize;
 
     for i in 0..df.height() {
         let ticker_str = match tickers.get(i) {
@@ -307,23 +341,28 @@ fn load_rolling_stats(
             None => continue,
         };
         let tid = interner.intern(ticker_str);
-        map.insert(
-            (tid, date),
-            RollingStats {
-                adj_close: opt_f64(adj_close[i]),
-                cum_ret_5d: opt_f64(cum_ret_5d[i]),
-                cum_ret_20d: opt_f64(cum_ret_20d[i]),
-                dvol_20d: opt_f64(dvol_20d[i]),
-                vol_20d: opt_f64(vol_20d[i]),
-                ma60_adj: opt_f64(ma60_adj[i]),
-                volume: opt_f64(volume[i]),
-                dollar_volume: opt_f64(dollar_volume[i]),
-            },
-        );
+        let key = (tid, date);
+
+        if let Some(bar) = daily_prices.get_mut(&key) {
+            // Merge rolling stats into existing PriceBar
+            bar.cum_ret_5d = opt_f64(cum_ret_5d[i]);
+            bar.cum_ret_20d = opt_f64(cum_ret_20d[i]);
+            bar.dvol_20d = opt_f64(dvol_20d[i]);
+            bar.vol_20d = opt_f64(vol_20d[i]);
+            bar.ma60_adj = opt_f64(ma60_adj[i]);
+            bar.dollar_volume = opt_f64(dollar_volume[i]);
+            // Also update adj_close from rolling stats (it's computed from Python, not NULL)
+            let rs_adj = opt_f64(rs_adj_close[i]);
+            if rs_adj.is_finite() && rs_adj > 0.0 {
+                bar.adj_close = rs_adj;
+            }
+            updated += 1;
+        }
+        // If key not in daily_prices, skip (rolling_stats might have extra entries)
     }
 
-    info!("Rolling stats: {} entries", map.len());
-    Ok(map)
+    info!("Rolling stats merged: {} entries updated", updated);
+    Ok(updated)
 }
 
 /// Compute month-end prices from daily prices (replacing pandas Period-based parquet).
@@ -365,7 +404,7 @@ fn compute_month_end_prices(
 
 fn load_financials(
     cache_dir: &Path,
-    interner: &mut TickerInterner,
+    interner: &SharedInterner,
 ) -> Result<(
     FxHashMap<TickerId, Vec<FinancialRecord>>,
     FxHashMap<TickerId, Vec<KeyMetricRecord>>,
@@ -525,7 +564,7 @@ fn load_financials(
 
 fn load_enterprise_values(
     cache_dir: &Path,
-    interner: &mut TickerInterner,
+    interner: &SharedInterner,
 ) -> Result<FxHashMap<TickerId, Vec<EvRecord>>> {
     let path = loader::find_any_cache_file(cache_dir, "alpha_enterprise_value")
     .ok_or_else(|| QrsError::ParquetNotFound("alpha_enterprise_value_*.parquet".into()))?;
@@ -569,7 +608,7 @@ fn load_enterprise_values(
 
 fn load_analyst_recs(
     cache_dir: &Path,
-    interner: &mut TickerInterner,
+    interner: &SharedInterner,
 ) -> Result<FxHashMap<TickerId, Vec<AnalystRec>>> {
     let path = loader::find_any_cache_file(cache_dir, "us_analyst_recommendation");
     let Some(path) = path else {
@@ -607,7 +646,7 @@ fn load_analyst_recs(
 
 fn load_earnings_surprises(
     cache_dir: &Path,
-    interner: &mut TickerInterner,
+    interner: &SharedInterner,
 ) -> Result<FxHashMap<TickerId, Vec<EarningsSurprise>>> {
     let path = loader::find_any_cache_file(cache_dir, "us_earnings_surprise");
     let Some(path) = path else {
@@ -645,7 +684,7 @@ fn load_earnings_surprises(
 
 fn load_eps_estimates(
     cache_dir: &Path,
-    interner: &mut TickerInterner,
+    interner: &SharedInterner,
 ) -> Result<FxHashMap<TickerId, Vec<EpsEstimate>>> {
     let path =
         loader::find_any_cache_file(cache_dir, "us_eps_estimate");
@@ -684,7 +723,7 @@ fn load_eps_estimates(
 
 fn load_dividends(
     cache_dir: &Path,
-    interner: &mut TickerInterner,
+    interner: &SharedInterner,
 ) -> Result<FxHashMap<TickerId, Vec<DividendRecord>>> {
     let path = loader::find_any_cache_file(cache_dir, "us_corporate_action_div");
     let Some(path) = path else {
@@ -720,7 +759,7 @@ fn load_dividends(
 
 fn load_insider_trades(
     cache_dir: &Path,
-    interner: &mut TickerInterner,
+    interner: &SharedInterner,
 ) -> Result<FxHashMap<TickerId, Vec<InsiderTrade>>> {
     let path =
         loader::find_any_cache_file(cache_dir, "us_insider_trade");

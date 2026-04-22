@@ -20,7 +20,7 @@ impl Factor for Tsmom {
         let mut result = FactorResult::default();
 
         // Get tickers on this date from rolling stats
-        let tickers_on_date: Vec<_> = cache.rolling_stats.keys()
+        let tickers_on_date: Vec<_> = cache.daily_prices.keys()
             .filter(|&&(_, d)| d == date)
             .map(|&(tid, _)| tid)
             .collect();
@@ -60,7 +60,7 @@ impl Factor for IndustryMom {
     fn compute(&self, date: Date, cache: &DataCache) -> FactorResult {
         // First compute 12M returns for all tickers
         let mut returns: rustc_hash::FxHashMap<qrs_core::types::TickerId, f64> = Default::default();
-        let tickers_on_date: Vec<_> = cache.rolling_stats.keys()
+        let tickers_on_date: Vec<_> = cache.daily_prices.keys()
             .filter(|&&(_, d)| d == date)
             .map(|&(tid, _)| tid)
             .collect();

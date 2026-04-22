@@ -16,7 +16,7 @@ impl Factor for Rev5D {
 
     fn compute(&self, date: Date, cache: &DataCache) -> FactorResult {
         let mut result = FactorResult::default();
-        for (&(tid, d), stats) in &cache.rolling_stats {
+        for (&(tid, d), stats) in &cache.daily_prices {
             if d != date {
                 continue;
             }
