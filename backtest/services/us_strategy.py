@@ -429,27 +429,37 @@ class USMultiFactorStrategy:
     # _INHERENT_REVERSE_SET / _NEVER_REVERSE_SET / _ROLLING_IC_WINDOW / _ROLLING_IC_DEFAULT
     # 已改为 __init__ 中实例属性，由 AlphaSignal registry 推导 + legacy 硬编码合并生成。
 
-    # IC → 连续权重的缩放参数
-    _IC_SCALE_REF = 0.02       # IC 均值达到此值时权重 = 1.0
-    _IC_WEIGHT_MIN = 0.2       # 最低权重（IC ≈ 0 时）
-    _IC_WEIGHT_MAX = 2.0       # 最高权重
-    _IC_EMA_HALFLIFE = 6       # EMA 半衰期（月），越小对近期越敏感
+    # ICIR 分级权重（来自 2012-2025 因子分析，固定不变）
+    _ICIR_TIER_WEIGHTS = {
+        # T1 强信号 (|ICIR| >= 0.3)
+        "FREE_FLOAT_PCT": 2.0, "TURN_20D": 2.0, "PIOTROSKI_F": 2.0,
+        "SUE_PEAD": 2.0, "EV_TO_FCF": 2.0, "AMIHUD_ILLIQ": 2.0,
+        "COMPOSITE_EQUITY_ISSUANCE": 2.0, "ROE_TTM": 2.0, "EARNINGS_SURPRISE": 2.0,
+        # T2 有信号 (0.15 <= |ICIR| < 0.3) → 默认 1.0，不列出
+        # T3 弱信号 (0.05 <= |ICIR| < 0.15)
+        "PRICE_52W_HIGH": 0.5, "VOLUME_RATIO": 0.5, "GROSS_MARGIN": 0.5,
+        "SHAREHOLDER_YIELD": 0.5, "EARNINGS_PERSISTENCE": 0.5,
+        "DAYS_SINCE_EARNINGS": 0.5, "OHLSON_O": 0.5, "REC_CHANGE": 0.5,
+        "LOBBY_INTENSITY": 0.5, "EV_TO_EBIT": 0.5, "RESIDUAL_MOM_FF3": 0.5,
+        "LOG_MARKET_CAP": 0.5, "ANALYST_DISPERSION": 0.5,
+        "REV_CONCENTRATION": 0.5, "ASSET_GROWTH": 0.5, "RSI_14": 0.5,
+        # 方向翻转因子 (|ICIR| < 0.05 但单年 > 0.5)
+        "BP": 0.3, "INTANGIBLE_ADJ_BP": 0.3, "RD_INTENSITY": 0.3,
+        "PV_TREND": 0.3, "EPS_REVISION": 0.3, "MOM_1M": 0.3,
+        "BENEISH_M": 0.3, "VOLATILITY_21D": 0.3, "VOL_20D": 0.3,
+        "ALTMAN_Z": 0.3, "CAPEX_GROWTH": 0.3, "MAX_RET": 0.3,
+        # 真噪音
+        "GEO_CONCENTRATION": 0.0,
+    }
 
     def _update_rolling_ic_weights(
         self, date: str, composite: pd.DataFrame, factor_cols: list[str],
     ):
         """
-        根据分因子滚动 IC，动态决定每个因子的**连续权重**。
+        滚动 IC v3：v1 二值方向 + 固定 ICIR 分级权重。
 
-        三层改进（v2）：
-        1. 连续权重：weight = sign(ema_ic) × clip(|ema_ic| / IC_SCALE_REF, MIN, MAX)
-           - 强 IC → 高权重（最高 2.0）
-           - 弱 IC → 低权重（最低 0.2，不完全静默）
-           - 方向翻转时平滑过渡，不是突然 +1 → -1
-        2. EMA 替代平均：半衰期 6 个月，近期 IC 权重更高，捕捉方向变化更快
-        3. 置信度缩放：观测不足时自动降权
-
-        固有方向因子（_INHERENT_REVERSE_SET / _NEVER_REVERSE_SET）不受 IC 影响。
+        方向：滚动 IC 均值 < -0.01 → -1，否则 +1（同 v1）
+        大小：ICIR 分级倍数（T1=2.0, T2=1.0, T3=0.5, 翻转=0.3）× 方向
         """
         date_ts = pd.to_datetime(date)
 
@@ -501,7 +511,6 @@ class USMultiFactorStrategy:
                         if fname not in self._rolling_ic_window:
                             self._rolling_ic_window[fname] = []
                         self._rolling_ic_window[fname].append(ic)
-                        # 按因子类型保持不同窗口大小
                         max_window = self._ROLLING_IC_WINDOW.get(fname, self._ROLLING_IC_DEFAULT)
                         if len(self._rolling_ic_window[fname]) > max_window:
                             self._rolling_ic_window[fname] = \
@@ -512,47 +521,37 @@ class USMultiFactorStrategy:
         self._prev_factor_snapshot = composite[snap_cols].copy()
         self._prev_date = date
 
-        # Step 3: 用 EMA IC 计算连续权重
-        alpha = 1.0 - np.exp(-np.log(2) / self._IC_EMA_HALFLIFE)  # EMA 衰减系数
-
+        # Step 3: v1 二值方向 × ICIR 分级倍数
         changes = []
         for fname in factor_cols:
+            # 方向
             if fname in self._INHERENT_REVERSE_SET:
-                new_w = -1.0
+                direction = -1.0
             elif fname in self._NEVER_REVERSE_SET:
-                new_w = 1.0
+                direction = 1.0
             elif fname in self._rolling_ic_window:
-                ic_series = self._rolling_ic_window[fname]
                 max_window = self._ROLLING_IC_WINDOW.get(fname, self._ROLLING_IC_DEFAULT)
-                min_obs = max(4, max_window // 4)
-
-                if len(ic_series) >= min_obs:
-                    # EMA（对近期 IC 更敏感）
-                    ema = ic_series[0]
-                    for ic_val in ic_series[1:]:
-                        ema = alpha * ic_val + (1 - alpha) * ema
-
-                    # 连续权重：|ema| / ref → 缩放到 [MIN, MAX]
-                    magnitude = min(abs(ema) / self._IC_SCALE_REF, self._IC_WEIGHT_MAX)
-                    magnitude = max(magnitude, self._IC_WEIGHT_MIN)
-                    new_w = np.sign(ema) * magnitude if abs(ema) > 1e-6 else self._IC_WEIGHT_MIN
-
-                    # 置信度缩放：观测少时降权
-                    confidence = min(len(ic_series) / max(min_obs * 2, 1), 1.0)
-                    new_w *= confidence
+                min_obs = max(6, max_window // 3)
+                if len(self._rolling_ic_window[fname]) >= min_obs:
+                    avg_ic = np.mean(self._rolling_ic_window[fname])
+                    direction = -1.0 if avg_ic < -0.01 else 1.0
                 else:
-                    new_w = self._IC_WEIGHT_MIN  # 冷启动：低权重而非默认 +1
+                    direction = 1.0  # 冷启动默认正向
             else:
-                new_w = self._IC_WEIGHT_MIN  # 无 IC 数据：低权重
+                direction = 1.0
+
+            # ICIR 分级倍数（T1=2.0, T2=1.0(默认), T3=0.5, 翻转=0.3）
+            tier = self._ICIR_TIER_WEIGHTS.get(fname, 1.0)
+            new_w = direction * tier
 
             if fname in self.factor_weights:
                 old_w = self.factor_weights[fname]
-                if abs(old_w - new_w) > 0.1:
-                    changes.append(f"{fname} {old_w:+.2f}→{new_w:+.2f}")
+                if old_w != new_w:
+                    changes.append(f"{fname} {old_w:+.1f}→{new_w:+.1f}")
                 self.factor_weights[fname] = new_w
 
         if changes:
-            logger.info(f"Rolling IC 权重变更 ({len(changes)}): {', '.join(changes[:10])}"
+            logger.info(f"Rolling IC 方向变更 ({len(changes)}): {', '.join(changes[:10])}"
                         + (f" ...+{len(changes)-10}" if len(changes) > 10 else ""))
 
     def _apply_financial_staleness_decay(
