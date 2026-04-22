@@ -1,0 +1,14 @@
+[package]
+name = "qrs-strategy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+qrs-core = { path = "../qrs-core" }
+qrs-data = { path = "../qrs-data" }
+qrs-factors = { path = "../qrs-factors" }
+rayon = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+rustc-hash = { workspace = true }
+nalgebra = { workspace = true }

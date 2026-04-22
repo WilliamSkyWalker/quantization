@@ -1,0 +1,107 @@
+# Quantitative Research System — Rust Engine Configuration
+# All values below are defaults. Override as needed.
+
+cache_dir = "../cache"
+output_dir = "../output"
+
+[universe]
+min_market_cap = 5e8          # $500M
+min_daily_volume = 1e6        # $1M average
+min_listing_days = 180
+benchmark_index = "^GSPC"
+
+[strategy]
+max_holdings = 25
+long_n = 15
+min_select_score = 0.0
+weight_temperature = 1.5
+rebalance_interval = 20
+rebalance_min_interval = 20
+min_valid_categories = 4
+missing_factor_threshold = 0.20
+missing_factor_max_penalty = 0.5
+
+[risk_controls]
+enabled = true
+use_vol_targeting = true
+target_vol = 0.16
+vol_lookback_days = 60
+vol_scale_min = 0.5
+vol_scale_max = 1.5
+dd_start_threshold = 0.10
+dd_max_threshold = 0.25
+dd_min_position = 0.50
+strategy_mom_window = 120
+strategy_mom_min_scale = 0.70
+
+[execution]
+initial_capital = 100000.0
+buy_commission = 0.0
+sell_commission = 0.0
+stamp_tax = 0.0
+slippage = 0.0005
+
+[regime]
+enabled = true
+index = "^GSPC"
+ma_window = 60
+bear_holdings_ratio = 0.6
+
+[regime.bear_overrides]
+
+[regime.bull_overrides]
+
+[short]
+enabled = true
+short_n = 10
+net_exposure = 0.6
+regime_gate = 0.55
+min_mcap = 1e10
+min_volume = 5e7
+stop_loss = 0.15
+eps_rev_pct = 0.20
+score_pct = 0.30
+borrow_fee = 0.015
+
+[short.borrow_fee_tiers]
+"50e9" = 0.003
+"10e9" = 0.015
+
+[short.factor_weights]
+EPS_REVISION = 0.40
+ACCRUALS = 0.25
+EARNINGS_SURPRISE = 0.20
+INSIDER_NET_BUY = 0.15
+BORROW_COST = -0.10
+
+[optimizer]
+enabled = true
+risk_aversion = 1.0
+turnover_penalty = 0.005
+max_long_weight = 0.15
+max_short_weight = 0.05
+max_sector_gross = 0.25
+cov_lookback = 252
+min_history_days = 120
+gross_leverage = 1.0
+
+[factor_processing]
+neutralize_mode = "full"
+standardize_mode = "zscore"
+nonlinear_size = false
+
+[factor_processing.category_neutralize_overrides]
+momentum = "size_only"
+macro = "size_only"
+analyst = "size_only"
+sentiment = "none"
+
+[category_weights]
+value = 1.0
+quality = 1.0
+growth = 1.0
+momentum = 1.0
+technical = 1.0
+macro = 1.0
+analyst = 1.0
+sentiment = 1.0

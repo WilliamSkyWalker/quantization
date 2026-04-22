@@ -1,0 +1,13 @@
+[package]
+name = "qrs-backtest"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+qrs-core = { path = "../qrs-core" }
+qrs-data = { path = "../qrs-data" }
+tracing = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rustc-hash = { workspace = true }

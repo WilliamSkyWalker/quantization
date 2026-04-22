@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/qrs-core",
+    "crates/qrs-data",
+    "crates/qrs-factors",
+    "crates/qrs-strategy",
+    "crates/qrs-backtest",
+    "crates/qrs-cli",
+]
+
+[workspace.dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rayon = "1.10"
+rustc-hash = "2"
+polars = { version = "0.46", features = ["parquet", "lazy", "dtype-date", "dtype-datetime", "dtype-struct"] }
+nalgebra = "0.33"
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+serde_json = "1"
+inventory = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

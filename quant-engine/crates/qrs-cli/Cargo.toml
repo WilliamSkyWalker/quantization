@@ -1,0 +1,22 @@
+[package]
+name = "qrs-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "qrs"
+path = "src/main.rs"
+
+[dependencies]
+qrs-core = { path = "../qrs-core" }
+qrs-data = { path = "../qrs-data" }
+qrs-factors = { path = "../qrs-factors" }
+qrs-strategy = { path = "../qrs-strategy" }
+qrs-backtest = { path = "../qrs-backtest" }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+indicatif = { workspace = true }
+chrono = { workspace = true }
+rustc-hash = { workspace = true }

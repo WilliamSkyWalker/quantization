@@ -293,6 +293,48 @@ python3 cli.py polymarket history --min-volume 1000000      # Polymarket 历史
 - Barra-style P&L 归因（每日拆解 factor return × β + specific return）
 
 
+## Rust 计算引擎 (`quant-engine/`)
+
+因子计算和回测引擎正在从 Python 迁移到 Rust，解决 macOS multiprocessing fork crash 并提升性能。
+
+**架构分工：**
+- **Python (Django)** — 数据下载、DB 写入、Web API、前端
+- **Rust (`quant-engine/`)** — 因子计算、回测模拟、因子分析（读 parquet 缓存）
+
+**技术栈：** Polars (parquet I/O) + rayon (并行) + nalgebra (线代) + OSQP (MVO 优化) + clap (CLI)
+
+```bash
+# 构建
+cd quant-engine && cargo build --release
+
+# 验证缓存文件
+cargo run --release -- validate --cache-dir ../cache/
+
+# 单日因子计算
+cargo run --release -- factors --date 2024-12-31
+
+# 单日评分
+cargo run --release -- score --date 2024-12-31 --top 30
+
+# 完整回测
+cargo run --release -- backtest --start 2012-01-01 --end 2025-12-31 --output ../output/rust/
+
+# 因子分析（IC / Fama-MacBeth / Decay）
+cargo run --release -- analyze --start 2012-01-01 --end 2025-12-31
+```
+
+**Rust Workspace 结构：**
+```
+quant-engine/
+├── crates/
+│   ├── qrs-core/       核心类型 + 配置（TickerId, Config, Date）
+│   ├── qrs-data/       Parquet 加载 + DataCache + Universe 过滤
+│   ├── qrs-factors/    ~80 个因子（value/quality/momentum/... 8 大类）
+│   ├── qrs-strategy/   两层评分 + 滚动IC + Regime + MVO优化器
+│   ├── qrs-backtest/   仓位制 T+0 回测引擎 + 风控
+│   └── qrs-cli/        CLI 入口（clap derive）
+```
+
 ## 详细文档
 
 - [A股策略算法](doc/A_SHARE_STRATEGY.md)
