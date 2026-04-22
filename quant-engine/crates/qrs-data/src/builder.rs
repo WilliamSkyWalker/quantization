@@ -84,6 +84,8 @@ pub fn build_cache_ranged(cache_dir: &Path, start: Option<Date>, end: Option<Dat
     let gov_contracts = load_gov_contracts(cache_dir, &interner)?;
     let lobbying = load_lobbying(cache_dir, &interner)?;
     let revenue_segments = load_revenue_segments(cache_dir, &interner)?;
+    let mut sector_interner = SectorInterner::new();
+    let (sector_map, industry_map) = load_industry_class(cache_dir, &interner, &mut sector_interner)?;
 
     info!("Phase 2: {:.1}s", t1.elapsed().as_secs_f64());
 
@@ -127,13 +129,13 @@ pub fn build_cache_ranged(cache_dir: &Path, start: Option<Date>, end: Option<Dat
         gov_contracts,
         lobbying,
         revenue_segments,
-        sector_map: FxHashMap::default(),
-        industry_map: FxHashMap::default(),
+        sector_map,
+        industry_map,
         ipo_dates: FxHashMap::default(),
         is_active: FxHashMap::default(),
         trading_days,
         ticker_interner: final_interner,
-        sector_interner: SectorInterner::new(),
+        sector_interner,
     })
 }
 
@@ -1158,4 +1160,39 @@ fn load_revenue_segments(
     for v in map.values_mut() { v.sort_by(|a, b| b.date.cmp(&a.date)); }
     info!("Revenue segments: {} tickers", map.len());
     Ok(map)
+}
+
+fn load_industry_class(
+    cache_dir: &Path,
+    interner: &SharedInterner,
+    sector_interner: &mut SectorInterner,
+) -> Result<(FxHashMap<TickerId, qrs_core::types::SectorId>, FxHashMap<TickerId, qrs_core::types::SectorId>)> {
+    let path = match loader::find_snapshot_cache(cache_dir, "us_industry_class") {
+        Some(p) => p,
+        None => {
+            warn!("us_industry_class_all.parquet not found, sector_map will be empty");
+            return Ok((FxHashMap::default(), FxHashMap::default()));
+        }
+    };
+    let df = loader::load_parquet(&path)?;
+    let tickers = get_str_col(&df, "ticker")?;
+    let sectors = get_str_values(&df, "sector");
+    let industries = get_str_values(&df, "industry");
+
+    let mut sector_map = FxHashMap::default();
+    let mut industry_map = FxHashMap::default();
+
+    for i in 0..df.height() {
+        let tid = interner.intern(tickers.get(i).unwrap_or(""));
+        if !sectors[i].is_empty() {
+            sector_map.insert(tid, sector_interner.intern(&sectors[i]));
+        }
+        if !industries[i].is_empty() {
+            industry_map.insert(tid, sector_interner.intern(&industries[i]));
+        }
+    }
+
+    info!("Industry class: {} sector mappings, {} industry mappings, {} unique sectors",
+        sector_map.len(), industry_map.len(), sector_interner.len());
+    Ok((sector_map, industry_map))
 }
