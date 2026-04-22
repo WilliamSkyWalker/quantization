@@ -1,37 +1,38 @@
 """
-Spawn worker for parallel factor computation.
+Fork worker for parallel factor computation.
 
-独立模块，不导入任何 Django model（避免 AppRegistryNotReady）。
-所有 import 在函数内部完成，django.setup() 后才安全。
+fork 模式：子进程通过 COW 继承主进程的 _static_cache（~6GB），
+不需要重新加载数据，不需要 Django setup。
+
+注意：主进程 fork 前必须：
+1. 完成所有预加载（串行，无线程）
+2. 关闭所有 DB 连接（connections.close_all()）
 """
+
+import logging
+import time as _time
+
+import numpy as np
+import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 def compute_factors_for_dates(args: tuple) -> list[tuple[str, dict]]:
-    """spawn worker：独立进程计算因子值（不做评分/选股）。
+    """fork worker：计算一批日期的因子值。
 
-    主进程已确保所有 parquet 缓存存在。
-    worker 只从 parquet 读取，不查 DB。
+    通过 fork COW 继承主进程的 _static_cache，不复制内存。
+    返回 [(date, {factor_name: DataFrame[ticker, factor_value]}), ...]
     """
-    import os
-    import sys
-    import time as _time
+    from django.db import connections
+    connections.close_all()  # fork 后关闭从主进程继承的死连接
 
     worker_id, dates_chunk, preload_start, preload_end = args
-
-    # Django setup（必须在任何 model import 之前）
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "core.settings")
-
-    import django
-    django.setup()
-
     t0 = _time.time()
 
     from stocks.services.factors.us_base import USFactorBase
     from stocks.services.us_cleaner import get_us_clean_universe
-    from stocks.services.factors.us_registry import get_active as get_active_signals, AlphaSignal
+    from stocks.services.factors.us_registry import get_active as get_active_signals
     import stocks.services.factors.signals  # noqa: F401
 
     from stocks.services.factors.us_value import EP, BP, DivYield
@@ -44,14 +45,7 @@ def compute_factors_for_dates(args: tuple) -> list[tuple[str, dict]]:
     from stocks.services.factors.us_insider import InsiderNetBuy
     from stocks.services.factors.us_quiver import LobbyIntensity, GovContract
 
-    # 加载缓存（主进程已确保 parquet 存在，这里只读 parquet，不查 DB）
-    # 用主进程的 preload 日期范围，确保 _find_cache 命中
-    USFactorBase.preload_for_backtest(preload_start, preload_end)
-    if not USFactorBase.load_precomputed_cache():
-        USFactorBase.precompute_rolling_stats()
-    AlphaSignal.preload_alpha_cache(preload_start, preload_end)
-
-    # 构建因子实例
+    # 构建因子实例（轻量，不加载数据）
     alpha_signals = [cls() for cls in get_active_signals().values()]
     legacy_factors = [
         EP(), BP(), DivYield(), BuybackYield(),
@@ -64,7 +58,7 @@ def compute_factors_for_dates(args: tuple) -> list[tuple[str, dict]]:
     ]
     all_factors = alpha_signals + legacy_factors
 
-    print(f"  Worker {worker_id}: 加载完成 {_time.time()-t0:.1f}s, {len(dates_chunk)} dates, "
+    print(f"  Worker {worker_id}: ready {_time.time()-t0:.1f}s, {len(dates_chunk)} dates, "
           f"{len(all_factors)} factors", flush=True)
 
     results = []
@@ -90,4 +84,5 @@ def compute_factors_for_dates(args: tuple) -> list[tuple[str, dict]]:
             print(f"  Worker {worker_id} | {date}: ERROR {e}", flush=True)
             results.append((date, {}))
 
+    connections.close_all()
     return results

@@ -214,16 +214,15 @@ class USFactorBase(ABC):
     @classmethod
     def preload_for_backtest(cls, start_date: str, end_date: str, **kwargs):
         """
-        一次性并行预加载回测区间所需数据到内存（Django ORM + parquet 缓存）。
+        一次性预加载回测区间所需数据到内存（Django ORM + parquet 缓存）。
 
-        所有独立表通过 ThreadPoolExecutor 并发加载（IO-bound），
-        首次从 DB 加载后缓存到本地 parquet，后续直接读文件。
+        parquet 缓存全命中时串行加载 ~1.5s，不需要多线程。
+        串行模式确保 fork 前无活跃线程（避免 macOS fork crash）。
         """
         import time
-        from django.db import connections
 
         t_total = time.time()
-        logger.info(f"US 并行预加载开始: {start_date} ~ {end_date}")
+        logger.info(f"US 预加载开始: {start_date} ~ {end_date}")
 
         price_start = (pd.to_datetime(start_date) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
         fin_start = (pd.to_datetime(start_date) - pd.Timedelta(days=5*365)).strftime("%Y-%m-%d")
@@ -518,7 +517,8 @@ class USFactorBase(ABC):
                                  pt_start, end_date, "published_date",
                                  cache_key="_bulk_pt_detail", order_by=["ticker", "published_date"])
 
-        # ---- 并行提交所有基础表加载任务 ----
+        # ---- 串行加载所有表（parquet 命中时 ~1.5s，无需多线程） ----
+        # 串行模式确保 fork 前无活跃线程（避免 macOS fork crash）
         loaders = [
             _load_financial,
             _load_daily_price,
@@ -542,21 +542,13 @@ class USFactorBase(ABC):
             _load_price_target_detail,
         ]
 
-        # Django ORM 在多线程中需要关闭陈旧连接
-        connections.close_all()
-
-        with ThreadPoolExecutor(max_workers=len(loaders)) as pool:
-            futures = {pool.submit(fn): fn.__name__ for fn in loaders}
-            for future in as_completed(futures):
-                name = futures[future]
-                try:
-                    cache_key, df = future.result()
-                    if cache_key is not None:
-                        cls._static_cache[cache_key] = df
-                except Exception as e:
-                    logger.error(f"并行预加载 {name} 失败: {e}")
-
-        connections.close_all()
+        for fn in loaders:
+            try:
+                cache_key, df = fn()
+                if cache_key is not None:
+                    cls._static_cache[cache_key] = df
+            except Exception as e:
+                logger.error(f"预加载 {fn.__name__} 失败: {e}")
 
         # AlphaSignal 预加载依赖 _bulk_daily（复用检查），必须在基础表之后
         from stocks.services.factors.us_registry import AlphaSignal

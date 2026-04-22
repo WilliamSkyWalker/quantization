@@ -148,41 +148,17 @@ def _compute_single_date(date: str) -> tuple[str, pd.DataFrame | None]:
 
 
 def _spawn_worker(args: tuple) -> list[tuple[str, pd.DataFrame | None]]:
-    """spawn worker: 独立进程，从 parquet 加载数据子集，计算一批日期的因子。
-
-    每个 worker 是全新进程（spawn），无继承线程状态，无 GIL 限制。
-    只加载该 worker 日期范围所需的数据子集，减少内存占用。
-    """
+    """fork worker: 通过 COW 继承主进程的 _static_cache，不需要重新加载数据。"""
     worker_id, dates_chunk, factor_names, universe_dict_path, full_start, full_end = args
 
-    # 1. Django setup（spawn 进程从零开始）
-    import os, sys, time as _time
-    _root = Path(__file__).resolve().parent.parent
-    if str(_root) not in sys.path:
-        sys.path.insert(0, str(_root))
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "core.settings")
-    import django
-    django.setup()
-
+    import time as _time
     t_start = _time.time()
 
-    # 2. 计算该 worker 的数据范围（日期范围 + lookback）
-    #    价格数据需要 400 天 lookback（动量因子），财报需要 5 年 lookback
-    #    但 parquet 缓存已包含全量，用 full_start/full_end 加载后内存过滤
-    from stocks.services.factors.us_base import USFactorBase
+    # fork 后关闭从主进程继承的死 DB 连接
+    from django.db import connections
+    connections.close_all()
 
-    # 加载全量 parquet 缓存（秒级，因为文件已存在）
-    USFactorBase.preload_for_backtest(full_start, full_end)
-
-    # 加载预算的 rolling stats（跳过重算）
-    if not USFactorBase.load_precomputed_cache():
-        USFactorBase.precompute_rolling_stats()
-
-    # AlphaSignal 缓存
-    from stocks.services.factors.us_registry import AlphaSignal
-    AlphaSignal.preload_alpha_cache(full_start, full_end)
-
-    print(f"  Worker {worker_id}: 数据加载完成, {_time.time()-t_start:.1f}s, "
+    print(f"  Worker {worker_id}: ready {_time.time()-t_start:.1f}s, "
           f"{len(dates_chunk)} dates", flush=True)
 
     # 3. 加载 universe（主进程预算好存到 pickle）
@@ -282,8 +258,8 @@ def build_factor_panel(
             logger.info(f"[{i+1}/{len(dates)}] {date}: {dt:.1f}s")
         return panel
 
-    # === multiprocessing spawn ===
-    logger.info(f"Launching {n_workers} spawn workers (~{_mem_mb():.0f}MB cache, {len(dates)} dates)...")
+    # === multiprocessing fork（COW 共享缓存，不复制内存） ===
+    logger.info(f"Launching {n_workers} fork workers (~{_mem_mb():.0f}MB cache, {len(dates)} dates)...")
 
     # 存 universe 到临时 pickle（供 worker 读取）
     import pickle, tempfile
@@ -299,8 +275,10 @@ def build_factor_panel(
         for i, chunk in enumerate(chunks) if chunk
     ]
 
-    # spawn 多进程
-    ctx = mp.get_context("spawn")
+    # fork 多进程（COW 共享 _static_cache，preload 已串行化无线程残留）
+    from django.db import connections
+    connections.close_all()
+    ctx = mp.get_context("fork")
     t_start = time.time()
     with ctx.Pool(processes=len(worker_args)) as pool:
         all_results = pool.map(_spawn_worker, worker_args)

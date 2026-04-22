@@ -1485,7 +1485,7 @@ class USMultiFactorStrategy:
         from django.db import connections
         t0 = time.time()
 
-        effective_workers = min(max_workers, 2)  # 内存限制：每个 worker ~6GB，24GB RAM 最多 2 个
+        effective_workers = min(max_workers, 8)  # fork COW 共享内存，8 worker 只需 ~8GB
         logger.info(f"US spawn factors: {len(rebalance_dates)} dates, {effective_workers} workers")
 
         # 确保 rolling stats parquet 缓存存在（供 worker 读取）
@@ -1507,13 +1507,16 @@ class USMultiFactorStrategy:
             for i, chunk in enumerate(chunks) if chunk
         ]
 
-        # Phase 1: spawn 多进程计算因子
+        # Phase 1: fork 多进程计算因子（COW 共享主进程 _static_cache，不复制内存）
         from backtest.services.us_factor_worker import compute_factors_for_dates
-        connections.close_all()
-        ctx = mp.get_context("spawn")
+        from django.db import connections
+        connections.close_all()  # fork 前关闭 DB 连接
+
+        ctx = mp.get_context("fork")
         with ctx.Pool(processes=len(worker_args)) as pool:
             all_results = pool.map(compute_factors_for_dates, worker_args)
-        connections.close_all()
+
+        connections.close_all()  # fork 后重建主进程连接
 
         t1 = time.time()
         logger.info(f"US spawn factors done: {t1 - t0:.1f}s")
