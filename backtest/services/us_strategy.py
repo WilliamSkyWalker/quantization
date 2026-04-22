@@ -1508,17 +1508,21 @@ class USMultiFactorStrategy:
         sector_df = self._get_cached_sector_df()
 
         for i, dt in enumerate(sorted_dates):
+            _t_date = time.time()
             self._last_date = dt
             fscores = factor_results[dt]
             if not fscores:
                 logger.info(f"[{i+1}/{len(sorted_dates)}] {dt} 无因子数据")
                 continue
 
-            # 从因子值构建 composite（处理 + 评分，和 _compute_scores_for_date 后半段一致）
+            # 从因子值构建 composite
+            _t0 = time.time()
             universe = get_us_clean_universe(dt)
             if universe.empty:
                 continue
+            _t_univ = time.time() - _t0
 
+            _t0 = time.time()
             mktcap_df = self._get_cached_mktcap_df(dt)
             all_tickers = universe["ticker"].tolist()
             composite = pd.DataFrame({"ticker": all_tickers})
@@ -1537,11 +1541,16 @@ class USMultiFactorStrategy:
                 )
                 processed = processed.rename(columns={"factor_value": fname})
                 composite = composite.merge(processed, on="ticker", how="left")
+            _t_neutralize = time.time() - _t0
 
             factor_cols = [c for c in composite.columns if c != "ticker"]
 
             # 滚动 IC + 评分
+            _t0 = time.time()
             self._update_rolling_ic_weights(dt, composite, factor_cols)
+            _t_ic = time.time() - _t0
+
+            _t0 = time.time()
             self._apply_financial_staleness_decay(dt, composite, factor_cols)
             effective_cat_weights = self._get_regime_cat_weights(dt)
             composite = self._compute_scores(composite, factor_cols, sector_df,
@@ -1555,6 +1564,7 @@ class USMultiFactorStrategy:
                 if trend_mask.any():
                     penalty = np.clip(1.0 + 0.3 * mom12[trend_mask], 0.3, 0.7)
                     composite.loc[trend_mask, "score"] *= penalty
+            _t_score = time.time() - _t0
 
             # 保留空头因子列
             keep_cols = ["ticker", "score"]
@@ -1564,13 +1574,25 @@ class USMultiFactorStrategy:
             composite = composite[keep_cols]
 
             # 选股
+            _t0 = time.time()
             selected = self._select_from_scores(composite, prev_holdings)
+            _t_select = time.time() - _t0
+
             signals[dt] = selected
             prev_holdings = set(selected["ticker"].tolist()) if len(selected) > 0 else set()
             if len(selected) > 0:
                 self._prev_weights_dict = dict(zip(selected["ticker"], selected["weight"]))
             else:
                 self._prev_weights_dict = {}
+
+            _t_total = time.time() - _t_date
+            n_sel = len(selected)
+            logger.info(
+                f"[{i+1}/{len(sorted_dates)}] {dt} {n_sel}stocks "
+                f"total={_t_total:.1f}s "
+                f"(univ={_t_univ:.1f} neutral={_t_neutralize:.1f} ic={_t_ic:.1f} "
+                f"score={_t_score:.1f} select={_t_select:.1f})"
+            )
 
             n_sel = len(selected)
             logger.info(f"[{i+1}/{len(sorted_dates)}] {dt} 评分+选股完成: {n_sel} stocks")
