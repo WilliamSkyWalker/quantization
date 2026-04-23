@@ -5,7 +5,6 @@
 
 use std::collections::HashSet;
 
-use chrono::NaiveDate;
 use serde_json::Value;
 use sqlx::PgPool;
 use tracing::{debug, info, warn};
@@ -30,20 +29,14 @@ impl FmpDownloader {
         }
     }
 
-    // ── helpers ──────────────────────────────────────────────────────────
+    // ── HTTP helpers ────────────────────────────────────────────────────
 
     async fn fmp_get(&self, path: &str, params: &[(&str, &str)]) -> Vec<Value> {
         let url = ApiClient::fmp_url(path, &self.api_key, params);
         match self.client.get_json(&url).await {
             Ok(Value::Array(arr)) => arr,
-            Ok(other) => {
-                // Some endpoints return a single object, wrap it
-                if other.is_object() { vec![other] } else { vec![] }
-            }
-            Err(e) => {
-                warn!("FMP {path}: {e}");
-                vec![]
-            }
+            Ok(other) => if other.is_object() { vec![other] } else { vec![] },
+            Err(e) => { warn!("FMP {path}: {e}"); vec![] }
         }
     }
 
@@ -51,70 +44,49 @@ impl FmpDownloader {
         let url = ApiClient::fmp_url_v3(path, &self.api_key, params);
         match self.client.get_json(&url).await {
             Ok(Value::Array(arr)) => arr,
-            Ok(other) => {
-                if other.is_object() { vec![other] } else { vec![] }
-            }
-            Err(e) => {
-                warn!("FMP v3 {path}: {e}");
-                vec![]
-            }
+            Ok(other) => if other.is_object() { vec![other] } else { vec![] },
+            Err(e) => { warn!("FMP v3 {path}: {e}"); vec![] }
         }
     }
 
+    // ── DB helpers ──────────────────────────────────────────────────────
+
     async fn get_active_tickers(&self) -> Vec<String> {
-        let rows: Vec<(String,)> = sqlx::query_as(
+        sqlx::query_scalar::<_, String>(
             "SELECT ticker FROM us_stock_basic WHERE is_actively_trading = 1"
-        )
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
-        rows.into_iter().map(|(t,)| t).collect()
+        ).fetch_all(&self.pool).await.unwrap_or_default()
+    }
+
+    async fn get_stocks_only_tickers(&self) -> Vec<String> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT ticker FROM us_stock_basic WHERE is_actively_trading = 1 AND is_etf = 0 AND is_fund = 0"
+        ).fetch_all(&self.pool).await.unwrap_or_default()
     }
 
     async fn get_done_tickers(&self, table: &str) -> HashSet<String> {
-        let rows: Vec<(String,)> = sqlx::query_as(
+        sqlx::query_scalar::<_, String>(
             "SELECT ticker FROM import_progress WHERE table_name = $1"
-        )
-        .bind(table)
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
-        rows.into_iter().map(|(t,)| t).collect()
+        ).bind(table).fetch_all(&self.pool).await.unwrap_or_default().into_iter().collect()
     }
 
     async fn mark_done(&self, table: &str, ticker: &str) {
         sqlx::query(
             "INSERT INTO import_progress (table_name, ticker, completed_at) \
-             VALUES ($1, $2, NOW()) \
-             ON CONFLICT (table_name, ticker) DO UPDATE SET completed_at = NOW()"
-        )
-        .bind(table)
-        .bind(ticker)
-        .execute(&self.pool)
-        .await
-        .ok();
+             VALUES ($1, $2, NOW()) ON CONFLICT (table_name, ticker) DO UPDATE SET completed_at = NOW()"
+        ).bind(table).bind(ticker).execute(&self.pool).await.ok();
     }
 
     /// Generic upsert: INSERT rows from JSON into table, ON CONFLICT DO UPDATE.
-    /// `unique_keys`: columns for the ON CONFLICT clause.
-    /// `rows`: Vec of snake_case JSON objects.
     async fn upsert_rows(&self, table: &str, rows: &[Value], unique_keys: &[&str]) -> usize {
-        if rows.is_empty() {
-            return 0;
-        }
+        if rows.is_empty() { return 0; }
 
-        // Extract column names from first row
         let first = match rows[0].as_object() {
             Some(m) => m,
             None => return 0,
         };
         let columns: Vec<String> = first.keys().cloned().collect();
-        if columns.is_empty() {
-            return 0;
-        }
+        if columns.is_empty() { return 0; }
 
-        // Build batch INSERT ... ON CONFLICT DO UPDATE
-        // Process in chunks of 500 to avoid parameter limits
         let chunk_size = 500;
         let mut total = 0usize;
 
@@ -125,333 +97,667 @@ impl FmpDownloader {
             let mut params: Vec<String> = Vec::with_capacity(chunk.len() * n_cols);
 
             for row in chunk {
-                let obj = match row.as_object() {
-                    Some(m) => m,
-                    None => continue,
-                };
-                let placeholders: Vec<String> = columns
-                    .iter()
-                    .map(|col| {
-                        let p = format!("${param_idx}");
-                        param_idx += 1;
-                        let val = obj.get(col).cloned().unwrap_or(Value::Null);
-                        params.push(json_to_sql_string(&val));
-                        p
-                    })
-                    .collect();
+                let obj = match row.as_object() { Some(m) => m, None => continue };
+                let placeholders: Vec<String> = columns.iter().map(|col| {
+                    let p = format!("${param_idx}");
+                    param_idx += 1;
+                    params.push(json_to_sql_string(obj.get(col).unwrap_or(&Value::Null)));
+                    p
+                }).collect();
                 values_clauses.push(format!("({})", placeholders.join(", ")));
             }
 
-            if values_clauses.is_empty() {
-                continue;
-            }
+            if values_clauses.is_empty() { continue; }
 
             let col_list = columns.join(", ");
             let conflict_cols = unique_keys.join(", ");
-            let update_set: String = columns
-                .iter()
+            let update_set: String = columns.iter()
                 .filter(|c| !unique_keys.contains(&c.as_str()))
                 .map(|c| format!("{c} = EXCLUDED.{c}"))
-                .collect::<Vec<_>>()
-                .join(", ");
+                .collect::<Vec<_>>().join(", ");
 
             let sql = if update_set.is_empty() {
-                format!(
-                    "INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO NOTHING",
-                    values_clauses.join(", ")
-                )
+                format!("INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO NOTHING",
+                    values_clauses.join(", "))
             } else {
-                format!(
-                    "INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO UPDATE SET {update_set}",
-                    values_clauses.join(", ")
-                )
+                format!("INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO UPDATE SET {update_set}",
+                    values_clauses.join(", "))
             };
 
-            // Execute with text params
             let mut query = sqlx::query(&sql);
-            for p in &params {
-                query = query.bind(p);
-            }
+            for p in &params { query = query.bind(p); }
 
             match query.execute(&self.pool).await {
-                Ok(result) => total += result.rows_affected() as usize,
-                Err(e) => {
-                    warn!("Upsert {table} failed: {e}");
-                    debug!("SQL (first 500 chars): {}", &sql[..sql.len().min(500)]);
-                }
+                Ok(r) => total += r.rows_affected() as usize,
+                Err(e) => warn!("Upsert {table} failed: {e}"),
             }
         }
-
         total
     }
 
-    // ── download methods ────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════
+    // DOWNLOAD METHODS
+    // ═══════════════════════════════════════════════════════════════════
 
-    /// Download stock list from FMP and upsert into us_stock_basic.
+    // ── 1. Stock List ───────────────────────────────────────────────────
+
     pub async fn download_stock_list(&self) -> usize {
         info!("Downloading FMP stock list...");
         let data = self.fmp_get_v3("stock/list", &[]).await;
-        if data.is_empty() {
-            warn!("FMP stock list returned empty");
-            return 0;
-        }
-
+        if data.is_empty() { return 0; }
         let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
+
+        // Also extract industry classification
+        let ind_rows: Vec<Value> = rows.iter().filter_map(|v| {
+            let obj = v.as_object()?;
+            let ticker = obj.get("ticker")?.as_str()?;
+            let sector = obj.get("sector").and_then(|v| v.as_str()).unwrap_or("");
+            let industry = obj.get("industry").and_then(|v| v.as_str()).unwrap_or("");
+            if sector.is_empty() && industry.is_empty() { return None; }
+            Some(serde_json::json!({
+                "ticker": ticker, "sector": sector, "industry": industry
+            }))
+        }).collect();
+
         let count = self.upsert_rows("us_stock_basic", &rows, &["ticker"]).await;
-        info!("Stock list: {count} rows upserted");
+        if !ind_rows.is_empty() {
+            self.upsert_rows("us_industry_class", &ind_rows, &["ticker"]).await;
+        }
+        info!("Stock list: {count} rows");
         count
     }
 
-    /// Download daily prices for all active tickers.
-    ///
-    /// Full mode: skip tickers already in import_progress.
-    /// Incremental: fetch from last known date to today.
-    pub async fn download_daily_prices(&self, start_year: i32, incremental: bool) -> usize {
+    // ── 2. Company Profiles ─────────────────────────────────────────────
+
+    pub async fn download_company_profiles(&self) -> usize {
         let tickers = self.get_active_tickers().await;
-        if tickers.is_empty() {
-            warn!("No active tickers for daily prices");
-            return 0;
-        }
+        let done = self.get_done_tickers("us_company_profile").await;
+        let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
+        if pending.is_empty() { return 0; }
 
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let done = self.get_done_tickers("us_daily_price").await;
-
-        let pending: Vec<String> = if incremental {
-            tickers // all tickers in incremental mode
-        } else {
-            tickers.into_iter().filter(|t| !done.contains(t)).collect()
-        };
-
-        if pending.is_empty() {
-            info!("All tickers done for us_daily_price");
-            return 0;
-        }
-
-        info!("Daily prices: {} tickers to process", pending.len());
-        let pb = ticker_progress(pending.len() as u64, "FMP Daily Prices");
-        let mut total = 0usize;
+        info!("Company profiles: {} tickers", pending.len());
+        let pb = ticker_progress(pending.len() as u64, "Profiles");
+        let mut total = 0;
 
         for ticker in &pending {
-            let count = self.download_daily_price_one(ticker, start_year, &today).await;
-            total += count;
+            let data = self.fmp_get("profile", &[("symbol", ticker.as_str())]).await;
+            if !data.is_empty() {
+                let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
+                total += self.upsert_rows("us_company_profile", &rows, &["ticker"]).await;
+            }
+            self.mark_done("us_company_profile", ticker).await;
+            pb.inc(1);
+        }
+        pb.finish_with_message(format!("{total} rows"));
+        total
+    }
+
+    // ── 3. Daily Prices ─────────────────────────────────────────────────
+
+    pub async fn download_daily_prices(&self, start_year: i32, incremental: bool) -> usize {
+        let tickers = self.get_active_tickers().await;
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let done = self.get_done_tickers("us_daily_price").await;
+        let pending: Vec<_> = if incremental { tickers } else {
+            tickers.into_iter().filter(|t| !done.contains(t)).collect()
+        };
+        if pending.is_empty() { return 0; }
+
+        info!("Daily prices: {} tickers", pending.len());
+        let pb = ticker_progress(pending.len() as u64, "Daily Prices");
+        let mut total = 0;
+
+        for ticker in &pending {
+            total += self.download_daily_price_one(ticker, start_year, &today).await;
             self.mark_done("us_daily_price", ticker).await;
             pb.inc(1);
         }
-
         pb.finish_with_message(format!("{total} rows"));
-        info!("FMP daily prices total: {total}");
         total
     }
 
     async fn download_daily_price_one(&self, ticker: &str, start_year: i32, today: &str) -> usize {
         let end_year: i32 = today[..4].parse().unwrap_or(2025);
         let mut count = 0;
-
-        // Download in 10-year segments
         let mut yr = start_year;
         while yr <= end_year {
             let seg_end = (yr + 9).min(end_year);
-            let from = format!("{yr}-01-01");
-            let to = format!("{seg_end}-12-31");
-
-            let data = self.fmp_get(
-                "historical-price-eod/full",
-                &[("symbol", ticker), ("from", &from), ("to", &to)],
-            ).await;
-
+            let data = self.fmp_get("historical-price-eod/full", &[
+                ("symbol", ticker), ("from", &format!("{yr}-01-01")), ("to", &format!("{seg_end}-12-31")),
+            ]).await;
             if !data.is_empty() {
-                let rows: Vec<Value> = data.into_iter()
-                    .map(|v| {
-                        let mut obj = snake_keys(&v);
-                        // Rename date → trade_date for unique key
-                        if let Some(map) = obj.as_object_mut() {
-                            if let Some(date_val) = map.remove("date") {
-                                map.insert("trade_date".to_string(), date_val);
-                            }
-                        }
-                        obj
-                    })
-                    .collect();
-
+                let rows: Vec<Value> = data.into_iter().map(|v| {
+                    let mut obj = snake_keys(&v);
+                    rename_key(obj.as_object_mut().unwrap(), "date", "trade_date");
+                    obj
+                }).collect();
                 count += self.upsert_rows("us_daily_price", &rows, &["ticker", "trade_date"]).await;
             }
-
             yr += 10;
         }
-
         count
     }
 
-    /// Download financial statements (IS+BS+CF merged) for all tickers.
+    // ── 4. Financial Quarterly (IS+BS+CF merged) ────────────────────────
+
     pub async fn download_financials(&self) -> usize {
-        let tickers = self.get_active_tickers().await;
+        let tickers = self.get_stocks_only_tickers().await;
         let done = self.get_done_tickers("us_financial_data").await;
-        let pending: Vec<String> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
+        let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
+        if pending.is_empty() { return 0; }
 
-        if pending.is_empty() {
-            info!("All tickers done for us_financial_data");
-            return 0;
-        }
-
-        info!("Financials: {} tickers to process", pending.len());
-        let pb = ticker_progress(pending.len() as u64, "FMP Financials");
-        let mut total = 0usize;
+        info!("Financials: {} tickers", pending.len());
+        let pb = ticker_progress(pending.len() as u64, "Financials");
+        let mut total = 0;
 
         for ticker in &pending {
-            // Income Statement
-            let is_data = self.fmp_get(
-                "income-statement",
-                &[("symbol", ticker), ("period", "quarter"), ("limit", "400")],
-            ).await;
-            // Balance Sheet
-            let bs_data = self.fmp_get(
-                "balance-sheet-statement",
-                &[("symbol", ticker), ("period", "quarter"), ("limit", "400")],
-            ).await;
-            // Cash Flow
-            let cf_data = self.fmp_get(
-                "cash-flow-statement",
-                &[("symbol", ticker), ("period", "quarter"), ("limit", "400")],
-            ).await;
-
-            // Merge IS+BS+CF by (ticker, date, period) — same approach as Python
-            let merged = merge_financial_statements(&is_data, &bs_data, &cf_data);
+            let is_data = self.fmp_get("income-statement", &[("symbol", ticker), ("period", "quarter"), ("limit", "400")]).await;
+            let bs_data = self.fmp_get("balance-sheet-statement", &[("symbol", ticker), ("period", "quarter"), ("limit", "400")]).await;
+            let cf_data = self.fmp_get("cash-flow-statement", &[("symbol", ticker), ("period", "quarter"), ("limit", "400")]).await;
+            let merged = merge_three_statements(&is_data, &bs_data, &cf_data);
             if !merged.is_empty() {
                 total += self.upsert_rows("us_financial_data", &merged, &["ticker", "date", "period"]).await;
             }
-
             self.mark_done("us_financial_data", ticker).await;
             pb.inc(1);
         }
-
         pb.finish_with_message(format!("{total} rows"));
-        info!("FMP financials total: {total}");
         total
     }
 
-    /// Download index daily prices (S&P 500, etc).
+    // ── 5. Key Metrics ──────────────────────────────────────────────────
+
+    pub async fn download_key_metrics(&self) -> usize {
+        self.simple_per_ticker("us_key_metric", &["ticker", "date"], "Key Metrics",
+            "key-metrics", &[("period", "quarter"), ("limit", "400")]).await
+    }
+
+    // ── 6. Financial Growth ─────────────────────────────────────────────
+
+    pub async fn download_financial_growth(&self) -> usize {
+        self.simple_per_ticker("us_financial_growth", &["ticker", "date"], "Financial Growth",
+            "financial-growth", &[("period", "quarter"), ("limit", "400")]).await
+    }
+
+    // ── 7. Enterprise Values ────────────────────────────────────────────
+
+    pub async fn download_enterprise_values(&self) -> usize {
+        self.simple_per_ticker("us_enterprise_value", &["ticker", "date"], "Enterprise Values",
+            "enterprise-values", &[("period", "quarter"), ("limit", "400")]).await
+    }
+
+    // ── 8. Owner Earnings ───────────────────────────────────────────────
+
+    pub async fn download_owner_earnings(&self) -> usize {
+        self.simple_per_ticker("us_owner_earnings", &["ticker", "date"], "Owner Earnings",
+            "owner-earnings", &[]).await
+    }
+
+    // ── 9. Earnings Surprises ───────────────────────────────────────────
+
+    pub async fn download_earnings_surprises(&self) -> usize {
+        self.simple_per_ticker("us_earnings_surprise", &["ticker", "date"], "Earnings Surprises",
+            "earnings", &[("limit", "400")]).await
+    }
+
+    // ── 10. EPS Estimates ───────────────────────────────────────────────
+
+    pub async fn download_eps_estimates(&self) -> usize {
+        let tickers = self.get_stocks_only_tickers().await;
+        let done = self.get_done_tickers("us_eps_estimate").await;
+        let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
+        if pending.is_empty() { return 0; }
+
+        let pb = ticker_progress(pending.len() as u64, "EPS Estimates");
+        let mut total = 0;
+        for ticker in &pending {
+            // v3 endpoint
+            let data = self.fmp_get_v3(&format!("analyst-estimates/{ticker}"),
+                &[("period", "quarter"), ("limit", "200")]).await;
+            if !data.is_empty() {
+                let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
+                total += self.upsert_rows("us_eps_estimate", &rows, &["ticker", "date"]).await;
+            }
+            self.mark_done("us_eps_estimate", ticker).await;
+            pb.inc(1);
+        }
+        pb.finish_with_message(format!("{total} rows"));
+        total
+    }
+
+    // ── 11. Insider Trading ─────────────────────────────────────────────
+
+    pub async fn download_insider_trading(&self) -> usize {
+        let tickers = self.get_stocks_only_tickers().await;
+        let done = self.get_done_tickers("us_insider_trade").await;
+        let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
+        if pending.is_empty() { return 0; }
+
+        let pb = ticker_progress(pending.len() as u64, "Insider Trading");
+        let mut total = 0;
+        for ticker in &pending {
+            // Paginated v4 endpoint
+            for page in 0..50 {
+                let data = self.fmp_get_v3("insider-trading",
+                    &[("symbol", ticker), ("page", &page.to_string()), ("limit", "100")]).await;
+                if data.is_empty() { break; }
+                let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
+                let n = rows.len();
+                total += self.upsert_rows("us_insider_trade", &rows,
+                    &["ticker", "transaction_date", "reporting_name", "transaction_type"]).await;
+                if n < 100 { break; }
+            }
+            self.mark_done("us_insider_trade", ticker).await;
+            pb.inc(1);
+        }
+        pb.finish_with_message(format!("{total} rows"));
+        total
+    }
+
+    // ── 12. Analyst Grades ──────────────────────────────────────────────
+
+    pub async fn download_analyst_grades(&self) -> usize {
+        let tickers = self.get_stocks_only_tickers().await;
+        let done = self.get_done_tickers("us_analyst_recommendation").await;
+        let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
+        if pending.is_empty() { return 0; }
+
+        let pb = ticker_progress(pending.len() as u64, "Analyst Grades");
+        let mut total = 0;
+        for ticker in &pending {
+            let data = self.fmp_get_v3(&format!("grade/{ticker}"), &[]).await;
+            if !data.is_empty() {
+                let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
+                total += self.upsert_rows("us_analyst_recommendation", &rows,
+                    &["ticker", "date", "grading_company"]).await;
+            }
+            self.mark_done("us_analyst_recommendation", ticker).await;
+            pb.inc(1);
+        }
+        pb.finish_with_message(format!("{total} rows"));
+        total
+    }
+
+    // ── 13. Dividends & Splits ──────────────────────────────────────────
+
+    pub async fn download_dividends(&self) -> usize {
+        self.simple_per_ticker("us_corporate_action", &["ticker", "date"], "Dividends",
+            "dividends", &[]).await
+    }
+
+    // ── 14. Financial Scores ────────────────────────────────────────────
+
+    pub async fn download_financial_scores(&self) -> usize {
+        self.simple_per_ticker("us_financial_score", &["ticker"], "Financial Scores",
+            "financial-scores", &[]).await
+    }
+
+    // ── 15. Shares Float ────────────────────────────────────────────────
+
+    pub async fn download_shares_float(&self) -> usize {
+        self.simple_per_ticker("us_shares_float", &["ticker", "date"], "Shares Float",
+            "shares-float", &[]).await
+    }
+
+    // ── 16. Insider Statistics ───────────────────────────────────────────
+
+    pub async fn download_insider_statistics(&self) -> usize {
+        self.simple_per_ticker("us_insider_statistic", &["ticker", "year", "quarter"], "Insider Stats",
+            "insider-trading/statistics", &[]).await
+    }
+
+    // ── 17. Employee Count ──────────────────────────────────────────────
+
+    pub async fn download_employee_count(&self) -> usize {
+        self.simple_per_ticker("us_employee_count", &["ticker", "period_of_report"], "Employee Count",
+            "employee-count", &[]).await
+    }
+
+    // ── 18. Price Targets ───────────────────────────────────────────────
+
+    pub async fn download_price_targets(&self) -> usize {
+        self.simple_per_ticker("us_price_target", &["ticker"], "Price Targets",
+            "price-target-consensus", &[]).await
+    }
+
+    // ── 19. ESG Ratings ─────────────────────────────────────────────────
+
+    pub async fn download_esg_ratings(&self) -> usize {
+        self.simple_per_ticker("us_esg_rating", &["ticker", "fiscal_year"], "ESG Ratings",
+            "esg-ratings", &[]).await
+    }
+
+    // ── 20. DCF Valuations ──────────────────────────────────────────────
+
+    pub async fn download_dcf_valuations(&self) -> usize {
+        self.simple_per_ticker("us_dcf_valuation", &["ticker", "date"], "DCF Valuations",
+            "discounted-cash-flow", &[]).await
+    }
+
+    // ── 21. Stock Peers ─────────────────────────────────────────────────
+
+    pub async fn download_stock_peers(&self) -> usize {
+        let tickers = self.get_stocks_only_tickers().await;
+        let done = self.get_done_tickers("us_stock_peer").await;
+        let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
+        if pending.is_empty() { return 0; }
+
+        let pb = ticker_progress(pending.len() as u64, "Stock Peers");
+        let mut total = 0;
+        for ticker in &pending {
+            let data = self.fmp_get("stock-peers", &[("symbol", ticker.as_str())]).await;
+            for item in &data {
+                if let Some(peers) = item.get("peersList").and_then(|v| v.as_array()) {
+                    for peer in peers {
+                        if let Some(p) = peer.as_str() {
+                            let row = serde_json::json!({"ticker": ticker, "peer_ticker": p});
+                            total += self.upsert_rows("us_stock_peer", &[row], &["ticker", "peer_ticker"]).await;
+                        }
+                    }
+                }
+            }
+            self.mark_done("us_stock_peer", ticker).await;
+            pb.inc(1);
+        }
+        pb.finish_with_message(format!("{total} rows"));
+        total
+    }
+
+    // ── 22. Index Daily ─────────────────────────────────────────────────
+
     pub async fn download_index_daily(&self, start_year: i32) -> usize {
         let indices = ["^GSPC", "^DJI", "^IXIC", "^RUT"];
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let end_year: i32 = today[..4].parse().unwrap_or(2025);
         let mut total = 0;
 
         for index in &indices {
-            let end_year: i32 = today[..4].parse().unwrap_or(2025);
             let mut yr = start_year;
             while yr <= end_year {
                 let seg_end = (yr + 9).min(end_year);
-                let from = format!("{yr}-01-01");
-                let to = format!("{seg_end}-12-31");
-
-                let data = self.fmp_get(
-                    "historical-price-eod/full",
-                    &[("symbol", index), ("from", &from), ("to", &to)],
-                ).await;
-
+                let data = self.fmp_get("historical-price-eod/full", &[
+                    ("symbol", index), ("from", &format!("{yr}-01-01")), ("to", &format!("{seg_end}-12-31")),
+                ]).await;
                 if !data.is_empty() {
-                    let rows: Vec<Value> = data.into_iter()
-                        .map(|v| {
-                            let mut obj = snake_keys(&v);
-                            if let Some(map) = obj.as_object_mut() {
-                                if let Some(date_val) = map.remove("date") {
-                                    map.insert("trade_date".to_string(), date_val);
-                                }
-                                // symbol → index_code for this table
-                                if let Some(sym) = map.remove("ticker") {
-                                    map.insert("index_code".to_string(), sym);
-                                }
+                    let rows: Vec<Value> = data.into_iter().map(|v| {
+                        let mut obj = snake_keys(&v);
+                        if let Some(map) = obj.as_object_mut() {
+                            rename_key(map, "date", "trade_date");
+                            if let Some(sym) = map.remove("ticker") {
+                                map.insert("index_code".to_string(), sym);
                             }
-                            obj
-                        })
-                        .collect();
-
+                        }
+                        obj
+                    }).collect();
                     total += self.upsert_rows("us_index_daily", &rows, &["index_code", "trade_date"]).await;
                 }
                 yr += 10;
             }
             info!("Index {index}: done");
         }
+        total
+    }
 
-        info!("Index daily total: {total}");
+    // ── 23. Macro Indicators ────────────────────────────────────────────
+
+    pub async fn download_macro(&self) -> usize {
+        let indicators = [
+            ("treasury", "US_10Y", "year10"),
+            ("treasury", "US_2Y", "year2"),
+            ("treasury", "US_5Y", "year5"),
+            ("treasury", "US_30Y", "year30"),
+            ("treasury", "US_1M", "month1"),
+            ("treasury", "US_3M", "month3"),
+            ("economic", "US_GDP", "GDP"),
+            ("economic", "US_CPI", "CPI"),
+            ("economic", "US_UNEMPLOYMENT", "unemployment-rate"),
+        ];
+        let mut total = 0;
+
+        for (endpoint_type, code, param) in &indicators {
+            let data = if *endpoint_type == "treasury" {
+                self.fmp_get_v3("treasury", &[("from", "2000-01-01"), ("to", "2026-12-31")]).await
+            } else {
+                self.fmp_get_v3(&format!("economic?name={param}"), &[]).await
+            };
+
+            if data.is_empty() { continue; }
+
+            let rows: Vec<Value> = data.into_iter().filter_map(|v| {
+                let obj = v.as_object()?;
+                let date = obj.get("date").and_then(|v| v.as_str())?;
+                let value = if *endpoint_type == "treasury" {
+                    obj.get(*param).and_then(|v| v.as_f64())
+                } else {
+                    obj.get("value").and_then(|v| v.as_f64())
+                }?;
+                Some(serde_json::json!({
+                    "indicator_code": code,
+                    "report_date": date,
+                    "value": value,
+                }))
+            }).collect();
+
+            total += self.upsert_rows("us_macro_indicator", &rows, &["indicator_code", "report_date"]).await;
+            info!("Macro {code}: {} rows", rows.len());
+        }
+        total
+    }
+
+    // ── 24. Congress Trading ────────────────────────────────────────────
+
+    pub async fn download_congress_trading(&self) -> usize {
+        let tickers = self.get_stocks_only_tickers().await;
+        let done = self.get_done_tickers("us_congress_trade").await;
+        let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
+        if pending.is_empty() { return 0; }
+
+        let pb = ticker_progress(pending.len() as u64, "Congress Trading");
+        let mut total = 0;
+        for ticker in &pending {
+            for page in 0..20 {
+                let data = self.fmp_get_v3("senate-trading", &[
+                    ("symbol", ticker), ("page", &page.to_string()),
+                ]).await;
+                if data.is_empty() { break; }
+                let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
+                let n = rows.len();
+                total += self.upsert_rows("us_congress_trade", &rows,
+                    &["ticker", "transaction_date", "first_name", "last_name", "type"]).await;
+                if n < 50 { break; }
+            }
+            self.mark_done("us_congress_trade", ticker).await;
+            pb.inc(1);
+        }
+        pb.finish_with_message(format!("{total} rows"));
+        total
+    }
+
+    // ── 25. Press Releases ──────────────────────────────────────────────
+
+    pub async fn download_press_releases(&self) -> usize {
+        self.simple_per_ticker("us_press_release", &["ticker", "url"], "Press Releases",
+            "press-releases", &[("limit", "1000")]).await
+    }
+
+    // ── 26. Revenue Segments ────────────────────────────────────────────
+
+    pub async fn download_revenue_segments(&self) -> usize {
+        let tickers = self.get_stocks_only_tickers().await;
+        let done = self.get_done_tickers("us_revenue_segment").await;
+        let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
+        if pending.is_empty() { return 0; }
+
+        let pb = ticker_progress(pending.len() as u64, "Revenue Segments");
+        let mut total = 0;
+        for ticker in &pending {
+            for seg_type in &["product", "geographic"] {
+                let data = self.fmp_get(&format!("revenue-{seg_type}-segmentation"), &[
+                    ("symbol", ticker.as_str()), ("structure", "flat"),
+                ]).await;
+                if !data.is_empty() {
+                    let rows: Vec<Value> = data.into_iter().map(|v| {
+                        let mut obj = snake_keys(&v);
+                        if let Some(map) = obj.as_object_mut() {
+                            map.insert("segment_type".to_string(), Value::String(seg_type.to_string()));
+                        }
+                        obj
+                    }).collect();
+                    total += self.upsert_rows("us_revenue_segment", &rows,
+                        &["ticker", "date", "segment_type", "segment_name"]).await;
+                }
+            }
+            self.mark_done("us_revenue_segment", ticker).await;
+            pb.inc(1);
+        }
+        pb.finish_with_message(format!("{total} rows"));
+        total
+    }
+
+    // ── 27. Delisted Companies ──────────────────────────────────────────
+
+    pub async fn download_delisted(&self) -> usize {
+        let data = self.fmp_get_v3("delisted-companies", &[("limit", "10000")]).await;
+        if data.is_empty() { return 0; }
+        let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
+        self.upsert_rows("us_delisted", &rows, &["ticker"]).await
+    }
+
+    // ── 28. Symbol Changes ──────────────────────────────────────────────
+
+    pub async fn download_symbol_changes(&self) -> usize {
+        let data = self.fmp_get_v3("symbol_change", &[]).await;
+        if data.is_empty() { return 0; }
+        let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
+        self.upsert_rows("us_symbol_change", &rows, &["old_symbol", "new_symbol", "date"]).await
+    }
+
+    // ── download_all ────────────────────────────────────────────────────
+
+    pub async fn download_all(&self, start_year: i32) -> usize {
+        let mut total = 0;
+        total += self.download_stock_list().await;
+        total += self.download_company_profiles().await;
+        total += self.download_index_daily(start_year).await;
+        total += self.download_macro().await;
+        total += self.download_daily_prices(start_year, false).await;
+        total += self.download_financials().await;
+        total += self.download_key_metrics().await;
+        total += self.download_financial_growth().await;
+        total += self.download_enterprise_values().await;
+        total += self.download_owner_earnings().await;
+        total += self.download_earnings_surprises().await;
+        total += self.download_eps_estimates().await;
+        total += self.download_insider_trading().await;
+        total += self.download_analyst_grades().await;
+        total += self.download_dividends().await;
+        total += self.download_financial_scores().await;
+        total += self.download_shares_float().await;
+        total += self.download_insider_statistics().await;
+        total += self.download_employee_count().await;
+        total += self.download_price_targets().await;
+        total += self.download_esg_ratings().await;
+        total += self.download_dcf_valuations().await;
+        total += self.download_stock_peers().await;
+        total += self.download_congress_trading().await;
+        total += self.download_press_releases().await;
+        total += self.download_revenue_segments().await;
+        total += self.download_delisted().await;
+        total += self.download_symbol_changes().await;
+        info!("FMP download_all total: {total}");
+        total
+    }
+
+    // ── Generic simple per-ticker helper ────────────────────────────────
+
+    async fn simple_per_ticker(
+        &self,
+        table: &str,
+        unique_keys: &[&str],
+        label: &str,
+        endpoint: &str,
+        extra_params: &[(&str, &str)],
+    ) -> usize {
+        let tickers = self.get_stocks_only_tickers().await;
+        let done = self.get_done_tickers(table).await;
+        let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
+        if pending.is_empty() { info!("{label}: all done"); return 0; }
+
+        let pb = ticker_progress(pending.len() as u64, label);
+        let mut total = 0;
+
+        for ticker in &pending {
+            let mut params: Vec<(&str, &str)> = vec![("symbol", ticker.as_str())];
+            params.extend_from_slice(extra_params);
+            let data = self.fmp_get(endpoint, &params).await;
+            if !data.is_empty() {
+                let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
+                total += self.upsert_rows(table, &rows, unique_keys).await;
+            }
+            self.mark_done(table, ticker).await;
+            pb.inc(1);
+        }
+        pb.finish_with_message(format!("{total} rows"));
         total
     }
 }
 
-// ── Financial statement merge helper ────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════
 
-fn merge_financial_statements(
-    is_data: &[Value],
-    bs_data: &[Value],
-    cf_data: &[Value],
-) -> Vec<Value> {
+fn rename_key(map: &mut serde_json::Map<String, Value>, from: &str, to: &str) {
+    if let Some(val) = map.remove(from) {
+        map.insert(to.to_string(), val);
+    }
+}
+
+fn merge_three_statements(is_data: &[Value], bs_data: &[Value], cf_data: &[Value]) -> Vec<Value> {
     use std::collections::HashMap;
 
-    // Index BS and CF by (date, period)
     let mut bs_map: HashMap<(String, String), &Value> = HashMap::new();
     for row in bs_data {
         if let (Some(d), Some(p)) = (
             row.get("date").and_then(|v| v.as_str()),
             row.get("period").and_then(|v| v.as_str()),
-        ) {
-            bs_map.insert((d.to_string(), p.to_string()), row);
-        }
+        ) { bs_map.insert((d.to_string(), p.to_string()), row); }
     }
     let mut cf_map: HashMap<(String, String), &Value> = HashMap::new();
     for row in cf_data {
         if let (Some(d), Some(p)) = (
             row.get("date").and_then(|v| v.as_str()),
             row.get("period").and_then(|v| v.as_str()),
-        ) {
-            cf_map.insert((d.to_string(), p.to_string()), row);
-        }
+        ) { cf_map.insert((d.to_string(), p.to_string()), row); }
     }
 
-    // Merge: IS as base, overlay BS and CF fields
     let mut result = Vec::new();
     for is_row in is_data {
         let date = is_row.get("date").and_then(|v| v.as_str()).unwrap_or("");
         let period = is_row.get("period").and_then(|v| v.as_str()).unwrap_or("");
-        if date.is_empty() || period.is_empty() {
-            continue;
-        }
+        if date.is_empty() || period.is_empty() { continue; }
         let key = (date.to_string(), period.to_string());
 
         let mut merged = snake_keys(is_row);
         if let Some(map) = merged.as_object_mut() {
-            // Merge BS fields
             if let Some(bs) = bs_map.get(&key) {
-                let bs_snake = snake_keys(bs);
-                if let Some(bs_obj) = bs_snake.as_object() {
-                    for (k, v) in bs_obj {
-                        if !map.contains_key(k) {
-                            map.insert(k.clone(), v.clone());
-                        }
-                    }
+                if let Some(bs_obj) = snake_keys(bs).as_object().cloned() {
+                    for (k, v) in bs_obj { if !map.contains_key(&k) { map.insert(k, v); } }
                 }
             }
-            // Merge CF fields
             if let Some(cf) = cf_map.get(&key) {
-                let cf_snake = snake_keys(cf);
-                if let Some(cf_obj) = cf_snake.as_object() {
-                    for (k, v) in cf_obj {
-                        if !map.contains_key(k) {
-                            map.insert(k.clone(), v.clone());
-                        }
-                    }
+                if let Some(cf_obj) = snake_keys(cf).as_object().cloned() {
+                    for (k, v) in cf_obj { if !map.contains_key(&k) { map.insert(k, v); } }
                 }
             }
         }
-
         result.push(merged);
     }
-
     result
 }
 
-/// Convert a JSON value to a SQL-safe string for parameterized queries.
 fn json_to_sql_string(val: &Value) -> String {
     match val {
-        Value::Null => String::new(), // will bind as empty string
+        Value::Null => String::new(),
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => n.to_string(),
         Value::String(s) => s.clone(),

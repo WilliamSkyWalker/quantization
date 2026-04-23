@@ -952,18 +952,41 @@ fn cmd_download(
 
                 match target {
                     "stock_list" => { dl.download_stock_list().await; }
+                    "profile" => { dl.download_company_profiles().await; }
                     "daily_price" => { dl.download_daily_prices(start_year, incremental).await; }
                     "financial" => { dl.download_financials().await; }
+                    "key_metric" => { dl.download_key_metrics().await; }
+                    "growth" => { dl.download_financial_growth().await; }
+                    "enterprise_value" => { dl.download_enterprise_values().await; }
+                    "owner_earnings" => { dl.download_owner_earnings().await; }
+                    "earnings" => { dl.download_earnings_surprises().await; }
+                    "eps_estimate" => { dl.download_eps_estimates().await; }
+                    "insider" => { dl.download_insider_trading().await; }
+                    "analyst" => { dl.download_analyst_grades().await; }
+                    "dividend" => { dl.download_dividends().await; }
+                    "score" => { dl.download_financial_scores().await; }
+                    "float" => { dl.download_shares_float().await; }
+                    "insider_stat" => { dl.download_insider_statistics().await; }
+                    "employee" => { dl.download_employee_count().await; }
+                    "price_target" => { dl.download_price_targets().await; }
+                    "esg" => { dl.download_esg_ratings().await; }
+                    "dcf" => { dl.download_dcf_valuations().await; }
+                    "peer" => { dl.download_stock_peers().await; }
                     "index" => { dl.download_index_daily(start_year).await; }
-                    "all" => {
-                        dl.download_stock_list().await;
-                        dl.download_index_daily(start_year).await;
-                        dl.download_daily_prices(start_year, incremental).await;
-                        dl.download_financials().await;
-                    }
+                    "macro" => { dl.download_macro().await; }
+                    "congress" => { dl.download_congress_trading().await; }
+                    "press" => { dl.download_press_releases().await; }
+                    "revenue_segment" => { dl.download_revenue_segments().await; }
+                    "delisted" => { dl.download_delisted().await; }
+                    "symbol_change" => { dl.download_symbol_changes().await; }
+                    "all" => { dl.download_all(start_year).await; }
                     other => {
                         eprintln!("Unknown FMP target: {other}");
-                        eprintln!("Available: stock_list, daily_price, financial, index, all");
+                        eprintln!("Available: stock_list, profile, daily_price, financial, key_metric,");
+                        eprintln!("  growth, enterprise_value, owner_earnings, earnings, eps_estimate,");
+                        eprintln!("  insider, analyst, dividend, score, float, insider_stat, employee,");
+                        eprintln!("  price_target, esg, dcf, peer, index, macro, congress, press,");
+                        eprintln!("  revenue_segment, delisted, symbol_change, all");
                         std::process::exit(1);
                     }
                 }
