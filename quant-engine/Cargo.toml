@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/qrs-core",
-    "crates/qrs-data",
-    "crates/qrs-factors",
-    "crates/qrs-strategy",
-    "crates/qrs-backtest",
-    "crates/qrs-cli",
+    "crates/core",
+    "crates/data",
+    "crates/factors",
+    "crates/strategy",
+    "crates/backtest",
+    "crates/cli",
 ]
 
 [workspace.dependencies]

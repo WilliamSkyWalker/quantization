@@ -1,0 +1,16 @@
+[package]
+name = "quant-strategy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+quant-core = { path = "../core" }
+quant-data = { path = "../data" }
+polars = { workspace = true }
+quant-factors = { path = "../factors" }
+rayon = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+rustc-hash = { workspace = true }
+nalgebra = { workspace = true }
+clarabel = "0.11"

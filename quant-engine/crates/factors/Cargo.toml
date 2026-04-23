@@ -1,0 +1,14 @@
+[package]
+name = "quant-factors"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+quant-core = { path = "../core" }
+quant-data = { path = "../data" }
+inventory = { workspace = true }
+rayon = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+rustc-hash = { workspace = true }
+nalgebra = { workspace = true }

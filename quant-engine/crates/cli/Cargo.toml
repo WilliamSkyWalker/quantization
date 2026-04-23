@@ -1,0 +1,23 @@
+[package]
+name = "quant-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "quant"
+path = "src/main.rs"
+
+[dependencies]
+quant-core = { path = "../core" }
+quant-data = { path = "../data" }
+quant-factors = { path = "../factors" }
+quant-strategy = { path = "../strategy" }
+quant-backtest = { path = "../backtest" }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+indicatif = { workspace = true }
+chrono = { workspace = true }
+rayon = { workspace = true }
+rustc-hash = { workspace = true }

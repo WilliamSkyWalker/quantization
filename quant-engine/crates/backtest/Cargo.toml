@@ -1,0 +1,13 @@
+[package]
+name = "quant-backtest"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+quant-core = { path = "../core" }
+quant-data = { path = "../data" }
+tracing = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rustc-hash = { workspace = true }

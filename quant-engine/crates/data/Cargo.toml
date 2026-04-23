@@ -1,0 +1,12 @@
+[package]
+name = "quant-data"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+quant-core = { path = "../core" }
+polars = { workspace = true }
+rayon = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+rustc-hash = { workspace = true }
