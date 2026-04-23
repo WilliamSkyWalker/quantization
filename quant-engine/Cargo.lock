@@ -1847,6 +1847,7 @@ name = "quant-backtest"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "nalgebra",
  "quant-core",
  "quant-data",
  "rustc-hash",
