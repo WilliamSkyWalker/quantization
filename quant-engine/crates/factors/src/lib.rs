@@ -1,3 +1,4 @@
+pub mod a_share;
 pub mod processor;
 pub mod registry;
 
