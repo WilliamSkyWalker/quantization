@@ -991,8 +991,44 @@ fn cmd_download(
                     }
                 }
             }
+            "quiver" => {
+                let quiver_key = std::env::var("QUIVER_API_KEY").unwrap_or_default();
+                if quiver_key.is_empty() {
+                    eprintln!("QUIVER_API_KEY not set.");
+                    std::process::exit(1);
+                }
+                let rate_limit: u32 = std::env::var("QUIVER_RATE_LIMIT")
+                    .ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+                let dl = quant_download::us_quiver::QuiverDownloader::new(
+                    quiver_key, pool.clone(), rate_limit,
+                );
+                match target {
+                    "lobbying" => { dl.download_lobbying().await; }
+                    "gov_contract" => { dl.download_gov_contracts().await; }
+                    "dark_pool" => { dl.download_dark_pool().await; }
+                    "institutional" => { dl.download_institutional_holders().await; }
+                    "all" => { dl.download_all().await; }
+                    other => {
+                        eprintln!("Unknown Quiver target: {other}");
+                        eprintln!("Available: lobbying, gov_contract, dark_pool, institutional, all");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            "fred" => {
+                let fred_key = std::env::var("FRED_API_KEY").unwrap_or_default();
+                if fred_key.is_empty() {
+                    eprintln!("FRED_API_KEY not set.");
+                    std::process::exit(1);
+                }
+                let dl = quant_download::us_fred::FredDownloader::new(
+                    fred_key, pool.clone(),
+                );
+                let start = format!("{start_year}-01-01");
+                dl.download_all(&start).await;
+            }
             other => {
-                eprintln!("Unknown source: {other}. Available: fmp");
+                eprintln!("Unknown source: {other}. Available: fmp, quiver, fred");
                 std::process::exit(1);
             }
         }
