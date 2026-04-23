@@ -1015,6 +1015,38 @@ fn cmd_download(
                     }
                 }
             }
+            "tushare" => {
+                let ts_token = std::env::var("TUSHARE_TOKEN").unwrap_or_default();
+                if ts_token.is_empty() {
+                    eprintln!("TUSHARE_TOKEN not set.");
+                    std::process::exit(1);
+                }
+                let rate_limit: u32 = std::env::var("TUSHARE_RATE_LIMIT")
+                    .ok().and_then(|s| s.parse().ok()).unwrap_or(200);
+                let dl = quant_download::a_tushare::TushareDownloader::new(
+                    ts_token, pool.clone(), rate_limit,
+                );
+                let start = format!("{start_year}0101");
+                match target {
+                    "stock_list" => { dl.download_stock_list().await; }
+                    "trade_cal" => { dl.download_trade_cal().await; }
+                    "daily_price" => { dl.download_daily_prices(&start).await; }
+                    "income" => { dl.download_income().await; }
+                    "balance" => { dl.download_balancesheet().await; }
+                    "cashflow" => { dl.download_cashflow().await; }
+                    "indicator" => { dl.download_fina_indicator().await; }
+                    "industry" => { dl.download_industry().await; }
+                    "index" => { dl.download_index_daily(&start).await; }
+                    "macro" => { dl.download_macro().await; }
+                    "all" => { dl.download_all(&start).await; }
+                    other => {
+                        eprintln!("Unknown Tushare target: {other}");
+                        eprintln!("Available: stock_list, trade_cal, daily_price, income, balance,");
+                        eprintln!("  cashflow, indicator, industry, index, macro, all");
+                        std::process::exit(1);
+                    }
+                }
+            }
             "fred" => {
                 let fred_key = std::env::var("FRED_API_KEY").unwrap_or_default();
                 if fred_key.is_empty() {
@@ -1028,7 +1060,7 @@ fn cmd_download(
                 dl.download_all(&start).await;
             }
             other => {
-                eprintln!("Unknown source: {other}. Available: fmp, quiver, fred");
+                eprintln!("Unknown source: {other}. Available: fmp, quiver, fred, tushare");
                 std::process::exit(1);
             }
         }

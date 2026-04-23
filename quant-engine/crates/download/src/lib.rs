@@ -1,3 +1,4 @@
+pub mod a_tushare;
 pub mod camel;
 pub mod http;
 pub mod progress;
