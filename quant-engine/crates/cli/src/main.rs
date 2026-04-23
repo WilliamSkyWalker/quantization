@@ -645,8 +645,37 @@ fn cmd_backtest(
         let mut combined: rustc_hash::FxHashMap<quant_core::types::TickerId, f64>;
 
         if use_optimizer {
-            // MVO path: build covariance → optimize
-            let candidate_tickers: Vec<quant_core::types::TickerId> = scores.keys().copied().collect();
+            // MVO path: select top candidates first, then optimize
+            // Python selects top 50 long + bottom 30 short + prev holdings ≈ 80 stocks
+            let long_n = 50usize;
+            let short_n = 30usize;
+
+            // Sort by score descending
+            let mut score_vec: Vec<(quant_core::types::TickerId, f64)> = scores
+                .iter().map(|(&t, &s)| (t, s)).collect();
+            score_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Top long_n candidates + bottom short_n candidates + prev holdings
+            let prev_weights: rustc_hash::FxHashMap<quant_core::types::TickerId, f64> = signals
+                .values().next_back()
+                .cloned()
+                .unwrap_or_default();
+
+            let mut candidate_set = rustc_hash::FxHashSet::default();
+            for (tid, _) in score_vec.iter().take(long_n) {
+                candidate_set.insert(*tid);
+            }
+            if !no_short {
+                for (tid, _) in score_vec.iter().rev().take(short_n) {
+                    candidate_set.insert(*tid);
+                }
+            }
+            for &tid in prev_weights.keys() {
+                candidate_set.insert(tid);
+            }
+            let candidate_tickers: Vec<quant_core::types::TickerId> =
+                candidate_set.into_iter().collect();
+
             let (returns_opt, cov_tickers) = quant_strategy::optimizer::build_returns_matrix(
                 &cache, date, &candidate_tickers,
                 config.optimizer.cov_lookback, config.optimizer.min_history_days,
@@ -655,15 +684,15 @@ fn cmd_backtest(
             if let Some(returns) = returns_opt {
                 let (cov, _shrinkage) = quant_strategy::optimizer::ledoit_wolf(&returns);
 
-                // Collect previous weights from last signal
-                let prev_weights: rustc_hash::FxHashMap<quant_core::types::TickerId, f64> = signals
-                    .values().next_back()
-                    .cloned()
-                    .unwrap_or_default();
+                // Only pass candidate scores (not full universe)
+                let candidate_scores: rustc_hash::FxHashMap<quant_core::types::TickerId, f64> =
+                    cov_tickers.iter()
+                        .filter_map(|&tid| scores.get(&tid).map(|&s| (tid, s)))
+                        .collect();
 
                 let net_exp = if no_short { 1.0 } else { config.short.net_exposure };
                 let mvo_result = quant_strategy::optimizer::optimize(
-                    &scores, &cov, &cov_tickers, &prev_weights,
+                    &candidate_scores, &cov, &cov_tickers, &prev_weights,
                     &cache.sector_map, &config.optimizer,
                     net_exp, !no_short,
                 );
