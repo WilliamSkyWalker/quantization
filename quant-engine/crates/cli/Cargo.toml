@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 quant-core = { path = "../core" }
 quant-db = { path = "../db" }
+quant-download = { path = "../download" }
 quant-data = { path = "../data" }
 quant-factors = { path = "../factors" }
 quant-strategy = { path = "../strategy" }

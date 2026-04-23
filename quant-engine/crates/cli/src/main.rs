@@ -95,6 +95,25 @@ enum Commands {
     /// Show database table row counts and connection status.
     DbStatus,
 
+    /// Download data from external APIs into PostgreSQL.
+    Download {
+        /// Data source: fmp, quiver, fred.
+        #[arg(long)]
+        source: String,
+
+        /// Target table: all, stock_list, daily_price, financial, index, etc.
+        #[arg(long, default_value = "all")]
+        target: String,
+
+        /// Start year for historical data.
+        #[arg(long, default_value = "1995")]
+        start_year: i32,
+
+        /// Incremental update (only fetch new data).
+        #[arg(long)]
+        incremental: bool,
+    },
+
     /// Run factor analysis (IC / Fama-MacBeth / Decay).
     Analyze {
         #[arg(long)]
@@ -163,6 +182,9 @@ fn main() {
         }
         Commands::DbStatus => {
             cmd_db_status(&_config);
+        }
+        Commands::Download { source, target, start_year, incremental } => {
+            cmd_download(&_config, &source, &target, start_year, incremental);
         }
         Commands::Backtest {
             start,
@@ -893,6 +915,67 @@ fn cmd_backtest(
     }
     std::fs::write(&nav_path, csv).ok();
     info!("NAV saved to {}", nav_path.display());
+}
+
+fn cmd_download(
+    config: &quant_core::config::Config,
+    source: &str,
+    target: &str,
+    start_year: i32,
+    incremental: bool,
+) {
+    let db_url = config.database.url();
+    let schema = &config.database.schema;
+    if db_url.contains("@:/") || db_url.contains("postgres://:@") {
+        eprintln!("Database not configured. Set DB_HOST, DB_USER, DB_PASSWORD, DB_DATABASE env vars.");
+        std::process::exit(1);
+    }
+
+    let fmp_key = std::env::var("FMP_API_KEY").unwrap_or_default();
+    if fmp_key.is_empty() && source == "fmp" {
+        eprintln!("FMP_API_KEY not set.");
+        std::process::exit(1);
+    }
+
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    rt.block_on(async {
+        let pool = quant_db::pool::create_pool(&db_url, schema, 5).await
+            .expect("Failed to connect to database");
+
+        match source {
+            "fmp" => {
+                let rate_limit: u32 = std::env::var("FMP_RATE_LIMIT")
+                    .ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+                let dl = quant_download::us_fmp::FmpDownloader::new(
+                    fmp_key, pool.clone(), rate_limit,
+                );
+
+                match target {
+                    "stock_list" => { dl.download_stock_list().await; }
+                    "daily_price" => { dl.download_daily_prices(start_year, incremental).await; }
+                    "financial" => { dl.download_financials().await; }
+                    "index" => { dl.download_index_daily(start_year).await; }
+                    "all" => {
+                        dl.download_stock_list().await;
+                        dl.download_index_daily(start_year).await;
+                        dl.download_daily_prices(start_year, incremental).await;
+                        dl.download_financials().await;
+                    }
+                    other => {
+                        eprintln!("Unknown FMP target: {other}");
+                        eprintln!("Available: stock_list, daily_price, financial, index, all");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            other => {
+                eprintln!("Unknown source: {other}. Available: fmp");
+                std::process::exit(1);
+            }
+        }
+
+        pool.close().await;
+    });
 }
 
 fn cmd_db_status(config: &quant_core::config::Config) {
