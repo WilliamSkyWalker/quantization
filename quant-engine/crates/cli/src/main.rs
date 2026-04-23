@@ -163,10 +163,10 @@ fn main() {
             end,
             output,
             cache_dir,
-            no_optimizer: _,
+            no_optimizer,
             no_short,
         } => {
-            cmd_backtest(&_config, &cache_dir, &start, &end, &output, no_short);
+            cmd_backtest(&_config, &cache_dir, &start, &end, &output, no_short, no_optimizer);
         }
         Commands::Analyze {
             start,
@@ -514,6 +514,7 @@ fn cmd_backtest(
     end_str: &str,
     output_dir: &PathBuf,
     no_short: bool,
+    no_optimizer: bool,
 ) {
     let start = chrono::NaiveDate::parse_from_str(start_str, "%Y-%m-%d")
         .expect("Invalid start date (expected YYYY-MM-DD)");
@@ -633,23 +634,76 @@ fn cmd_backtest(
             config.strategy.missing_factor_max_penalty,
         );
 
-        // === Tiered portfolio: 60% large cap + 25% IPO + 15% small cap ===
-        let tiered_config = quant_strategy::tiered::TieredConfig::default();
-        let mut combined = quant_strategy::tiered::select_tiered_portfolio(
-            date, &processed_factors, &factor_weights_map, &cache, &tiered_config,
-            &prev_holdings,
+        // === Regime detection (4-dimensional composite) ===
+        let regime_state = quant_strategy::regime::detect(&cache, &config.regime, date);
+        let regime_ratio = quant_strategy::regime::holdings_ratio(
+            regime_state.strength, config.regime.bear_holdings_ratio,
         );
+
+        // === Portfolio construction: MVO or Tiered ===
+        let use_optimizer = config.optimizer.enabled && !no_optimizer;
+        let mut combined: rustc_hash::FxHashMap<quant_core::types::TickerId, f64>;
+
+        if use_optimizer {
+            // MVO path: build covariance → optimize
+            let candidate_tickers: Vec<quant_core::types::TickerId> = scores.keys().copied().collect();
+            let (returns_opt, cov_tickers) = quant_strategy::optimizer::build_returns_matrix(
+                &cache, date, &candidate_tickers,
+                config.optimizer.cov_lookback, config.optimizer.min_history_days,
+            );
+
+            if let Some(returns) = returns_opt {
+                let (cov, _shrinkage) = quant_strategy::optimizer::ledoit_wolf(&returns);
+
+                // Collect previous weights from last signal
+                let prev_weights: rustc_hash::FxHashMap<quant_core::types::TickerId, f64> = signals
+                    .values().next_back()
+                    .cloned()
+                    .unwrap_or_default();
+
+                let net_exp = if no_short { 1.0 } else { config.short.net_exposure };
+                let mvo_result = quant_strategy::optimizer::optimize(
+                    &scores, &cov, &cov_tickers, &prev_weights,
+                    &cache.sector_map, &config.optimizer,
+                    net_exp, !no_short,
+                );
+                combined = mvo_result.weights;
+            } else {
+                // Fallback to tiered if covariance estimation fails
+                let tiered_config = quant_strategy::tiered::TieredConfig::default();
+                combined = quant_strategy::tiered::select_tiered_portfolio(
+                    date, &processed_factors, &factor_weights_map, &cache, &tiered_config,
+                    &prev_holdings,
+                );
+            }
+        } else {
+            // Tiered portfolio: 60% large cap + 25% IPO + 15% small cap
+            let tiered_config = quant_strategy::tiered::TieredConfig::default();
+            combined = quant_strategy::tiered::select_tiered_portfolio(
+                date, &processed_factors, &factor_weights_map, &cache, &tiered_config,
+                &prev_holdings,
+            );
+        }
+
         // Update prev_holdings for next period's stickiness
         prev_holdings = combined.keys()
             .filter(|t| combined.get(t).map(|&w| w > 0.0).unwrap_or(false))
             .copied()
             .collect();
 
-        // Regime-adaptive short overlay
-        if !no_short {
+        // === Regime-adaptive position scaling ===
+        // In bear markets, scale down all positions (both long and short)
+        if regime_ratio < 0.99 {
+            for v in combined.values_mut() {
+                *v *= regime_ratio;
+            }
+        }
+
+        // === Regime-adaptive short overlay (non-MVO path) ===
+        if !no_short && !use_optimizer {
             let short_config = quant_strategy::short::ShortConfig::default();
-            let regime_scale = quant_strategy::short::regime_short_scale(date, &cache, 60);
-            let short_exposure = short_config.base_short_exposure * regime_scale;
+            // Use regime strength directly instead of the old simple MA check
+            let short_exposure = short_config.base_short_exposure * regime_state.strength.min(1.0);
 
             if short_exposure > 0.01 {
                 // Scale long weights down to make room for shorts
@@ -758,6 +812,36 @@ fn cmd_backtest(
                 bm_ret * 100.0,
                 (strat_ret - bm_ret) * 100.0,
             );
+        }
+    }
+
+    // Capture ratios
+    if result.nav.len() > 60 && result.benchmark_nav.len() > 60 {
+        let cap = quant_backtest::ff5::capture_ratios(&result.nav, &result.benchmark_nav);
+        println!("\nCapture Ratios (monthly):");
+        println!("  Up Capture:       {:>10.2}%", cap.up_capture * 100.0);
+        println!("  Down Capture:     {:>10.2}%", cap.down_capture * 100.0);
+        println!("  Capture Ratio:    {:>10.2}", cap.capture_ratio);
+        println!("  ({} up months, {} down months)", cap.n_up_months, cap.n_down_months);
+    }
+
+    // FF5 regression (if data file exists)
+    let ff5_path = cache_dir.join("ff5_daily.csv");
+    if ff5_path.exists() && result.nav.len() > 60 {
+        let ff5_data = quant_backtest::ff5::load_ff5_csv(&ff5_path, true);
+        if !ff5_data.is_empty() {
+            let ff5_results = quant_backtest::ff5::analyze(&result.nav, &ff5_data, false);
+            if let Some(full) = ff5_results.first() {
+                println!("\nFama-French 5-Factor Regression:");
+                println!("  Alpha (ann):      {:>10.2}% (t={:.2})", full.alpha_annualized * 100.0, full.alpha_t_stat);
+                println!("  R²:               {:>10.3}", full.r_squared);
+                for name in quant_backtest::ff5::FACTOR_NAMES {
+                    if let Some(&b) = full.betas.get(*name) {
+                        println!("  β_{:<12}    {:>10.3}", name, b);
+                    }
+                }
+                println!("  Observations:     {:>10}", full.n_obs);
+            }
         }
     }
 
