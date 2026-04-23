@@ -143,8 +143,8 @@ fn select_with_stickiness(
     if scored.is_empty() { return vec![]; }
 
     let n = scored.len();
-    let keep_threshold = 0;  // Disabled: no stickiness (full rebalance each period is optimal)
-    let new_threshold = n;  // All candidates eligible
+    let keep_threshold = n * 20 / 100;  // top 20% → keep (tight: only keep truly strong holdings)
+    let new_threshold = n * 10 / 100;  // top 10% → eligible to enter (high bar for new positions)
 
     // Step 1: Keep existing holdings that are still in top 50%
     let mut kept: Vec<TickerId> = Vec::new();
@@ -196,7 +196,7 @@ fn score_tier(
     scored
 }
 
-/// Tier 1: Score large cap stocks (returns sorted scored list).
+/// Tier 1: Score large cap stocks by factor model (individual stock scoring).
 fn select_large_cap_scored(
     date: Date,
     factors: &HashMap<String, FxHashMap<TickerId, f64>>,
@@ -204,7 +204,6 @@ fn select_large_cap_scored(
     cache: &DataCache,
     config: &TieredConfig,
 ) -> Vec<(TickerId, f64)> {
-    // Universe: $50B+ market cap, traded today
     let candidates: Vec<TickerId> = cache.daily_prices.iter_date(date)
         .filter(|(tid, bar)| {
             bar.close > 0.0 && bar.volume > 0.0
@@ -215,24 +214,11 @@ fn select_large_cap_scored(
 
     if candidates.is_empty() { return vec![]; }
 
-    // Large cap scoring: balanced quality + momentum + analyst
     let tier1_factors = [
-        // Quality (solid foundation)
-        ("PIOTROSKI_F", 1.5),
-        ("ROE_TTM", 1.5),
-        ("PROFIT_STB", 1.0),
-        // Momentum (trend following)
-        ("MOM_12M", 2.0),
-        ("MOM_3M", 1.0),
-        ("PRICE_52W_HIGH", 1.0),
-        // Analyst / earnings signals
-        ("EARNINGS_SURPRISE", 2.0),
-        ("EPS_REVISION", 1.5),
-        ("PRICE_TARGET_RATIO", 1.5),
-        // Growth acceleration
-        ("REVENUE_ACCELERATION", 2.5),  // 2nd derivative — key signal for NVDA-type stocks
-        ("REVENUE_GROWTH", 1.5),
-        ("EARNINGS_GROWTH", 1.5),
+        ("PIOTROSKI_F", 1.5), ("ROE_TTM", 1.5), ("PROFIT_STB", 1.0),
+        ("MOM_12M", 2.0), ("MOM_3M", 1.0), ("PRICE_52W_HIGH", 1.0),
+        ("EARNINGS_SURPRISE", 2.0), ("EPS_REVISION", 1.5), ("PRICE_TARGET_RATIO", 1.5),
+        ("REVENUE_ACCELERATION", 2.5), ("REVENUE_GROWTH", 1.5), ("EARNINGS_GROWTH", 1.5),
     ];
 
     score_tier(&candidates, &tier1_factors, factors)
