@@ -4,6 +4,16 @@
 cache_dir = "../cache"
 output_dir = "../output"
 
+[database]
+# Override via environment: DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_DATABASE, DB_SCHEMA
+host = ""
+port = 5432
+user = ""
+password = ""
+database = ""
+schema = "quant"
+max_connections = 10
+
 [universe]
 min_market_cap = 5e8          # $500M
 min_daily_volume = 1e6        # $1M average

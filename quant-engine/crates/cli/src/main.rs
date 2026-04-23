@@ -92,6 +92,9 @@ enum Commands {
         no_short: bool,
     },
 
+    /// Show database table row counts and connection status.
+    DbStatus,
+
     /// Run factor analysis (IC / Fama-MacBeth / Decay).
     Analyze {
         #[arg(long)]
@@ -157,6 +160,9 @@ fn main() {
         }
         Commands::Score { date, top } => {
             info!("TODO: score --date {date} --top {top}");
+        }
+        Commands::DbStatus => {
+            cmd_db_status(&_config);
         }
         Commands::Backtest {
             start,
@@ -887,6 +893,59 @@ fn cmd_backtest(
     }
     std::fs::write(&nav_path, csv).ok();
     info!("NAV saved to {}", nav_path.display());
+}
+
+fn cmd_db_status(config: &quant_core::config::Config) {
+    let db_url = config.database.url();
+    let schema = &config.database.schema;
+    if db_url.contains("@:/") || db_url.contains("postgres://:@") {
+        eprintln!("Database not configured. Set DB_HOST, DB_USER, DB_PASSWORD, DB_DATABASE env vars.");
+        std::process::exit(1);
+    }
+
+    info!("Connecting to database...");
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    rt.block_on(async {
+        let pool = match quant_db::pool::create_pool(&db_url, schema, 2).await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Failed to connect: {e}");
+                std::process::exit(1);
+            }
+        };
+
+        let tables = [
+            "us_stock_basic", "us_daily_price", "us_financial_data", "us_key_metric",
+            "us_index_daily", "us_industry_class", "us_enterprise_value",
+            "us_analyst_recommendation", "us_earnings_surprise", "us_eps_estimate",
+            "us_corporate_action", "us_insider_trade", "us_macro_indicator",
+            "us_shares_float", "us_dark_pool_volume", "us_institutional_holder",
+            "us_employee_count", "us_congress_trade", "us_gov_contract", "us_lobbying",
+            "us_revenue_segment", "us_esg_rating", "us_company_profile",
+            "us_sec_filing", "us_press_release", "us_news",
+            "import_progress",
+        ];
+
+        println!("\n{:<35} {:>12}", "Table", "Rows");
+        println!("{}", "-".repeat(49));
+
+        let mut total = 0i64;
+        for table in &tables {
+            match quant_db::queries::us_read::count_rows(&pool, table).await {
+                Ok(count) => {
+                    println!("{:<35} {:>12}", table, count);
+                    total += count;
+                }
+                Err(_) => {
+                    println!("{:<35} {:>12}", table, "N/A");
+                }
+            }
+        }
+        println!("{}", "-".repeat(49));
+        println!("{:<35} {:>12}", "TOTAL", total);
+
+        pool.close().await;
+    });
 }
 
 fn estimate_memory(cache: &quant_data::cache::DataCache) -> f64 {

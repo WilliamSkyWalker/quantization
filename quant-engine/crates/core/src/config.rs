@@ -37,6 +37,9 @@ pub struct Config {
     pub short: ShortConfig,
 
     #[serde(default)]
+    pub database: DatabaseConfig,
+
+    #[serde(default)]
     pub optimizer: OptimizerConfig,
 
     #[serde(default)]
@@ -121,6 +124,60 @@ pub struct ShortConfig {
     pub borrow_fee: f64,
     pub borrow_fee_tiers: HashMap<String, f64>,
     pub factor_weights: HashMap<String, f64>,
+}
+
+/// Database connection parameters.
+#[derive(Debug, Deserialize)]
+pub struct DatabaseConfig {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub password: String,
+    pub database: String,
+    pub schema: String,
+    pub max_connections: u32,
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            host: std::env::var("DB_HOST").unwrap_or_default(),
+            port: std::env::var("DB_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(5432),
+            user: std::env::var("DB_USER").unwrap_or_default(),
+            password: std::env::var("DB_PASSWORD").unwrap_or_default(),
+            database: std::env::var("DB_DATABASE").unwrap_or_default(),
+            schema: std::env::var("DB_SCHEMA").unwrap_or_else(|_| "quant".to_string()),
+            max_connections: 10,
+        }
+    }
+}
+
+impl DatabaseConfig {
+    /// Build a PostgreSQL connection URL.
+    pub fn url(&self) -> String {
+        let host = if self.host.is_empty() {
+            std::env::var("DB_HOST").unwrap_or_else(|_| "localhost".to_string())
+        } else {
+            self.host.clone()
+        };
+        let user = if self.user.is_empty() {
+            std::env::var("DB_USER").unwrap_or_default()
+        } else {
+            self.user.clone()
+        };
+        let password = if self.password.is_empty() {
+            std::env::var("DB_PASSWORD").unwrap_or_default()
+        } else {
+            self.password.clone()
+        };
+        let database = if self.database.is_empty() {
+            std::env::var("DB_DATABASE").unwrap_or_default()
+        } else {
+            self.database.clone()
+        };
+        format!("postgres://{user}:{password}@{host}:{}/{}",
+            self.port, database)
+    }
 }
 
 /// MVO optimizer parameters.
@@ -329,6 +386,7 @@ impl Config {
             execution: ExecutionConfig::default(),
             regime: RegimeConfig::default(),
             short: ShortConfig::default(),
+            database: DatabaseConfig::default(),
             optimizer: OptimizerConfig::default(),
             factor_processing: FactorProcessingConfig::default(),
             category_weights,
