@@ -295,45 +295,102 @@ python3 cli.py polymarket history --min-volume 1000000      # Polymarket 历史
 
 ## Rust 计算引擎 (`quant-engine/`)
 
-因子计算和回测引擎正在从 Python 迁移到 Rust，解决 macOS multiprocessing fork crash 并提升性能。
+因子计算和回测引擎从 Python 迁移到 Rust，解决 macOS multiprocessing fork crash 并提升性能。
 
 **架构分工：**
 - **Python (Django)** — 数据下载、DB 写入、Web API、前端
 - **Rust (`quant-engine/`)** — 因子计算、回测模拟、因子分析（读 parquet 缓存）
 
-**技术栈：** Polars (parquet I/O) + rayon (并行) + nalgebra (线代) + OSQP (MVO 优化) + clap (CLI)
+**技术栈：** Polars (parquet I/O) + rayon (并行) + nalgebra (线代) + clap (CLI)
 
 ```bash
-# 构建
 cd quant-engine && cargo build --release
 
-# 验证缓存文件
-cargo run --release -- validate --cache-dir ../cache/
-
-# 单日因子计算
-cargo run --release -- factors --date 2024-12-31
-
-# 单日评分
-cargo run --release -- score --date 2024-12-31 --top 30
-
-# 完整回测
-cargo run --release -- backtest --start 2012-01-01 --end 2025-12-31 --output ../output/rust/
-
-# 因子分析（IC / Fama-MacBeth / Decay）
-cargo run --release -- analyze --start 2012-01-01 --end 2025-12-31
+cargo run --release -- validate --cache-dir ../cache/           # 验证缓存文件
+cargo run --release -- factors --date 2024-12-31 --cache-dir ../cache/  # 单日因子
+cargo run --release -- backtest --start 2012-01-01 --end 2025-12-31 --cache-dir ../cache/  # 回测
+cargo run --release -- analyze --start 2020-01-01 --end 2024-12-31 --cache-dir ../cache/   # IC + FM
 ```
 
-**Rust Workspace 结构：**
+**Workspace 结构：**
 ```
 quant-engine/
 ├── crates/
 │   ├── qrs-core/       核心类型 + 配置（TickerId, Config, Date）
-│   ├── qrs-data/       Parquet 加载 + DataCache + Universe 过滤
-│   ├── qrs-factors/    ~80 个因子（value/quality/momentum/... 8 大类）
-│   ├── qrs-strategy/   两层评分 + 滚动IC + Regime + MVO优化器
-│   ├── qrs-backtest/   仓位制 T+0 回测引擎 + 风控
+│   ├── qrs-data/       Parquet 加载 + PriceGrid + DataCache + Universe
+│   ├── qrs-factors/    77 个因子（11 大类）
+│   ├── qrs-strategy/   分层组合 + 滚动IC + Regime + 空头模型 + FM分析
+│   ├── qrs-backtest/   仓位制 T+0 回测引擎 + 风控 + 空头止损
 │   └── qrs-cli/        CLI 入口（clap derive）
 ```
+
+### Rust 引擎回测绩效（77 因子，2020-2024）
+
+| 指标 | 值 |
+|------|-----|
+| Annual Return | 14.4% |
+| S&P 500 | 12.8% |
+| **Excess** | **+2.74%** |
+| Sharpe | 0.58 |
+| Max Drawdown | -28.5% |
+| Annual Turnover | 249% |
+| 持仓数 | ~26（15 大盘 + 7 新股 + 4 小盘） |
+| 运行时间 | ~50s（14 年完整回测） |
+
+### 策略架构
+
+**分层组合（60% + 25% + 15%）：**
+- **Tier 1 大盘核心**（$50B+, 15 只）— 质量 + 动量 + 分析师 + REVENUE_ACCELERATION
+- **Tier 2 优质新股**（IPO < 2 年, 科技/医疗, 营收增速 > 20%, 7 只）
+- **Tier 3 小盘动量**（$500M-$5B, 盈利, 动量 Top 10%, 4 只）
+- **空头叠加**（熊市才开启, 4 维 Regime 检测, 20% 止损）
+
+**持仓粘性：** Top 20% 才保留，跌出即换。换手率 249%（vs 无粘性 433%），excess 反而提升。
+
+### 策略探索与结论
+
+| 实验 | 结果 | 结论 |
+|------|------|------|
+| 行业中性化 | Sharpe 0.22→0.13 | Alpha 来自行业配置，中性化后选股 alpha 归零。**关闭** |
+| 滚动 IC 方向翻转 | Sharpe 降到 -0.05 | IC 太噪，方向判断不可靠。**只用 ICIR 分级权重，不翻方向** |
+| 空头（简单 Regime） | Annual -3.93% | 牛市做空被轧。**改为 4 维 Regime，牛市关闭空头** |
+| 周频调仓 | Sharpe 0.57（更低） | 换手翻倍但收益不增，因子信号是月频的。**保持月频** |
+| 持仓粘性 top 50% | Sharpe 0.37 | 太宽松，错过好股。**收紧到 top 20%** |
+| 持仓粘性 top 20% | **Sharpe 0.58, Turnover 249%** | 换手减半，excess 翻倍。**最优配置** |
+| 行业优先选股 | Sharpe 0.44 | 行业内选最大市值太无聊。**个股优先更好** |
+| REVENUE_ACCELERATION | Sharpe 0.56→0.60 | 营收加速度（二阶导）是最有价值的新因子 |
+| 纯多头 vs 多空 | 多头 Sharpe 0.22 | 15 只等权中盘股无法跟上 500 只市值加权大盘。**分层解决** |
+
+### 因子分析关键发现（IC + Fama-MacBeth）
+
+**IC 排名 Top 10（2020-2024, 60 月）：**
+
+| Factor | ICIR | t-stat | 含义 |
+|--------|------|--------|------|
+| EV_TO_FCF | +0.93 | 7.07*** | 自由现金流估值 |
+| EARNINGS_SURPRISE | +0.93 | 7.06*** | 盈利惊喜（PEAD） |
+| PIOTROSKI_F | +0.78 | 5.93*** | 财务健康度 |
+| QMJ_NET_PAYOUT | +0.74 | 5.67*** | 股东回报 |
+| BUYBACK_YIELD | +0.74 | 5.64*** | 回购收益率 |
+| PROFIT_STB | +0.72 | 5.49*** | 利润稳定性 |
+| COMPOSITE_ISSUANCE | -0.69 | -5.24*** | 发股稀释（反向） |
+| EV_TO_EBIT | +0.67 | 5.12*** | EBIT 估值 |
+| AMIHUD_ILLIQ | -0.65 | -4.94*** | 流动性（反向） |
+| SUE_PEAD | +0.60 | 4.58*** | 标准化盈利惊喜 |
+
+**Fama-MacBeth 结论：** 76 因子多因子截面回归，最高 MOM_12M t=2.49，**无因子达到 HLZ |t|>3.0 显著性**。因子间共线性高，独立边际贡献弱。
+
+**核心发现：** 因子体系的 alpha 主要来自行业配置 beta（超配科技/成长），不是截面选股。分层组合通过 Tier 1 大盘核心跟住基准，Tier 2/3 捕捉 IPO 和小盘动量提供额外 alpha。
+
+### 性能优化路径
+
+| 版本 | 总时间 | 优化 |
+|------|--------|------|
+| 初版 | 3:44 | 全量 33M 行 HashMap |
+| +date 过滤 | 2:06 | Polars predicate pushdown |
+| +rayon | 1:19 | 72 因子并行计算 |
+| +PriceGrid | 31s | flat Vec O(1) 替代 HashMap |
+| +iter_date_range | **47s (14年)** | 窗口因子不遍历全量 |
 
 ## 详细文档
 
