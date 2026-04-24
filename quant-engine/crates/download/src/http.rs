@@ -96,9 +96,10 @@ impl ApiClient {
         Err("Max retries exceeded".to_string())
     }
 
-    /// Build a FMP API URL.
+    /// Build a FMP stable URL: https://financialmodelingprep.com/stable/{endpoint}
+    /// (Python: _fmp_get_stable)
     pub fn fmp_url(path: &str, api_key: &str, params: &[(&str, &str)]) -> String {
-        let mut url = format!("https://financialmodelingprep.com/api/stable/{path}?apikey={api_key}");
+        let mut url = format!("https://financialmodelingprep.com/stable/{path}?apikey={api_key}");
         for (k, v) in params {
             url.push('&');
             url.push_str(k);
@@ -160,9 +161,18 @@ impl ApiClient {
         Err("Max retries exceeded".to_string())
     }
 
-    /// Build a FMP v3 API URL.
+    /// Build a FMP versioned URL: https://financialmodelingprep.com/api/{version}/{path}
+    /// (Python: _fmp_get_json with version param)
     pub fn fmp_url_v3(path: &str, api_key: &str, params: &[(&str, &str)]) -> String {
-        let mut url = format!("https://financialmodelingprep.com/api/v3/{path}?apikey={api_key}");
+        Self::fmp_url_versioned(path, api_key, "v3", params)
+    }
+
+    pub fn fmp_url_v4(path: &str, api_key: &str, params: &[(&str, &str)]) -> String {
+        Self::fmp_url_versioned(path, api_key, "v4", params)
+    }
+
+    fn fmp_url_versioned(path: &str, api_key: &str, version: &str, params: &[(&str, &str)]) -> String {
+        let mut url = format!("https://financialmodelingprep.com/api/{version}/{path}?apikey={api_key}");
         for (k, v) in params {
             url.push('&');
             url.push_str(k);

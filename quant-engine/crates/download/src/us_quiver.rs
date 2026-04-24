@@ -105,7 +105,7 @@ impl QuiverDownloader {
             for p in &params { query = query.bind(p); }
             match query.execute(&self.pool).await {
                 Ok(r) => total += r.rows_affected() as usize,
-                Err(e) => warn!("Upsert {table} failed: {e}"),
+                Err(e) => tracing::error!("Upsert {table} failed: {e}"),
             }
         }
         total

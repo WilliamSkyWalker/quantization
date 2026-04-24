@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 use sqlx::PgPool;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::http::ApiClient;
 
@@ -88,7 +88,7 @@ impl FredDownloader {
         let resp = match self.client.get_json(&url).await {
             Ok(v) => v,
             Err(e) => {
-                warn!("FRED {indicator_code} ({fred_series}): {e}");
+                error!("FRED {indicator_code} ({fred_series}): {e}");
                 return 0;
             }
         };
@@ -158,7 +158,7 @@ impl FredDownloader {
 
         match query.execute(&self.pool).await {
             Ok(r) => r.rows_affected() as usize,
-            Err(e) => { warn!("FRED upsert {table}: {e}"); 0 }
+            Err(e) => { error!("FRED upsert {table}: {e}"); 0 }
         }
     }
 }

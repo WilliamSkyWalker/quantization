@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 use sqlx::PgPool;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::camel::snake_keys;
 use crate::http::ApiClient;
@@ -40,12 +40,23 @@ impl FmpDownloader {
         }
     }
 
+    /// FMP versioned API: /api/v3/{path} (Python: _fmp_get_json with version="v3")
     async fn fmp_get_v3(&self, path: &str, params: &[(&str, &str)]) -> Vec<Value> {
         let url = ApiClient::fmp_url_v3(path, &self.api_key, params);
         match self.client.get_json(&url).await {
             Ok(Value::Array(arr)) => arr,
             Ok(other) => if other.is_object() { vec![other] } else { vec![] },
             Err(e) => { warn!("FMP v3 {path}: {e}"); vec![] }
+        }
+    }
+
+    /// FMP v4 API: /api/v4/{path} (Python: _fmp_get_json with version="v4")
+    async fn fmp_get_v4(&self, path: &str, params: &[(&str, &str)]) -> Vec<Value> {
+        let url = ApiClient::fmp_url_v4(path, &self.api_key, params);
+        match self.client.get_json(&url).await {
+            Ok(Value::Array(arr)) => arr,
+            Ok(other) => if other.is_object() { vec![other] } else { vec![] },
+            Err(e) => { warn!("FMP v4 {path}: {e}"); vec![] }
         }
     }
 
@@ -103,25 +114,12 @@ impl FmpDownloader {
         let chunk_size = 500;
         let mut total = 0usize;
 
-        for chunk in rows.chunks(chunk_size) {
-            let n_cols = columns.len();
-            let mut param_idx = 1u32;
-            let mut values_clauses = Vec::with_capacity(chunk.len());
-            let mut params: Vec<String> = Vec::with_capacity(chunk.len() * n_cols);
+        // Insert one row at a time with typed bindings.
+        // This is slower than batch but ensures correct types for PostgreSQL.
+        for row in rows {
+            let obj = match row.as_object() { Some(m) => m, None => continue };
 
-            for row in chunk {
-                let obj = match row.as_object() { Some(m) => m, None => continue };
-                let placeholders: Vec<String> = columns.iter().map(|col| {
-                    let p = format!("${param_idx}");
-                    param_idx += 1;
-                    params.push(json_to_sql_string(obj.get(col).unwrap_or(&Value::Null)));
-                    p
-                }).collect();
-                values_clauses.push(format!("({})", placeholders.join(", ")));
-            }
-
-            if values_clauses.is_empty() { continue; }
-
+            let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("${i}")).collect();
             let col_list = columns.join(", ");
             let conflict_cols = unique_keys.join(", ");
             let update_set: String = columns.iter()
@@ -130,19 +128,27 @@ impl FmpDownloader {
                 .collect::<Vec<_>>().join(", ");
 
             let sql = if update_set.is_empty() {
-                format!("INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO NOTHING",
-                    values_clauses.join(", "))
+                format!("INSERT INTO {table} ({col_list}) VALUES ({}) ON CONFLICT ({conflict_cols}) DO NOTHING",
+                    placeholders.join(", "))
             } else {
-                format!("INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO UPDATE SET {update_set}",
-                    values_clauses.join(", "))
+                format!("INSERT INTO {table} ({col_list}) VALUES ({}) ON CONFLICT ({conflict_cols}) DO UPDATE SET {update_set}",
+                    placeholders.join(", "))
             };
 
             let mut query = sqlx::query(&sql);
-            for p in &params { query = query.bind(p); }
+            for col in &columns {
+                let val = obj.get(col).unwrap_or(&Value::Null);
+                query = bind_json_value(query, val);
+            }
 
             match query.execute(&self.pool).await {
                 Ok(r) => total += r.rows_affected() as usize,
-                Err(e) => warn!("Upsert {table} failed: {e}"),
+                Err(e) => {
+                    // Log first failure only, don't spam
+                    if total == 0 {
+                        error!("Upsert {table} failed: {e}");
+                    }
+                }
             }
         }
         total
@@ -155,10 +161,18 @@ impl FmpDownloader {
     // ── 1. Stock List ───────────────────────────────────────────────────
 
     pub async fn download_stock_list(&self) -> usize {
-        info!("Downloading FMP stock list...");
-        let data = self.fmp_get_v3("stock/list", &[]).await;
-        if data.is_empty() { return 0; }
-        let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
+        info!("Downloading FMP stock list (stock-screener)...");
+        // Python uses v3/stock-screener per exchange, NOT v3/stock/list
+        let mut all_data = Vec::new();
+        for exchange in &["NYSE", "NASDAQ", "AMEX"] {
+            let data = self.fmp_get_v3("stock-screener", &[
+                ("exchange", exchange), ("limit", "20000"), ("isActivelyTrading", "true"),
+            ]).await;
+            info!("FMP stock-screener {exchange}: {} rows", data.len());
+            all_data.extend(data);
+        }
+        if all_data.is_empty() { return 0; }
+        let rows: Vec<Value> = all_data.into_iter().map(|v| snake_keys(&v)).collect();
 
         // Also extract industry classification
         let ind_rows: Vec<Value> = rows.iter().filter_map(|v| {
@@ -229,7 +243,7 @@ impl FmpDownloader {
         total
     }
 
-    async fn download_daily_price_one(&self, ticker: &str, start_year: i32, today: &str) -> usize {
+    pub async fn download_daily_price_one(&self, ticker: &str, start_year: i32, today: &str) -> usize {
         let end_year: i32 = today[..4].parse().unwrap_or(2025);
         let mut count = 0;
         let mut yr = start_year;
@@ -406,7 +420,7 @@ impl FmpDownloader {
         for ticker in &pending {
             // Paginated v4 endpoint
             for page in 0..50 {
-                let data = self.fmp_get_v3("insider-trading",
+                let data = self.fmp_get_v4("insider-trading",
                     &[("symbol", ticker), ("page", &page.to_string()), ("limit", "100")]).await;
                 if data.is_empty() { break; }
                 let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
@@ -584,9 +598,9 @@ impl FmpDownloader {
 
         for (endpoint_type, code, param) in &indicators {
             let data = if *endpoint_type == "treasury" {
-                self.fmp_get_v3("treasury", &[("from", "2000-01-01"), ("to", "2026-12-31")]).await
+                self.fmp_get_v4("treasury", &[("from", "2000-01-01"), ("to", "2026-12-31")]).await
             } else {
-                self.fmp_get_v3(&format!("economic?name={param}"), &[]).await
+                self.fmp_get_v4(&format!("economic?name={param}"), &[]).await
             };
 
             if data.is_empty() { continue; }
@@ -623,16 +637,14 @@ impl FmpDownloader {
         let pb = ticker_progress(pending.len() as u64, "Congress Trading");
         let mut total = 0;
         for ticker in &pending {
-            for page in 0..20 {
-                let data = self.fmp_get_v3("senate-trading", &[
-                    ("symbol", ticker), ("page", &page.to_string()),
-                ]).await;
-                if data.is_empty() { break; }
-                let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
-                let n = rows.len();
-                total += self.upsert_rows("us_congress_trade", &rows,
-                    &["ticker", "transaction_date", "first_name", "last_name", "type"]).await;
-                if n < 50 { break; }
+            // Python: stable/senate-trades + stable/house-trades (NOT v3/senate-trading)
+            for endpoint in &["senate-trades", "house-trades"] {
+                let data = self.fmp_get(endpoint, &[("symbol", ticker.as_str())]).await;
+                if !data.is_empty() {
+                    let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
+                    total += self.upsert_rows("us_congress_trade", &rows,
+                        &["ticker", "transaction_date", "first_name", "last_name", "type"]).await;
+                }
             }
             self.mark_done("us_congress_trade", ticker).await;
             pb.inc(1);
@@ -644,8 +656,26 @@ impl FmpDownloader {
     // ── 25. Press Releases ──────────────────────────────────────────────
 
     pub async fn download_press_releases(&self) -> usize {
-        self.simple_per_ticker("us_press_release", &["ticker", "url"], "Press Releases",
-            "press-releases", &[("limit", "1000")]).await
+        // Python: _fmp_get_stable("news/press-releases", params={"symbols": ticker, "limit": 500})
+        // Note: uses "symbols" not "symbol"
+        let tickers = self.get_stocks_only_tickers().await;
+        let done = self.get_done_tickers("us_press_release").await;
+        let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
+        if pending.is_empty() { return 0; }
+
+        let pb = ticker_progress(pending.len() as u64, "Press Releases");
+        let mut total = 0;
+        for ticker in &pending {
+            let data = self.fmp_get("news/press-releases", &[("symbols", ticker.as_str()), ("limit", "500")]).await;
+            if !data.is_empty() {
+                let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
+                total += self.upsert_rows("us_press_release", &rows, &["ticker", "url"]).await;
+            }
+            self.mark_done("us_press_release", ticker).await;
+            pb.inc(1);
+        }
+        pb.finish_with_message(format!("{total} rows"));
+        total
     }
 
     // ── 26. Revenue Segments ────────────────────────────────────────────
@@ -685,7 +715,8 @@ impl FmpDownloader {
     // ── 27. Delisted Companies ──────────────────────────────────────────
 
     pub async fn download_delisted(&self) -> usize {
-        let data = self.fmp_get_v3("delisted-companies", &[("limit", "10000")]).await;
+        // Python: _fmp_get_stable("delisted-companies")
+        let data = self.fmp_get("delisted-companies", &[]).await;
         if data.is_empty() { return 0; }
         let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
         self.upsert_rows("us_delisted", &rows, &["ticker"]).await
@@ -694,7 +725,8 @@ impl FmpDownloader {
     // ── 28. Symbol Changes ──────────────────────────────────────────────
 
     pub async fn download_symbol_changes(&self) -> usize {
-        let data = self.fmp_get_v3("symbol_change", &[]).await;
+        // Python: _fmp_get_stable("symbol-change")
+        let data = self.fmp_get("symbol-change", &[]).await;
         if data.is_empty() { return 0; }
         let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
         self.upsert_rows("us_symbol_change", &rows, &["old_symbol", "new_symbol", "date"]).await
@@ -910,12 +942,39 @@ fn merge_three_statements(is_data: &[Value], bs_data: &[Value], cf_data: &[Value
     result
 }
 
-fn json_to_sql_string(val: &Value) -> String {
+/// Bind a JSON value to a sqlx query with the correct PostgreSQL type.
+/// Detects date strings (YYYY-MM-DD) and binds as NaiveDate.
+fn bind_json_value<'q>(
+    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    val: &'q Value,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
     match val {
-        Value::Null => String::new(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => s.clone(),
-        _ => val.to_string(),
+        Value::Null => query.bind(Option::<String>::None),
+        Value::Bool(b) => query.bind(*b),
+        Value::Number(n) => {
+            if let Some(f) = n.as_f64() {
+                query.bind(f)
+            } else if let Some(i) = n.as_i64() {
+                query.bind(i)
+            } else {
+                query.bind(n.to_string())
+            }
+        }
+        Value::String(s) => {
+            // Detect date format: YYYY-MM-DD (10 chars, matches pattern)
+            if s.len() == 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-') {
+                if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                    return query.bind(date);
+                }
+            }
+            // Detect datetime format: YYYY-MM-DD HH:MM:SS (19+ chars)
+            if s.len() >= 19 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(10) == Some(&b' ') {
+                if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&s[..19], "%Y-%m-%d %H:%M:%S") {
+                    return query.bind(dt);
+                }
+            }
+            query.bind(s.as_str())
+        }
+        _ => query.bind(val.to_string()),
     }
 }

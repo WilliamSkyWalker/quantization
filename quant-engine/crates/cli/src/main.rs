@@ -112,6 +112,10 @@ enum Commands {
         /// Incremental update (only fetch new data).
         #[arg(long)]
         incremental: bool,
+
+        /// Only process this ticker (for testing).
+        #[arg(long)]
+        ticker: Option<String>,
     },
 
     /// Run factor analysis (IC / Fama-MacBeth / Decay).
@@ -191,8 +195,8 @@ fn main() {
         Commands::DbStatus => {
             cmd_db_status(&_config);
         }
-        Commands::Download { source, target, start_year, incremental } => {
-            cmd_download(&_config, &source, &target, start_year, incremental);
+        Commands::Download { source, target, start_year, incremental, ticker } => {
+            cmd_download(&_config, &source, &target, start_year, incremental, ticker.as_deref());
         }
         Commands::Backtest {
             start,
@@ -931,6 +935,7 @@ fn cmd_download(
     target: &str,
     start_year: i32,
     incremental: bool,
+    ticker: Option<&str>,
 ) {
     let db_url = config.database.url();
     let schema = &config.database.schema;
@@ -964,7 +969,15 @@ fn cmd_download(
                     match target {
                         "stock_list" => { dl.download_stock_list().await; }
                         "profile" => { dl.download_company_profiles().await; }
-                        "daily_price" => { dl.download_daily_prices(start_year, incremental).await; }
+                        "daily_price" => {
+                            if let Some(t) = ticker {
+                                let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                                let n = dl.download_daily_price_one(t, start_year, &today).await;
+                                info!("daily_price {t}: {n} rows");
+                            } else {
+                                dl.download_daily_prices(start_year, incremental).await;
+                            }
+                        }
                         "financial" => {
                             if incremental { dl.download_financials_incremental().await; }
                             else { dl.download_financials().await; }
