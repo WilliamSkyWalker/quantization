@@ -11,10 +11,10 @@ Claude Code 编码规范。**所有代码变更必须遵守，无例外。**
 3. **严禁凭记忆写 API 调用** — 必须查文档或调一次 API 看真实返回。Tushare/AkShare 文档可能过时，以实际返回为准。
 4. **严禁编造 import 路径** — 必须先确认项目目录结构和模块是否存在。
 5. **API 返回什么就存什么** — 不做字段过滤、不只映射"觉得有用的"列。col_map 必须覆盖 API 返回的每一列。写 model 前调一次 API 对比列数。
-6. **对标参考实现** — 新增模块必须完整读完参考实现（整个文件），1:1 复刻：类结构、多线程、断点续跑、增量逻辑、错误处理、日志格式。
+6. **对标参考实现** — 新增模块必须完整读完参考实现（整个文件），1:1 复刻：类结构、多线程、断点续跑、增量逻辑、错误处理、日志格式。**[违反 1 次：2026-04-23 Rust FMP 下载器 40 个方法只给 daily_price 写了增量逻辑，其余 39 个没做，用户指出"你根本没做完"]**
 7. **用户说"对齐/一致" = 逐层 diff** — 类结构 → 并发模型 → 断点 → 增量 → 错误处理 → 日志，写成表格给用户看。不是口头说"差不多"。
 8. **禁止静默失败** — 每个 `return/continue/break` 前必须有 `logger`。数据跳过、空返回必须打日志。
-9. **每次修改后验证** — `python3 manage.py check` + import smoke test + 真实 API 调用 + `SELECT COUNT(*)` 确认入库。不能只检查语法。**[违反 1 次：未清 import_progress 就跑 smoke test，财报 4 表假通]**
+9. **每次修改后验证** — `python3 manage.py check` + import smoke test + 真实 API 调用 + `SELECT COUNT(*)` 确认入库。不能只检查语法。**[违反 2 次：未清 import_progress 就跑 smoke test，财报 4 表假通；2026-04-23 MVO 优化器把全 universe 2700 只股票作为候选池，没验证就 commit，导致 1373% 虚假收益]**
 10. **严禁重复犯同一个错误** — 被纠正一次，后续所有类似场景必须记住。**[违反 3 次：2026-04-21 多次给出前后矛盾的结论（"不需要删缓存"→"需要删缓存"→"不需要删"；"无法并行"→"可以并行"）；2026-04-22 已分析出 OBJC env var 需 os.execv 在进程启动前设置，动手时却选了 spawn 方案，导致每个 worker 重复加载 33M 行 daily price × 6 = 浪费内存+I/O]**
 11. **禁止快速补丁** — 不做 `.empty` → `.is_empty()` 这种逐行替换式的 quick fix。必须完整迁移整个文件，grep 确认全项目零残留。半吊子修复比不修更差。
 12. **大规模变更必须有验证门禁** — 涉及 >10 个文件的变更，commit 前必须：(1) `grep -rn "旧模式" | wc -l` 确认零残留；(2) 列出所有改动文件 vs 应改文件的 diff，确认无遗漏；(3) `python3 manage.py check` + 至少一个 smoke test。Agent 产出必须验证后再合并，不能盲信。**[违反 1 次：2026-04-21 polars 迁移只完成 25%，浪费 ~500K tokens]**
@@ -28,7 +28,7 @@ Claude Code 编码规范。**所有代码变更必须遵守，无例外。**
 13. **一次只做一件事** — 不在一个 commit 里同时重构 + 加功能。
 14. **不写 magic number** — 用类常量或 config。
 15. **不静默吞错误** — 至少 logger.warning。
-16. **不硬编码环境值** — URL、路径、密钥用环境变量。
+16. **不硬编码环境值** — URL、路径、密钥用环境变量。Rust CLI 必须自动加载 `.env` 文件（dotenvy），不能要求用户手动 `source .env && export`。**[违反 1 次：2026-04-24 用户跑 `quant download` 报 "Database not configured"，因为没读 .env]**
 17. **float 用 `_safe_float`** — 防空字符串/None/NaN。日期用 `_date_col_to_date`。datetime 用 timezone aware。
 18. **DataFrame 去重在 upsert 前做** — `drop_duplicates(subset=unique_keys, keep="last")`。
 19. **每个方法都用 ThreadPoolExecutor** — 除非数据量 < 20 条。每个方法都有 tqdm + logger.info 汇总。
