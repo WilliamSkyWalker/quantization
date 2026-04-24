@@ -952,7 +952,7 @@ fn cmd_download(
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     rt.block_on(async {
-        let pool = quant_db::pool::create_pool(&db_url, schema, 5).await
+        let pool = quant_db::pool::create_pool(&db_url, schema, 20).await
             .expect("Failed to connect to database");
 
         match source {
