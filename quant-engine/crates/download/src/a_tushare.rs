@@ -1,18 +1,24 @@
 //! Tushare Pro API downloader for A-share data.
 //!
 //! Tushare API: POST https://api.tushare.pro with JSON body.
-//! Rate limit: configurable (default 900 points/min).
+//! Rate limit: configurable (default 200 points/min).
 //! Convention: no `fields=` parameter — keep all fields returned by API.
 
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{json, Value};
 use sqlx::PgPool;
+use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 use crate::http::ApiClient;
 use crate::progress::ticker_progress;
 
+const MAX_CONCURRENT: usize = 10; // Tushare rate limit is stricter than FMP
+
+#[derive(Clone)]
 pub struct TushareDownloader {
     pub token: String,
     pub client: ApiClient,
@@ -23,7 +29,7 @@ impl TushareDownloader {
     pub fn new(token: String, pool: PgPool, rate_limit: u32) -> Self {
         Self {
             token,
-            client: ApiClient::new(rate_limit, 5),
+            client: ApiClient::new(rate_limit, MAX_CONCURRENT),
             pool,
         }
     }
@@ -38,17 +44,11 @@ impl TushareDownloader {
         });
 
         let url = "https://api.tushare.pro";
-
-        // Rate limit
         let resp = match self.client.post_json(url, &body).await {
             Ok(v) => v,
-            Err(e) => {
-                warn!("Tushare {api_name}: {e}");
-                return vec![];
-            }
+            Err(e) => { warn!("Tushare {api_name}: {e}"); return vec![]; }
         };
 
-        // Parse Tushare response format: { "data": { "fields": [...], "items": [[...], ...] } }
         let data = match resp.get("data") {
             Some(d) => d,
             None => {
@@ -68,7 +68,6 @@ impl TushareDownloader {
             None => return vec![],
         };
 
-        // Convert rows to JSON objects
         items.iter().filter_map(|row| {
             let arr = row.as_array()?;
             let mut obj = serde_json::Map::new();
@@ -80,6 +79,8 @@ impl TushareDownloader {
             Some(Value::Object(obj))
         }).collect()
     }
+
+    // ── DB helpers ──────────────────────────────────────────────────────
 
     async fn get_done_tickers(&self, table: &str) -> HashSet<String> {
         sqlx::query_scalar::<_, String>(
@@ -100,14 +101,48 @@ impl TushareDownloader {
         ).fetch_all(&self.pool).await.unwrap_or_default()
     }
 
+    async fn get_table_columns(&self, table: &str) -> HashSet<String> {
+        let sql = format!(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = '{table}'"
+        );
+        let rows: Vec<(String,)> = sqlx::query_as(&sql)
+            .fetch_all(&self.pool).await.unwrap_or_default();
+        rows.into_iter().map(|(c,)| c).collect()
+    }
+
+    async fn get_ticker_latest(&self, table: &str, date_field: &str) -> std::collections::HashMap<String, String> {
+        let sql = format!(
+            "SELECT ts_code, MAX({date_field})::text as latest FROM {table} GROUP BY ts_code"
+        );
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(&sql)
+            .fetch_all(&self.pool).await.unwrap_or_default();
+        rows.into_iter()
+            .filter_map(|(t, d)| d.map(|d| (t, d.trim().to_string())))
+            .collect()
+    }
+
     async fn upsert_rows(&self, table: &str, rows: &[Value], unique_keys: &[&str]) -> usize {
         if rows.is_empty() { return 0; }
         let first = match rows[0].as_object() { Some(m) => m, None => return 0 };
-        let columns: Vec<String> = first.keys().cloned().collect();
+
+        let db_columns = self.get_table_columns(table).await;
+        let columns: Vec<String> = first.keys()
+            .filter(|k| {
+                let k = k.as_str();
+                k != "id" && k != "updated_at" && (db_columns.is_empty() || db_columns.contains(k))
+            })
+            .cloned().collect();
         if columns.is_empty() { return 0; }
 
-        let chunk_size = 200;
-        let mut total = 0usize;
+        // Dedup
+        let mut seen = HashSet::new();
+        let deduped: Vec<&Value> = rows.iter().filter(|row| {
+            if let Some(obj) = row.as_object() {
+                let key: Vec<String> = unique_keys.iter()
+                    .map(|k| obj.get(*k).map(|v| v.to_string()).unwrap_or_default()).collect();
+                seen.insert(key)
+            } else { false }
+        }).collect();
 
         let col_list = columns.join(", ");
         let conflict_cols = unique_keys.join(", ");
@@ -116,12 +151,16 @@ impl TushareDownloader {
             .map(|c| format!("{c} = EXCLUDED.{c}"))
             .collect::<Vec<_>>().join(", ");
 
-        for chunk in rows.chunks(chunk_size) {
+        let chunk_size = 200;
+        let mut total = 0usize;
+        let mut error_count = 0usize;
+
+        for chunk in deduped.chunks(chunk_size) {
             let mut values_clauses = Vec::with_capacity(chunk.len());
             for row in chunk {
                 let obj = match row.as_object() { Some(m) => m, None => continue };
                 let vals: Vec<String> = columns.iter().map(|col| {
-                    to_sql_literal(obj.get(col).unwrap_or(&serde_json::Value::Null))
+                    to_sql_literal(obj.get(col).unwrap_or(&Value::Null))
                 }).collect();
                 values_clauses.push(format!("({})", vals.join(",")));
             }
@@ -137,10 +176,47 @@ impl TushareDownloader {
 
             match sqlx::query(&sql).execute(&self.pool).await {
                 Ok(r) => total += r.rows_affected() as usize,
-                Err(e) => tracing::error!("Upsert {table} failed: {e}"),
+                Err(e) => {
+                    error_count += 1;
+                    if error_count <= 3 { tracing::error!("Upsert {table} failed: {e}"); }
+                    if error_count == 3 { tracing::error!("Upsert {table}: suppressing further errors"); }
+                }
             }
         }
         total
+    }
+
+    /// Run per-item tasks concurrently.
+    async fn run_concurrent<F, Fut>(&self, items: Vec<String>, label: &str, task_fn: F) -> usize
+    where
+        F: Fn(TushareDownloader, String) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = usize> + Send + 'static,
+    {
+        if items.is_empty() { return 0; }
+        info!("{label}: {} items ({MAX_CONCURRENT} concurrent)", items.len());
+        let pb = Arc::new(ticker_progress(items.len() as u64, label));
+        let total = Arc::new(AtomicUsize::new(0));
+        let sem = Arc::new(Semaphore::new(MAX_CONCURRENT));
+        let task_fn = Arc::new(task_fn);
+
+        let mut handles = Vec::with_capacity(items.len());
+        for item in items {
+            let dl = self.clone();
+            let sem = sem.clone();
+            let total = total.clone();
+            let pb = pb.clone();
+            let task_fn = task_fn.clone();
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let n = task_fn(dl, item).await;
+                total.fetch_add(n, Ordering::Relaxed);
+                pb.inc(1);
+            }));
+        }
+        for h in handles { h.await.ok(); }
+        let t = total.load(Ordering::Relaxed);
+        pb.finish_with_message(format!("{t} rows"));
+        t
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -152,9 +228,7 @@ impl TushareDownloader {
         info!("Downloading Tushare stock list...");
         let mut total = 0;
         for status in ["L", "D", "P"] {
-            let data = self.tushare_call("stock_basic", &json!({
-                "list_status": status,
-            })).await;
+            let data = self.tushare_call("stock_basic", &json!({"list_status": status})).await;
             if !data.is_empty() {
                 total += self.upsert_rows("a_stock_basic", &data, &["ts_code"]).await;
             }
@@ -168,9 +242,7 @@ impl TushareDownloader {
         let mut total = 0;
         for exchange in ["SSE", "SZSE"] {
             let data = self.tushare_call("trade_cal", &json!({
-                "exchange": exchange,
-                "start_date": "20000101",
-                "end_date": "20261231",
+                "exchange": exchange, "start_date": "20000101", "end_date": "20261231",
             })).await;
             if !data.is_empty() {
                 total += self.upsert_rows("a_trade_cal", &data, &["exchange", "cal_date"]).await;
@@ -180,144 +252,134 @@ impl TushareDownloader {
         total
     }
 
-    /// Download daily prices (per trade_date, full market).
-    /// Merges: daily + daily_basic + adj_factor.
-    pub async fn download_daily_prices(&self, start_date: &str) -> usize {
-        info!("Downloading A-share daily prices from {start_date}...");
-
-        // Get trading days
+    /// Download daily prices (per trade_date, full market). Concurrent by date.
+    pub async fn download_daily_prices(&self, start_date: &str, incremental: bool) -> usize {
         let cal_data = self.tushare_call("trade_cal", &json!({
-            "exchange": "SSE",
-            "start_date": start_date,
-            "end_date": "20261231",
-            "is_open": 1,
+            "exchange": "SSE", "start_date": start_date, "end_date": "20261231", "is_open": 1,
         })).await;
 
         let trade_dates: Vec<String> = cal_data.iter().filter_map(|v| {
             v.get("cal_date").and_then(|d| d.as_str()).map(|s| s.to_string())
         }).collect();
 
-        let done = self.get_done_tickers("a_daily_price").await;
-        let pending: Vec<_> = trade_dates.iter()
-            .filter(|d| !done.contains(d.as_str()))
-            .cloned().collect();
+        let pending: Vec<String> = if incremental {
+            // Find latest date in DB, only process after that
+            let latest: Option<String> = sqlx::query_scalar(
+                "SELECT MAX(trade_date)::text FROM a_daily_price"
+            ).fetch_one(&self.pool).await.ok().flatten();
+            let cutoff = latest.unwrap_or_default();
+            trade_dates.into_iter().filter(|d| d.as_str() > cutoff.as_str()).collect()
+        } else {
+            let done = self.get_done_tickers("a_daily_price").await;
+            trade_dates.into_iter().filter(|d| !done.contains(d.as_str())).collect()
+        };
 
         if pending.is_empty() {
             info!("All trade dates done for a_daily_price");
             return 0;
         }
 
-        info!("Daily prices: {} trade dates to process", pending.len());
-        let pb = ticker_progress(pending.len() as u64, "A-Share Daily");
-        let mut total = 0;
-
-        for date in &pending {
-            // Fetch daily OHLC
-            let daily = self.tushare_call("daily", &json!({"trade_date": date})).await;
-            // Fetch daily basic (valuation)
-            let basic = self.tushare_call("daily_basic", &json!({"trade_date": date})).await;
-            // Fetch adj factor
-            let adj = self.tushare_call("adj_factor", &json!({"trade_date": date})).await;
-
-            // Merge by ts_code
+        self.run_concurrent(pending, "A-Share Daily", |dl, date| async move {
+            let daily = dl.tushare_call("daily", &json!({"trade_date": &date})).await;
+            let basic = dl.tushare_call("daily_basic", &json!({"trade_date": &date})).await;
+            let adj = dl.tushare_call("adj_factor", &json!({"trade_date": &date})).await;
             let merged = merge_daily(&daily, &basic, &adj);
+            let mut n = 0;
             if !merged.is_empty() {
-                total += self.upsert_rows("a_daily_price", &merged, &["ts_code", "trade_date"]).await;
+                n = dl.upsert_rows("a_daily_price", &merged, &["ts_code", "trade_date"]).await;
             }
-            self.mark_done("a_daily_price", date).await;
-            pb.inc(1);
-        }
-
-        pb.finish_with_message(format!("{total} rows"));
-        total
+            dl.mark_done("a_daily_price", &date).await;
+            n
+        }).await
     }
 
-    /// Download income statements (per ts_code).
-    pub async fn download_income(&self) -> usize {
-        self.download_financial_table("income", "a_financial_income",
-            &["ts_code", "end_date", "report_type"]).await
-    }
-
-    /// Download balance sheets.
-    pub async fn download_balancesheet(&self) -> usize {
-        self.download_financial_table("balancesheet", "a_financial_balance",
-            &["ts_code", "end_date", "report_type"]).await
-    }
-
-    /// Download cash flow statements.
-    pub async fn download_cashflow(&self) -> usize {
-        self.download_financial_table("cashflow", "a_financial_cashflow",
-            &["ts_code", "end_date", "report_type"]).await
-    }
-
-    /// Download financial indicators.
-    pub async fn download_fina_indicator(&self) -> usize {
-        self.download_financial_table("fina_indicator", "a_financial_indicator",
-            &["ts_code", "end_date"]).await
-    }
-
-    /// Generic per-ticker financial table download.
-    async fn download_financial_table(&self, api_name: &str, table: &str, unique_keys: &[&str]) -> usize {
+    /// Download financial table (per ts_code, concurrent).
+    async fn download_financial_table(&self, api_name: &str, table: &str, unique_keys: &[&str], incremental: bool) -> usize {
         let ts_codes = self.get_all_ts_codes().await;
-        let done = self.get_done_tickers(table).await;
-        let pending: Vec<_> = ts_codes.into_iter().filter(|t| !done.contains(t)).collect();
-        if pending.is_empty() { info!("{table}: all done"); return 0; }
 
-        info!("{table}: {} ts_codes to process", pending.len());
-        let pb = ticker_progress(pending.len() as u64, &format!("Tushare {api_name}"));
-        let mut total = 0;
+        let pending: Vec<String> = if incremental {
+            let latest = self.get_ticker_latest(table, "end_date").await;
+            let today = chrono::Local::now().format("%Y%m%d").to_string();
+            ts_codes.into_iter().filter(|t| {
+                match latest.get(t) {
+                    Some(d) => d.as_str() < &today[..8], // stale if older than today
+                    None => true, // no data yet
+                }
+            }).collect()
+        } else {
+            let done = self.get_done_tickers(table).await;
+            ts_codes.into_iter().filter(|t| !done.contains(t)).collect()
+        };
 
-        for ts_code in &pending {
-            let data = self.tushare_call(api_name, &json!({"ts_code": ts_code})).await;
-            if !data.is_empty() {
-                total += self.upsert_rows(table, &data, unique_keys).await;
+        let api_name = api_name.to_string();
+        let table = table.to_string();
+        let unique_keys: Vec<String> = unique_keys.iter().map(|s| s.to_string()).collect();
+        let is_incremental = incremental;
+
+        self.run_concurrent(pending, &format!("Tushare {api_name}"), move |dl, ts_code| {
+            let api_name = api_name.clone();
+            let table = table.clone();
+            let unique_keys = unique_keys.clone();
+            async move {
+                let data = dl.tushare_call(&api_name, &json!({"ts_code": &ts_code})).await;
+                let mut n = 0;
+                if !data.is_empty() {
+                    let uk_refs: Vec<&str> = unique_keys.iter().map(|s| s.as_str()).collect();
+                    n = dl.upsert_rows(&table, &data, &uk_refs).await;
+                }
+                if !is_incremental {
+                    dl.mark_done(&table, &ts_code).await;
+                }
+                n
             }
-            self.mark_done(table, ts_code).await;
-            pb.inc(1);
-        }
+        }).await
+    }
 
-        pb.finish_with_message(format!("{total} rows"));
-        total
+    pub async fn download_income(&self, incremental: bool) -> usize {
+        self.download_financial_table("income", "a_financial_income",
+            &["ts_code", "end_date", "report_type"], incremental).await
+    }
+
+    pub async fn download_balancesheet(&self, incremental: bool) -> usize {
+        self.download_financial_table("balancesheet", "a_financial_balance",
+            &["ts_code", "end_date", "report_type"], incremental).await
+    }
+
+    pub async fn download_cashflow(&self, incremental: bool) -> usize {
+        self.download_financial_table("cashflow", "a_financial_cashflow",
+            &["ts_code", "end_date", "report_type"], incremental).await
+    }
+
+    pub async fn download_fina_indicator(&self, incremental: bool) -> usize {
+        self.download_financial_table("fina_indicator", "a_financial_indicator",
+            &["ts_code", "end_date"], incremental).await
     }
 
     /// Download industry classification (Shenwan).
     pub async fn download_industry(&self) -> usize {
         info!("Downloading Shenwan industry classification...");
         let mut total = 0;
-
         for src in ["SW2021", "SW2014"] {
             for level in ["L1", "L2"] {
-                let indices = self.tushare_call("index_classify", &json!({
-                    "level": level, "src": src,
-                })).await;
-
+                let indices = self.tushare_call("index_classify", &json!({"level": level, "src": src})).await;
                 for idx in &indices {
                     let index_code = match idx.get("index_code").and_then(|v| v.as_str()) {
-                        Some(c) => c.to_string(),
-                        None => continue,
+                        Some(c) => c.to_string(), None => continue,
                     };
                     let index_name = idx.get("index_name").and_then(|v| v.as_str()).unwrap_or("");
                     let industry_name = idx.get("industry_name").and_then(|v| v.as_str()).unwrap_or(index_name);
 
-                    let members = self.tushare_call("index_member", &json!({
-                        "index_code": &index_code,
-                    })).await;
-
+                    let members = self.tushare_call("index_member", &json!({"index_code": &index_code})).await;
                     let rows: Vec<Value> = members.iter().filter_map(|m| {
                         let ts_code = m.get("con_code").or(m.get("ts_code")).and_then(|v| v.as_str())?;
-                        let in_date = m.get("in_date").and_then(|v| v.as_str()).unwrap_or("");
                         Some(json!({
-                            "ts_code": ts_code,
-                            "index_code": &index_code,
-                            "index_name": index_name,
-                            "industry_name": industry_name,
-                            "src": src,
-                            "level": level,
-                            "in_date": in_date,
+                            "ts_code": ts_code, "index_code": &index_code,
+                            "index_name": index_name, "industry_name": industry_name,
+                            "src": src, "level": level,
+                            "in_date": m.get("in_date").and_then(|v| v.as_str()).unwrap_or(""),
                             "out_date": m.get("out_date").and_then(|v| v.as_str()).unwrap_or(""),
                         }))
                     }).collect();
-
                     if !rows.is_empty() {
                         total += self.upsert_rows("a_industry_class", &rows,
                             &["ts_code", "src", "level", "index_code", "in_date"]).await;
@@ -337,12 +399,8 @@ impl TushareDownloader {
             ("000688.SH", "科创50"),
         ];
         let mut total = 0;
-
         for (code, name) in &indices {
-            let data = self.tushare_call("index_daily", &json!({
-                "ts_code": code,
-                "start_date": start_date,
-            })).await;
+            let data = self.tushare_call("index_daily", &json!({"ts_code": code, "start_date": start_date})).await;
             if !data.is_empty() {
                 total += self.upsert_rows("a_index_daily", &data, &["ts_code", "trade_date"]).await;
             }
@@ -356,7 +414,6 @@ impl TushareDownloader {
         info!("Downloading A-share macro indicators...");
         let mut total = 0;
 
-        // SHIBOR
         let data = self.tushare_call("shibor", &json!({"start_date": "20060101"})).await;
         for row in &data {
             let date = match row.get("date").and_then(|v| v.as_str()) { Some(d) => d, None => continue };
@@ -368,7 +425,6 @@ impl TushareDownloader {
             }
         }
 
-        // CPI
         let data = self.tushare_call("cn_cpi", &json!({"start_m": "200001"})).await;
         for row in &data {
             let month = match row.get("month").and_then(|v| v.as_str()) { Some(m) => m, None => continue };
@@ -379,7 +435,6 @@ impl TushareDownloader {
             }
         }
 
-        // PPI
         let data = self.tushare_call("cn_ppi", &json!({"start_m": "200001"})).await;
         for row in &data {
             let month = match row.get("month").and_then(|v| v.as_str()) { Some(m) => m, None => continue };
@@ -394,7 +449,7 @@ impl TushareDownloader {
         total
     }
 
-    /// Download all A-share data.
+    /// Download all A-share data (full).
     pub async fn download_all(&self, start_date: &str) -> usize {
         let mut total = 0;
         total += self.download_stock_list().await;
@@ -402,69 +457,73 @@ impl TushareDownloader {
         total += self.download_industry().await;
         total += self.download_index_daily(start_date).await;
         total += self.download_macro().await;
-        total += self.download_daily_prices(start_date).await;
-        total += self.download_income().await;
-        total += self.download_balancesheet().await;
-        total += self.download_cashflow().await;
-        total += self.download_fina_indicator().await;
+        total += self.download_daily_prices(start_date, false).await;
+        total += self.download_income(false).await;
+        total += self.download_balancesheet(false).await;
+        total += self.download_cashflow(false).await;
+        total += self.download_fina_indicator(false).await;
         info!("Tushare download_all total: {total}");
+        total
+    }
+
+    /// Incremental update all A-share data.
+    pub async fn update_all(&self) -> usize {
+        let mut total = 0;
+        total += self.download_stock_list().await;
+        total += self.download_daily_prices("20200101", true).await;
+        total += self.download_income(true).await;
+        total += self.download_balancesheet(true).await;
+        total += self.download_cashflow(true).await;
+        total += self.download_fina_indicator(true).await;
+        total += self.download_index_daily("20200101").await;
+        total += self.download_macro().await;
+        info!("Tushare update_all total: {total}");
         total
     }
 }
 
-/// Merge daily + daily_basic + adj_factor by ts_code.
+// ═══════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════
+
 fn merge_daily(daily: &[Value], basic: &[Value], adj: &[Value]) -> Vec<Value> {
     use std::collections::HashMap;
-
     let mut basic_map: HashMap<&str, &Value> = HashMap::new();
     for row in basic {
-        if let Some(code) = row.get("ts_code").and_then(|v| v.as_str()) {
-            basic_map.insert(code, row);
-        }
+        if let Some(code) = row.get("ts_code").and_then(|v| v.as_str()) { basic_map.insert(code, row); }
     }
     let mut adj_map: HashMap<&str, &Value> = HashMap::new();
     for row in adj {
-        if let Some(code) = row.get("ts_code").and_then(|v| v.as_str()) {
-            adj_map.insert(code, row);
-        }
+        if let Some(code) = row.get("ts_code").and_then(|v| v.as_str()) { adj_map.insert(code, row); }
     }
 
     daily.iter().filter_map(|row| {
         let code = row.get("ts_code").and_then(|v| v.as_str())?;
         let mut merged = row.as_object()?.clone();
-
-        // Overlay basic fields (skip ts_code/trade_date duplicates)
         if let Some(b) = basic_map.get(code) {
             if let Some(b_obj) = b.as_object() {
                 for (k, v) in b_obj {
-                    if k != "ts_code" && k != "trade_date" && !merged.contains_key(k) {
-                        merged.insert(k.clone(), v.clone());
-                    }
+                    if k != "ts_code" && k != "trade_date" && !merged.contains_key(k) { merged.insert(k.clone(), v.clone()); }
                 }
             }
         }
-
-        // Overlay adj_factor
         if let Some(a) = adj_map.get(code) {
             if let Some(a_obj) = a.as_object() {
                 for (k, v) in a_obj {
-                    if k != "ts_code" && k != "trade_date" && !merged.contains_key(k) {
-                        merged.insert(k.clone(), v.clone());
-                    }
+                    if k != "ts_code" && k != "trade_date" && !merged.contains_key(k) { merged.insert(k.clone(), v.clone()); }
                 }
             }
         }
-
         Some(Value::Object(merged))
     }).collect()
 }
 
-fn to_sql_literal(val: &serde_json::Value) -> String {
+fn to_sql_literal(val: &Value) -> String {
     match val {
-        serde_json::Value::Null => "NULL".to_string(),
-        serde_json::Value::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        Value::Null => "NULL".to_string(),
+        Value::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
         _ => format!("'{}'", val.to_string().replace('\'', "''")),
     }
 }

@@ -1059,23 +1059,27 @@ fn cmd_download(
                     ts_token, pool.clone(), rate_limit,
                 );
                 let start = format!("{start_year}0101");
-                match target {
-                    "stock_list" => { dl.download_stock_list().await; }
-                    "trade_cal" => { dl.download_trade_cal().await; }
-                    "daily_price" => { dl.download_daily_prices(&start).await; }
-                    "income" => { dl.download_income().await; }
-                    "balance" => { dl.download_balancesheet().await; }
-                    "cashflow" => { dl.download_cashflow().await; }
-                    "indicator" => { dl.download_fina_indicator().await; }
-                    "industry" => { dl.download_industry().await; }
-                    "index" => { dl.download_index_daily(&start).await; }
-                    "macro" => { dl.download_macro().await; }
-                    "all" => { dl.download_all(&start).await; }
-                    other => {
-                        eprintln!("Unknown Tushare target: {other}");
-                        eprintln!("Available: stock_list, trade_cal, daily_price, income, balance,");
-                        eprintln!("  cashflow, indicator, industry, index, macro, all");
-                        std::process::exit(1);
+                if incremental && target == "all" {
+                    dl.update_all().await;
+                } else {
+                    match target {
+                        "stock_list" => { dl.download_stock_list().await; }
+                        "trade_cal" => { dl.download_trade_cal().await; }
+                        "daily_price" => { dl.download_daily_prices(&start, incremental).await; }
+                        "income" => { dl.download_income(incremental).await; }
+                        "balance" => { dl.download_balancesheet(incremental).await; }
+                        "cashflow" => { dl.download_cashflow(incremental).await; }
+                        "indicator" => { dl.download_fina_indicator(incremental).await; }
+                        "industry" => { dl.download_industry().await; }
+                        "index" => { dl.download_index_daily(&start).await; }
+                        "macro" => { dl.download_macro().await; }
+                        "all" => { dl.download_all(&start).await; }
+                        other => {
+                            eprintln!("Unknown Tushare target: {other}");
+                            eprintln!("Available: stock_list, trade_cal, daily_price, income, balance,");
+                            eprintln!("  cashflow, indicator, industry, index, macro, all");
+                            std::process::exit(1);
+                        }
                     }
                 }
             }
