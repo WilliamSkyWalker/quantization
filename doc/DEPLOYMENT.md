@@ -12,27 +12,17 @@ quant download (cron)          quant backtest               git push
          ───── parquet 文件 ──────────┘
 ```
 
-三台通过 Tailscale 组虚拟局域网，互相直连。
+ECS 通过 OSS 内网上传 parquet，台式机/Mac 从 OSS 公网下载。
+
+**月费估算：**
+- ECS 1核2G: ~¥60
+- OSS 存储 19GB: ~¥2.3
+- OSS 下载流量 19GB×30天: 首次19GB + 后续增量 ~1GB/天 ≈ ¥5
+- **合计: ~¥70/月**
 
 ---
 
-## 一、三台机器都装 Tailscale
-
-```bash
-# Linux (ECS + 台式机)
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
-
-# Mac
-brew install tailscale
-# 或下载 App Store 版本
-```
-
-同一账号登录后自动分配内网 IP (100.x.x.x)，三台互通。
-
----
-
-## 二、阿里云 ECS
+## 一、阿里云 ECS
 
 ### 1. 购买
 - 规格：ecs.t6-c1m2.large (1核2G)
@@ -113,7 +103,22 @@ EOF
 chmod 600 /opt/quant-engine/.env
 ```
 
-### 6. Parquet 导出脚本
+### 6. OSS 配置 (内网中转 parquet)
+```bash
+# 安装 ossutil
+wget https://gosspublic.alicdn.com/ossutil/install.sh && bash install.sh
+
+# 配置 (用内网 endpoint，ECS→OSS 免费)
+ossutil config -e oss-cn-shanghai-internal.aliyuncs.com -i <AccessKeyId> -k <AccessKeySecret>
+
+# 创建 bucket (在阿里云控制台创建，选和 ECS 同区域)
+# Bucket: 你的bucket
+# 区域: 与 ECS 同区 (如 cn-shanghai)
+# 存储类型: 标准
+# 权限: 私有
+```
+
+### 7. Parquet 导出脚本
 ```bash
 sudo apt install -y python3-pip
 pip3 install pandas sqlalchemy psycopg2-binary pyarrow
@@ -173,8 +178,8 @@ crontab -e
 # FRED 宏观 (每周一 06:00)
 0 6 * * 1 cd /opt/quant-engine && ./quant download --source fred >> /var/log/quant-fred.log 2>&1
 
-# 导出 parquet (每天 07:00，美股更新完之后)
-0 7 * * * /opt/quant-engine/export_parquet.sh >> /var/log/quant-export.log 2>&1
+# 导出 parquet + 上传 OSS (每天 07:00，美股更新完之后)
+0 7 * * * /opt/quant-engine/export_parquet.sh && ossutil sync /opt/quant-engine/cache/ oss://你的bucket/quant-cache/ --delete >> /var/log/quant-export.log 2>&1
 
 # 日志清理 (每周日)
 0 0 * * 0 find /var/log/quant-*.log -size +100M -exec truncate -s 0 {} \;
@@ -185,7 +190,7 @@ crontab -e
 
 ---
 
-## 三、台式机 (i5-13400F / 64G)
+## 二、台式机 (i5-13400F / 64G)
 
 ### 1. 安装 Rust + 编译
 ```bash
@@ -195,14 +200,21 @@ cd ~/quantization/quant-engine
 cargo build --release
 ```
 
-### 2. 同步 Parquet
+### 2. 同步 Parquet (从 OSS 拉)
 ```bash
-# 手动拉
-rsync -avz --progress ecs-tailscale-ip:/opt/quant-engine/cache/ ~/quantization/cache/
+# 安装 ossutil
+# Linux: wget https://gosspublic.alicdn.com/ossutil/install.sh && bash install.sh
+# Mac: brew install ossutil
 
-# 定时拉 (每天 07:30，ECS 导出完成后)
+# 配置 (用 ECS 同一个 AccessKey)
+ossutil config -e oss-cn-shanghai.aliyuncs.com -i <AccessKeyId> -k <AccessKeySecret>
+
+# 手动拉
+ossutil sync oss://你的bucket/quant-cache/ ~/quantization/cache/ --delete
+
+# 定时拉 (每天 07:30，ECS 上传完成后)
 crontab -e
-# 30 7 * * * rsync -avz ecs-tailscale-ip:/opt/quant-engine/cache/ ~/quantization/cache/ >> ~/quant-sync.log 2>&1
+# 30 7 * * * ossutil sync oss://你的bucket/quant-cache/ ~/quantization/cache/ --delete >> ~/quant-sync.log 2>&1
 ```
 
 ### 3. 跑回测
@@ -225,12 +237,12 @@ cd ~/quantization/quant-engine
 ## 四、数据流时间线 (每日)
 
 ```
-16:30  ECS: A股增量更新 (Tushare)
+16:30  ECS: A 股增量更新 (Tushare)
 05:00  ECS: 美股增量更新 (FMP)
 06:00  ECS: FRED 宏观 (周一)
-07:00  ECS: 导出全量 parquet
-07:30  台式机: rsync 拉 parquet (~19GB，增量传输 <1min)
-08:30  台式机: A股选股 → 输出持仓建议
+07:00  ECS: 导出 parquet → 上传 OSS (内网，免费)
+07:30  台式机: ossutil sync 从 OSS 拉 parquet (增量 ~1GB, 几分钟)
+08:30  台式机: A 股选股 → 输出持仓建议
 21:00  台式机: 美股选股 → 输出持仓建议
 ```
 
@@ -238,8 +250,8 @@ cd ~/quantization/quant-engine
 
 ## 五、安全
 
-1. **Tailscale 默认加密**：所有流量走 WireGuard 隧道
-2. **PostgreSQL 只监听 localhost**：不开公网端口
-3. **ECS 安全组**：只开 SSH 22 端口
+1. **PostgreSQL 只监听 localhost**：不开公网端口
+2. **ECS 安全组**：只开 SSH 22 端口
+3. **OSS Bucket 私有**：AccessKey 访问，不开公网读
 4. **.env 权限**：`chmod 600`
 5. **API Key 不进 git**：.env 在 .gitignore
