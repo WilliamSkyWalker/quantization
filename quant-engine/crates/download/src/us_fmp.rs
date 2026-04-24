@@ -4,16 +4,22 @@
 //! Column names = camel_to_snake(API field), except symbol → ticker.
 
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 use sqlx::PgPool;
+use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
 use crate::camel::snake_keys;
 use crate::http::ApiClient;
 use crate::progress::ticker_progress;
 
+const MAX_CONCURRENT: usize = 15;
+
 /// FMP downloader context.
+#[derive(Clone)]
 pub struct FmpDownloader {
     pub api_key: String,
     pub client: ApiClient,
@@ -102,6 +108,45 @@ impl FmpDownloader {
         let rows: Vec<(String,)> = sqlx::query_as(&sql)
             .fetch_all(&self.pool).await.unwrap_or_default();
         rows.into_iter().map(|(c,)| c).collect()
+    }
+
+    /// Run a per-ticker async task concurrently (15 workers).
+    /// `task_fn` takes (downloader, ticker) and returns row count.
+    async fn run_concurrent<F, Fut>(
+        &self,
+        tickers: Vec<String>,
+        label: &str,
+        task_fn: F,
+    ) -> usize
+    where
+        F: Fn(FmpDownloader, String) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = usize> + Send + 'static,
+    {
+        if tickers.is_empty() { return 0; }
+        info!("{label}: {} tickers ({MAX_CONCURRENT} concurrent)", tickers.len());
+        let pb = Arc::new(ticker_progress(tickers.len() as u64, label));
+        let total = Arc::new(AtomicUsize::new(0));
+        let sem = Arc::new(Semaphore::new(MAX_CONCURRENT));
+        let task_fn = Arc::new(task_fn);
+
+        let mut handles = Vec::with_capacity(tickers.len());
+        for ticker in tickers {
+            let dl = self.clone();
+            let sem = sem.clone();
+            let total = total.clone();
+            let pb = pb.clone();
+            let task_fn = task_fn.clone();
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let n = task_fn(dl, ticker).await;
+                total.fetch_add(n, Ordering::Relaxed);
+                pb.inc(1);
+            }));
+        }
+        for h in handles { h.await.ok(); }
+        let t = total.load(Ordering::Relaxed);
+        pb.finish_with_message(format!("{t} rows"));
+        t
     }
 
     async fn mark_done(&self, table: &str, ticker: &str) {
@@ -250,23 +295,16 @@ impl FmpDownloader {
         let tickers = self.get_active_tickers().await;
         let done = self.get_done_tickers("us_company_profile").await;
         let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
-        if pending.is_empty() { return 0; }
-
-        info!("Company profiles: {} tickers", pending.len());
-        let pb = ticker_progress(pending.len() as u64, "Profiles");
-        let mut total = 0;
-
-        for ticker in &pending {
-            let data = self.fmp_get("profile", &[("symbol", ticker.as_str())]).await;
+        self.run_concurrent(pending, "Profiles", |dl, ticker| async move {
+            let data = dl.fmp_get("profile", &[("symbol", &ticker)]).await;
+            let mut n = 0;
             if !data.is_empty() {
                 let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
-                total += self.upsert_rows("us_company_profile", &rows, &["ticker"]).await;
+                n = dl.upsert_rows("us_company_profile", &rows, &["ticker"]).await;
             }
-            self.mark_done("us_company_profile", ticker).await;
-            pb.inc(1);
-        }
-        pb.finish_with_message(format!("{total} rows"));
-        total
+            dl.mark_done("us_company_profile", &ticker).await;
+            n
+        }).await
     }
 
     // ── 3. Daily Prices ─────────────────────────────────────────────────
@@ -275,22 +313,35 @@ impl FmpDownloader {
         let tickers = self.get_active_tickers().await;
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let done = self.get_done_tickers("us_daily_price").await;
-        let pending: Vec<_> = if incremental { tickers } else {
+        let pending: Vec<String> = if incremental { tickers } else {
             tickers.into_iter().filter(|t| !done.contains(t)).collect()
         };
         if pending.is_empty() { return 0; }
 
-        info!("Daily prices: {} tickers", pending.len());
-        let pb = ticker_progress(pending.len() as u64, "Daily Prices");
-        let mut total = 0;
+        info!("Daily prices: {} tickers ({MAX_CONCURRENT} concurrent)", pending.len());
+        let pb = Arc::new(ticker_progress(pending.len() as u64, "Daily Prices"));
+        let total = Arc::new(AtomicUsize::new(0));
+        let sem = Arc::new(Semaphore::new(MAX_CONCURRENT));
 
-        for ticker in &pending {
-            total += self.download_daily_price_one(ticker, start_year, &today).await;
-            self.mark_done("us_daily_price", ticker).await;
-            pb.inc(1);
+        let mut handles = Vec::with_capacity(pending.len());
+        for ticker in pending {
+            let dl = self.clone();
+            let today = today.clone();
+            let sem = sem.clone();
+            let total = total.clone();
+            let pb = pb.clone();
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let n = dl.download_daily_price_one(&ticker, start_year, &today).await;
+                dl.mark_done("us_daily_price", &ticker).await;
+                total.fetch_add(n, Ordering::Relaxed);
+                pb.inc(1);
+            }));
         }
-        pb.finish_with_message(format!("{total} rows"));
-        total
+        for h in handles { h.await.ok(); }
+        let t = total.load(Ordering::Relaxed);
+        pb.finish_with_message(format!("{t} rows"));
+        t
     }
 
     pub async fn download_daily_price_one(&self, ticker: &str, start_year: i32, today: &str) -> usize {
@@ -321,64 +372,50 @@ impl FmpDownloader {
         let tickers = self.get_stocks_only_tickers().await;
         let done = self.get_done_tickers("us_financial_data").await;
         let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
-        if pending.is_empty() { return 0; }
-
-        info!("Financials: {} tickers", pending.len());
-        let pb = ticker_progress(pending.len() as u64, "Financials");
-        let mut total = 0;
-
-        for ticker in &pending {
-            let is_data = self.fmp_get("income-statement", &[("symbol", ticker), ("period", "quarter"), ("limit", "400")]).await;
-            let bs_data = self.fmp_get("balance-sheet-statement", &[("symbol", ticker), ("period", "quarter"), ("limit", "400")]).await;
-            let cf_data = self.fmp_get("cash-flow-statement", &[("symbol", ticker), ("period", "quarter"), ("limit", "400")]).await;
+        self.run_concurrent(pending, "Financials", |dl, ticker| async move {
+            let is_data = dl.fmp_get("income-statement", &[("symbol", &ticker), ("period", "quarter"), ("limit", "400")]).await;
+            let bs_data = dl.fmp_get("balance-sheet-statement", &[("symbol", &ticker), ("period", "quarter"), ("limit", "400")]).await;
+            let cf_data = dl.fmp_get("cash-flow-statement", &[("symbol", &ticker), ("period", "quarter"), ("limit", "400")]).await;
             let merged = merge_three_statements(&is_data, &bs_data, &cf_data);
+            let mut n = 0;
             if !merged.is_empty() {
-                total += self.upsert_rows("us_financial_data", &merged, &["ticker", "period"]).await;
+                n = dl.upsert_rows("us_financial_data", &merged, &["ticker", "period"]).await;
             }
-            self.mark_done("us_financial_data", ticker).await;
-            pb.inc(1);
-        }
-        pb.finish_with_message(format!("{total} rows"));
-        total
+            dl.mark_done("us_financial_data", &ticker).await;
+            n
+        }).await
     }
 
     /// Incremental financials: only fetch tickers whose latest filing_date is stale.
     pub async fn download_financials_incremental(&self) -> usize {
         let tickers = self.get_stocks_only_tickers().await;
-        let latest = self.get_ticker_latest("us_financial_data", "date").await;
+        let latest = Arc::new(self.get_ticker_latest("us_financial_data", "date").await);
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-
         info!("Financials incremental: {} tickers, {} with existing data", tickers.len(), latest.len());
-        let pb = ticker_progress(tickers.len() as u64, "Financials (incr)");
-        let mut total = 0;
-        let mut skipped = 0;
 
-        for ticker in &tickers {
-            // Skip if latest data is within 30 days (quarterly reports don't change daily)
-            if let Some(latest_date) = latest.get(ticker) {
-                if let (Ok(ld), Ok(td)) = (
-                    chrono::NaiveDate::parse_from_str(latest_date, "%Y-%m-%d"),
-                    chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d"),
-                ) {
-                    if (td - ld).num_days() < 30 {
-                        skipped += 1;
-                        pb.inc(1);
-                        continue;
+        let latest_c = latest.clone();
+        let today_c = today.clone();
+        self.run_concurrent(tickers, "Financials (incr)", move |dl, ticker| {
+            let latest = latest_c.clone();
+            let today = today_c.clone();
+            async move {
+                if let Some(latest_date) = latest.get(&ticker) {
+                    if let (Ok(ld), Ok(td)) = (
+                        chrono::NaiveDate::parse_from_str(latest_date, "%Y-%m-%d"),
+                        chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d"),
+                    ) {
+                        if (td - ld).num_days() < 30 { return 0; }
                     }
                 }
+                let is_data = dl.fmp_get("income-statement", &[("symbol", &ticker), ("period", "quarter"), ("limit", "10")]).await;
+                let bs_data = dl.fmp_get("balance-sheet-statement", &[("symbol", &ticker), ("period", "quarter"), ("limit", "10")]).await;
+                let cf_data = dl.fmp_get("cash-flow-statement", &[("symbol", &ticker), ("period", "quarter"), ("limit", "10")]).await;
+                let merged = merge_three_statements(&is_data, &bs_data, &cf_data);
+                if !merged.is_empty() {
+                    dl.upsert_rows("us_financial_data", &merged, &["ticker", "period"]).await
+                } else { 0 }
             }
-
-            let is_data = self.fmp_get("income-statement", &[("symbol", ticker), ("period", "quarter"), ("limit", "10")]).await;
-            let bs_data = self.fmp_get("balance-sheet-statement", &[("symbol", ticker), ("period", "quarter"), ("limit", "10")]).await;
-            let cf_data = self.fmp_get("cash-flow-statement", &[("symbol", ticker), ("period", "quarter"), ("limit", "10")]).await;
-            let merged = merge_three_statements(&is_data, &bs_data, &cf_data);
-            if !merged.is_empty() {
-                total += self.upsert_rows("us_financial_data", &merged, &["ticker", "period"]).await;
-            }
-            pb.inc(1);
-        }
-        pb.finish_with_message(format!("{total} rows ({skipped} skipped)"));
-        total
+        }).await
     }
 
     // ── 5. Key Metrics ──────────────────────────────────────────────────
@@ -438,23 +475,17 @@ impl FmpDownloader {
         let tickers = self.get_stocks_only_tickers().await;
         let done = self.get_done_tickers("us_eps_estimate").await;
         let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
-        if pending.is_empty() { return 0; }
-
-        let pb = ticker_progress(pending.len() as u64, "EPS Estimates");
-        let mut total = 0;
-        for ticker in &pending {
-            // v3 endpoint
-            let data = self.fmp_get_v3(&format!("analyst-estimates/{ticker}"),
+        self.run_concurrent(pending, "EPS Estimates", |dl, ticker| async move {
+            let data = dl.fmp_get_v3(&format!("analyst-estimates/{ticker}"),
                 &[("period", "quarter"), ("limit", "200")]).await;
+            let mut n = 0;
             if !data.is_empty() {
                 let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
-                total += self.upsert_rows("us_eps_estimate", &rows, &["ticker", "date"]).await;
+                n = dl.upsert_rows("us_eps_estimate", &rows, &["ticker", "date"]).await;
             }
-            self.mark_done("us_eps_estimate", ticker).await;
-            pb.inc(1);
-        }
-        pb.finish_with_message(format!("{total} rows"));
-        total
+            dl.mark_done("us_eps_estimate", &ticker).await;
+            n
+        }).await
     }
 
     // ── 11. Insider Trading ─────────────────────────────────────────────
@@ -463,27 +494,21 @@ impl FmpDownloader {
         let tickers = self.get_stocks_only_tickers().await;
         let done = self.get_done_tickers("us_insider_trade").await;
         let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
-        if pending.is_empty() { return 0; }
-
-        let pb = ticker_progress(pending.len() as u64, "Insider Trading");
-        let mut total = 0;
-        for ticker in &pending {
-            // Paginated v4 endpoint
+        self.run_concurrent(pending, "Insider Trading", |dl, ticker| async move {
+            let mut n = 0;
             for page in 0..50 {
-                let data = self.fmp_get_v4("insider-trading",
-                    &[("symbol", ticker), ("page", &page.to_string()), ("limit", "100")]).await;
+                let data = dl.fmp_get_v4("insider-trading",
+                    &[("symbol", &ticker), ("page", &page.to_string()), ("limit", "100")]).await;
                 if data.is_empty() { break; }
+                let len = data.len();
                 let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
-                let n = rows.len();
-                total += self.upsert_rows("us_insider_trade", &rows,
+                n += dl.upsert_rows("us_insider_trade", &rows,
                     &["ticker", "transaction_date", "reporting_name", "transaction_type"]).await;
-                if n < 100 { break; }
+                if len < 100 { break; }
             }
-            self.mark_done("us_insider_trade", ticker).await;
-            pb.inc(1);
-        }
-        pb.finish_with_message(format!("{total} rows"));
-        total
+            dl.mark_done("us_insider_trade", &ticker).await;
+            n
+        }).await
     }
 
     // ── 12. Analyst Grades ──────────────────────────────────────────────
@@ -492,22 +517,17 @@ impl FmpDownloader {
         let tickers = self.get_stocks_only_tickers().await;
         let done = self.get_done_tickers("us_analyst_recommendation").await;
         let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
-        if pending.is_empty() { return 0; }
-
-        let pb = ticker_progress(pending.len() as u64, "Analyst Grades");
-        let mut total = 0;
-        for ticker in &pending {
-            let data = self.fmp_get_v3(&format!("grade/{ticker}"), &[]).await;
+        self.run_concurrent(pending, "Analyst Grades", |dl, ticker| async move {
+            let data = dl.fmp_get_v3(&format!("grade/{ticker}"), &[]).await;
+            let mut n = 0;
             if !data.is_empty() {
                 let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
-                total += self.upsert_rows("us_analyst_recommendation", &rows,
+                n = dl.upsert_rows("us_analyst_recommendation", &rows,
                     &["ticker", "date", "grading_company"]).await;
             }
-            self.mark_done("us_analyst_recommendation", ticker).await;
-            pb.inc(1);
-        }
-        pb.finish_with_message(format!("{total} rows"));
-        total
+            dl.mark_done("us_analyst_recommendation", &ticker).await;
+            n
+        }).await
     }
 
     // ── 13. Dividends & Splits ──────────────────────────────────────────
@@ -574,25 +594,22 @@ impl FmpDownloader {
         let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
         if pending.is_empty() { return 0; }
 
-        let pb = ticker_progress(pending.len() as u64, "Stock Peers");
-        let mut total = 0;
-        for ticker in &pending {
-            let data = self.fmp_get("stock-peers", &[("symbol", ticker.as_str())]).await;
+        self.run_concurrent(pending, "Stock Peers", |dl, ticker| async move {
+            let data = dl.fmp_get("stock-peers", &[("symbol", &ticker)]).await;
+            let mut n = 0;
             for item in &data {
                 if let Some(peers) = item.get("peersList").and_then(|v| v.as_array()) {
                     for peer in peers {
                         if let Some(p) = peer.as_str() {
-                            let row = serde_json::json!({"ticker": ticker, "peer_ticker": p});
-                            total += self.upsert_rows("us_stock_peer", &[row], &["ticker", "peer_ticker"]).await;
+                            let row = serde_json::json!({"ticker": &ticker, "peer_ticker": p});
+                            n += dl.upsert_rows("us_stock_peer", &[row], &["ticker", "peer_ticker"]).await;
                         }
                     }
                 }
             }
-            self.mark_done("us_stock_peer", ticker).await;
-            pb.inc(1);
-        }
-        pb.finish_with_message(format!("{total} rows"));
-        total
+            dl.mark_done("us_stock_peer", &ticker).await;
+            n
+        }).await
     }
 
     // ── 22. Index Daily ─────────────────────────────────────────────────
@@ -682,50 +699,37 @@ impl FmpDownloader {
         let tickers = self.get_stocks_only_tickers().await;
         let done = self.get_done_tickers("us_congress_trade").await;
         let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
-        if pending.is_empty() { return 0; }
-
-        let pb = ticker_progress(pending.len() as u64, "Congress Trading");
-        let mut total = 0;
-        for ticker in &pending {
-            // Python: stable/senate-trades + stable/house-trades (NOT v3/senate-trading)
+        self.run_concurrent(pending, "Congress Trading", |dl, ticker| async move {
+            let mut n = 0;
             for endpoint in &["senate-trades", "house-trades"] {
-                let data = self.fmp_get(endpoint, &[("symbol", ticker.as_str())]).await;
+                let data = dl.fmp_get(endpoint, &[("symbol", &ticker)]).await;
                 if !data.is_empty() {
                     let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
-                    total += self.upsert_rows("us_congress_trade", &rows,
+                    n += dl.upsert_rows("us_congress_trade", &rows,
                         &["ticker", "transaction_date", "first_name", "last_name", "type"]).await;
                 }
             }
-            self.mark_done("us_congress_trade", ticker).await;
-            pb.inc(1);
-        }
-        pb.finish_with_message(format!("{total} rows"));
-        total
+            dl.mark_done("us_congress_trade", &ticker).await;
+            n
+        }).await
     }
 
     // ── 25. Press Releases ──────────────────────────────────────────────
 
     pub async fn download_press_releases(&self) -> usize {
-        // Python: _fmp_get_stable("news/press-releases", params={"symbols": ticker, "limit": 500})
-        // Note: uses "symbols" not "symbol"
         let tickers = self.get_stocks_only_tickers().await;
         let done = self.get_done_tickers("us_press_release").await;
         let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
-        if pending.is_empty() { return 0; }
-
-        let pb = ticker_progress(pending.len() as u64, "Press Releases");
-        let mut total = 0;
-        for ticker in &pending {
-            let data = self.fmp_get("news/press-releases", &[("symbols", ticker.as_str()), ("limit", "500")]).await;
+        self.run_concurrent(pending, "Press Releases", |dl, ticker| async move {
+            let data = dl.fmp_get("news/press-releases", &[("symbols", &ticker), ("limit", "500")]).await;
+            let mut n = 0;
             if !data.is_empty() {
                 let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
-                total += self.upsert_rows("us_press_release", &rows, &["ticker", "url"]).await;
+                n = dl.upsert_rows("us_press_release", &rows, &["ticker", "url"]).await;
             }
-            self.mark_done("us_press_release", ticker).await;
-            pb.inc(1);
-        }
-        pb.finish_with_message(format!("{total} rows"));
-        total
+            dl.mark_done("us_press_release", &ticker).await;
+            n
+        }).await
     }
 
     // ── 26. Revenue Segments ────────────────────────────────────────────
@@ -734,14 +738,11 @@ impl FmpDownloader {
         let tickers = self.get_stocks_only_tickers().await;
         let done = self.get_done_tickers("us_revenue_segment").await;
         let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
-        if pending.is_empty() { return 0; }
-
-        let pb = ticker_progress(pending.len() as u64, "Revenue Segments");
-        let mut total = 0;
-        for ticker in &pending {
+        self.run_concurrent(pending, "Revenue Segments", |dl, ticker| async move {
+            let mut n = 0;
             for seg_type in &["product", "geographic"] {
-                let data = self.fmp_get(&format!("revenue-{seg_type}-segmentation"), &[
-                    ("symbol", ticker.as_str()), ("structure", "flat"),
+                let data = dl.fmp_get(&format!("revenue-{seg_type}-segmentation"), &[
+                    ("symbol", &ticker), ("structure", "flat"),
                 ]).await;
                 if !data.is_empty() {
                     let rows: Vec<Value> = data.into_iter().map(|v| {
@@ -751,15 +752,13 @@ impl FmpDownloader {
                         }
                         obj
                     }).collect();
-                    total += self.upsert_rows("us_revenue_segment", &rows,
+                    n += dl.upsert_rows("us_revenue_segment", &rows,
                         &["ticker", "date", "segment_type", "segment_name"]).await;
                 }
             }
-            self.mark_done("us_revenue_segment", ticker).await;
-            pb.inc(1);
-        }
-        pb.finish_with_message(format!("{total} rows"));
-        total
+            dl.mark_done("us_revenue_segment", &ticker).await;
+            n
+        }).await
     }
 
     // ── 27. Delisted Companies ──────────────────────────────────────────
@@ -873,62 +872,98 @@ impl FmpDownloader {
         let tickers = self.get_stocks_only_tickers().await;
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
-        let (pending, latest_map) = if incremental {
+        let latest_map = if incremental {
             let latest = self.get_ticker_latest(table, date_field).await;
             info!("{label} incremental: {} tickers, {} with existing data", tickers.len(), latest.len());
-            (tickers, Some(latest))
+            Some(latest)
+        } else {
+            None
+        };
+
+        let pending: Vec<String> = if incremental {
+            tickers
         } else {
             let done = self.get_done_tickers(table).await;
-            let p: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
-            (p, None)
+            tickers.into_iter().filter(|t| !done.contains(t)).collect()
         };
 
         if pending.is_empty() { info!("{label}: all done"); return 0; }
 
-        let pb = ticker_progress(pending.len() as u64, label);
-        let mut total = 0;
-        let mut skipped = 0;
+        info!("{label}: {} tickers ({MAX_CONCURRENT} concurrent)", pending.len());
+        let pb = Arc::new(ticker_progress(pending.len() as u64, label));
+        let total = Arc::new(AtomicUsize::new(0));
+        let skipped = Arc::new(AtomicUsize::new(0));
+        let sem = Arc::new(Semaphore::new(MAX_CONCURRENT));
 
-        for ticker in &pending {
-            // In incremental mode, check if ticker needs update
-            let from_date = if let Some(ref latest) = latest_map {
-                match latest.get(ticker) {
-                    Some(latest_date) => {
-                        // Skip if data is fresh (within 1 day)
-                        if latest_date.as_str() >= &today[..10] {
-                            skipped += 1;
-                            pb.inc(1);
-                            continue;
+        // Convert to owned for spawn
+        let table = table.to_string();
+        let unique_keys: Vec<String> = unique_keys.iter().map(|s| s.to_string()).collect();
+        let endpoint = endpoint.to_string();
+        let extra_params: Vec<(String, String)> = extra_params.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let latest_map = latest_map.map(Arc::new);
+
+        let mut handles = Vec::with_capacity(pending.len());
+        for ticker in pending {
+            let dl = self.clone();
+            let sem = sem.clone();
+            let total = total.clone();
+            let skipped = skipped.clone();
+            let pb = pb.clone();
+            let today = today.clone();
+            let table = table.clone();
+            let unique_keys = unique_keys.clone();
+            let endpoint = endpoint.clone();
+            let extra_params = extra_params.clone();
+            let latest_map = latest_map.clone();
+
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+
+                // Incremental: check if ticker needs update
+                let from_date = if let Some(ref latest) = latest_map {
+                    match latest.get(&ticker) {
+                        Some(latest_date) => {
+                            if latest_date.as_str() >= &today[..10] {
+                                skipped.fetch_add(1, Ordering::Relaxed);
+                                pb.inc(1);
+                                return;
+                            }
+                            Some(next_day(latest_date))
                         }
-                        // Fetch from day after latest
-                        let next = next_day(latest_date);
-                        Some(next)
+                        None => None,
                     }
-                    None => None, // No data yet, full fetch
-                }
-            } else {
-                None
-            };
+                } else {
+                    None
+                };
 
-            let mut params: Vec<(&str, &str)> = vec![("symbol", ticker.as_str())];
-            params.extend_from_slice(extra_params);
-            let from_str;
-            if let Some(ref fd) = from_date {
-                from_str = fd.clone();
-                params.push(("from", &from_str));
-            }
-            let data = self.fmp_get(endpoint, &params).await;
-            if !data.is_empty() {
-                let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
-                total += self.upsert_rows(table, &rows, unique_keys).await;
-            }
-            if !incremental {
-                self.mark_done(table, ticker).await;
-            }
-            pb.inc(1);
+                let mut params: Vec<(&str, &str)> = vec![("symbol", &ticker)];
+                for (k, v) in &extra_params {
+                    params.push((k.as_str(), v.as_str()));
+                }
+                let from_str;
+                if let Some(ref fd) = from_date {
+                    from_str = fd.clone();
+                    params.push(("from", &from_str));
+                }
+
+                let data = dl.fmp_get(&endpoint, &params).await;
+                if !data.is_empty() {
+                    let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
+                    let uk_refs: Vec<&str> = unique_keys.iter().map(|s| s.as_str()).collect();
+                    let n = dl.upsert_rows(&table, &rows, &uk_refs).await;
+                    total.fetch_add(n, Ordering::Relaxed);
+                }
+                if latest_map.is_none() {
+                    dl.mark_done(&table, &ticker).await;
+                }
+                pb.inc(1);
+            }));
         }
-        pb.finish_with_message(format!("{total} rows ({skipped} skipped)"));
-        total
+        for h in handles { h.await.ok(); }
+        let t = total.load(Ordering::Relaxed);
+        let s = skipped.load(Ordering::Relaxed);
+        pb.finish_with_message(format!("{t} rows ({s} skipped)"));
+        t
     }
 }
 
