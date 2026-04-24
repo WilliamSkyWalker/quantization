@@ -961,7 +961,7 @@ fn cmd_download(
                     .ok().and_then(|s| s.parse().ok()).unwrap_or(300);
                 let dl = quant_download::us_fmp::FmpDownloader::new(
                     fmp_key, pool.clone(), rate_limit,
-                );
+                ).with_ticker(ticker);
 
                 if incremental && target == "all" {
                     dl.update_all().await;
@@ -969,15 +969,7 @@ fn cmd_download(
                     match target {
                         "stock_list" => { dl.download_stock_list().await; }
                         "profile" => { dl.download_company_profiles().await; }
-                        "daily_price" => {
-                            if let Some(t) = ticker {
-                                let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-                                let n = dl.download_daily_price_one(t, start_year, &today).await;
-                                info!("daily_price {t}: {n} rows");
-                            } else {
-                                dl.download_daily_prices(start_year, incremental).await;
-                            }
-                        }
+                        "daily_price" => { dl.download_daily_prices(start_year, incremental).await; }
                         "financial" => {
                             if incremental { dl.download_financials_incremental().await; }
                             else { dl.download_financials().await; }

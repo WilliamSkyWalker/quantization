@@ -18,6 +18,8 @@ pub struct FmpDownloader {
     pub api_key: String,
     pub client: ApiClient,
     pub pool: PgPool,
+    /// If set, only process this single ticker (for testing).
+    pub ticker_filter: Option<String>,
 }
 
 impl FmpDownloader {
@@ -26,7 +28,13 @@ impl FmpDownloader {
             api_key,
             client: ApiClient::new(rate_limit, 10),
             pool,
+            ticker_filter: None,
         }
+    }
+
+    pub fn with_ticker(mut self, ticker: Option<&str>) -> Self {
+        self.ticker_filter = ticker.map(|s| s.to_string());
+        self
     }
 
     // ── HTTP helpers ────────────────────────────────────────────────────
@@ -63,12 +71,18 @@ impl FmpDownloader {
     // ── DB helpers ──────────────────────────────────────────────────────
 
     async fn get_active_tickers(&self) -> Vec<String> {
+        if let Some(ref t) = self.ticker_filter {
+            return vec![t.clone()];
+        }
         sqlx::query_scalar::<_, String>(
             "SELECT ticker FROM us_stock_basic WHERE is_actively_trading = 1"
         ).fetch_all(&self.pool).await.unwrap_or_default()
     }
 
     async fn get_stocks_only_tickers(&self) -> Vec<String> {
+        if let Some(ref t) = self.ticker_filter {
+            return vec![t.clone()];
+        }
         sqlx::query_scalar::<_, String>(
             "SELECT ticker FROM us_stock_basic WHERE is_actively_trading = 1 AND is_etf = 0 AND is_fund = 0"
         ).fetch_all(&self.pool).await.unwrap_or_default()
@@ -283,7 +297,7 @@ impl FmpDownloader {
             let cf_data = self.fmp_get("cash-flow-statement", &[("symbol", ticker), ("period", "quarter"), ("limit", "400")]).await;
             let merged = merge_three_statements(&is_data, &bs_data, &cf_data);
             if !merged.is_empty() {
-                total += self.upsert_rows("us_financial_data", &merged, &["ticker", "date", "period"]).await;
+                total += self.upsert_rows("us_financial_data", &merged, &["ticker", "period"]).await;
             }
             self.mark_done("us_financial_data", ticker).await;
             pb.inc(1);
@@ -323,7 +337,7 @@ impl FmpDownloader {
             let cf_data = self.fmp_get("cash-flow-statement", &[("symbol", ticker), ("period", "quarter"), ("limit", "10")]).await;
             let merged = merge_three_statements(&is_data, &bs_data, &cf_data);
             if !merged.is_empty() {
-                total += self.upsert_rows("us_financial_data", &merged, &["ticker", "date", "period"]).await;
+                total += self.upsert_rows("us_financial_data", &merged, &["ticker", "period"]).await;
             }
             pb.inc(1);
         }
@@ -463,7 +477,7 @@ impl FmpDownloader {
     // ── 13. Dividends & Splits ──────────────────────────────────────────
 
     pub async fn download_dividends(&self) -> usize {
-        self.simple_per_ticker("us_corporate_action", &["ticker", "date"], "Dividends",
+        self.simple_per_ticker("us_corporate_action", &["ticker", "date", "action_type"], "Dividends",
             "dividends", &[]).await
     }
 
@@ -512,7 +526,7 @@ impl FmpDownloader {
     // ── 20. DCF Valuations ──────────────────────────────────────────────
 
     pub async fn download_dcf_valuations(&self) -> usize {
-        self.simple_per_ticker("us_dcf_valuation", &["ticker", "date"], "DCF Valuations",
+        self.simple_per_ticker("us_dcf_valuation", &["ticker", "date", "dcf_type"], "DCF Valuations",
             "discounted-cash-flow", &[]).await
     }
 
@@ -950,7 +964,7 @@ fn bind_json_value<'q>(
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
     match val {
         Value::Null => query.bind(Option::<String>::None),
-        Value::Bool(b) => query.bind(*b),
+        Value::Bool(b) => query.bind(if *b { 1i32 } else { 0i32 }),
         Value::Number(n) => {
             if let Some(f) = n.as_f64() {
                 query.bind(f)
