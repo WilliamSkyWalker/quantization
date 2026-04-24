@@ -126,13 +126,18 @@ impl TushareDownloader {
         let first = match rows[0].as_object() { Some(m) => m, None => return 0 };
 
         let db_columns = self.get_table_columns(table).await;
-        let columns: Vec<String> = first.keys()
+        let has_updated_at = db_columns.contains("updated_at");
+        let mut columns: Vec<String> = first.keys()
             .filter(|k| {
                 let k = k.as_str();
                 k != "id" && k != "updated_at" && (db_columns.is_empty() || db_columns.contains(k))
             })
             .cloned().collect();
         if columns.is_empty() { return 0; }
+        // Add updated_at = NOW() for tables that require it
+        if has_updated_at {
+            columns.push("updated_at".to_string());
+        }
 
         // Dedup
         let mut seen = HashSet::new();
@@ -160,7 +165,8 @@ impl TushareDownloader {
             for row in chunk {
                 let obj = match row.as_object() { Some(m) => m, None => continue };
                 let vals: Vec<String> = columns.iter().map(|col| {
-                    to_sql_literal(obj.get(col).unwrap_or(&Value::Null))
+                    if col == "updated_at" { "NOW()".to_string() }
+                    else { to_sql_literal(obj.get(col).unwrap_or(&Value::Null)) }
                 }).collect();
                 values_clauses.push(format!("({})", vals.join(",")));
             }
@@ -224,15 +230,51 @@ impl TushareDownloader {
     // ═══════════════════════════════════════════════════════════════════
 
     /// Download A-share stock list.
+    /// Python: download_tushare_stock_list — adds is_st, board, list_status; filters 沪深 A 股.
     pub async fn download_stock_list(&self) -> usize {
         info!("Downloading Tushare stock list...");
-        let mut total = 0;
-        for status in ["L", "D", "P"] {
-            let data = self.tushare_call("stock_basic", &json!({"list_status": status})).await;
-            if !data.is_empty() {
-                total += self.upsert_rows("a_stock_basic", &data, &["ts_code"]).await;
+
+        let mut all_rows: Vec<Value> = Vec::new();
+        for (status, label) in [("L", "L"), ("D", "D")] {
+            let mut data = self.tushare_call("stock_basic", &json!({"list_status": status})).await;
+            // list_status is a query param, not returned by API — add it manually
+            for row in &mut data {
+                if let Some(obj) = row.as_object_mut() {
+                    obj.insert("list_status".to_string(), Value::String(label.to_string()));
+                }
             }
+            all_rows.extend(data);
         }
+
+        if all_rows.is_empty() {
+            warn!("stock_basic returned empty");
+            return 0;
+        }
+
+        // Filter to 沪深 A 股: ts_code starts with 00/30/60/68
+        let filtered: Vec<Value> = all_rows.into_iter().filter(|row| {
+            row.get("ts_code").and_then(|v| v.as_str())
+                .map(|c| c.starts_with("00") || c.starts_with("30") || c.starts_with("60") || c.starts_with("68"))
+                .unwrap_or(false)
+        }).collect();
+
+        // Add derived fields: is_st (from name), board (from ts_code)
+        let rows: Vec<Value> = filtered.into_iter().map(|mut row| {
+            if let Some(obj) = row.as_object_mut() {
+                // is_st: check if name contains ST keywords
+                let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let is_st = if name.contains("ST") || name.contains("*ST") || name.contains("S*ST") || name.contains("SST") { 1 } else { 0 };
+                obj.insert("is_st".to_string(), Value::Number(is_st.into()));
+
+                // board: detect from ts_code prefix
+                let ts_code = obj.get("ts_code").and_then(|v| v.as_str()).unwrap_or("");
+                let board = detect_board(ts_code);
+                obj.insert("board".to_string(), Value::String(board.to_string()));
+            }
+            row
+        }).collect();
+
+        let total = self.upsert_rows("a_stock_basic", &rows, &["ts_code"]).await;
         info!("Stock list: {total} rows");
         total
     }
@@ -284,9 +326,27 @@ impl TushareDownloader {
             let basic = dl.tushare_call("daily_basic", &json!({"trade_date": &date})).await;
             let adj = dl.tushare_call("adj_factor", &json!({"trade_date": &date})).await;
             let merged = merge_daily(&daily, &basic, &adj);
+
+            // Filter to 沪深 A 股 + add is_limit_up/is_limit_down
+            let processed: Vec<Value> = merged.into_iter().filter_map(|mut row| {
+                let obj = row.as_object_mut()?;
+                let ts_code = obj.get("ts_code").and_then(|v| v.as_str()).unwrap_or("");
+                if !(ts_code.starts_with("00") || ts_code.starts_with("30") || ts_code.starts_with("60") || ts_code.starts_with("68")) {
+                    return None;
+                }
+                // Derive limit up/down from pct_chg + board
+                let pct_chg = obj.get("pct_chg").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let board = detect_board(ts_code);
+                let limit = if board == "创业板" || board == "科创板" { 20.0 } else { 10.0 };
+                let threshold = limit - 0.05;
+                obj.insert("is_limit_up".to_string(), Value::Number(if pct_chg >= threshold { 1 } else { 0 }.into()));
+                obj.insert("is_limit_down".to_string(), Value::Number(if pct_chg <= -threshold { 1 } else { 0 }.into()));
+                Some(row)
+            }).collect();
+
             let mut n = 0;
-            if !merged.is_empty() {
-                n = dl.upsert_rows("a_daily_price", &merged, &["ts_code", "trade_date"]).await;
+            if !processed.is_empty() {
+                n = dl.upsert_rows("a_daily_price", &processed, &["ts_code", "trade_date"]).await;
             }
             dl.mark_done("a_daily_price", &date).await;
             n
@@ -516,6 +576,15 @@ fn merge_daily(daily: &[Value], basic: &[Value], adj: &[Value]) -> Vec<Value> {
         }
         Some(Value::Object(merged))
     }).collect()
+}
+
+/// Detect board type from ts_code prefix (Python: _detect_board).
+fn detect_board(ts_code: &str) -> &'static str {
+    let code = ts_code.split('.').next().unwrap_or("");
+    if code.starts_with("00") || code.starts_with("60") { "主板" }
+    else if code.starts_with("30") { "创业板" }
+    else if code.starts_with("68") { "科创板" }
+    else { "其他" }
 }
 
 fn to_sql_literal(val: &Value) -> String {
