@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 quant-core = { path = "../core" }
 quant-data = { path = "../data" }
+quant-factors = { path = "../factors" }
 tracing = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }

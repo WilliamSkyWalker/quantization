@@ -1,3 +1,4 @@
+pub mod a_strategy;
 pub mod analysis;
 pub mod optimizer;
 pub mod regime;

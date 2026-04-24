@@ -2557,6 +2557,7 @@ dependencies = [
  "nalgebra",
  "quant-core",
  "quant-data",
+ "quant-factors",
  "rustc-hash",
  "serde",
  "serde_json",
