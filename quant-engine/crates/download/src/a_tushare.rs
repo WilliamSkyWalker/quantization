@@ -106,45 +106,36 @@ impl TushareDownloader {
         let columns: Vec<String> = first.keys().cloned().collect();
         if columns.is_empty() { return 0; }
 
-        let chunk_size = 500;
+        let chunk_size = 200;
         let mut total = 0usize;
 
-        for chunk in rows.chunks(chunk_size) {
-            let mut param_idx = 1u32;
-            let mut values_clauses = Vec::new();
-            let mut params: Vec<String> = Vec::new();
+        let col_list = columns.join(", ");
+        let conflict_cols = unique_keys.join(", ");
+        let update_set: String = columns.iter()
+            .filter(|c| !unique_keys.contains(&c.as_str()))
+            .map(|c| format!("{c} = EXCLUDED.{c}"))
+            .collect::<Vec<_>>().join(", ");
 
+        for chunk in rows.chunks(chunk_size) {
+            let mut values_clauses = Vec::with_capacity(chunk.len());
             for row in chunk {
                 let obj = match row.as_object() { Some(m) => m, None => continue };
-                let placeholders: Vec<String> = columns.iter().map(|col| {
-                    let p = format!("${param_idx}");
-                    param_idx += 1;
-                    let val = obj.get(col).unwrap_or(&Value::Null);
-                    params.push(json_to_sql(val));
-                    p
+                let vals: Vec<String> = columns.iter().map(|col| {
+                    to_sql_literal(obj.get(col).unwrap_or(&serde_json::Value::Null))
                 }).collect();
-                values_clauses.push(format!("({})", placeholders.join(", ")));
+                values_clauses.push(format!("({})", vals.join(",")));
             }
             if values_clauses.is_empty() { continue; }
 
-            let col_list = columns.join(", ");
-            let conflict_cols = unique_keys.join(", ");
-            let update_set: String = columns.iter()
-                .filter(|c| !unique_keys.contains(&c.as_str()))
-                .map(|c| format!("{c} = EXCLUDED.{c}"))
-                .collect::<Vec<_>>().join(", ");
-
             let sql = if update_set.is_empty() {
                 format!("INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO NOTHING",
-                    values_clauses.join(", "))
+                    values_clauses.join(","))
             } else {
                 format!("INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO UPDATE SET {update_set}",
-                    values_clauses.join(", "))
+                    values_clauses.join(","))
             };
 
-            let mut query = sqlx::query(&sql);
-            for p in &params { query = query.bind(p); }
-            match query.execute(&self.pool).await {
+            match sqlx::query(&sql).execute(&self.pool).await {
                 Ok(r) => total += r.rows_affected() as usize,
                 Err(e) => tracing::error!("Upsert {table} failed: {e}"),
             }
@@ -468,12 +459,12 @@ fn merge_daily(daily: &[Value], basic: &[Value], adj: &[Value]) -> Vec<Value> {
     }).collect()
 }
 
-fn json_to_sql(val: &Value) -> String {
+fn to_sql_literal(val: &serde_json::Value) -> String {
     match val {
-        Value::Null => String::new(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => s.clone(),
-        _ => val.to_string(),
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        _ => format!("'{}'", val.to_string().replace('\'', "''")),
     }
 }

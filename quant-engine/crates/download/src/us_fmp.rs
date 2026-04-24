@@ -114,7 +114,8 @@ impl FmpDownloader {
             .collect()
     }
 
-    /// Generic upsert: INSERT rows from JSON into table, ON CONFLICT DO UPDATE.
+    /// Generic batch upsert: INSERT with inline SQL literals for correct type inference.
+    /// Numbers inline, strings single-quoted + escaped, bools as 0/1, nulls as NULL.
     async fn upsert_rows(&self, table: &str, rows: &[Value], unique_keys: &[&str]) -> usize {
         if rows.is_empty() { return 0; }
 
@@ -125,42 +126,47 @@ impl FmpDownloader {
         let columns: Vec<String> = first.keys().cloned().collect();
         if columns.is_empty() { return 0; }
 
-        let chunk_size = 500;
+        let col_list = columns.join(", ");
+        let conflict_cols = unique_keys.join(", ");
+        let update_set: String = columns.iter()
+            .filter(|c| !unique_keys.contains(&c.as_str()))
+            .map(|c| format!("{c} = EXCLUDED.{c}"))
+            .collect::<Vec<_>>().join(", ");
+
+        let chunk_size = 200;
         let mut total = 0usize;
+        let mut error_count = 0usize;
 
-        // Insert one row at a time with typed bindings.
-        // This is slower than batch but ensures correct types for PostgreSQL.
-        for row in rows {
-            let obj = match row.as_object() { Some(m) => m, None => continue };
+        for chunk in rows.chunks(chunk_size) {
+            let mut values_clauses = Vec::with_capacity(chunk.len());
 
-            let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("${i}")).collect();
-            let col_list = columns.join(", ");
-            let conflict_cols = unique_keys.join(", ");
-            let update_set: String = columns.iter()
-                .filter(|c| !unique_keys.contains(&c.as_str()))
-                .map(|c| format!("{c} = EXCLUDED.{c}"))
-                .collect::<Vec<_>>().join(", ");
-
-            let sql = if update_set.is_empty() {
-                format!("INSERT INTO {table} ({col_list}) VALUES ({}) ON CONFLICT ({conflict_cols}) DO NOTHING",
-                    placeholders.join(", "))
-            } else {
-                format!("INSERT INTO {table} ({col_list}) VALUES ({}) ON CONFLICT ({conflict_cols}) DO UPDATE SET {update_set}",
-                    placeholders.join(", "))
-            };
-
-            let mut query = sqlx::query(&sql);
-            for col in &columns {
-                let val = obj.get(col).unwrap_or(&Value::Null);
-                query = bind_json_value(query, val);
+            for row in chunk {
+                let obj = match row.as_object() { Some(m) => m, None => continue };
+                let vals: Vec<String> = columns.iter().map(|col| {
+                    to_sql_literal(obj.get(col).unwrap_or(&Value::Null))
+                }).collect();
+                values_clauses.push(format!("({})", vals.join(",")));
             }
 
-            match query.execute(&self.pool).await {
+            if values_clauses.is_empty() { continue; }
+
+            let sql = if update_set.is_empty() {
+                format!("INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO NOTHING",
+                    values_clauses.join(","))
+            } else {
+                format!("INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO UPDATE SET {update_set}",
+                    values_clauses.join(","))
+            };
+
+            match sqlx::query(&sql).execute(&self.pool).await {
                 Ok(r) => total += r.rows_affected() as usize,
                 Err(e) => {
-                    // Log first failure only, don't spam
-                    if total == 0 {
+                    error_count += 1;
+                    if error_count <= 3 {
                         error!("Upsert {table} failed: {e}");
+                    }
+                    if error_count == 3 {
+                        error!("Upsert {table}: suppressing further errors");
                     }
                 }
             }
@@ -956,39 +962,21 @@ fn merge_three_statements(is_data: &[Value], bs_data: &[Value], cf_data: &[Value
     result
 }
 
-/// Bind a JSON value to a sqlx query with the correct PostgreSQL type.
-/// Detects date strings (YYYY-MM-DD) and binds as NaiveDate.
-fn bind_json_value<'q>(
-    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    val: &'q Value,
-) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+/// Convert a JSON value to a SQL literal string for inline INSERT.
+/// Numbers: inline. Strings: single-quoted + escaped. Bools: 0/1. Null: NULL.
+fn to_sql_literal(val: &Value) -> String {
     match val {
-        Value::Null => query.bind(Option::<String>::None),
-        Value::Bool(b) => query.bind(if *b { 1i32 } else { 0i32 }),
-        Value::Number(n) => {
-            if let Some(f) = n.as_f64() {
-                query.bind(f)
-            } else if let Some(i) = n.as_i64() {
-                query.bind(i)
-            } else {
-                query.bind(n.to_string())
-            }
-        }
+        Value::Null => "NULL".to_string(),
+        Value::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
+        Value::Number(n) => n.to_string(),
         Value::String(s) => {
-            // Detect date format: YYYY-MM-DD (10 chars, matches pattern)
-            if s.len() == 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-') {
-                if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-                    return query.bind(date);
-                }
-            }
-            // Detect datetime format: YYYY-MM-DD HH:MM:SS (19+ chars)
-            if s.len() >= 19 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(10) == Some(&b' ') {
-                if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&s[..19], "%Y-%m-%d %H:%M:%S") {
-                    return query.bind(dt);
-                }
-            }
-            query.bind(s.as_str())
+            // Escape single quotes for SQL
+            let escaped = s.replace('\'', "''");
+            format!("'{escaped}'")
         }
-        _ => query.bind(val.to_string()),
+        Value::Array(_) | Value::Object(_) => {
+            let s = val.to_string().replace('\'', "''");
+            format!("'{s}'")
+        }
     }
 }
