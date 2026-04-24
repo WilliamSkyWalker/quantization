@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 use sqlx::PgPool;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::camel::snake_keys;
 use crate::http::ApiClient;
@@ -74,6 +74,19 @@ impl FmpDownloader {
             "INSERT INTO import_progress (table_name, ticker, completed_at) \
              VALUES ($1, $2, NOW()) ON CONFLICT (table_name, ticker) DO UPDATE SET completed_at = NOW()"
         ).bind(table).bind(ticker).execute(&self.pool).await.ok();
+    }
+
+    /// Get the latest date per ticker in a table (for incremental updates).
+    /// Returns {ticker: "YYYY-MM-DD"}.
+    async fn get_ticker_latest(&self, table: &str, date_field: &str) -> std::collections::HashMap<String, String> {
+        let sql = format!(
+            "SELECT ticker, MAX({date_field})::text as latest FROM {table} GROUP BY ticker"
+        );
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(&sql)
+            .fetch_all(&self.pool).await.unwrap_or_default();
+        rows.into_iter()
+            .filter_map(|(t, d)| d.map(|d| (t, d[..10].to_string())))
+            .collect()
     }
 
     /// Generic upsert: INSERT rows from JSON into table, ON CONFLICT DO UPDATE.
@@ -265,11 +278,54 @@ impl FmpDownloader {
         total
     }
 
+    /// Incremental financials: only fetch tickers whose latest filing_date is stale.
+    pub async fn download_financials_incremental(&self) -> usize {
+        let tickers = self.get_stocks_only_tickers().await;
+        let latest = self.get_ticker_latest("us_financial_data", "date").await;
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        info!("Financials incremental: {} tickers, {} with existing data", tickers.len(), latest.len());
+        let pb = ticker_progress(tickers.len() as u64, "Financials (incr)");
+        let mut total = 0;
+        let mut skipped = 0;
+
+        for ticker in &tickers {
+            // Skip if latest data is within 30 days (quarterly reports don't change daily)
+            if let Some(latest_date) = latest.get(ticker) {
+                if let (Ok(ld), Ok(td)) = (
+                    chrono::NaiveDate::parse_from_str(latest_date, "%Y-%m-%d"),
+                    chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d"),
+                ) {
+                    if (td - ld).num_days() < 30 {
+                        skipped += 1;
+                        pb.inc(1);
+                        continue;
+                    }
+                }
+            }
+
+            let is_data = self.fmp_get("income-statement", &[("symbol", ticker), ("period", "quarter"), ("limit", "10")]).await;
+            let bs_data = self.fmp_get("balance-sheet-statement", &[("symbol", ticker), ("period", "quarter"), ("limit", "10")]).await;
+            let cf_data = self.fmp_get("cash-flow-statement", &[("symbol", ticker), ("period", "quarter"), ("limit", "10")]).await;
+            let merged = merge_three_statements(&is_data, &bs_data, &cf_data);
+            if !merged.is_empty() {
+                total += self.upsert_rows("us_financial_data", &merged, &["ticker", "date", "period"]).await;
+            }
+            pb.inc(1);
+        }
+        pb.finish_with_message(format!("{total} rows ({skipped} skipped)"));
+        total
+    }
+
     // ── 5. Key Metrics ──────────────────────────────────────────────────
 
     pub async fn download_key_metrics(&self) -> usize {
         self.simple_per_ticker("us_key_metric", &["ticker", "date"], "Key Metrics",
             "key-metrics", &[("period", "quarter"), ("limit", "400")]).await
+    }
+    pub async fn download_key_metrics_incremental(&self) -> usize {
+        self.simple_per_ticker_incremental("us_key_metric", &["ticker", "date"], "Key Metrics",
+            "key-metrics", &[("period", "quarter"), ("limit", "400")], "date").await
     }
 
     // ── 6. Financial Growth ─────────────────────────────────────────────
@@ -278,12 +334,20 @@ impl FmpDownloader {
         self.simple_per_ticker("us_financial_growth", &["ticker", "date"], "Financial Growth",
             "financial-growth", &[("period", "quarter"), ("limit", "400")]).await
     }
+    pub async fn download_financial_growth_incremental(&self) -> usize {
+        self.simple_per_ticker_incremental("us_financial_growth", &["ticker", "date"], "Financial Growth",
+            "financial-growth", &[("period", "quarter"), ("limit", "400")], "date").await
+    }
 
     // ── 7. Enterprise Values ────────────────────────────────────────────
 
     pub async fn download_enterprise_values(&self) -> usize {
         self.simple_per_ticker("us_enterprise_value", &["ticker", "date"], "Enterprise Values",
             "enterprise-values", &[("period", "quarter"), ("limit", "400")]).await
+    }
+    pub async fn download_enterprise_values_incremental(&self) -> usize {
+        self.simple_per_ticker_incremental("us_enterprise_value", &["ticker", "date"], "Enterprise Values",
+            "enterprise-values", &[("period", "quarter"), ("limit", "400")], "date").await
     }
 
     // ── 8. Owner Earnings ───────────────────────────────────────────────
@@ -298,6 +362,10 @@ impl FmpDownloader {
     pub async fn download_earnings_surprises(&self) -> usize {
         self.simple_per_ticker("us_earnings_surprise", &["ticker", "date"], "Earnings Surprises",
             "earnings", &[("limit", "400")]).await
+    }
+    pub async fn download_earnings_surprises_incremental(&self) -> usize {
+        self.simple_per_ticker_incremental("us_earnings_surprise", &["ticker", "date"], "Earnings Surprises",
+            "earnings", &[("limit", "400")], "date").await
     }
 
     // ── 10. EPS Estimates ───────────────────────────────────────────────
@@ -668,6 +736,22 @@ impl FmpDownloader {
         total
     }
 
+    /// Incremental update: only fetch new data since last known date per ticker.
+    pub async fn update_all(&self) -> usize {
+        let mut total = 0;
+        total += self.download_stock_list().await;
+        total += self.download_daily_prices(2020, true).await;
+        total += self.download_financials_incremental().await;
+        total += self.download_key_metrics_incremental().await;
+        total += self.download_financial_growth_incremental().await;
+        total += self.download_enterprise_values_incremental().await;
+        total += self.download_earnings_surprises_incremental().await;
+        total += self.download_index_daily(2020).await;
+        total += self.download_macro().await;
+        info!("FMP update_all total: {total}");
+        total
+    }
+
     // ── Generic simple per-ticker helper ────────────────────────────────
 
     async fn simple_per_ticker(
@@ -678,26 +762,90 @@ impl FmpDownloader {
         endpoint: &str,
         extra_params: &[(&str, &str)],
     ) -> usize {
+        self.simple_per_ticker_ex(table, unique_keys, label, endpoint, extra_params, false, "date").await
+    }
+
+    /// Incremental variant: queries DB for latest date per ticker, only fetches newer data.
+    async fn simple_per_ticker_incremental(
+        &self,
+        table: &str,
+        unique_keys: &[&str],
+        label: &str,
+        endpoint: &str,
+        extra_params: &[(&str, &str)],
+        date_field: &str,
+    ) -> usize {
+        self.simple_per_ticker_ex(table, unique_keys, label, endpoint, extra_params, true, date_field).await
+    }
+
+    async fn simple_per_ticker_ex(
+        &self,
+        table: &str,
+        unique_keys: &[&str],
+        label: &str,
+        endpoint: &str,
+        extra_params: &[(&str, &str)],
+        incremental: bool,
+        date_field: &str,
+    ) -> usize {
         let tickers = self.get_stocks_only_tickers().await;
-        let done = self.get_done_tickers(table).await;
-        let pending: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        let (pending, latest_map) = if incremental {
+            let latest = self.get_ticker_latest(table, date_field).await;
+            info!("{label} incremental: {} tickers, {} with existing data", tickers.len(), latest.len());
+            (tickers, Some(latest))
+        } else {
+            let done = self.get_done_tickers(table).await;
+            let p: Vec<_> = tickers.into_iter().filter(|t| !done.contains(t)).collect();
+            (p, None)
+        };
+
         if pending.is_empty() { info!("{label}: all done"); return 0; }
 
         let pb = ticker_progress(pending.len() as u64, label);
         let mut total = 0;
+        let mut skipped = 0;
 
         for ticker in &pending {
+            // In incremental mode, check if ticker needs update
+            let from_date = if let Some(ref latest) = latest_map {
+                match latest.get(ticker) {
+                    Some(latest_date) => {
+                        // Skip if data is fresh (within 1 day)
+                        if latest_date.as_str() >= &today[..10] {
+                            skipped += 1;
+                            pb.inc(1);
+                            continue;
+                        }
+                        // Fetch from day after latest
+                        let next = next_day(latest_date);
+                        Some(next)
+                    }
+                    None => None, // No data yet, full fetch
+                }
+            } else {
+                None
+            };
+
             let mut params: Vec<(&str, &str)> = vec![("symbol", ticker.as_str())];
             params.extend_from_slice(extra_params);
+            let from_str;
+            if let Some(ref fd) = from_date {
+                from_str = fd.clone();
+                params.push(("from", &from_str));
+            }
             let data = self.fmp_get(endpoint, &params).await;
             if !data.is_empty() {
                 let rows: Vec<Value> = data.into_iter().map(|v| snake_keys(&v)).collect();
                 total += self.upsert_rows(table, &rows, unique_keys).await;
             }
-            self.mark_done(table, ticker).await;
+            if !incremental {
+                self.mark_done(table, ticker).await;
+            }
             pb.inc(1);
         }
-        pb.finish_with_message(format!("{total} rows"));
+        pb.finish_with_message(format!("{total} rows ({skipped} skipped)"));
         total
     }
 }
@@ -705,6 +853,13 @@ impl FmpDownloader {
 // ═══════════════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════
+
+/// Compute next day string from "YYYY-MM-DD".
+fn next_day(date_str: &str) -> String {
+    chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .map(|d| (d + chrono::Duration::days(1)).format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|_| date_str.to_string())
+}
 
 fn rename_key(map: &mut serde_json::Map<String, Value>, from: &str, to: &str) {
     if let Some(val) = map.remove(from) {

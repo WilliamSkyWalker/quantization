@@ -13,7 +13,6 @@
 use quant_core::config::RegimeConfig;
 use quant_core::types::Date;
 use quant_data::cache::DataCache;
-use rustc_hash::FxHashMap;
 use tracing::debug;
 
 const TRANSITION_BAND: f64 = 0.05;
@@ -218,7 +217,7 @@ fn crowding_score(cache: &DataCache, date: Date) -> f64 {
         let d = cal[idx];
         // Collect 20-day returns for all stocks on this date
         let mut rets = Vec::new();
-        for (tid, bar) in cache.daily_prices.iter_date(d) {
+        for (_tid, bar) in cache.daily_prices.iter_date(d) {
             if bar.cum_ret_20d.is_finite() {
                 rets.push(bar.cum_ret_20d);
             }

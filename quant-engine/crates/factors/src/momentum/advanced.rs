@@ -157,7 +157,7 @@ impl Factor for ResidualMomFf3 {
     fn inherent_direction(&self) -> i8 { 1 }
     fn ic_window_months(&self) -> u32 { 12 }
 
-    fn compute(&self, date: Date, _cache: &DataCache) -> FactorResult {
+    fn compute(&self, _date: Date, _cache: &DataCache) -> FactorResult {
         // Requires FF5 daily factor data (Mkt-RF, SMB, HML) which isn't loaded yet.
         // TODO: Load ff5_daily.csv into DataCache, then implement full OLS regression.
         // For now, return empty — this is the most complex factor requiring matrix OLS.

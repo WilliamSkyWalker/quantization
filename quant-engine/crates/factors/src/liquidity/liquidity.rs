@@ -16,7 +16,7 @@ impl Factor for AmihudIlliq {
         let start = date - chrono::Duration::days(35);
         let mut result = FactorResult::default();
         let mut ticker_ratios: rustc_hash::FxHashMap<quant_core::types::TickerId, Vec<f64>> = Default::default();
-        for (tid, d, bar) in cache.daily_prices.iter_date_range(start, date) {
+        for (tid, _d, bar) in cache.daily_prices.iter_date_range(start, date) {
             let ret = bar.change_percent / 100.0;
             let dvol = bar.close * bar.volume;
             if ret.is_finite() && dvol > 1e-6 {

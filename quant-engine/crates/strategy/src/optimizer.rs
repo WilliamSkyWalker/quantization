@@ -220,7 +220,7 @@ pub fn optimize(
     cov: &DMatrix<f64>,
     tickers: &[TickerId],
     prev_weights: &FxHashMap<TickerId, f64>,
-    sector_map: &FxHashMap<TickerId, SectorId>,
+    _sector_map: &FxHashMap<TickerId, SectorId>,
     config: &OptimizerConfig,
     net_exposure: f64,
     short_enabled: bool,
@@ -270,7 +270,7 @@ pub fn optimize(
     //   7) Σ|wᵢ| ≤ gross_leverage → linearized: wᵢ ≤ pᵢ, -wᵢ ≤ pᵢ, Σpᵢ ≤ GL (3n+1)
     //   8) sector gross constraints (optional)
 
-    use clarabel::algebra::CscMatrix;
+    
     use clarabel::solver::{
         DefaultSettingsBuilder, DefaultSolver, IPSolver, SolverStatus, SupportedConeT,
     };

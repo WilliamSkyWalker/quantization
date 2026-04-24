@@ -7,7 +7,7 @@ use reqwest::Client;
 use serde_json::Value;
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
-use tracing::{debug, warn};
+use tracing::warn;
 
 /// Rate-limited HTTP client for financial data APIs.
 pub struct ApiClient {

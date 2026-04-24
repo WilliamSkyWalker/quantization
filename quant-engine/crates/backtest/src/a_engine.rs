@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use chrono::NaiveDate;
 use rustc_hash::FxHashMap;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 use quant_factors::a_share::cache::{AShareCache, ABar};
 
@@ -73,8 +73,8 @@ pub fn run_backtest(
         return empty_result();
     }
 
-    let start = *trading_days.first().unwrap();
-    let end = *trading_days.last().unwrap();
+    let _start = *trading_days.first().unwrap();
+    let _end = *trading_days.last().unwrap();
 
     let mut cash = config.initial_capital;
     let mut positions: FxHashMap<String, i64> = FxHashMap::default(); // ts_code → shares
@@ -99,7 +99,7 @@ pub fn run_backtest(
 
             // Phase 1: Sell (reduce/close positions)
             let mut sell_codes: Vec<String> = Vec::new();
-            for (code, &shares) in &positions {
+            for (code, &_shares) in &positions {
                 let target_w = target_weights.get(code).copied().unwrap_or(0.0);
                 if target_w <= 0.0 {
                     sell_codes.push(code.clone());
@@ -245,7 +245,7 @@ fn is_limit_down_one_char(bar: &ABar) -> bool {
 fn compute_stats(
     nav: &[(NaiveDate, f64)],
     _bm_nav: &[(NaiveDate, f64)],
-    total_trades: usize,
+    _total_trades: usize,
     total_turnover: f64,
     initial_capital: f64,
 ) -> (f64, f64, f64, f64, f64, f64, f64) {
@@ -273,7 +273,7 @@ fn compute_stats(
     let var = returns.iter().map(|r| (r - mean_r).powi(2)).sum::<f64>() / (returns.len() - 1) as f64;
     let annual_vol = var.sqrt() * (244.0_f64).sqrt(); // A-share ~244 trading days
 
-    let rf_daily = 0.02 / 244.0; // 2% annual risk-free
+    let _rf_daily = 0.02 / 244.0; // 2% annual risk-free
     let sharpe = if annual_vol > 1e-6 { (annual_return - 0.02) / annual_vol } else { 0.0 };
 
     // Max drawdown

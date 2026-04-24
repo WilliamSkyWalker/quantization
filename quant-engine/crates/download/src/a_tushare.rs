@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use serde_json::{json, Value};
 use sqlx::PgPool;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::http::ApiClient;
 use crate::progress::ticker_progress;

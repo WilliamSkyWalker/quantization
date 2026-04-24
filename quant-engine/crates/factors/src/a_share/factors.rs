@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use chrono::NaiveDate;
-use super::cache::{AShareCache, ABar};
+use super::cache::AShareCache;
 
 pub type AFactorResult = HashMap<String, f64>;
 
@@ -258,7 +258,7 @@ pub fn all_factors() -> Vec<AFactorDef> {
                 for code in cache.active_codes_on(date) {
                     let bars = cache.get_bars_before(code, date, 20);
                     if bars.len() >= 15 {
-                        let n = bars.len() as f64;
+                        let _n = bars.len() as f64;
                         let vol_trend: f64 = bars.windows(2)
                             .filter_map(|w| {
                                 if w[0].vol > 0.0 && w[1].vol > 0.0 {

@@ -5,7 +5,7 @@
 //! β estimated from 252-day rolling OLS of excess returns on Mkt-RF,
 //! then Vasicek-shrunk toward 1.0: β_shrunk = 0.6·β_OLS + 0.4·1.0
 
-use quant_core::types::{Date, FactorResult, TickerId};
+use quant_core::types::{Date, FactorResult};
 use quant_data::cache::DataCache;
 use crate::registry::Factor;
 

@@ -17,7 +17,7 @@ impl Factor for MaxRet {
         let mut result = FactorResult::default();
         // Group daily returns by ticker
         let mut ticker_rets: rustc_hash::FxHashMap<quant_core::types::TickerId, Vec<f64>> = Default::default();
-        for (tid, d, bar) in cache.daily_prices.iter_date_range(start, date) {
+        for (tid, _d, bar) in cache.daily_prices.iter_date_range(start, date) {
             if bar.change_percent.is_finite() {
                 ticker_rets.entry(tid).or_default().push(bar.change_percent / 100.0);
             }

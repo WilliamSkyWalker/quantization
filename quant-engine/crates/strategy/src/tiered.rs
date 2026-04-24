@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use quant_core::types::{Date, TickerId, SectorId};
+use quant_core::types::{Date, TickerId};
 use quant_data::cache::DataCache;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::info;

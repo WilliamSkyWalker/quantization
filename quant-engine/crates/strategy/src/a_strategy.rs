@@ -90,7 +90,7 @@ pub fn compute_scores(date: NaiveDate, cache: &AShareCache) -> AFactorResult {
         let mut cat_scores: HashMap<&str, f64> = HashMap::new();
         let mut cat_counts: HashMap<&str, usize> = HashMap::new();
 
-        for (name, category, direction, vals) in &factor_values {
+        for (_name, category, direction, vals) in &factor_values {
             if let Some(&val) = vals.get(code) {
                 if val.is_finite() {
                     let signed = if *direction == -1 { -val } else { val };
