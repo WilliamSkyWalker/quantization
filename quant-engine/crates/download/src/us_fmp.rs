@@ -94,6 +94,16 @@ impl FmpDownloader {
         ).bind(table).fetch_all(&self.pool).await.unwrap_or_default().into_iter().collect()
     }
 
+    /// Get actual column names from DB for a table (cached).
+    async fn get_table_columns(&self, table: &str) -> HashSet<String> {
+        let sql = format!(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = '{table}'"
+        );
+        let rows: Vec<(String,)> = sqlx::query_as(&sql)
+            .fetch_all(&self.pool).await.unwrap_or_default();
+        rows.into_iter().map(|(c,)| c).collect()
+    }
+
     async fn mark_done(&self, table: &str, ticker: &str) {
         sqlx::query(
             "INSERT INTO import_progress (table_name, ticker, completed_at) \
@@ -115,7 +125,7 @@ impl FmpDownloader {
     }
 
     /// Generic batch upsert: INSERT with inline SQL literals for correct type inference.
-    /// Numbers inline, strings single-quoted + escaped, bools as 0/1, nulls as NULL.
+    /// Filters out columns not present in the DB table (API may return extra fields).
     async fn upsert_rows(&self, table: &str, rows: &[Value], unique_keys: &[&str]) -> usize {
         if rows.is_empty() { return 0; }
 
@@ -123,7 +133,16 @@ impl FmpDownloader {
             Some(m) => m,
             None => return 0,
         };
-        let columns: Vec<String> = first.keys().cloned().collect();
+
+        // Filter columns to only those that exist in DB + skip 'id' and 'updated_at' (auto-generated)
+        let db_columns = self.get_table_columns(table).await;
+        let columns: Vec<String> = first.keys()
+            .filter(|k| {
+                let k = k.as_str();
+                k != "id" && k != "updated_at" && (db_columns.is_empty() || db_columns.contains(k))
+            })
+            .cloned()
+            .collect();
         if columns.is_empty() { return 0; }
 
         let col_list = columns.join(", ");
@@ -137,7 +156,18 @@ impl FmpDownloader {
         let mut total = 0usize;
         let mut error_count = 0usize;
 
-        for chunk in rows.chunks(chunk_size) {
+        // Deduplicate rows by unique key to avoid "cannot affect row a second time"
+        let mut seen = HashSet::new();
+        let deduped: Vec<&Value> = rows.iter().filter(|row| {
+            if let Some(obj) = row.as_object() {
+                let key: Vec<String> = unique_keys.iter()
+                    .map(|k| obj.get(*k).map(|v| v.to_string()).unwrap_or_default())
+                    .collect();
+                seen.insert(key)
+            } else { false }
+        }).collect();
+
+        for chunk in deduped.chunks(chunk_size) {
             let mut values_clauses = Vec::with_capacity(chunk.len());
 
             for row in chunk {
