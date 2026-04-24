@@ -16,3 +16,4 @@ cache/
 backend/
 tests/
 quant-engine/target/
+cache_backup_*.tar.zst
