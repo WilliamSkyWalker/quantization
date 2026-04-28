@@ -1466,11 +1466,11 @@ Live PnL = Backtest_predicted_PnL + Implementation_shortfall + Alpha_decay + Ran
 | **6** | Regime detection expanding window | ⚠️ | 当前实施方式待核查 |
 | **8** | Daily 借券成本 | ❌ | 当前可能用静态 bps |
 | **8** | Recall + Forced buy-in 模拟 | ❌ | 未建模（GME 类型风险敞口未量化） |
-| **9** | DSR / PBO 校正 | ❌ | t=2.26 已知边缘显著，未跑 DSR；2025 +108% 未跑 PBO |
+| **9** | DSR / PBO 校正 | ⚠️ | DSR 已跑（`backtest_significance` 命令）；PBO 待补。**结论：所有版本 DSR < 0.95，OOS Bootstrap CI 跨 0** |
 | **9** | Spearman vs Pearson IC | ⚠️ | 待核查美股是否用 Pearson + winsorize |
 | **9** | IC half-life 量化 | ❌ | 未做，影响调仓频率决策 |
-| **10** | 月度因子拥挤度监控 | ❌ | 2025 +108% 强证据，未量化 13F overlap / kurtosis |
-| **10** | Crowding kill switch | ❌ | 未实施 |
+| **10** | 月度因子拥挤度监控 | ⚠️ | 4 项 NAV-only 指标已建（`backtest_crowding` 命令）：60D kurt / 1D autocorr / 252D Sharpe pct / NASDAQ-SPY corr。13F overlap / SI / ETF AUM 待外部数据 |
+| **10** | Crowding kill switch | ❌ | 框架已有，未挂入实盘流水 |
 | **11** | Brinson 三项分解 | ❌ | 已知 alpha 行业归零，但未跑数字归因 |
 | **11** | Barra 风格归因 | ⚠️ | 已知 β_rmw=-1.01，未规范报告 |
 | **11** | Long vs Short IR 拆分 | ⚠️ | 已知 Short IR ≈ 0，未规范报告 |
@@ -1533,6 +1533,35 @@ Live PnL = Backtest_predicted_PnL + Implementation_shortfall + Alpha_decay + Ran
 15. TCA + Capacity curve + Live monitoring + Kill switch（节 18-20）
 
 > **注**：本附录每次重大策略变更后应重新校对，标记 ✅ 的项也可能因代码变动失效。建议季度 review 一次。
+
+### 关键发现 (2026-04-28 跑分结果)
+
+**DSR / Bootstrap CI**（`backtest_significance` 跑 N=50 试错）：
+
+| Backtest | 全样本 SR | 全样本 DSR | OOS SR | OOS DSR | OOS Bootstrap CI 95% |
+|---------|----------|-----------|--------|---------|----------------------|
+| ID 5 (pre-MVO) | 0.18 | < 0.05 | — | — | — |
+| ID 9 (best, 2026-04-20) | **0.87** | 0.74 ❌ | 0.75 | 0.18 ❌ | [-0.04, +1.63] |
+| ID 13 (latest, 2026-04-22) | 0.60 | 0.37 ❌ | 0.60 | 0.11 ❌ | [-0.41, +1.44] |
+
+**结论**：
+- **PSR 全部过线**（vs SR=0），但 **DSR 全部失败**（< 0.95）→ 单次比较显著，N=50 试错下不显著
+- 所有 OOS Bootstrap CI 下界 ≤ 0 → 无法拒绝 "OOS 真实 SR = 0"
+- N=50 下 OOS 显著阈值 = 年化 SR > 1.16；现有最高 0.75，差距 ~50%
+
+**Crowding 监控**（`backtest_crowding`，4 项 alert）：
+
+- 当前（2025-12-31）：ID 9 / ID 13 **均 0/4 命中**
+- ID 9 历史高拥挤天数 25 / 3209（0.8%）；ID 13 42 / 3209（1.3%）
+- ID 9 在 **2025-06-09 ~ 06-30 连续 10 天命中 2/4**（kurt ~12 + autocorr +0.11）→ 早期拥挤预警但未触发 3/4 高拥挤
+- 2025 全年 **NASDAQ−SPY corr 为负**（mean −0.07）→ 策略反向暴露 tech，与 MEMORY 假设的"AI 风格红利"**矛盾**
+
+**对下一步 P0 的指引**：
+- 既然 DSR 失败 + crowding 当前不高，问题不太可能是"factor crowding 红利"
+- **更可能的解释**：alpha 来自行业/style 暴露而不是真选股
+- → **下一步做 Brinson + Barra 归因**才能确认
+
+**MEMORY 中"+108% 2025 / β_rmw=-1.01"的 Strategy v3 版本未在 `backtest_result` 表中保存**。当前所有保存的版本年化 7-12%，β_rmw 在 -0.27 ~ +0.003 之间。**MEMORY 描述的版本可能是早期的实验快照**，需要校对 / 删除。
 
 ---
 
