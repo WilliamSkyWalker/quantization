@@ -9,6 +9,40 @@ description: 量化投研金融常识 checklist。当任务涉及因子构建、
 
 ---
 
+## 目录
+
+**A. 数据层** — 数据正确性、PIT、survivorship、对齐
+1. Universe / 候选池
+2. Alpha vs Beta：选股 vs 风格暴露
+3. 因子：截面 vs 时序
+4. 财务数据：Point-in-Time
+5. Survivorship Bias / 幸存者偏差
+6. Look-ahead Bias / 前瞻偏差
+7. 数据频率与对齐
+
+**B. 因子 / 策略层** — 信号有效性、空头特殊性、归因
+8. 空头端 / Short Side
+9. IC / ICIR / t-stat 解读
+10. 因子拥挤度 (Factor Crowding)
+11. 业绩归因 (Performance Attribution)
+12. 多空中性化层级 (Long-Short Neutralization)
+
+**C. 组合 / 风险层** — 成本、协方差、约束
+13. 换手率与交易成本
+14. 风险模型 / 协方差估计
+15. 组合约束体系
+
+**D. 验证层** — 回测真实性、OOS 设计
+16. 回测真实性 Checklist
+17. 训练 / 验证 / 测试与 Walk-forward
+
+**E. 区域附录**
+18. 常见数据陷阱（A 股）
+
+**速查索引**：见末尾「使用方式」节
+
+---
+
 ## 1. Universe / 候选池
 
 **铁律：候选池 ≠ 数据库里全部股票。回测 universe 必须是 point-in-time 可投资集合，不是今天的指数成分。**
@@ -76,11 +110,82 @@ description: 量化投研金融常识 checklist。当任务涉及因子构建、
 
 ## 3. 因子：截面 vs 时序
 
-- **截面因子（cross-sectional）**：同一日期，所有股票按因子值 ranking → 选 top/bottom
-  - 本项目所有因子默认是截面因子（CLAUDE.md 已规定）
-  - IC = 当期因子值 与 下期收益 的截面相关系数
-- **时序因子（time-series）**：同一股票在时间维度的信号（如 momentum t-1 → t 的方向）
-- **混淆截面/时序会导致错误**：例如把"全市场 RSI < 30"当成截面信号是错的，应该是"RSI 在所有股票里排名 bottom 10%"
+**铁律：因子定义必须明确"截面"还是"时序"，混淆会让整个 IC 分析失真。**
+
+### 截面 vs 时序
+
+- **截面因子 (cross-sectional)**：同一日期，所有股票按因子值 ranking → 选 top / bottom
+  - 本项目所有因子默认截面（CLAUDE.md 已规定）
+  - IC = 当期因子值 与 下期收益的截面相关系数
+- **时序因子 (time-series)**：同一股票在时间维度的信号（如 momentum t-1 → t 的方向）
+- **混淆案例**：把"全市场 RSI < 30"当截面信号是错的，正确是"RSI 在所有股票里排名 bottom 10%"
+
+### 分组测试 (Quantile Portfolios)
+
+最常用的因子有效性可视化：
+
+- **5 分组 (quintile)**：每个截面按因子排序分 5 组，看 Q1 vs Q5 收益差
+  - 优点：每组 ~20% universe，样本量足够
+  - 缺点：分辨率低，无法区分 top 5% 与 top 20%
+- **10 分组 (decile)**：每组 ~10%，分辨率更高
+  - 优点：能看到极端组的"长尾 alpha"
+  - 缺点：每组样本少（universe < 500 时单组 < 50 只），噪声大
+- **报告内容**：
+  - 各组累计净值曲线（Q1 应低于 Q5）
+  - Top minus Bottom (TMB) 多空组合的 Sharpe / IR
+  - 分组单调性 (Monotonicity Test)：Q1 < Q2 < Q3 < Q4 < Q5 是理想，反单调说明因子方向反了
+
+### Fama-MacBeth vs Pooled Regression
+
+跑因子收益时两种方法选哪个：
+
+| 方法 | 步骤 | 标准误 | 适用 |
+|------|------|--------|------|
+| **Fama-MacBeth** | 每个截面跑回归 → 系数时序均值 | 时序 SD / √T | 截面因子（**推荐**） |
+| **Pooled (panel)** | 所有 (t, i) 数据堆叠回归 | 简单 OLS | 时序因子 |
+| **Pooled + Cluster SE** | Panel 带聚类标准误（按 firm 或 time） | Cluster-robust | Panel data，需双重 cluster |
+
+- **Fama-MacBeth 是截面因子检验黄金标准**：与 IC 分析在概念上等价（都是逐截面计算）
+- **Pooled 容易低估标准误**：忽略截面相关性 → 假阳性多
+- **Newey-West 修正**：FM 系数有自相关时必须用 NW 校正（→ 第 9 节）
+
+### 因子正交化
+
+多因子模型里因子间相关性高会导致权重不稳定 / 多重共线，两种正交化思路：
+
+- **Sequential orthogonalization**：按优先级逐个回归剥离
+
+  ```
+  Factor_2_clean = residual( Factor_2 ~ Factor_1 )
+  Factor_3_clean = residual( Factor_3 ~ Factor_1 + Factor_2 )
+  ```
+
+  - 优点：直观、可解释
+  - 缺点：依赖剥离顺序，结果不唯一
+- **Simultaneous (PCA-based)**：对相关矩阵做 PCA，取主成分
+  - 优点：无主观顺序
+  - 缺点：主成分缺乏经济意义
+
+### 因子合成方法
+
+把多个原始因子合成单一信号：
+
+- **Z-score 加权**：每个因子 z-score normalize 后加权求和
+  - 受极端值影响（需先 winsorize）
+- **Rank 加权**：每个因子转 rank 再加权
+  - 对极端值稳健（A 股推荐，因涨跌停 truncation）
+- **IC 加权**：权重 ∝ 因子滚动 IC（动态调整）
+  - 类似本项目滚动 IC 框架
+- **机器学习集成**：Lasso / Ridge / Random Forest 学因子组合
+  - 注意 walk-forward 训练（→ 第 17 节）
+
+### 实施 checklist
+
+- [ ] 因子定义明确截面 / 时序
+- [ ] 跑 5 / 10 分组测试 + 单调性检验
+- [ ] Fama-MacBeth 系数 + Newey-West 标准误
+- [ ] 多因子模型先做相关矩阵检查（\|ρ\| > 0.7 触发正交化）
+- [ ] 因子合成方法（Z-score / Rank / IC 加权）按数据特性选
 
 ---
 
@@ -124,6 +229,36 @@ description: 量化投研金融常识 checklist。当任务涉及因子构建、
 - **回测用的是"vendor 当时已收录"的数据**，不是"SEC 已披露"
 - A 股 Tushare / AkShare 入库通常披露后 1-3 天内
 - **保守做法**：可用日 = max(披露日, vendor 入库日) + buffer 5 天
+
+### 基本面语义陷阱
+
+财务数据"看到"和"理解对了"是两码事：
+
+- **一次性损益 (non-recurring items)**
+  - 资产处置 / 重组费用 / 减值损失 / 法律和解金
+  - 不剥离会让 ROE / EPS 信号失真
+  - 数据源通常提供 **GAAP vs adjusted** 两版（adjusted 已剥离）
+- **商誉 (goodwill)**
+  - 并购溢价的"幽灵资产"，无现金流贡献
+  - 减值时一次性 hit P&L（巨额非现金费用），扭曲季度 ROE
+  - 高商誉公司（goodwill / total assets > 30%）需特别关注减值风险
+- **研发费用化 vs 资本化**
+  - GAAP 美股 R&D 全部费用化，IFRS 部分可资本化
+  - 跨准则 ROE / Margin 不可比
+  - 修正方法：把 R&D 加回 EBITDA，计算 R&D-adjusted ROE
+- **季节性**
+  - **Q4 偏差**：年末调整、奖金、坏账计提集中在 Q4，单季 EPS 有结构性偏低
+  - **Q1 业绩预告**：A 股 Q1 业绩预告窗口集中，预告本身是信号
+  - 同比 (YoY) > 环比 (QoQ)：季节性强行业（零售、能源）只看 YoY
+- **合并范围变化**
+  - 子公司收购 / 剥离会导致同比数据"假增长"
+  - 须查 same-store / organic growth 口径（管理层 MD&A 会披露）
+- **关联交易 / 表外项目**
+  - SPV / VIE 等表外负债不在合并报表，但有实质风险
+  - 美股 KMI / GE / 中概股阿里 VIE 都曾踩过坑
+- **审计意见**
+  - 标准无保留 / 保留 / 否定 / 无法表示意见
+  - 非标意见显著负 alpha 但披露日才可知（PIT）
 
 ### 分析师预期 / 估值数据
 
