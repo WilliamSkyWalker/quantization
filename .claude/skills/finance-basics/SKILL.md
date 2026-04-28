@@ -7,6 +7,13 @@ description: 量化投研金融常识 checklist。当任务涉及因子构建、
 
 本项目已发生过的"低级金融常识"错误的纠错手册。每次涉及量化研究/回测/组合构建时，**逐条对照检查**，不能跳过。
 
+**Checklist 优先级标签说明**：
+- **[P0]** = 必查，违反会导致回测失真 / 上线爆仓 / 监管违规
+- **[P1]** = 强推，影响策略质量与稳健性，工业级标准
+- **[P2]** = 可选，AUM 上规模或特殊需求时再做
+
+**附录 A** 提供本项目当前策略 (Strategy v3) 对照本 skill 的合规自检表。
+
 ---
 
 ## 目录
@@ -43,6 +50,9 @@ description: 量化投研金融常识 checklist。当任务涉及因子构建、
 
 **F. 区域附录**
 21. 常见数据陷阱（A 股）
+
+**附录**
+- 附录 A. 项目自检 (Strategy v3)
 
 **速查索引**：见末尾「使用方式」节
 
@@ -186,11 +196,11 @@ description: 量化投研金融常识 checklist。当任务涉及因子构建、
 
 ### 实施 checklist
 
-- [ ] 因子定义明确截面 / 时序
-- [ ] 跑 5 / 10 分组测试 + 单调性检验
-- [ ] Fama-MacBeth 系数 + Newey-West 标准误
-- [ ] 多因子模型先做相关矩阵检查（\|ρ\| > 0.7 触发正交化）
-- [ ] 因子合成方法（Z-score / Rank / IC 加权）按数据特性选
+- [ ] **[P0]** 因子定义明确截面 / 时序
+- [ ] **[P0]** 跑 5 / 10 分组测试 + 单调性检验
+- [ ] **[P1]** Fama-MacBeth 系数 + Newey-West 标准误
+- [ ] **[P1]** 多因子模型先做相关矩阵检查（\|ρ\| > 0.7 触发正交化）
+- [ ] **[P1]** 因子合成方法（Z-score / Rank / IC 加权）按数据特性选
 
 ---
 
@@ -472,15 +482,15 @@ description: 量化投研金融常识 checklist。当任务涉及因子构建、
 
 ### 实施 checklist
 
-- [ ] 借券成本日度建模（不是静态 bps）
-- [ ] Rebate 净额建模（含 negative rebate 场景）
-- [ ] 股息日赔付 + 税务调整
-- [ ] Reg SHO locate 模拟（约 5-10% 标的某些日不可借）
-- [ ] **Recall probability 建模**（高 SI + 高 utilization 标的 ≥ 5% / 月）
-- [ ] **Forced buy-in 成交价模拟**（拍 ask + 1%，不是 mid）
-- [ ] SSR 触发后次日不开新空头
-- [ ] 单空头 < 2% AUM、≥ 50 只
-- [ ] SIR > 5 days 的标的列入观察名单（不一定剔除但要监控）
+- [ ] **[P0]** 借券成本日度建模（不是静态 bps）
+- [ ] **[P1]** Rebate 净额建模（含 negative rebate 场景）
+- [ ] **[P0]** 股息日赔付 + 税务调整
+- [ ] **[P0]** Reg SHO locate 模拟（约 5-10% 标的某些日不可借）
+- [ ] **[P0]** Recall probability 建模（高 SI + 高 utilization 标的 ≥ 5% / 月）
+- [ ] **[P0]** Forced buy-in 成交价模拟（拍 ask + 1%，不是 mid）
+- [ ] **[P0]** SSR 触发后次日不开新空头
+- [ ] **[P0]** 单空头 < 2% AUM、≥ 50 只
+- [ ] **[P1]** SIR > 5 days 的标的列入观察名单（不一定剔除但要监控）
 
 > 🚨 **本项目结论**：空头端形同虚设；下行保护来自半仓效应而非空头对冲。归因 (→ 第 10 节) 显示 Short IR ≈ 0，应考虑改 long-only + index hedge
 
@@ -622,11 +632,11 @@ DSR 的配套指标 — DSR 看显著性，PBO 看选择偏差，两个一起报
 
 ### 操作 checklist（建议每月跑一次）
 
-- [ ] 因子日收益的 60D rolling kurtosis / autocorr / Sharpe 分位
-- [ ] 13F top 50 基金顶部持仓重叠度（用 `us_13f_holdings` 表）
-- [ ] thematic ETF AUM 6M 增速（ARKK/SOXX/KWEB/QUAL/SMH）
-- [ ] 任 3 项命中 → 触发减仓 alert + 归因报告
-- [ ] 历史压力测试：组合在 2007-08-07 / 2020-03-09 / 2021-01-27 三日的模拟收益
+- [ ] **[P0]** 因子日收益的 60D rolling kurtosis / autocorr / Sharpe 分位
+- [ ] **[P1]** 13F top 50 基金顶部持仓重叠度（用 `us_13f_holdings` 表）
+- [ ] **[P1]** thematic ETF AUM 6M 增速（ARKK/SOXX/KWEB/QUAL/SMH）
+- [ ] **[P0]** 任 3 项命中 → 触发减仓 alert + 归因报告
+- [ ] **[P1]** 历史压力测试：组合在 2007-08-07 / 2020-03-09 / 2021-01-27 三日的模拟收益
 
 ---
 
@@ -695,12 +705,12 @@ R_portfolio = R_market + Σ β_style · F_style + Σ β_industry · F_industry +
 
 ### 归因实施 checklist（每月跑）
 
-- [ ] Brinson 三项分解（用 point-in-time GICS Sector + benchmark）
-- [ ] Barra 风格暴露 + 风格收益贡献分解
-- [ ] Long book / Short book / Net 三本账分别归因
-- [ ] 归因与第 12 节 backtest checklist 交叉比对
-- [ ] 如果 Specific α / Total Return < 30%，重新审视策略本质
-- [ ] 多 regime 分别归因（牛 / 熊 / 横盘）
+- [ ] **[P0]** Brinson 三项分解（用 point-in-time GICS Sector + benchmark）
+- [ ] **[P0]** Barra 风格暴露 + 风格收益贡献分解
+- [ ] **[P0]** Long book / Short book / Net 三本账分别归因
+- [ ] **[P1]** 归因与第 16 节 backtest checklist 交叉比对
+- [ ] **[P0]** 如果 Specific α / Total Return < 30%，重新审视策略本质
+- [ ] **[P1]** 多 regime 分别归因（牛 / 熊 / 横盘）
 
 ### 常见误用
 
@@ -794,13 +804,13 @@ R_portfolio = R_market + Σ β_style · F_style + Σ β_industry · F_industry +
 
 ### 中性化实施 checklist
 
-- [ ] 明确 alpha 来源 → 选择对应中性化层级
-- [ ] β 估计：PIT、winsorize、shrinkage
-- [ ] Sector 分类：PIT、与 universe 一致
-- [ ] 优化器约束：硬 vs 软 vs 惩罚项（按可行性选）
-- [ ] 中性化前后 R² 对比，确认风格暴露有效降低
-- [ ] 月度报告残余敞口（不应 > 阈值）
-- [ ] 中性化后 OOS Sharpe 仍 > 阈值才算合格策略
+- [ ] **[P0]** 明确 alpha 来源 → 选择对应中性化层级
+- [ ] **[P0]** β 估计：PIT、winsorize、shrinkage
+- [ ] **[P0]** Sector 分类：PIT、与 universe 一致
+- [ ] **[P1]** 优化器约束：硬 vs 软 vs 惩罚项（按可行性选）
+- [ ] **[P1]** 中性化前后 R² 对比，确认风格暴露有效降低
+- [ ] **[P1]** 月度报告残余敞口（不应 > 阈值）
+- [ ] **[P0]** 中性化后 OOS Sharpe 仍 > 阈值才算合格策略
 
 ---
 
@@ -941,11 +951,11 @@ RC_i = w_i · (Σw)_i / σ_p          (Risk Contribution)
 
 ### 实施 checklist
 
-- [ ] Σ 估计用 Ledoit-Wolf 或 Factor model（不裸用样本协方差）
-- [ ] μ 经过 winsorize、shrinkage 处理
-- [ ] MVO 输出做扰动测试（μ ±5% 扰动权重重叠 > 80%）
-- [ ] 权重 sanity check：top 10 holdings < 30% AUM
-- [ ] 历史回测验证 ex-ante vol vs ex-post realized vol（应 ±20% 内吻合）
+- [ ] **[P0]** Σ 估计用 Ledoit-Wolf 或 Factor model（不裸用样本协方差）
+- [ ] **[P0]** μ 经过 winsorize、shrinkage 处理
+- [ ] **[P1]** MVO 输出做扰动测试（μ ±5% 扰动权重重叠 > 80%）
+- [ ] **[P0]** 权重 sanity check：top 10 holdings < 30% AUM
+- [ ] **[P1]** 历史回测验证 ex-ante vol vs ex-post realized vol（应 ±20% 内吻合）
 
 ---
 
@@ -1017,14 +1027,14 @@ RC_i = w_i · (Σw)_i / σ_p          (Risk Contribution)
 
 ### 实施 checklist
 
-- [ ] 单股 ADV 占比 cap（最关键）
-- [ ] 单股 weight cap
-- [ ] 行业 / 国家暴露 cap
-- [ ] 风格 β cap（→ 第 12 节）
-- [ ] Vol target 或 leverage cap
-- [ ] Turnover budget（→ 第 13 节）
-- [ ] DD 软停损规则
-- [ ] 约束 binding 频率监控
+- [ ] **[P0]** 单股 ADV 占比 cap（最关键）
+- [ ] **[P0]** 单股 weight cap
+- [ ] **[P0]** 行业 / 国家暴露 cap
+- [ ] **[P0]** 风格 β cap（→ 第 12 节）
+- [ ] **[P0]** Vol target 或 leverage cap
+- [ ] **[P1]** Turnover budget（→ 第 13 节）
+- [ ] **[P1]** DD 软停损规则
+- [ ] **[P1]** 约束 binding 频率监控
 
 ### 常见错误
 
@@ -1040,18 +1050,18 @@ RC_i = w_i · (Σw)_i / σ_p          (Risk Contribution)
 
 每次发回测结果前，强制自检：
 
-- [ ] Universe 是 point-in-time，不是今天的成分股
-- [ ] Universe 经过流动性 / 市值 / ST 筛选
-- [ ] 财务数据用披露日，不用报告期
-- [ ] 分析师预期用 point-in-time 快照
-- [ ] 价格用前复权
-- [ ] 包含已退市股票（无 survivorship bias）
-- [ ] 信号 t 日生成，t+1 日开盘 / VWAP 执行（不是 t 日收盘）
-- [ ] 扣除交易成本（至少单边 5-10 bps）
-- [ ] 扣除借券成本（如有空头）
-- [ ] 行业中性 / 风格中性后 alpha 是否还在
-- [ ] IS / OOS 分割，OOS 不能 fit
-- [ ] 多重检验调整
+- [ ] **[P0]** Universe 是 point-in-time，不是今天的成分股
+- [ ] **[P0]** Universe 经过流动性 / 市值 / ST 筛选
+- [ ] **[P0]** 财务数据用披露日，不用报告期
+- [ ] **[P0]** 分析师预期用 point-in-time 快照
+- [ ] **[P0]** 价格用前复权
+- [ ] **[P0]** 包含已退市股票（无 survivorship bias）
+- [ ] **[P0]** 信号 t 日生成，t+1 日开盘 / VWAP 执行（不是 t 日收盘）
+- [ ] **[P0]** 扣除交易成本（至少单边 5-10 bps）
+- [ ] **[P0]** 扣除借券成本（如有空头）
+- [ ] **[P0]** 行业中性 / 风格中性后 alpha 是否还在
+- [ ] **[P0]** IS / OOS 分割，OOS 不能 fit
+- [ ] **[P1]** 多重检验调整
 
 > 🚨 任何回测出现 IS Sharpe > 3 / 年化收益 > 50%，第一反应是"哪里漏了"，不是"找到圣杯"
 
@@ -1116,12 +1126,12 @@ RC_i = w_i · (Σw)_i / σ_p          (Risk Contribution)
 
 ### 实施 checklist
 
-- [ ] 严格三段式分割，测试集只跑 1 次
-- [ ] Walk-forward 而非随机 CV
-- [ ] 训练 / 验证之间 purge + embargo
-- [ ] Bootstrap 报告 Sharpe 置信区间
-- [ ] 超参选择记录次数（→ 第 9 节 Deflated Sharpe）
-- [ ] 测试集结果与验证集结果对比，差距 > 50% 触发警报
+- [ ] **[P0]** 严格三段式分割，测试集只跑 1 次
+- [ ] **[P0]** Walk-forward 而非随机 CV
+- [ ] **[P1]** 训练 / 验证之间 purge + embargo
+- [ ] **[P1]** Bootstrap 报告 Sharpe 置信区间
+- [ ] **[P1]** 超参选择记录次数（→ 第 9 节 Deflated Sharpe）
+- [ ] **[P0]** 测试集结果与验证集结果对比，差距 > 50% 触发警报
 
 ### 本项目应用
 
@@ -1195,12 +1205,12 @@ IS = Spread Cost + Market Impact + Timing Risk + Opportunity Cost
 
 ### 实施 checklist
 
-- [ ] 信号决策价定义（生成时 mid / arrival quote）
-- [ ] 执行算法选择（按订单 size / alpha 衰减速度）
-- [ ] 大单 slice schedule（U-shape / VWAP-aligned）
-- [ ] 月度 TCA 报告：arrival + VWAP slippage + markout
-- [ ] 按 broker / venue / 算法分拆找最优路径
-- [ ] Adverse selection 监控（markout 应有利）
+- [ ] **[P0]** 信号决策价定义（生成时 mid / arrival quote）
+- [ ] **[P1]** 执行算法选择（按订单 size / alpha 衰减速度）
+- [ ] **[P1]** 大单 slice schedule（U-shape / VWAP-aligned）
+- [ ] **[P0]** 月度 TCA 报告：arrival + VWAP slippage + markout（上线后）
+- [ ] **[P2]** 按 broker / venue / 算法分拆找最优路径
+- [ ] **[P1]** Adverse selection 监控（markout 应有利）
 
 ### 常见错误
 
@@ -1269,12 +1279,12 @@ Sharpe
 
 ### 实施 checklist
 
-- [ ] 回测必须有 capacity curve 模块（不是单点 Sharpe）
-- [ ] 单股 ADV cap 显式建模（→ 第 15 节）
-- [ ] Sqrt-law impact 加入交易成本（→ 第 13 节）
-- [ ] 标记 soft capacity（Sharpe −50%）和 hard capacity（Sharpe < 1）
-- [ ] 定期重算（每季度），市场流动性会变
-- [ ] 当前 AUM / soft capacity 比值监控（> 0.5 触发 alert）
+- [ ] **[P0]** 回测必须有 capacity curve 模块（不是单点 Sharpe）
+- [ ] **[P0]** 单股 ADV cap 显式建模（→ 第 15 节）
+- [ ] **[P1]** Sqrt-law impact 加入交易成本（→ 第 13 节）
+- [ ] **[P0]** 标记 soft capacity（Sharpe −50%）和 hard capacity（Sharpe < 1）
+- [ ] **[P1]** 定期重算（每季度），市场流动性会变
+- [ ] **[P0]** 当前 AUM / soft capacity 比值监控（> 0.5 触发 alert）
 
 ### 常见错误
 
@@ -1355,12 +1365,12 @@ Live PnL = Backtest_predicted_PnL + Implementation_shortfall + Alpha_decay + Ran
 
 ### 实施 checklist
 
-- [ ] 日度 dashboard：performance + risk 指标
-- [ ] 月度归因报告（→ 第 11 节）
-- [ ] 月度 factor 健康度报告（rolling IC + crowding）
-- [ ] Kill switch 规则文档化 + 自动触发
-- [ ] Live vs Backtest 差异归因（每周）
-- [ ] Quarterly review：是否需要 retire / redesign 因子
+- [ ] **[P0]** 日度 dashboard：performance + risk 指标
+- [ ] **[P0]** 月度归因报告（→ 第 11 节）
+- [ ] **[P0]** 月度 factor 健康度报告（rolling IC + crowding）
+- [ ] **[P0]** Kill switch 规则文档化 + 自动触发
+- [ ] **[P0]** Live vs Backtest 差异归因（每周）
+- [ ] **[P1]** Quarterly review：是否需要 retire / redesign 因子
 
 ### 常见错误
 
@@ -1433,6 +1443,96 @@ Live PnL = Backtest_predicted_PnL + Implementation_shortfall + Alpha_decay + Ran
 
 - **政策事件驱动**：A 股政策敏感性远高于美股（货币、监管、产业），系统性 regime shift 频繁
 - **机构占比低**：散户占比 60%+（美股 < 10%），微观结构 / 行为偏差因子在 A 股更有效
+
+---
+
+## 附录 A. 项目自检 (Strategy v3 — 截至 2026-04-28)
+
+按本 skill 各节关键要求，逐项标注当前 Strategy v3 (美股 long-short) 的合规状态，作为下一版改进的优先级排序依据。
+
+**图例**：✅ 已合规 / ⚠️ 部分合规 / ❌ 待办 / 🔮 N/A（未上线）
+
+| 节 | 要求 | 状态 | 备注 |
+|----|------|------|------|
+| **1** | 流动性 / 市值 / 价格筛选 | ⚠️ | MVO 用全 universe 2700 只导致 1373% 虚假回测，需补 ADV / 市值过滤 |
+| **1** | PIT 指数成分历史 | ⚠️ | 当前用静态 universe |
+| **1** | PIT GICS sector 分类 | ❌ | 用今天的 GICS 跑历史，2018 Communication Services 拆分污染 |
+| **4** | 财务用披露日 (announcement_date) | ✅ | FMP 数据已正确处理 |
+| **4** | EPS 预期 PIT 快照 | ❌ | EPS_REVISION 有前瞻偏差，已列入 P3 待办 |
+| **4** | First-print vs 修订版 | ⚠️ | FMP 仅最终版，未区分 vintage |
+| **4** | TTM 断档处理 | ⚠️ | 未严格校验 IPO < 4 季度的剔除 |
+| **5** | 包含已退市股票 | ⚠️ | FMP 提供 delistedCompanies，需确认是否并入 universe |
+| **5** | M&A announcement jump 处理 | ❌ | 当前可能跳过 jump 收益 |
+| **6** | Regime detection expanding window | ⚠️ | 当前实施方式待核查 |
+| **8** | Daily 借券成本 | ❌ | 当前可能用静态 bps |
+| **8** | Recall + Forced buy-in 模拟 | ❌ | 未建模（GME 类型风险敞口未量化） |
+| **9** | DSR / PBO 校正 | ❌ | t=2.26 已知边缘显著，未跑 DSR；2025 +108% 未跑 PBO |
+| **9** | Spearman vs Pearson IC | ⚠️ | 待核查美股是否用 Pearson + winsorize |
+| **9** | IC half-life 量化 | ❌ | 未做，影响调仓频率决策 |
+| **10** | 月度因子拥挤度监控 | ❌ | 2025 +108% 强证据，未量化 13F overlap / kurtosis |
+| **10** | Crowding kill switch | ❌ | 未实施 |
+| **11** | Brinson 三项分解 | ❌ | 已知 alpha 行业归零，但未跑数字归因 |
+| **11** | Barra 风格归因 | ⚠️ | 已知 β_rmw=-1.01，未规范报告 |
+| **11** | Long vs Short IR 拆分 | ⚠️ | 已知 Short IR ≈ 0，未规范报告 |
+| **12** | Dollar-neutral | ✅ | 多空各半 |
+| **12** | Beta-neutral | ❌ | 未估计组合 β，可能净 β ≠ 0 |
+| **12** | Sector-neutral | ❌ | **P0 待办：行业内 L/S 测试** |
+| **12** | Style-neutral (ex-ante β cap) | ❌ | β_rmw=-1.01 强证据，无 ex-ante 约束 |
+| **13** | 单边 / 双边换手率口径明确 | ⚠️ | 待核查项目代码用哪个 |
+| **13** | Sqrt-law impact | ❌ | 当前可能用常数 bps |
+| **13** | 换手率控制 | ❌ | 年化 ~8x 太高，已列入 P2 待办 |
+| **14** | Ledoit-Wolf 协方差 | ✅ | Tier 1 已完成 (2026-04-20) |
+| **14** | MVO 优化器 (cvxpy/OSQP) | ✅ | 已替换 Top-N + Softmax |
+| **14** | μ 扰动稳定性测试 | ❌ | 未做 |
+| **14** | Risk attribution (RC_i) | ❌ | 未跑 |
+| **15** | 单股 ADV 占比 cap | ❌ | **已踩 1373% 虚假回测的坑** |
+| **15** | 单股 weight cap | ⚠️ | 待核查实施细节 |
+| **15** | 行业暴露 cap | ❌ | 与 sector-neutral 配套未做 |
+| **15** | DD 软停损规则 | ❌ | 未实施 |
+| **15** | 约束 binding 频率监控 | ❌ | 未实施 |
+| **16** | 12 项回测 checklist 全过 | ⚠️ | 多项待补，见上 |
+| **17** | Train/Val/Test 三段切分 | ❌ | 当前 IS/OOS 两段 |
+| **17** | OOS 只跑一次 | ❌ | OOS 2021-2025 已被多次"看过" |
+| **17** | Bootstrap Sharpe 置信区间 | ❌ | 未报告 |
+| **17** | Walk-forward 重训练 | ⚠️ | 滚动 IC 是 walk-forward，但因子权重 fit 待核 |
+| **18** | TCA 报告 | 🔮 | 未上线，无成交数据 |
+| **19** | Capacity curve | ❌ | 未做，无法回答"能管多大" |
+| **20** | Live monitoring | 🔮 | 未上线 |
+| **21** | A 股专项 | N/A | 本策略仅美股 |
+
+### 优先级排序（结合本 skill + MEMORY 待办）
+
+**P0 — 修虚假 alpha**（先验证当前结果可信度）
+
+1. **Brinson + Barra 归因**（节 11）— 量化"行业归零"和 RMW 拖累，把口头结论变数字
+2. **Crowding 监控**（节 10）— 量化 2025 +108% 是 crowding 还是 alpha
+3. **DSR / PBO**（节 9）— 给 t=2.26 / 2025 +108% 加显著性置信区间
+4. **Universe 补 ADV / 市值 / PIT GICS**（节 1）— 修最基础的数据正确性
+
+**P0.5 — 验证选股能力**（决定要不要继续做多空）
+
+5. **Sector-neutral 行业内 L/S 测试**（节 12，已是 P0 待办）
+6. **EPS_REVISION 单因子行业内测试**（已是 P0 待办）
+
+**P1 — 修方法论**（如果选股能力存在，就需要这些）
+
+7. **Style-neutral ex-ante β_rmw 约束**（节 12）— 对应 Alpha v4 设计
+8. **Train/Val/Test 三段切分**（节 17）+ Bootstrap CI
+9. **单股 ADV cap**（节 15）+ Sqrt-law impact（节 13）
+10. **Risk attribution + μ 扰动测试**（节 14）
+
+**P2 — 长期改进**
+
+11. EPS PIT 快照积累（节 4，已 P3 待办）
+12. M&A 处理协议 + first-print vintage（节 4 / 5）
+13. Recall + Forced buy-in 建模（节 8）— 仅在保留空头端时需要
+14. Daily 借券成本 + 股息税赔付（节 8）— 同上
+
+**🔮 上线时（如果策略最终上线）**
+
+15. TCA + Capacity curve + Live monitoring + Kill switch（节 18-20）
+
+> **注**：本附录每次重大策略变更后应重新校对，标记 ✅ 的项也可能因代码变动失效。建议季度 review 一次。
 
 ---
 
