@@ -36,8 +36,13 @@ description: 量化投研金融常识 checklist。当任务涉及因子构建、
 16. 回测真实性 Checklist
 17. 训练 / 验证 / 测试与 Walk-forward
 
-**E. 区域附录**
-18. 常见数据陷阱（A 股）
+**E. 生产 / 上线层** — 执行、容量、监控
+18. 执行 / TCA (Transaction Cost Analysis)
+19. 容量曲线 (Capacity Curve)
+20. 上线监控 / Model Decay
+
+**F. 区域附录**
+21. 常见数据陷阱（A 股）
 
 **速查索引**：见末尾「使用方式」节
 
@@ -424,16 +429,38 @@ description: 量化投研金融常识 checklist。当任务涉及因子构建、
 - **借券费率每日变动**：回测必须用 daily 借券快照，不能用静态平均（券池流动性日内变化）
 - **股息赔付义务**：空头持有期间必须把分红"赔付"给借出方（cash-in-lieu）
   - 进一步：long 端股息可享 qualified dividend 15-20% 税率，short 端的 cash-in-lieu 是普通收入 37%，**税务上空头还有 ~15-20% 额外侵蚀**
-- **rebate**：现金抵押品的利息回报，正常情况下 rebate ≈ Fed funds − fee；hard-to-borrow 时 rebate 转负
+- **rebate (净额返还)**：broker 把现金抵押品的 reinvestment income 扣掉 borrow fee 后**返还**给空头的部分（不是两个独立项，是一个净额）
+  - GC 时 rebate ≈ Fed funds − fee（几 bps，broker 微利）
+  - hard-to-borrow 时 rebate 可能为**负** → 空头反向付钱给 broker（"negative rebate" / "fee on capital"）
 - **市场冲击**：空头平仓往往比多头平仓难（轧空风险），冲击成本要 ×1.5
 
 ### 监管 / 操作约束
 
-- **Reg SHO Locate Rule**：美股做空必须在 T+1 前 locate 借券来源，否则是 naked short 违规
-- **强制 buy-in**：券商在借不到券时可以单方强制平仓你的空头（任意价格成交）
+- **Reg SHO Locate Rule (203b)**：美股做空必须在 T+1 前 locate 借券来源，否则是 naked short 违规
 - **Threshold Security List**：连续 5 个交易日 fail-to-deliver 的标的进入限制名单，新增空头被禁
-- **Uptick Rule (SSR, Reg SHO Rule 201)**：单日 -10%+ 触发，次日及当日剩余时间空头只能在 above-bid 报价（不能 hit bid）
+- **Uptick Rule (SSR, Reg SHO Rule 201)**：单日 −10%+ 触发，次日及当日剩余时间空头只能在 above-bid 报价（不能 hit bid）
 - **Pattern Day Trader**：retail 账户 < $25k 限制 5 天 4 次 day trade，机构无此限制
+
+### Recall + Forced Buy-in 链条（最隐蔽的爆仓路径）
+
+**比 Reg SHO locate 更危险**：locate 是 T+1 前能搞定的合规问题，recall / forced buy-in 是任意时点炸弹。
+
+- **Recall risk（召回风险）**：原借出方（pension fund / lending agent）随时可以召回股票
+  - 触发：rehypothecation chain 断裂、原持有人卖出、agent 改变 lending policy
+  - 召回后空头有 T+3（美股，部分券商更短）补券窗口
+- **Forced buy-in**：券商在窗口内借不到替代券 → **单方在市场上买回平仓**
+  - 成交价不可控，通常拍击 ask（worst price）
+  - 高 SI 标的同时被 buy-in 触发集体 squeeze
+- **2021 GME 真正的杀招**：不是 borrow fee 飙升，是机构空头被大规模 recall + forced buy-in，被迫在天价买回
+- **回测建模**：高 SI（> 20% float）+ 高 utilization（> 90%）的标的应给 recall probability ≥ 5% / 月，触发时按 ask + 1% 成交
+
+### 信号性质
+
+- **空头 ≠ 多头反向**：多空因子的 IC 通常 **多头侧 > 空头侧**（"alpha decays on the short side"）
+- **空头集中度**：10 只空头太集中，单只 squeeze 毁组合；推荐 ≥ 50 只
+- **下行保护幻觉**：半仓做空 + 半仓做多 在熊市的"保护"主要来自半仓 cash 效应，不是空头对冲
+- **Short Interest Ratio (SIR / days-to-cover)** = SI / ADV，> 5 days 的标的轧空风险高
+- **Crowded short 高度危险**：见第 10 节，2021 GME 是教科书
 
 ### 信号性质
 
@@ -446,8 +473,11 @@ description: 量化投研金融常识 checklist。当任务涉及因子构建、
 ### 实施 checklist
 
 - [ ] 借券成本日度建模（不是静态 bps）
+- [ ] Rebate 净额建模（含 negative rebate 场景）
 - [ ] 股息日赔付 + 税务调整
 - [ ] Reg SHO locate 模拟（约 5-10% 标的某些日不可借）
+- [ ] **Recall probability 建模**（高 SI + 高 utilization 标的 ≥ 5% / 月）
+- [ ] **Forced buy-in 成交价模拟**（拍 ask + 1%，不是 mid）
 - [ ] SSR 触发后次日不开新空头
 - [ ] 单空头 < 2% AUM、≥ 50 只
 - [ ] SIR > 5 days 的标的列入观察名单（不一定剔除但要监控）
@@ -496,17 +526,42 @@ description: 量化投研金融常识 checklist。当任务涉及因子构建、
 
 > 🚨 Strategy v3 t = 2.26：**单因子检验显著，多次试错后大概率不显著**。Lopez de Prado 的经验法则：N=100 个策略尝试时，需要 raw Sharpe > 2.5 才能等同于单次 Sharpe > 1
 
-### Deflated Sharpe Ratio 公式
+### Deflated Sharpe Ratio (Bailey-Lopez de Prado 2014)
+
+DSR 把"试错次数 N"和"非正态性"两个修正合在一起，分三步：
+
+**步骤 1：估计期望最大 Sharpe**（极值理论）
 
 ```
-DSR = Φ((SR − E[max SR_N]) / σ(SR))
 E[max SR_N] ≈ √(2 log N) − γ / √(2 log N)        (γ = Euler-Mascheroni ≈ 0.577)
-σ(SR) ≈ √((1 − γ_3·SR + (γ_4 − 1)/4 · SR²) / (T − 1))   (γ_3 偏度, γ_4 峰度)
+```
+
+**步骤 2：估计 SR 的非正态标准误**（Mertens 2002）
+
+```
+σ̂(SR) = √( (1 − γ_3·SR + (γ_4 − 1)/4 · SR²) / (T − 1) )    (γ_3 偏度, γ_4 峰度)
+```
+
+**步骤 3：组合**
+
+```
+DSR = Φ( (SR_observed − E[max SR_N]) / σ̂(SR) )
 ```
 
 - N = 你尝试过的策略 / 因子组合数
 - T = 样本天数
-- DSR < 0.95 则不显著
+- **DSR < 0.95 则不显著**
+
+### Probability of Backtest Overfitting (PBO, Bailey-Lopez de Prado 2014)
+
+DSR 的配套指标 — DSR 看显著性，PBO 看选择偏差，两个一起报才完整：
+
+- 把 N 个试错策略的回测序列 split 为多个组合（**Combinatorially Symmetric Cross-Validation, CSCV**）
+- 对每个 fold：找出 IS 最优策略，看它在 OOS 是否还在前 50%
+- **PBO = OOS rank 跌出前 50% 的概率**
+- **PBO > 50% 则策略本质是 overfit**
+
+> 🚨 **本项目 Strategy v3** 的"+108% 2025"在 31 因子 × 滚动 IC 的搜索空间下，N 远 > 100，DSR 大概率 < 0.95；PBO 也应该跑一次确认
 
 ### 实操要点
 
@@ -805,8 +860,18 @@ impact_bps = α · σ_daily · √(order_size / ADV)
 
 ### 例：年化换手率成本影响
 
-- 年化 8x 换手 + 单边 10 bps = **1.6% 年化成本**，吃掉一半 alpha
-- 年化 12x 换手 + 单边 15 bps = 3.6%，alpha 必须 > 3.6% 才有正收益
+**公式（注意双向）**：
+
+```
+cost_annual = 2 × turnover_oneside_annual × bps_oneside
+```
+
+`2` 来自买 + 卖各一次。读者按字面"换手 × bps"算会少算一半。
+
+- 年化单边 8x + 单边 10 bps → 2 × 8 × 10 = **160 bps = 1.6% 年化**，吃掉一半 alpha
+- 年化单边 12x + 单边 15 bps → 2 × 12 × 15 = **360 bps = 3.6% 年化**，alpha 必须 > 3.6% 才正收益
+
+> 🚨 **口径混乱是常见 bug 来源**："单边换手率"按本节定义 = 总成交额 / 2 / AUM；如果项目用"双边换手率"口径（= 总成交额 / AUM），公式就变成 `cost = turnover_twoside × bps_oneside`，没有那个 2。两种口径都用，关键是别混
 
 > 🚨 **MEMORY 里待办**：换手率控制（年化 ~8x 太高）
 
@@ -1068,7 +1133,246 @@ RC_i = w_i · (Σw)_i / σ_p          (Risk Contribution)
 
 ---
 
-## 18. 常见数据陷阱（A 股）
+## 18. 执行 / TCA (Transaction Cost Analysis)
+
+**铁律：执行算法不是"买入卖出按钮"，是和市场博弈。AUM > $50M 时执行损耗能吃掉 50%+ alpha。**
+
+### 执行算法选择
+
+| 算法 | 目标 | 适用 | 特点 |
+|------|------|------|------|
+| **VWAP (Volume-Weighted Avg Price)** | 跟踪日内成交量分布 | 中等订单（< 20% ADV） | 低 IS，被动 |
+| **TWAP (Time-Weighted Avg Price)** | 平均切片时间 | 流动性差 / 隐藏意图 | 无视成交量，损耗高 |
+| **POV (Percent of Volume)** | 占当前成交量固定比例 | 大订单（> 20% ADV） | 自适应流动性 |
+| **IS (Implementation Shortfall)** | 最小化决策价 vs 成交价偏差 | alpha 衰减快 | 优化框架（Almgren-Chriss） |
+| **Iceberg / Hidden** | 大单切小单藏意图 | 防止 front-run | 中等损耗 |
+| **Auction (open / close)** | 集合竞价单 | 跟踪指数 / 月底再平衡 | 高 spread + impact |
+
+**典型选择**：
+- 中频量化（日频）+ 中等单：VWAP 或 POV 10-20%
+- 高频信号（intraday）：IS / 自定义
+- 月底 rebalance：closing auction（跟踪 SPX 收盘指数）
+
+### Implementation Shortfall 拆解
+
+IS = 决策价 vs 最终成交均价的偏差，四部分：
+
+```
+IS = Spread Cost + Market Impact + Timing Risk + Opportunity Cost
+```
+
+- **Spread Cost**：挂 best ask vs mid，bid-ask spread / 2 是基线
+- **Market Impact**：自己交易推动价格（→ 第 13 节 sqrt-law）
+- **Timing Risk**：执行期间市场漂移，σ × √(execution_time)
+- **Opportunity Cost**：未成交部分错过的 alpha（partial fill）
+
+### Adverse Selection（逆向选择）
+
+挂 limit order 等成交时，**只在你"错"的时候被对手拿单**：
+
+- 你挂 buy at $100，市场冲到 $99 你成交（卖方知道有利空）
+- 你挂 sell at $100，市场冲到 $101 你成交（买方知道有利好）
+- **结果**：limit order 平均成交价比 market order 更不利
+- **量化**：post-trade markout（成交后 5s / 1min / 1h / 1d 价格），均值应在你的方向上有利
+- **HFT / DMM 盈利模式**：吃 spread + 卖单流（PFOF）= 散户的 adverse selection 损失
+
+### Large Order Slicing
+
+订单 > 5% ADV 必须切片：
+
+- **Slice schedule**：U-shape（开收盘高、午盘低）匹配 VWAP
+- **切片数量**：~50-100 片（< 50 流动性冲击大；> 100 timing risk 累积）
+- **暗池路由**：~30-40% 美股流量在暗池，可降 impact 但提高 adverse selection
+- **取消重挂频率**：> 10 次 / 分钟会被交易所 throttling
+
+### TCA 报告内容（月度必看）
+
+- **Arrival price slippage**：(成交均价 − 信号生成时价) / 信号生成时价
+- **VWAP slippage**：成交均价 vs 当日 VWAP（执行质量）
+- **Implementation shortfall**：决策价 vs 成交均价（含 opportunity cost）
+- **Markout curve**：成交后 5s / 1min / 5min / 1h / EOD 的 P&L（adverse selection 检测）
+- **按 broker / 算法 / venue 拆分**：找最优执行路径
+
+### 实施 checklist
+
+- [ ] 信号决策价定义（生成时 mid / arrival quote）
+- [ ] 执行算法选择（按订单 size / alpha 衰减速度）
+- [ ] 大单 slice schedule（U-shape / VWAP-aligned）
+- [ ] 月度 TCA 报告：arrival + VWAP slippage + markout
+- [ ] 按 broker / venue / 算法分拆找最优路径
+- [ ] Adverse selection 监控（markout 应有利）
+
+### 常见错误
+
+- **回测用收盘价 = 假设零成本执行** → 上线后立刻发现 alpha 衰减 30%+
+- **忽视 opportunity cost** → 部分成交时未计入未成交的 alpha 损失
+- **TCA 只看 spread 不看 markout** → 漏掉 adverse selection
+- **大单不切片** → 单笔冲击 > 50 bps，alpha 全吃掉
+- **暗池盲信** → 部分暗池有 toxic flow，markout 验证后才用
+
+---
+
+## 19. 容量曲线 (Capacity Curve)
+
+**铁律：策略 alpha 随 AUM 衰减是数学必然。"AUM vs Sharpe" 曲线是 PM 跟 LP 对话的核心交付物，也是判断策略能不能 scale 的唯一硬指标。**
+
+### 容量衰减根因
+
+- **市场冲击**（→ 第 13 / 18 节）：sqrt-law 决定大单不可避免推价
+- **流动性约束**（→ 第 15 节）：单股 ADV cap 触发 → 权重被压低 → alpha 摊薄
+- **换手成本**（→ 第 13 节）：成本绝对值 ∝ AUM
+- **机会成本**：大订单分多日执行，alpha 半衰期短的策略损失更大
+
+### Capacity Curve 构造步骤
+
+1. 用基础 AUM（如 $10M）跑回测，记录 Sharpe_0
+2. 假设 AUM = $50M / $100M / $250M / $500M / $1B / $5B
+3. 每个 AUM 重新跑回测，**显式应用约束**：
+   - ADV cap：单股 < 5 ADV days
+   - 市场冲击：sqrt-law impact 加入成本
+   - Turnover budget：可能触发 binding
+4. 记录每 AUM 的 Sharpe / 年化收益 / TE
+5. 绘图：x = log(AUM)，y = Sharpe
+
+### 典型容量曲线形态
+
+```
+Sharpe
+  │
+  │ ████████
+  │         ████████
+  │                 █████
+  │                      ████
+  │                          ███   ← 拐点 (soft capacity)
+  │                             █  ← 断崖 (hard capacity)
+  └───────────────────────────────── log(AUM)
+       $10M   $100M   $1B   $10B
+```
+
+- **平台期**：AUM < capacity 时 Sharpe 平稳
+- **拐点**：约束开始 binding（ADV cap、turnover），Sharpe 缓降
+- **断崖**：capacity × 2-3 后 Sharpe 暴跌（多个约束同时 binding）
+- **本项目典型**：Long-Short 美股 capacity $100M-$1B；微盘 $10M；大盘 $5B+
+
+### 关键数值
+
+- **Soft capacity** = Sharpe 衰减 50% 时的 AUM
+- **Hard capacity** = Sharpe < 1.0 时的 AUM（不再可投资）
+- **Capacity-weighted alpha** = alpha × capacity_dollar，是绝对赚钱能力的衡量
+
+### LP 对话的常见问题
+
+- **"你能管多大？"** → 给 capacity curve，标 soft / hard 阈值
+- **"现在多少 AUM？距 capacity 多远？"** → 当前 < 0.33 × hard 健康，> 0.5 × hard 危险
+- **"capacity 怎么算的？"** → ADV cap + impact model + turnover budget 公开
+- **"会限制申购吗？"** → 接近 soft capacity 时关闭申购是 fiduciary duty
+
+### 实施 checklist
+
+- [ ] 回测必须有 capacity curve 模块（不是单点 Sharpe）
+- [ ] 单股 ADV cap 显式建模（→ 第 15 节）
+- [ ] Sqrt-law impact 加入交易成本（→ 第 13 节）
+- [ ] 标记 soft capacity（Sharpe −50%）和 hard capacity（Sharpe < 1）
+- [ ] 定期重算（每季度），市场流动性会变
+- [ ] 当前 AUM / soft capacity 比值监控（> 0.5 触发 alert）
+
+### 常见错误
+
+- **小 AUM 回测 → 直接外推大 AUM** → capacity 严重高估
+- **不建模 ADV cap** → 回测假设买得到任意数量
+- **忽视市场冲击** → 大单零成本假设
+- **capacity 当固定数字** → 实际是 stochastic（随波动率 / 流动性变）
+
+---
+
+## 20. 上线监控 / Model Decay
+
+**铁律：回测验证解决"策略历史上是否有效"，上线监控解决"策略今天是否还有效"。Alpha decay 是常态，不是例外。**
+
+### Alpha Decay 的形态
+
+- **缓慢衰减**：因子被广泛发现，每年 IC 减少 10-20%
+- **断崖式**：因子被 crowded → 单日 −8σ 事件（→ 第 10 节）
+- **Regime shift**：市场结构变化（2018 Reg NMS 改革 / 2020 零佣金普及），整套策略失效
+- **Slow-bleed**：归因显示 alpha 仍在但被成本吃光
+
+### 监控指标体系
+
+**A. Performance（日度）**
+- **实际 vs 预期收益偏差**：累计 P&L vs 回测预期 P&L 的 z-score
+- **Sharpe degradation**：rolling 60D Sharpe vs 回测 IS Sharpe
+- **Hit rate**：日胜率 vs 回测胜率
+- **Max DD**：当前 DD vs 历史 95% 分位
+
+**B. Risk（日度）**
+- **Ex-ante vs ex-post vol**：MVO 预测 σ 与实际实现 σ 偏差（应 ±20% 内）
+- **Beta drift**：组合 β 与目标 β 偏差（中性策略应 ≈ 0）
+- **Concentration**：top 10 holdings 占比、单股 cap binding 频率
+- **Liquidity**：days-to-liquidate（按 25% ADV 平仓所需天数）
+
+**C. Attribution（月度，→ 第 11 节）**
+- **Brinson 三项分解**：allocation / selection / interaction 各贡献 P&L
+- **Barra 风格归因**：specific α / total return（应 > 30%）
+- **Long vs Short 拆分**：各自 IR
+- **Regime-conditional 归因**：牛 / 熊 / 横盘各自表现
+
+**D. Factor 健康度（月度）**
+- **每个因子的 rolling IC**：vs 回测 IC 衰减比例
+- **Factor crowding 指标**（→ 第 10 节）：13F overlap / kurtosis / autocorr
+- **Factor return autocorr**：从 ~0 转正 → 拥挤预警
+
+### Kill Switch 触发条件（不靠人为判断）
+
+| 触发条件 | 动作 |
+|---------|------|
+| Trailing 6M DD > 历史 95% 分位 | 减仓 50% |
+| Trailing 12M DD > 历史 99% 分位 | 减仓 100%，触发 review |
+| Rolling 60D Sharpe < 0 | 减仓 50% |
+| Single-day P&L < 历史 99.9% 分位 | 暂停新交易 24h，归因 review |
+| Ex-ante / ex-post vol 比 > 2.0 | 风险模型 fail，暂停 |
+| Single-name P&L > AUM × 5% | 集中度 review |
+| Crowding 指标 ≥ 3 项命中 | 减拥挤因子权重，review |
+
+### Alpha Decay 量化
+
+- **Decay rate**：rolling Sharpe 拟合指数衰减 `S(t) = S_0 × exp(−λt)`，半衰期 = ln(2) / λ
+- **典型半衰期**：quality 类 5-10 年，动量类 2-5 年，反转类 1-2 年，crowded 因子 6 个月 - 1 年
+- **决策**：半衰期 < 1 年的因子应主动降权
+
+### Live vs Backtest 差异归因（每周）
+
+```
+Live PnL = Backtest_predicted_PnL + Implementation_shortfall + Alpha_decay + Random_noise
+```
+
+- **Implementation shortfall**（→ 第 18 节）：执行损耗
+- **Alpha decay**：信号本身衰减
+- **Random noise**：随机性，应均值 ≈ 0
+
+诊断：
+- IS 持续 > 30% 总差异 → 改执行算法
+- Alpha decay 持续 > 30% → 因子重设计或退役
+
+### 实施 checklist
+
+- [ ] 日度 dashboard：performance + risk 指标
+- [ ] 月度归因报告（→ 第 11 节）
+- [ ] 月度 factor 健康度报告（rolling IC + crowding）
+- [ ] Kill switch 规则文档化 + 自动触发
+- [ ] Live vs Backtest 差异归因（每周）
+- [ ] Quarterly review：是否需要 retire / redesign 因子
+
+### 常见错误
+
+- **只看累计 P&L** → 忽视 risk drift
+- **Kill switch 靠人脑判断** → 情绪 override
+- **不做 ex-ante vs ex-post vol 校准** → 风险模型偷偷失效
+- **不做 alpha decay 量化** → 因子早已死亡仍在用
+- **Monitoring 不分多空** → 单边问题被对侧掩盖（→ 第 11 节）
+
+---
+
+## 21. 常见数据陷阱（A 股）
 
 ### 交易制度
 
@@ -1078,9 +1382,11 @@ RC_i = w_i · (Σw)_i / σ_p          (Risk Contribution)
   - **一字板**：开盘即触板，全天不可买入；连板股票流动性极差
   - **跌停换手**：跌停封单内的成交可作为退出窗口（按比例）
   - **集合竞价**：9:15-9:25 开盘竞价、14:57-15:00 收盘竞价，撮合规则与连续竞价不同
+  - **9:25 撤单虚假涨跌停**：9:20 前可挂单也可撤单，部分账户在 9:15-9:20 挂涨停大单制造虚假涨停信号，9:20 后撤回——回测看到的开盘集合竞价价格可能是被操纵的，需用 9:25 真实开盘价
 - **印花税不对称**：买入 0、卖出 0.05%（2023-08 减半，原 0.1%）
 - **过户费 + 经手费 + 证管费**：合计 ~1bp，对冲基金可忽略，retail 显著
 - **板块涨停限制**：极端市况下交易所可临时全板块停牌（如 2015 熔断 / 2020 疫情）
+- **2024 程序化交易报备新规**：年成交额 ≥ 1 亿元或委托笔数 ≥ 50 万的机构必须向交易所报备策略 / 算法 / 服务器位置；高频策略（撤单率 > 80% 或委托频率 > 300 笔 / 秒）受额外限制。**回测策略上线前必须确认报备状态**，否则会被识别为异常交易
 
 ### 融券 / 做空
 
@@ -1099,6 +1405,7 @@ RC_i = w_i · (Σw)_i / σ_p          (Risk Contribution)
 - **次新股**：上市 < 252 个交易日波动巨大，因子失效，建议剔除
 - **北交所**（2021-）：流动性极差，单股日成交可 < 100 万，量化策略基本不可用，universe 应剔除
 - **退市新规（2020/2024）**：财务/交易/规范/重大违法四类强制退市，每年数十家，必须包含在历史 universe 防 survivorship
+- **科创板做市商制度**（2022-10 起）：首批 14 家券商在科创板做双边报价，spread 显著缩小（典型 < 5bps），同时引入"日内回转"特殊机制（仅限做市商），导致科创板个股的 microstructure 与主板不同，截面因子（特别是流动性 / 反转）需分开校准
 
 ### 跨市场数据
 
@@ -1136,7 +1443,7 @@ RC_i = w_i · (Σw)_i / σ_p          (Risk Contribution)
 - 跑回测 → 第 1、4、5、6、7、10、13、16、17 节
 - 解读结果 → 第 2、8、9、10、11 节
 - 写优化器 → 第 1、12、13、14、15 节
-- 设计 universe → 第 1、5、7、18 节
+- 设计 universe → 第 1、5、7、21 节
 - 加空头端 → 第 8、10、11、12 节
 - 处理跨市场 / 跨频率数据 → 第 7 节
 - 检查 crowding → 第 10 节
@@ -1144,5 +1451,8 @@ RC_i = w_i · (Σw)_i / σ_p          (Risk Contribution)
 - 设计多空对冲 → 第 12 节
 - 设计组合约束 → 第 15 节
 - 设计 OOS 验证 / walk-forward → 第 17 节
+- 设计执行算法 / 算 TCA → 第 18 节
+- 评估策略容量 / LP 对话 → 第 19 节
+- 上线监控 / Kill switch / 因子退役 → 第 20 节
 
 **不要凭"金融直觉"写代码。每次都对照 checklist。**
