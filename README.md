@@ -2,7 +2,7 @@
 
 覆盖数据采集、因子计算、组合构建、风控、回测、模拟交易、舆情爬取和报告生成。
 
-> **2026-04-30 重大变更**：Python 代码已归档到 [`legacy_python/`](legacy_python/)，不再维护。生产策略全部迁移到 Rust [`quant-engine/`](quant-engine/)。原因：Python 引擎多个 bug 未修，Rust v25 已达机构级 alpha (α=13.28%, t=3.40, Sharpe 0.99)。
+> **2026-04-30 重大变更**：所有 Python 代码 + React 前端已归档到 [`legacy_python/`](legacy_python/)，不再维护。生产策略全部迁移到 Rust [`quant-engine/`](quant-engine/)。原因：Python 引擎多个 bug 未修，Rust v25 已达机构级 alpha (α=13.28%, t=3.40, Sharpe 0.99)。
 
 ## 系统架构（Rust 单栈，6 crates）
 
@@ -21,9 +21,6 @@
 │  │ quant-db        PostgreSQL pool + ORM  │  │
 │  └────────────────────────────────────────┘  │
 └──────────────────────────────────────────────┘
-
-Frontend (frontend/, React/Vite):
-  仍依赖 Django HTTP API（来自 legacy_python/），后续待 Rust 重写
 
 文件命名规则（同名 + 前缀分流）:
   美股: us_xxx.rs / a 股: a_xxx.rs / 通用: xxx.rs
@@ -334,11 +331,11 @@ NVDA 530× / CELH 472× / TSLA 239× / AVGO 119× / AXON 106× / NFLX 90× / MPW
 
 ## Rust 计算引擎 (`quant-engine/`)
 
-因子计算和回测引擎从 Python 迁移到 Rust，解决 macOS multiprocessing fork crash 并提升性能。
+因子计算和回测引擎从 Python 迁移到 Rust，解决 macOS multiprocessing fork crash 并提升性能。**2026-04-30：完整迁移完成**，Python 全部归档（`legacy_python/`）。
 
-**架构分工：**
-- **Python (Django)** — 数据下载、DB 写入、Web API、前端
-- **Rust (`quant-engine/`)** — 因子计算、回测模拟、因子分析（读 parquet 缓存）
+**架构（Rust 单栈）：**
+- 数据下载、DB 写入、因子计算、回测、A 股 trading 全部 Rust
+- 美股 paper trading + Web API 待 Rust 实现
 
 **技术栈：** Polars (parquet I/O) + rayon (并行) + nalgebra (线代) + clap (CLI)
 

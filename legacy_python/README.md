@@ -1,6 +1,8 @@
-# Legacy Python Code (DEPRECATED, 2026-04-30)
+# Legacy Python + Frontend Code (DEPRECATED, 2026-04-30)
 
-**全部 Python 代码已归档到此目录。后续不再维护。生产策略迁移到 Rust：[`/quant-engine/`](../quant-engine/)。**
+**全部 Python + 前端代码已归档到此目录。后续不再维护。生产策略迁移到 Rust：[`/quant-engine/`](../quant-engine/)。**
+
+> 包含 Django 后端 + React/Vite 前端（前端依赖 Django API，一并归档）。
 
 ## 为什么归档
 
@@ -9,7 +11,7 @@
 3. **数据栈精简**：Rust 仅依赖 FMP + FRED 两个数据源，节约 ~$600+/年
 4. **维护成本**：双栈维护成本高，专注 Rust
 
-## 目录结构（归档前 Django MVT）
+## 目录结构（归档前 Django MVT + Vite 前端）
 
 ```
 legacy_python/
@@ -20,6 +22,7 @@ legacy_python/
 ├── stocks/        models / downloaders / factors / management commands
 ├── tasks/         Celery 任务
 ├── trading/       paper trader + Alpaca + risk
+├── frontend/      React + Vite 前端（依赖 Django HTTP API）
 ├── scripts/       Python 工具脚本（DDL 生成、回填等）
 ├── manage.py      Django 入口
 ├── requirements.txt
@@ -38,22 +41,17 @@ legacy_python/
 | `python3 manage.py paper --market alpaca` 模拟交易 | **待迁移**（Rust 暂无 trading crate 美股部分） |
 | 前端 API（Django views） | **待迁移**（Rust 需起 Axum/Warp HTTP 服务） |
 
-## 待迁移的 Python 功能（如需保留）
+## Rust 端待补的功能（长期路线）
 
-1. **Alpaca 模拟交易** (`trading/services/us_alpaca_trader.py`)
-   - Rust 端尚未实现美股 paper trading（只有 A 股 `quant-engine/crates/trading/`）
-   - 短期可仍跑 Python `paper --market alpaca`，但 strategy signal 应来自 Rust
-   - 桥接方案：Rust `backtest` → 输出 signals.csv → Python paper trader 读取执行
+1. **美股 trading crate**：当前 `quant-engine/crates/trading/` 只有 A 股 PaperBroker + 掘金。
+   美股模拟盘需新增 `quant-trading` 的美股部分（例如 Alpaca SDK 的 Rust binding 或 IBKR TWS API）。
+   短期模拟盘可手动从 Rust backtest 输出 signals.csv → 人工读取下单（不再依赖 Python）。
 
-2. **前端 API**（`stocks/views/` + `backtest/views/` + Django REST）
-   - 前端 `frontend/` 仍依赖 Django HTTP API
-   - 长期需用 Rust 框架（Axum）重写后端 API
-   - 短期：保留 Django 仅作为前端 backend（不再开发）
+2. **HTTP server 层**：前端归档后无后端依赖。如需 web UI，用 Axum/Warp 重写 API
+   暴露 backtest / signals / db_status 等 endpoint。
 
-3. **舆情爬虫**（`sentiment/scrapers/`）
-   - 中国政府网站 + Twitter 爬虫 11+ 个
-   - 当前 strategy 不用 sentiment 因子（POLYMARKET_SENT 全 0）
-   - 暂不迁移
+3. **舆情爬虫**：中国政府网站 + Twitter 爬虫 20+ 个。当前 strategy 不依赖 sentiment 因子
+   （POLYMARKET_SENT 全 0），暂不迁移。如未来做 NLP sentiment 再决定。
 
 ## Python 引擎已知 bug（不再修复）
 

@@ -82,12 +82,11 @@ quantization/
 │   ├── config.toml                production 配置（含 v25 baseline）
 │   └── scripts/                   DDL 自动生成 (gen_a_financial_rows.py)
 ├── cache/                         parquet 数据缓存（gitignore）
-├── frontend/                      React/Vite 前端（仍依赖 legacy_python Django API）
 ├── doc/                           策略文档
 ├── output/                        回测输出（gitignore）
 ├── logs/                          运行时日志（gitignore）
 ├── scripts/                       SQL migration（PostgreSQL DDL）
-└── legacy_python/                 ← 已废弃 Python 代码（仅前端 API + Alpaca paper 桥接保留）
+└── legacy_python/                 ← 已废弃 Python + React 前端（不再使用）
 ```
 
 ### 数据导入（Rust CLI）
