@@ -34,7 +34,15 @@ impl Factor for EarningsSurprise {
 
 /// EPS Revision: (recent EPS estimate - prior) / |prior|
 pub struct EpsRevision;
-inventory::submit! { &EpsRevision as &dyn Factor }
+// DEPRECATED 2026-04-30: misnamed. FMP `us_eps_estimate.date` is the FORECAST
+// PERIOD (e.g., 2024-Q1 target = 2024-03-31), not the publication date of the
+// estimate. So this factor compares CONSENSUS-EPS for two adjacent periods
+// (essentially QoQ earnings growth), NOT the change in consensus over time
+// for the same period (true Stickel 1991 EPS revision).
+// True EPS_REVISION needs a PIT snapshot table (see MEMORY P3 task
+// `EPS point-in-time 快照积累`). Until that exists, disable this signal —
+// IC=-0.010 confirms the formula carries no real revision info.
+// inventory::submit! { &EpsRevision as &dyn Factor }
 
 impl Factor for EpsRevision {
     fn name(&self) -> &'static str { "EPS_REVISION" }

@@ -70,8 +70,13 @@ pub fn compute_scores(
                 }
             }
 
+            // Layer 1: weighted SUM (not avg). 2026-04-30 redesign:
+            // avg-based aggregation rescales cat_score whenever factor count
+                // changes (e.g., removing a near-zero-IC factor still shifts denom).
+            // Sum-based aggregation makes high-IC signals stack additively
+            // and low-IC noise wash out near zero — more honest aggregation.
             if weight_denom > 0.0 {
-                cat_scores.insert(cat.as_str(), weighted_sum / weight_denom);
+                cat_scores.insert(cat.as_str(), weighted_sum);
                 cat_valid.insert(cat.as_str(), true);
             }
         }
