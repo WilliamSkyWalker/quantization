@@ -14,10 +14,10 @@ Claude Code 编码规范。**所有代码变更必须遵守，无例外。**
 6. **对标参考实现** — 新增模块必须完整读完参考实现（整个文件），1:1 复刻：类结构、多线程、断点续跑、增量逻辑、错误处理、日志格式。**[违反 1 次：2026-04-23 Rust FMP 下载器 40 个方法只给 daily_price 写了增量逻辑，其余 39 个没做，用户指出"你根本没做完"]**
 7. **用户说"对齐/一致" = 逐层 diff** — 类结构 → 并发模型 → 断点 → 增量 → 错误处理 → 日志，写成表格给用户看。不是口头说"差不多"。
 8. **禁止静默失败** — 每个 `return/continue/break` 前必须有 `logger`。数据跳过、空返回必须打日志。
-9. **每次修改后验证** — `python3 manage.py check` + import smoke test + 真实 API 调用 + `SELECT COUNT(*)` 确认入库。不能只检查语法。**[违反 2 次：未清 import_progress 就跑 smoke test，财报 4 表假通；2026-04-23 MVO 优化器把全 universe 2700 只股票作为候选池，没验证就 commit，导致 1373% 虚假收益]**
+9. **每次修改后验证** — `cargo build --release -p quant-cli` + 至少跑一个 backtest/factor smoke test + `SELECT COUNT(*)` 确认入库。不能只检查语法。**[违反 2 次：未清 import_progress 就跑 smoke test，财报 4 表假通；2026-04-23 MVO 优化器把全 universe 2700 只股票作为候选池，没验证就 commit，导致 1373% 虚假收益]**
 10. **严禁重复犯同一个错误** — 被纠正一次，后续所有类似场景必须记住。**[违反 3 次：2026-04-21 多次给出前后矛盾的结论（"不需要删缓存"→"需要删缓存"→"不需要删"；"无法并行"→"可以并行"）；2026-04-22 已分析出 OBJC env var 需 os.execv 在进程启动前设置，动手时却选了 spawn 方案，导致每个 worker 重复加载 33M 行 daily price × 6 = 浪费内存+I/O]**
 11. **禁止快速补丁** — 不做 `.empty` → `.is_empty()` 这种逐行替换式的 quick fix。必须完整迁移整个文件，grep 确认全项目零残留。半吊子修复比不修更差。
-12. **大规模变更必须有验证门禁** — 涉及 >10 个文件的变更，commit 前必须：(1) `grep -rn "旧模式" | wc -l` 确认零残留；(2) 列出所有改动文件 vs 应改文件的 diff，确认无遗漏；(3) `python3 manage.py check` + 至少一个 smoke test。Agent 产出必须验证后再合并，不能盲信。**[违反 1 次：2026-04-21 polars 迁移只完成 25%，浪费 ~500K tokens]**
+12. **大规模变更必须有验证门禁** — 涉及 >10 个文件的变更，commit 前必须：(1) `grep -rn "旧模式" | wc -l` 确认零残留；(2) 列出所有改动文件 vs 应改文件的 diff，确认无遗漏；(3) `cargo build --release` + 至少一个 smoke test (factors/backtest)。Agent 产出必须验证后再合并，不能盲信。**[违反 1 次：2026-04-21 polars 迁移只完成 25%，浪费 ~500K tokens]**
 
 ---
 
@@ -58,41 +58,54 @@ Claude Code 编码规范。**所有代码变更必须遵守，无例外。**
 
 ## 项目特定规则
 
-### 项目结构（Django MVT — `a_`/`us_` 前缀区分）
+### 项目结构（Rust 单栈 — `a_`/`us_` 前缀区分）
 
-- 同一业务在 **同名 app** 下：A 股 `a_xxx.py`，美股 `us_xxx.py`，通用无前缀
-- CLI 共用 `--market {cn,us}` / `--source {fmp,quiver,tushare,akshare}`
-- URL 路由各 app 的 `urls.py`，`core/urls.py` include 到 `/api/`
+> **2026-04-30 重大变更**：Python 全部代码归档到 `legacy_python/`，不再使用。
+> 生产策略 = Rust `quant-engine/` workspace（9 crates）。
+
+- 同一业务在 **同 module** 下：A 股 `a_xxx.rs` / `a_share/`，美股 `us_xxx.rs`，通用无前缀
+- CLI 统一入口 `quant`（`quant-cli` crate）：`quant --market {us,cn} <command>`
 
 ```
 quantization/
-├── stocks/         models/ + services/{downloaders/a_bulk.py,us_bulk.py | factors/a_*,us_* | upsert.py | a_cleaner,us_cleaner}
-│                   views/{a_stock,a_config,a_data,a_watchlist | us_strategy}
-│                   management/commands/{bulk_import,data_update}
-├── backtest/       services/{a_engine,a_strategy,a_regime | us_engine,us_strategy,...}
-│                   views/{a_strategy,a_report}
-├── trading/        services/{a_paper_trader,a_risk,a_gm_trader | us_paper_trader,us_alpaca_trader | base_trader | monitor/}
-│                   views/{a_trading}
-├── sentiment/      polymarket + scrapers
-├── services/       config.py + database.py stub
-├── core/           settings + urls
-└── scripts/        DDL 生成器
+├── quant-engine/                 ← Rust 生产代码
+│   └── crates/
+│       ├── core/                  TickerId / Config / Date / FactorResult
+│       ├── data/                  parquet 加载 + DataCache + Universe filter
+│       ├── factors/               美股 71 因子 + A 股 因子（a_share/）
+│       ├── strategy/              scoring + MVO (Clarabel) + rolling_ic + regime
+│       ├── backtest/              T+0 引擎 + FF5 + margin call + a_engine (A 股)
+│       ├── download/              FMP / FRED / Tushare 下载器
+│       ├── trading/               A 股 PaperBroker + 掘金实盘 + RiskChecker
+│       ├── db/                    PostgreSQL pool (sqlx) + 模型 + queries
+│       └── cli/                   `quant` CLI 入口（clap）
+│   ├── config.toml                production 配置（含 v25 baseline）
+│   └── scripts/                   DDL 自动生成 (gen_a_financial_rows.py)
+├── cache/                         parquet 数据缓存（gitignore）
+├── frontend/                      React/Vite 前端（仍依赖 legacy_python Django API）
+├── doc/                           策略文档
+├── output/                        回测输出（gitignore）
+├── logs/                          运行时日志（gitignore）
+├── scripts/                       SQL migration（PostgreSQL DDL）
+└── legacy_python/                 ← 已废弃 Python 代码（仅前端 API + Alpaca paper 桥接保留）
 ```
 
-### 数据导入
+### 数据导入（Rust CLI）
 
-- **Django ORM only** — 禁止 raw SQL。写入用 `UpsertManager`，查询用 `Model.objects.filter()`
-- **FMP** — 列名 = `_camel_to_snake()`，禁止手动 rename
-- **Tushare** — 不指定 `fields=`，保留全字段。财报拆 4 表（income/balance/cashflow/indicator）
-- **AkShare** — col_map 从 `inspect.getsource()` 确认真实列名，不凭记忆
-- **表名** — A 股全 `a_*` 前缀，美股全 `us_*` 前缀
-- **A 股 CLI**：
+- **PostgreSQL via sqlx**（quant-db crate）— 不再用 Django ORM
+- **FMP** — Ultimate plan，~$300/月。列名 snake_case，全字段保留
+- **Tushare** — 全字段，财报拆 4 表
+- **FRED** — 永久免费，12 个宏观指标
+- **已废弃数据源**：Quiver / UW / Fiscal.ai / AlphaVantage（v25 不依赖）
+- **CLI 命令**：
+  ```bash
+  cd quant-engine
+  cargo build --release -p quant-cli
+  ./target/release/quant download --source fmp --target all
+  ./target/release/quant download --source tushare --target all --start-year 2015
+  ./target/release/quant download --source fred --target all
   ```
-  python3 manage.py bulk_import --source tushare --target all --start-date 20150101 --clean
-  python3 manage.py bulk_import --source akshare --target all --clean
-  python3 manage.py data_update --market cn
-  ```
-- **DDL**：`python3 scripts/generate_ashare_ddl.py > scripts/migrate_ashare_schema.sql`
+- **DDL**：`python3 quant-engine/scripts/gen_a_financial_rows.py`（保留 Python tooling）
 
 ### 操作授权
 

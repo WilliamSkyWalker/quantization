@@ -1,126 +1,99 @@
-# A股+美股多因子量化系统
+# A股+美股多因子量化系统（Rust）
 
 覆盖数据采集、因子计算、组合构建、风控、回测、模拟交易、舆情爬取和报告生成。
 
-## 系统架构（Django MVT，A 股/美股按 app 对齐）
+> **2026-04-30 重大变更**：Python 代码已归档到 [`legacy_python/`](legacy_python/)，不再维护。生产策略全部迁移到 Rust [`quant-engine/`](quant-engine/)。原因：Python 引擎多个 bug 未修，Rust v25 已达机构级 alpha (α=13.28%, t=3.40, Sharpe 0.99)。
+
+## 系统架构（Rust 单栈，6 crates）
 
 ```
-┌─────────────┐   ┌─────────────┐   ┌─────────────┐
-│   CLI       │   │ Django API  │   │  Frontend   │
-│ manage.py   │   │ api/views/  │   │ frontend/   │
-└──────┬──────┘   └──────┬──────┘   └──────┬──────┘
-       │                 │                 │
-       └────────┬────────┘                 │
-                ▼                          │
-    Django apps  ◄──────────────────────────┘ (via HTTP)
-    (stocks / backtest / trading / sentiment)
+┌──────────────────────────────────────────────┐
+│  quant-engine/  (Rust workspace)              │
+│  ┌────────────────────────────────────────┐  │
+│  │ quant-cli       CLI 入口 (`quant`)     │  │
+│  │ quant-core      types / config         │  │
+│  │ quant-data      parquet cache + 因子计算│  │
+│  │ quant-factors   美股 + A 股 因子注册表 │  │
+│  │ quant-strategy  scoring + MVO + regime │  │
+│  │ quant-backtest  回测引擎 + FF5 回归    │  │
+│  │ quant-download  FMP / FRED / Tushare   │  │
+│  │ quant-trading   纸面 + 实盘交易（A 股）│  │
+│  │ quant-db        PostgreSQL pool + ORM  │  │
+│  └────────────────────────────────────────┘  │
+└──────────────────────────────────────────────┘
 
-文件命名规则（同名 app + 前缀分流）:
-  A 股：a_xxx.py    美股：us_xxx.py    通用：xxx.py（无前缀）
+Frontend (frontend/, React/Vite):
+  仍依赖 Django HTTP API（来自 legacy_python/），后续待 Rust 重写
 
-A 股管道（已全面 Django ORM 化）:
-  Tushare/AkShare → stocks/services/downloaders/a_tushare_*.py + a_akshare_*.py
-    → AStockBasic / ADailyPrice / AFinancial{Income,Balance,Cashflow,Indicator}
-    → stocks/services/a_cleaner.py
-    → stocks/services/factors/a_*.py (30+ 因子)
-    → backtest/services/a_regime.py + a_strategy.py + a_engine.py
-    → trading/services/a_paper_trader.py + a_risk.py + a_gm_trader.py
+文件命名规则（同名 + 前缀分流）:
+  美股: us_xxx.rs / a 股: a_xxx.rs / 通用: xxx.rs
 
-美股管道（三策略：Alpha 多空 + Beta Regime + Baseline VQM）:
-  FMP / UW / Fiscal / Quiver / AlphaVantage / FRED
-    → stocks/services/downloaders/{fmp,bulk,fred,edgar,...}.py（待重命名为 us_*.py）
-    → US{StockBasic, DailyPrice, FinancialData, ...} (40+ 表)
-    → stocks/services/cleaner.py（待重命名为 us_cleaner.py）
-    → stocks/services/factors/{value,quality,growth,...}.py（待重命名为 us_*.py）
-    → backtest/services/{engine,strategy,regime,ff5,baseline,beta,ml_scorer,saver}.py（待重命名为 us_*.py）
-    → trading/services/{paper_trader,alpaca_trader}.py（待重命名为 us_*.py）
-
-通用层（无前缀）:
-  stocks/services/upsert.py     — Django ORM 异步批写（UpsertManager）
-  trading/services/base_trader.py — 交易执行抽象基类
-  trading/services/monitor/       — 绩效 + HTML 报告
-  backtest/models/result.py       — 回测结果持久化
+数据栈（仅 2 家）:
+  FMP Ultimate (~$300/月)  — 财务/价格/EPS/insider/dividend
+  FRED (永久免费)          — 12 个宏观指标
+  (已废弃: Quiver / UW / Fiscal.ai / AlphaVantage)
 ```
 
-**前端页面:**
-- A股: 选股(`/select`)、回测(`/backtest`)、模拟交易(`/paper`)
-- 美股: 选股(`/us/select`)、回测(`/us/backtest`)、模拟交易(`/us/paper`)
-- 公共: 仪表盘(`/`)、数据管理(`/data`)、自选股(`/watchlist`)、设置(`/settings`)
-
-## 常用命令（统一 management commands）
+## 常用命令（Rust CLI 统一入口 `quant`）
 
 ```bash
-# 安装后端依赖
-pip install -r requirements.txt
+# === 编译 ===
+cd quant-engine
+cargo build --release -p quant-cli      # 输出 target/release/quant
 
-# 启动服务（开发）
-./start.sh                                        # 后端 + 前端 + cron
+# === 美股数据导入（FMP only，~$300/月 Ultimate plan） ===
+quant download --source fmp --target all --start-year 1995    # 全量
+quant download --source fmp --target daily_price              # 单端点
+quant download --source fmp --target all --incremental        # 增量更新
 
-# === 美股数据导入（FMP / Quiver） ===
-python3 manage.py bulk_import --source fmp --target all --start-year 1995    # FMP 全量
-python3 manage.py bulk_import --source fmp --target prices                    # 单端点
-python3 manage.py bulk_import --source quiver --target all                    # Quiver 游说/政府合同
+# === 宏观数据（FRED 永久免费） ===
+quant download --source fred --target all --start-year 2000
 
-# 2026-04-15 数据补强批次（验证后正式列表）：
-# 先建新表（dark_pool + 13f）
-psql $PG_URL -f scripts/migrate_us_short_interest_13f.sql
+# === 美股因子分析 ===
+quant analyze --start 2012-01-01 --end 2025-12-31 \
+  --cache-dir ../cache --output ../output/factor_analysis
 
-# 真有历史的端点 — 一次性 bulk
-python3 manage.py bulk_import --source fmp --target press-releases           # us_press_release（FMP 仅返最近 ~20 天，需 cron 每日积累）
-python3 manage.py bulk_import --source fmp --target sec-filings              # us_sec_filing（per-ticker，按年切段，2010-至今）
-python3 manage.py bulk_import --source fmp --target revenue-segments         # us_revenue_segment（产品+地理，2010-至今 15 年季度）
-python3 manage.py bulk_import --source fmp --target 13f-holdings             # us_institutional_holder（FMP 必须循环 year/quarter，默认 2015-至今）
-python3 manage.py bulk_import --source quiver --target dark-pool             # us_dark_pool_volume（替代 short interest，2010-至今每日）
+# === 美股回测（v25 baseline） ===
+quant backtest --start 2012-01-01 --end 2025-12-31 \
+  --cache-dir ../cache --output ../output/rust_v25
+# 输出: α=13.28% t=3.40 / Sharpe 0.99 / Down Capture -8.62%
 
-# Snapshot-only 端点 — 当下立即跑 + 加 cron 周任务积累时序：
-python3 manage.py bulk_import --source fmp --target dcf            --clean   # us_dcf_valuation（仅 1 条/票）
-python3 manage.py bulk_import --source fmp --target scores         --clean   # us_financial_score（仅 1 条/票，对照自算 Piotroski/Altman 用）
-python3 manage.py bulk_import --source fmp --target float          --clean   # us_shares_float（仅 1 条/票）
-python3 manage.py bulk_import --source fmp --target peers          --clean   # us_stock_peer（同业列表，仅 1 条/票）
+# === A 股 ===
+quant --market cn factors --date 2025-12-31     # A 股因子
+quant --market cn trade --date 2025-12-31 --signals signals.json   # A 股纸面交易
 
-# C-3 FRED 宏观增强（NFCI / HY OAS / IG OAS / 短端利率 / 通胀预期 等 12 个新指标）：
-python3 manage.py data_update --market us                                    # FRED 用 update 入口（全量自动加载新增 series）
+# === DB 状态 ===
+quant db-status
 
-# ⚠ 已移除：news（FMP 计划不含 /general-news 端点，404）+ short-interest（FMP 计划不含，改用 Quiver dark-pool）
-
-# === A 股数据导入（Tushare / AkShare） ===
-# 第一次：先备份 → drop+重建表 → 全量下载
-psql $PG_URL -f scripts/migrate_ashare_schema.sql
-python3 manage.py bulk_import --source tushare --target trade-cal             # 交易日历
-python3 manage.py bulk_import --source tushare --target stock-list            # 股票列表
-python3 manage.py bulk_import --source tushare --target all --start-date 20150101  # 全量
-python3 manage.py bulk_import --source akshare --target all                    # 研报 + 高管持股
-
-# 单端点（Tushare 全字段保留）
-python3 manage.py bulk_import --source tushare --target {prices|income|balancesheet|cashflow|fina-indicator|industry|index|commodity|macro|trade-cal}
-
-# === 增量更新（统一入口，--market 分流） ===
-python3 manage.py data_update --market us                  # 美股 (FMP+UW+Fiscal+Quiver+AV+FRED)
-python3 manage.py data_update --market us --old-source     # 美股旧源 (yfinance)
-python3 manage.py data_update --market cn                  # A 股 (Tushare+AkShare 全部端点)
-
-# === 回测 ===
-python3 manage.py backtest --market us --start 2020-01-01 --end 2024-12-31
-python3 manage.py backtest --market cn --start 2020-01-01 --end 2024-12-31
-
-# === cli.py 残留命令（待迁移到 management commands） ===
-python3 cli.py db status                                    # 查看全表数据状态
-python3 cli.py select --market us --date 2025-01-15        # 选股
-python3 cli.py paper trade --market us                      # 执行模拟交易
-python3 cli.py polymarket history --min-volume 1000000      # Polymarket 历史
 ```
 
 ## 配置
 
-环境变量在 `.env`（参考 `.env.example`）。所有配置在 `services/config.py` 中有默认值。
+环境变量在 `.env`（项目根目录）。Rust CLI 通过 `dotenvy` 自动加载。
 
-- **A股**: `TUSHARE_TOKEN`、`MAX_HOLDINGS`、`NEUTRALIZE_MODE`、`USE_VOL_TARGETING`、风控参数
-- **美股**: `US_MAX_HOLDINGS`、`US_SLIPPAGE`、`US_REGIME_INDEX`、`US_CATEGORY_WEIGHTS` 等（均带 `US_` 前缀）
-- **美股数据**: `FMP_API_KEY`（主数据源）、`UW_API_KEY`（Unusual Whales）、`FISCAL_API_KEY`（Fiscal.ai）、`QUIVER_API_KEY`（Quiver）、`ALPHAVANTAGE_API_KEY`（Alpha Vantage）、`FRED_API_KEY`（FRED 宏观）
-- **舆情**: `TWITTER_USERNAME`/`TWITTER_EMAIL`/`TWITTER_PASSWORD`、`LLM_PROVIDER`/`LLM_API_KEY`/`LLM_MODEL`
-- **数据库**: MySQL 连接信息
+**最小配置（FMP + FRED + DB）**：
+```
+FMP_API_KEY=xxx              # FMP Ultimate plan
+FRED_API_KEY=xxx             # FRED (永久免费)
+DB_HOST=...                  # PostgreSQL 连接
+DB_PORT=5432
+DB_USER=...
+DB_PASSWORD=...
+DB_DATABASE=...
+DB_SCHEMA=quant
+```
 
-## A股因子体系（30 因子，`stocks/services/factors/a_*.py`）
+**A 股额外**：`TUSHARE_TOKEN`
+
+**Strategy 参数**（`quant-engine/config.toml`）：
+- `[universe]`: min_market_cap = 1e10, min_daily_volume = 1e7
+- `[execution]`: initial_capital = 1000000, slippage = 0.0005
+- `[strategy]`: max_holdings, long_n, rebalance_interval
+- `[optimizer]`: gross_leverage = 1.2, max_long_weight = 0.10, turnover_penalty = 0.01
+- `[category_weights]`: value=0.7, quality=1.5, growth=1.5, momentum=2.5, analyst=1.2
+- `[risk_controls]`: vol_targeting / dd_response 参数
+
+## A股因子体系（Rust 实现 `quant-engine/crates/factors/src/a_share/`，下表为旧 Python 30 因子参考）
 
 | 大类 | 权重 | 因子 |
 |---|---|---|
@@ -132,15 +105,19 @@ python3 cli.py polymarket history --min-volume 1000000      # Polymarket 历史
 | 宏观 | 0.6 | MACRO_CYCLE, MACRO_LIQD, MACRO_INFL, MACRO_EXTR |
 | 舆情 | 0.6 | POLICY_SENT, POLICY_INTENSITY, ANALYST_RATING, ANALYST_COVERAGE |
 
-## 美股因子体系（43 因子 × 7 大类）
+## 美股因子体系（Rust v25：71 因子 × 8 大类）
 
-**已迁移到 AlphaSignal 架构**（`stocks/services/factors/signals/`，元数据化 + `@register` 自动注册）的批次：
-- **Quality**（15 因子，2026-04-15）— Batch 1
-- **Momentum**（10 因子，6 个新增 + 4 个 legacy 待迁移，2026-04-15）— Batch 2
+**实现位置**：`quant-engine/crates/factors/src/{value,quality,growth,momentum,defensive,analyst,alternative,...}/`
 
-未迁移的类别仍用旧架构，按 T1 backlog 逐批迁移（Value / Defensive / Liquidity / Analyst / Short-side）。
+**v25 数据源**：仅 FMP + FRED（已禁用 Quiver 5 因子，alpha 仅退 0.25%/年）
 
-文件命名：`stocks/services/factors/signals/{category}/us_{factor}.py`（A 股未来按 `a_{factor}.py` 加入）。
+**禁用的因子**（数据源付费 / IC 弱）：
+- CONGRESS_NET_BUY / GOV_CONTRACT_FLOW / LOBBY_INTENSITY / DARK_POOL_SHORT / INST_OWNERSHIP_DELTA（Quiver 付费）
+- NET_PROFIT_YOY (Winners/Losers 不区分)
+- EPS_REVISION (FMP date 是 forecast period，misnamed)
+- 4 对重复因子：SIZE/VOLATILITY_21D/TSMOM/QMJ_NET_PAYOUT 保留但与 LOG_MARKET_CAP/VOL_20D/MOM_12M/SHAREHOLDER_YIELD 等价
+
+下面表格是旧 Python 31 因子参考，仅作历史对照：
 
 | 大类 | 因子 | 架构 |
 |------|------|------|
@@ -272,9 +249,9 @@ NVDA 530× / CELH 472× / TSLA 239× / AVGO 119× / AXON 106× / NFLX 90× / MPW
 - **Regime 切换：** 四维复合（趋势+VIX+利差+拥挤度）+ Credit Veto
 - **回测预加载：** `preload_for_backtest()` 一次性加载到内存，因子计算全部从内存过滤
 
-## 舆情管道
+## 舆情管道（Legacy Python，已归档）
 
-`services/sentiment/scrapers/` 下 11 个中国政府网站爬虫 + CCTV新闻联播（AKShare）+ 巨潮公告 + 3 个 Twitter/X 美国政策爬虫 + Polymarket 预测市场桥接，共 20 个爬虫。两层分析：关键词底层 + LLM 增强层。
+`legacy_python/sentiment/scrapers/` 下 11 个中国政府网站爬虫 + CCTV新闻联播（AKShare）+ 巨潮公告 + 3 个 Twitter/X 美国政策爬虫 + Polymarket 预测市场桥接，共 20 个爬虫。当前 Rust 策略（v25）不依赖 sentiment 因子（POLYMARKET_SENT 全 0、IC 接近噪声）。后续如需 NLP sentiment 再决定是否迁移。
 
 ## 开发历史
 
@@ -307,11 +284,10 @@ NVDA 530× / CELH 472× / TSLA 239× / AVGO 119× / AXON 106× / NFLX 90× / MPW
 
 **当前待办（按优先级）：**
 
-**P0.5 — 工业级架构补强 ✅ 已完成：**
-- 风险模型：`backtest/services/us_risk_model.py`（Ledoit-Wolf 252D 协方差 Σ，parquet 缓存）
-- MVO 优化器：`backtest/services/us_optimizer.py`（cvxpy + OSQP，目标 `max μ̂'w − λ·w'Σw − γ·||w − w_prev||₁`）
-- 约束：净敞口 0.6 / 总杠杆 ≤ 1.0 / 单股 [-5%, +15%] / 行业 gross ≤ 25%
-- `US_USE_OPTIMIZER=0` 一键回退 Top-N + Softmax
+**P0.5 — 工业级架构补强 ✅ 已完成（Rust 实现）：**
+- 风险模型：`quant-engine/crates/strategy/src/optimizer.rs`（Ledoit-Wolf 252D 协方差 Σ）
+- MVO 优化器：Clarabel QP 求解器，目标 `max μ̂'w − λ·w'Σw − γ·||w − w_prev||₁`
+- 约束（v25 production）：净敞口 0.6 / 总杠杆 1.2 / 单股 [-0.05, +0.10] / Σ|wᵢ| ≤ gross_leverage（QP 内联立约束，非 post-hoc scaling）
 
 **因子分析结果（2026-04-21，79 因子 × 168 月）：**
 
@@ -379,26 +355,32 @@ cargo run --release -- analyze --start 2020-01-01 --end 2024-12-31 --cache-dir .
 ```
 quant-engine/
 ├── crates/
-│   ├── qrs-core/       核心类型 + 配置（TickerId, Config, Date）
-│   ├── qrs-data/       Parquet 加载 + PriceGrid + DataCache + Universe
-│   ├── qrs-factors/    77 个因子（11 大类）
-│   ├── qrs-strategy/   分层组合 + 滚动IC + Regime + 空头模型 + FM分析
-│   ├── qrs-backtest/   仓位制 T+0 回测引擎 + 风控 + 空头止损
-│   └── qrs-cli/        CLI 入口（clap derive）
+│   ├── core/       核心类型 + 配置（TickerId, Config, Date）
+│   ├── data/       Parquet 加载 + PriceGrid + DataCache + Universe filter
+│   ├── factors/    71 个因子（v25 已禁用 5 个 Quiver 付费 + EPS_REVISION + NET_PROFIT_YOY）
+│   ├── strategy/   scoring + MVO (Clarabel QP) + 滚动IC + Regime
+│   ├── backtest/   T+0 回测引擎 + FF5 回归 + margin call
+│   ├── download/   FMP / FRED / Tushare 下载器
+│   ├── trading/    A 股纸面 + 掘金实盘
+│   ├── db/         PostgreSQL pool + sqlx
+│   └── cli/        CLI 入口 `quant`
 ```
 
-### Rust 引擎回测绩效（77 因子，2020-2024）
+### Rust 引擎 v25 baseline（2012-2025 14 年完整回测）
 
 | 指标 | 值 |
 |------|-----|
-| Annual Return | 14.4% |
-| S&P 500 | 12.8% |
-| **Excess** | **+2.74%** |
-| Sharpe | 0.58 |
-| Max Drawdown | -28.5% |
-| Annual Turnover | 249% |
-| 持仓数 | ~26（15 大盘 + 7 新股 + 4 小盘） |
-| 运行时间 | ~50s（14 年完整回测） |
+| Annual Return | **20.76%** |
+| S&P 500 | 12.77% |
+| **Excess vs S&P** | **+7.98%** |
+| Sharpe | **0.99** ⭐ 机构级 |
+| **FF5 α** | **13.28% (t=3.40)** ⭐⭐⭐ HLZ \|t\|>3 |
+| Max Drawdown | -29.29% |
+| Calmar | 0.71 |
+| **Down Capture** | **-8.62%** ⭐⭐ 反向防守 |
+| Annual Turnover | ~400% |
+| 持仓数 | ~12（8 长 + 4 短） |
+| 运行时间 | ~70s（14 年完整回测）|
 
 ### 策略架构
 
