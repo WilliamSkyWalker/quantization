@@ -20,9 +20,11 @@
 
 | 任务 | 工作量 | 状态 | 备注 |
 |------|------|------|------|
-| 美股 Alpaca REST 客户端（Phase 1）| 1-2 天 | ⏳ | `quant-trading` 加美股部分，`quant --market us trade` 命令 |
+| Rust signals export | 0.5 天 | ✅ | commit `831cab8` `--export-signals` 出 JSON |
+| 美股 Alpaca REST 客户端（Phase 1）| 1-2 天 | ✅ | commit `656d86d` `quant alpaca {status,plan,run}` |
 | 美股 IBKR TWS 客户端（Phase 2）| 1-2 周 | ⏳ | 真实借券费 + 流动性压力测试 |
-| Rust signals export（`--output-signals signals.csv`）| 0.5 天 | ⏳ | 让外部程序/手动操作能读 |
+| Alpaca 增强：fractional shares + limit order | 0.5 天 | ⏳ | 当前 floor 整股有 dollar 残差，market 单 open 时滑点大 |
+| 每日 NAV 同步落 PG | 0.5 天 | ⏳ | Alpaca 仓位定时拉到本地 DB，方便对比 backtest |
 
 ## 🟡 P2 — 回测鲁棒性
 
@@ -70,8 +72,10 @@
 
 ## ✅ 已完成（最近 30 天）
 
-### 2026-04-30
+### 2026-04-30 / 05-01
 
+- ✅ Alpaca REST 美股 paper trading 客户端（`quant alpaca` 全套命令）— commit `656d86d`
+- ✅ Rust signals export（`backtest --export-signals` 出 JSON）— commit `831cab8`
 - ✅ Rust 引擎 8 bug 修复（floor / sign-flip / cover-starvation / margin-call / post-hoc-gross-scaling）— commit `cc7b69a`
 - ✅ Layer 1 sum scoring + EPS_REVISION 移除 — commit `29e9d88`
 - ✅ Winner-signature 调权（MOM_12M/SUE_PEAD/EARNINGS_SURPRISE 进 T0）— commit `acc4014`
