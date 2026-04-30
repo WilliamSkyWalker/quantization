@@ -57,7 +57,15 @@ fn is_inherent_reverse(factor_name: &str) -> bool {
         | "CASH_CONV_CYCLE" | "BENEISH_M" | "OHLSON_O" | "MAX_RET"
         | "DOWNSIDE_BETA" | "DARK_POOL_SHORT"
         | "ASSET_GROWTH" | "NET_OPERATING_ASSETS" | "COMPOSITE_EQUITY_ISSUANCE"
-        | "EV_TO_EBIT" | "EV_TO_FCF" | "EV_TO_SALES" | "AMIHUD_ILLIQ"
+        // EV_TO_FCF / EV_TO_EBIT removed (2026-04-30): empirical ICIR=+0.875 /
+        // +0.565, raw → positive return. Treating them as "value-low-good" was
+        // structurally fighting the strongest signal in the system. Default
+        // direction (+1) now aligns with empirical IC and winner signature
+        // (Winners EV/FCF=113 vs Losers=7 — expensive stocks won 14y).
+        // (QMJ_LEVERAGE / ANALYST_DISPERSION tested for flip in v15 — α regressed
+        // 10.44→9.73, kept in reverse list. IC > 0 doesn't always mean flip helps
+        // due to multi-factor portfolio interactions.)
+        | "EV_TO_SALES" | "AMIHUD_ILLIQ"
         | "ANALYST_DISPERSION"
     )
 }
