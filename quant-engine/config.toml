@@ -89,12 +89,16 @@ enabled = true
 risk_aversion = 1.0
 turnover_penalty = 0.01       # 0.005 → 0.01: 温和抑制换手
 max_long_weight = 0.10        # 0.15 → 0.10: 容 10 只长头降集中度
+                              # (v23 测试 0.08: α退 1.2%; v24 测试 0.12: α退 0.5%
+                              #  0.10 是 alpha vs DD 的甜蜜点)
 max_short_weight = 0.05
 max_sector_gross = 0.25
 cov_lookback = 252
 min_history_days = 120
 gross_leverage = 1.2          # 1.0 → 1.2 (2026-04-30): 轻度杠杆，net 仍 0.6，
                               # 但 long/short 暴露 +20%，放大 alpha 信号
+                              # (v22 测试 1.5: α 14.02 但 Sharpe 0.95 t=3.21,
+                              #  diminishing returns，1.2 是甜蜜点)
 
 [factor_processing]
 neutralize_mode = "full"
