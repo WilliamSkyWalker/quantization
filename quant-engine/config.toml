@@ -108,11 +108,12 @@ sentiment = "none"
 
 [category_weights]
 # Path B baseline (2026-04-30): QMOM 因子加权，14 年首次跑赢 S&P
-# Capture Ratio 24, Down Capture 2.2%
+# v18 boost (2026-04-30): momentum 2.0→2.5 / growth 1.2→1.5 进一步抓
+# 长期赢家 (Winners 12M momentum 中位 0.37 是核心特征)
 value = 0.7
 quality = 1.5
-growth = 1.2
-momentum = 2.0
+growth = 1.5
+momentum = 2.5
 technical = 1.0
 macro = 1.0
 analyst = 1.2

@@ -18,13 +18,10 @@ use crate::analysis::spearman_ic;
 /// ICIR tier weights (from Python's factor analysis results).
 fn icir_tier_weight(factor_name: &str) -> f64 {
     match factor_name {
-        // T0 super-strong (boosted 2026-04-30 per winner-signature audit +
-        // earnings-surprise momentum):
+        // T0 super-strong (boosted 2026-04-30):
         //   MOM_12M / INDUSTRY_MOM: #1 winner-discriminator (4/4 dates)
-        //   SUE_PEAD / EARNINGS_SURPRISE: beat-and-raise → "NVDA 2023" type
-        //     fundamental-driven runs that ride MOM_12M into multi-year
-        //     compound. Both have ICIR ~0.5+ and academic foundation
-        //     (Bernard-Thomas 1989 PEAD).
+        //   SUE_PEAD / EARNINGS_SURPRISE: PEAD beat-and-raise (Bernard-Thomas)
+        //   (EV_TO_FCF tested at T0 in v17 — α 10.68→10.56, kept at T1.)
         "MOM_12M" | "TSMOM" | "INDUSTRY_MOM"
         | "SUE_PEAD" | "EARNINGS_SURPRISE" => 3.0,
 
