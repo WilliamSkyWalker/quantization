@@ -509,6 +509,128 @@ impl TushareDownloader {
         total
     }
 
+    /// Download A-share commodity futures (主力合约 daily bars).
+    ///
+    /// Algorithm (per symbol):
+    ///   1. `fut_mapping(SYMBOL.EXCHANGE)` → maps each trade_date to the active main contract
+    ///   2. Group mapping rows by `mapping_ts_code` (each = one continuous segment)
+    ///   3. For each segment, `fut_daily(contract_code)` for that date range
+    ///   4. Filter daily bars to dates where contract was actually the main one
+    ///   5. Tag with `ts_code = SYMBOL.EXCHANGE` (not contract code) for stable identity
+    ///
+    /// Incremental: per-symbol latest trade_date in `a_commodity_price` → resume from there.
+    pub async fn download_commodity(&self, incremental: bool) -> usize {
+        // 16 symbols (matches Python services/config.COMMODITY_SYMBOLS).
+        // (symbol, exchange)
+        let pairs: &[(&str, &str)] = &[
+            ("AU","SHF"),("AG","SHF"),("CU","SHF"),("AL","SHF"),
+            ("ZN","SHF"),("PB","SHF"),("NI","SHF"),("SN","SHF"),
+            ("RB","SHF"),
+            ("I","DCE"),("J","DCE"),("JM","DCE"),
+            ("SC","INE"),
+            ("SA","ZCE"),("MA","ZCE"),
+        ];
+
+        let latest_by_code = if incremental {
+            self.get_ticker_latest("a_commodity_price", "trade_date").await
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        let default_start = "20150101".to_string();
+        let today = chrono::Local::now().format("%Y%m%d").to_string();
+
+        let mut sym_meta: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+        for (sym, ex) in pairs {
+            let ts_code = format!("{sym}.{ex}");
+            let start = latest_by_code.get(&ts_code)
+                .map(|d| d.replace('-', ""))
+                .and_then(|d| chrono::NaiveDate::parse_from_str(&d, "%Y%m%d").ok())
+                .and_then(|nd| nd.succ_opt())
+                .map(|nd| nd.format("%Y%m%d").to_string())
+                .unwrap_or_else(|| default_start.clone());
+            sym_meta.insert(sym.to_string(), (ex.to_string(), start));
+        }
+        let sym_meta = Arc::new(sym_meta);
+        let end_date = today.clone();
+        let symbols: Vec<String> = pairs.iter().map(|(s, _)| s.to_string()).collect();
+
+        self.run_concurrent(
+            symbols,
+            "Tushare commodity",
+            move |dl, sym| {
+                let sym_meta = sym_meta.clone();
+                let end = end_date.clone();
+                async move {
+                    let (exchange, start) = match sym_meta.get(&sym) {
+                        Some(m) => m.clone(),
+                        None => return 0,
+                    };
+                    if start > end {
+                        return 0;
+                    }
+                    let ts_code = format!("{sym}.{exchange}");
+
+                    // Step 1: fut_mapping
+                    let mapping = dl.tushare_call("fut_mapping", &json!({
+                        "ts_code": &ts_code,
+                        "start_date": &start,
+                        "end_date": &end,
+                    })).await;
+                    if mapping.is_empty() {
+                        return 0;
+                    }
+
+                    // Step 2: group by mapping_ts_code, find date range per group.
+                    use std::collections::BTreeMap;
+                    let mut groups: BTreeMap<String, (String, String, std::collections::HashSet<String>)> = BTreeMap::new();
+                    for row in &mapping {
+                        let trade_date = match row.get("trade_date").and_then(|v| v.as_str()) {
+                            Some(d) => d.to_string(), None => continue,
+                        };
+                        let contract = match row.get("mapping_ts_code").and_then(|v| v.as_str()) {
+                            Some(c) => c.to_string(), None => continue,
+                        };
+                        let entry = groups.entry(contract).or_insert_with(||
+                            (trade_date.clone(), trade_date.clone(), std::collections::HashSet::new()));
+                        if trade_date < entry.0 { entry.0 = trade_date.clone(); }
+                        if trade_date > entry.1 { entry.1 = trade_date.clone(); }
+                        entry.2.insert(trade_date);
+                    }
+
+                    // Step 3+4: per-segment fut_daily, filter by valid dates, accumulate.
+                    let mut all_rows: Vec<Value> = Vec::new();
+                    let mut seen_dates: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    for (contract, (seg_start, seg_end, valid_dates)) in &groups {
+                        let daily = dl.tushare_call("fut_daily", &json!({
+                            "ts_code": contract,
+                            "start_date": seg_start,
+                            "end_date": seg_end,
+                        })).await;
+                        for row in daily {
+                            let trade_date = match row.get("trade_date").and_then(|v| v.as_str()) {
+                                Some(d) => d.to_string(), None => continue,
+                            };
+                            if !valid_dates.contains(&trade_date) { continue; }
+                            // Dedup across segments (rare but possible at boundaries).
+                            if !seen_dates.insert(trade_date.clone()) { continue; }
+                            // Stamp stable identity instead of contract code.
+                            let mut o = match row.as_object() { Some(o) => o.clone(), None => continue };
+                            o.insert("ts_code".to_string(), Value::String(ts_code.clone()));
+                            o.insert("name".to_string(), Value::String(sym.clone()));
+                            all_rows.push(Value::Object(o));
+                        }
+                    }
+
+                    if all_rows.is_empty() {
+                        return 0;
+                    }
+                    dl.upsert_rows("a_commodity_price", &all_rows, &["ts_code", "trade_date"]).await
+                }
+            },
+        ).await
+    }
+
     /// Download all A-share data (full).
     pub async fn download_all(&self, start_date: &str) -> usize {
         let mut total = 0;
@@ -522,6 +644,7 @@ impl TushareDownloader {
         total += self.download_balancesheet(false).await;
         total += self.download_cashflow(false).await;
         total += self.download_fina_indicator(false).await;
+        total += self.download_commodity(false).await;
         info!("Tushare download_all total: {total}");
         total
     }
@@ -530,6 +653,8 @@ impl TushareDownloader {
     pub async fn update_all(&self) -> usize {
         let mut total = 0;
         total += self.download_stock_list().await;
+        total += self.download_trade_cal().await;
+        total += self.download_industry().await;
         total += self.download_daily_prices("20200101", true).await;
         total += self.download_income(true).await;
         total += self.download_balancesheet(true).await;
@@ -537,6 +662,7 @@ impl TushareDownloader {
         total += self.download_fina_indicator(true).await;
         total += self.download_index_daily("20200101").await;
         total += self.download_macro().await;
+        total += self.download_commodity(true).await;
         info!("Tushare update_all total: {total}");
         total
     }

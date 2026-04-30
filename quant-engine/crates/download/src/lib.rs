@@ -1,3 +1,4 @@
+pub mod a_policy_migrate;
 pub mod a_tushare;
 pub mod camel;
 pub mod http;

@@ -172,6 +172,28 @@ enum Commands {
         #[arg(long)]
         no_risk: bool,
     },
+
+    /// One-time migration: policy_article + policy_analysis + scrape_log
+    /// from legacy MySQL → PostgreSQL. Reads from MYSQL_* env vars unless
+    /// overridden by flags.
+    MigratePolicy {
+        #[arg(long, env = "MYSQL_HOST", default_value = "127.0.0.1")]
+        mysql_host: String,
+        #[arg(long, env = "MYSQL_PORT", default_value = "3306")]
+        mysql_port: u16,
+        #[arg(long, env = "MYSQL_USER", default_value = "root")]
+        mysql_user: String,
+        #[arg(long, env = "MYSQL_PASSWORD", default_value = "")]
+        mysql_password: String,
+        #[arg(long, env = "MYSQL_DATABASE", default_value = "quant")]
+        mysql_database: String,
+        /// Rows per fetch batch.
+        #[arg(long, default_value = "1000")]
+        batch: usize,
+        /// Read MySQL only; report counts but don't write to PG.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() {
@@ -262,6 +284,12 @@ fn main() {
                 }
                 Market::Cn => cmd_a_trade(&_config, &account, &date, &signals, dry_run, no_risk),
             }
+        }
+        Commands::MigratePolicy {
+            mysql_host, mysql_port, mysql_user, mysql_password, mysql_database, batch, dry_run,
+        } => {
+            cmd_migrate_policy(&_config, &mysql_host, mysql_port, &mysql_user,
+                               &mysql_password, &mysql_database, batch, dry_run);
         }
     }
 }
@@ -1400,11 +1428,12 @@ fn cmd_download(
                         "industry" => { dl.download_industry().await; }
                         "index" => { dl.download_index_daily(&start).await; }
                         "macro" => { dl.download_macro().await; }
+                        "commodity" => { dl.download_commodity(incremental).await; }
                         "all" => { dl.download_all(&start).await; }
                         other => {
                             eprintln!("Unknown Tushare target: {other}");
                             eprintln!("Available: stock_list, trade_cal, daily_price, income, balance,");
-                            eprintln!("  cashflow, indicator, industry, index, macro, all");
+                            eprintln!("  cashflow, indicator, industry, index, macro, commodity, all");
                             std::process::exit(1);
                         }
                     }
@@ -1664,5 +1693,51 @@ fn cmd_a_trade(
         println!("positions    = {}", snap.positions.len());
 
         pool.close().await;
+    });
+}
+
+// ── MySQL → PG one-time migration: policy_article / policy_analysis ─────
+
+fn cmd_migrate_policy(
+    config: &Config,
+    mysql_host: &str,
+    mysql_port: u16,
+    mysql_user: &str,
+    mysql_password: &str,
+    mysql_database: &str,
+    batch: usize,
+    dry_run: bool,
+) {
+    let pg_url = config.database.url();
+    let schema = &config.database.schema;
+    if pg_url.contains("@:/") || pg_url.contains("postgres://:@") {
+        eprintln!("PG not configured. Set DB_HOST/USER/PASSWORD/DATABASE.");
+        std::process::exit(1);
+    }
+    let mysql_url = quant_download::a_policy_migrate::mysql_url(
+        mysql_host, mysql_port, mysql_user, mysql_password, mysql_database,
+    );
+    info!("MySQL: {}@{}:{}/{}", mysql_user, mysql_host, mysql_port, mysql_database);
+    info!("PG: {}", pg_url.split('@').last().unwrap_or(""));
+    info!("batch={} dry_run={}", batch, dry_run);
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    rt.block_on(async {
+        let pg_pool = quant_db::pool::create_pool(&pg_url, schema, 8).await
+            .expect("connect to PG");
+
+        let stats = quant_download::a_policy_migrate::migrate(
+            &mysql_url, &pg_pool, batch, dry_run,
+        ).await.expect("migration failed");
+
+        println!("\n=== Migration {}===", if dry_run { "(dry-run) " } else { "" });
+        println!("policy_article  read={:>7} inserted={:>7} skipped={:>7}",
+                 stats.articles_read, stats.articles_inserted, stats.articles_skipped);
+        println!("policy_analysis read={:>7} inserted={:>7} skipped={:>7}",
+                 stats.analyses_read, stats.analyses_inserted, stats.analyses_skipped);
+        println!("scrape_log      read={:>7} inserted={:>7}",
+                 stats.scrape_logs_read, stats.scrape_logs_inserted);
+
+        pg_pool.close().await;
     });
 }
