@@ -45,7 +45,9 @@ impl Factor for EmployeeGrowth {
 }
 
 pub struct CongressNetBuy;
-inventory::submit! { &CongressNetBuy as &dyn Factor }
+// DISABLED 2026-04-30: Quiver 数据源（付费）依赖。ICIR=-0.183，方向反学术（应为正
+// 但实测负向），weak signal，移除以摆脱付费数据。仅保留代码方便回退。
+// inventory::submit! { &CongressNetBuy as &dyn Factor }
 impl Factor for CongressNetBuy {
     fn name(&self) -> &'static str { "CONGRESS_NET_BUY" }
     fn category(&self) -> &'static str { "alternative" }
@@ -67,7 +69,8 @@ impl Factor for CongressNetBuy {
 }
 
 pub struct GovContractFlow;
-inventory::submit! { &GovContractFlow as &dyn Factor }
+// DISABLED 2026-04-30: Quiver 付费数据源依赖。ICIR=-0.346（弱）。
+// inventory::submit! { &GovContractFlow as &dyn Factor }
 impl Factor for GovContractFlow {
     fn name(&self) -> &'static str { "GOV_CONTRACT_FLOW" }
     fn category(&self) -> &'static str { "alternative" }
@@ -95,7 +98,8 @@ impl Factor for GovContractFlow {
 }
 
 pub struct LobbyIntensity;
-inventory::submit! { &LobbyIntensity as &dyn Factor }
+// DISABLED 2026-04-30: Quiver 付费数据源依赖。ICIR=-0.029（噪声）。
+// inventory::submit! { &LobbyIntensity as &dyn Factor }
 impl Factor for LobbyIntensity {
     fn name(&self) -> &'static str { "LOBBY_INTENSITY" }
     fn category(&self) -> &'static str { "alternative" }

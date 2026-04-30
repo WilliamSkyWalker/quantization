@@ -6,7 +6,8 @@ use crate::registry::Factor;
 
 /// Dark Pool Short Interest: mean DPI over ~20 trading days
 pub struct DarkPoolShort;
-inventory::submit! { &DarkPoolShort as &dyn Factor }
+// DISABLED 2026-04-30: Quiver 付费数据源依赖。ICIR=-0.168（弱）。
+// inventory::submit! { &DarkPoolShort as &dyn Factor }
 impl Factor for DarkPoolShort {
     fn name(&self) -> &'static str { "DARK_POOL_SHORT" }
     fn category(&self) -> &'static str { "ownership" }
@@ -32,7 +33,8 @@ impl Factor for DarkPoolShort {
 
 /// Institutional Ownership Delta: change in 13F shares between latest 2 periods
 pub struct InstOwnershipDelta;
-inventory::submit! { &InstOwnershipDelta as &dyn Factor }
+// DISABLED 2026-04-30: Quiver 付费数据源依赖（13F holdings）。ICIR=-0.100（接近噪声）。
+// inventory::submit! { &InstOwnershipDelta as &dyn Factor }
 impl Factor for InstOwnershipDelta {
     fn name(&self) -> &'static str { "INST_OWNERSHIP_DELTA" }
     fn category(&self) -> &'static str { "ownership" }
