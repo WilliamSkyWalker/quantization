@@ -1,2 +1,2 @@
-mod technical;
-mod advanced;
+mod us_technical;
+mod us_advanced;
