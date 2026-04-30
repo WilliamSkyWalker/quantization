@@ -21,7 +21,11 @@ fn icir_tier_weight(factor_name: &str) -> f64 {
         // T0 super-strong (boosted 2026-04-30):
         //   MOM_12M / INDUSTRY_MOM: #1 winner-discriminator (4/4 dates)
         //   SUE_PEAD / EARNINGS_SURPRISE: PEAD beat-and-raise (Bernard-Thomas)
-        //   (EV_TO_FCF tested at T0 in v17 — α 10.68→10.56, kept at T1.)
+        //   (Tested at T0 and rejected:
+        //    - EV_TO_FCF v17: α 10.68→10.56 (-0.22%/yr)
+        //    - PIOTROSKI v19: α regress -1.70%/yr (over-defensive)
+        //    - AMIHUD_ILLIQ v20: no effect — universe min_dvol=$10M already
+        //      filters out low-liquidity, AMIHUD has limited variation here.)
         "MOM_12M" | "TSMOM" | "INDUSTRY_MOM"
         | "SUE_PEAD" | "EARNINGS_SURPRISE" => 3.0,
 
