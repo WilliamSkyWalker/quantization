@@ -39,7 +39,7 @@ pub struct AFinIndicator {
     pub gross_margin: f64,
     pub netprofit_margin: f64,
     pub q_profit_yoy: f64,
-    pub q_revenue_yoy: f64,
+    pub q_sales_yoy: f64,
     pub q_netprofit_yoy: f64,
     pub current_ratio: f64,
     pub ocf_to_profit: f64,
@@ -52,6 +52,17 @@ pub struct AIndustry {
     pub industry_name: String,
 }
 
+/// Per-stock static info from `a_stock_basic` (used by universe cleaner).
+#[derive(Debug, Clone)]
+pub struct AStockInfo {
+    pub name: String,
+    pub list_date: Option<NaiveDate>,
+    pub delist_date: Option<NaiveDate>,
+    pub is_st: bool,
+    pub board: Option<String>,        // 主板 / 创业板 / 科创板 / 北交所
+    pub total_share: Option<f64>,     // 万股
+}
+
 /// Central A-share data cache.
 pub struct AShareCache {
     /// Daily prices: ts_code → sorted Vec<(date, ABar)>
@@ -60,6 +71,8 @@ pub struct AShareCache {
     pub financials: FxHashMap<String, Vec<AFinIndicator>>,
     /// Industry classification: ts_code → AIndustry
     pub industry: FxHashMap<String, AIndustry>,
+    /// Static stock basics: ts_code → AStockInfo
+    pub basics: FxHashMap<String, AStockInfo>,
     /// Trading calendar (sorted)
     pub trading_days: Vec<NaiveDate>,
     /// Index daily: index_code → sorted Vec<(date, close)>
@@ -111,5 +124,34 @@ impl AShareCache {
             .filter(|(_, bars)| bars.binary_search_by_key(&date, |(d, _)| *d).is_ok())
             .map(|(code, _)| code.as_str())
             .collect()
+    }
+
+    /// True if `ts_code` is currently flagged ST/*ST in basics. False if no basics row.
+    pub fn is_st(&self, ts_code: &str) -> bool {
+        self.basics.get(ts_code).is_some_and(|b| b.is_st)
+    }
+
+    /// True if a stock is listed on `date` (list_date <= date && (delist_date.is_none() || delist_date > date)).
+    pub fn is_listed_on(&self, ts_code: &str, date: NaiveDate) -> bool {
+        let info = match self.basics.get(ts_code) { Some(b) => b, None => return false };
+        let listed = info.list_date.is_some_and(|d| d <= date);
+        let active = info.delist_date.map_or(true, |d| d > date);
+        listed && active
+    }
+
+    /// Days since IPO on `date` (None if no list_date or not yet listed).
+    pub fn listing_days_on(&self, ts_code: &str, date: NaiveDate) -> Option<i64> {
+        let ld = self.basics.get(ts_code)?.list_date?;
+        if ld > date { return None; }
+        Some((date - ld).num_days())
+    }
+
+    /// Average `amount` over the last `n` trading days up to and including `date`.
+    /// Returns NaN if no bars in window.
+    pub fn avg_amount(&self, ts_code: &str, date: NaiveDate, n: usize) -> f64 {
+        let bars = self.get_bars_before(ts_code, date, n);
+        if bars.is_empty() { return f64::NAN; }
+        let sum: f64 = bars.iter().map(|b| b.amount).sum();
+        sum / bars.len() as f64
     }
 }

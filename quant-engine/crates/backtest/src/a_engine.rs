@@ -4,7 +4,7 @@
 //! - T+1: signals trigger next-day open execution (not same-day close)
 //! - Lot size: 100 shares (整手)
 //! - Stamp tax: 0.1% on sell side only
-//! - Limit up/down: 10% (20% for ChiNext/STAR)
+//! - Limit up/down: per-board (主板 ±10% / 创业板·科创板 ±20% / 北交所 ±30% / ST ±5%)
 //! - Commission minimum: 5 CNY per trade
 
 use std::collections::BTreeMap;
@@ -13,29 +13,41 @@ use chrono::NaiveDate;
 use rustc_hash::FxHashMap;
 use tracing::info;
 
+pub use quant_core::board::{Board, board_from_ts_code, limit_pct_for};
+use quant_core::config::{AShareConfig, AShareMarketRulesConfig};
 use quant_factors::a_share::cache::{AShareCache, ABar};
-
-const LOT_SIZE: i64 = 100;
-const MIN_COMMISSION: f64 = 5.0;
 
 /// A-share execution cost parameters.
 #[derive(Debug, Clone)]
 pub struct ACostConfig {
-    pub buy_commission: f64,   // 0.0003 (万三)
-    pub sell_commission: f64,  // 0.0003
-    pub stamp_tax: f64,        // 0.001 (千一, sell only)
-    pub slippage: f64,         // 0.0005
-    pub initial_capital: f64,  // 1_000_000.0
+    pub buy_commission: f64,
+    pub sell_commission: f64,
+    pub stamp_tax: f64,
+    pub slippage: f64,
+    pub initial_capital: f64,
+    pub min_commission: f64,
+    pub lot_size: i64,
+    pub market_rules: AShareMarketRulesConfig,
 }
 
 impl Default for ACostConfig {
     fn default() -> Self {
+        Self::from_a_share(&AShareConfig::default())
+    }
+}
+
+impl ACostConfig {
+    /// Build from a top-level A-share config block.
+    pub fn from_a_share(a: &AShareConfig) -> Self {
         Self {
-            buy_commission: 0.0003,
-            sell_commission: 0.0003,
-            stamp_tax: 0.001,
-            slippage: 0.0005,
-            initial_capital: 1_000_000.0,
+            buy_commission: a.execution.buy_commission,
+            sell_commission: a.execution.sell_commission,
+            stamp_tax: a.execution.stamp_tax,
+            slippage: a.execution.slippage,
+            initial_capital: a.execution.initial_capital,
+            min_commission: a.execution.min_commission,
+            lot_size: a.execution.lot_size,
+            market_rules: a.market_rules.clone(),
         }
     }
 }
@@ -110,7 +122,7 @@ pub fn run_backtest(
                 if shares <= 0 { continue; }
                 if let Some(bar) = cache.get_bar(code, today) {
                     // Check: can we sell? (not limit-down one-char board)
-                    if is_limit_down_one_char(bar) { continue; }
+                    if is_limit_down_one_char(code, bar, cache.is_st(code), &config.market_rules) { continue; }
                     let exec_price = bar.open * (1.0 - config.slippage);
                     let amount = shares as f64 * exec_price;
                     let fees = calc_sell_fees(amount, config);
@@ -129,14 +141,14 @@ pub fn run_backtest(
                     None => continue,
                 };
                 // Check: can we buy? (not limit-up one-char board)
-                if is_limit_up_one_char(bar) { continue; }
+                if is_limit_up_one_char(code, bar, cache.is_st(code), &config.market_rules) { continue; }
 
                 let current_shares = positions.get(code).copied().unwrap_or(0);
                 let target_value = total_value * target_w;
                 let exec_price = bar.open * (1.0 + config.slippage);
                 if exec_price <= 0.0 { continue; }
 
-                let target_shares = round_to_lot((target_value / exec_price) as i64);
+                let target_shares = round_to_lot((target_value / exec_price) as i64, config.lot_size);
                 let delta = target_shares - current_shares;
                 if delta <= 0 { continue; }
 
@@ -212,31 +224,48 @@ fn portfolio_value(
     value
 }
 
-fn round_to_lot(shares: i64) -> i64 {
-    (shares / LOT_SIZE) * LOT_SIZE
+fn round_to_lot(shares: i64, lot_size: i64) -> i64 {
+    (shares / lot_size) * lot_size
 }
 
 fn calc_buy_fees(amount: f64, config: &ACostConfig) -> f64 {
-    (amount * config.buy_commission).max(MIN_COMMISSION)
+    (amount * config.buy_commission).max(config.min_commission)
 }
 
 fn calc_sell_fees(amount: f64, config: &ACostConfig) -> f64 {
-    let commission = (amount * config.sell_commission).max(MIN_COMMISSION);
+    let commission = (amount * config.sell_commission).max(config.min_commission);
     let stamp = amount * config.stamp_tax;
     commission + stamp
 }
 
-/// Detect one-char limit-up (一字涨停): open == high == close, pct_chg >= 9.5%
-fn is_limit_up_one_char(bar: &ABar) -> bool {
-    let threshold = 9.5; // 10% board ± tolerance
+/// Threshold % (e.g. 9.5 for ±10% board with 0.5% tolerance) used to detect
+/// near-limit moves. Returns the up-side cutoff (positive) — flip sign for down.
+fn near_limit_pct(board: Board, is_st: bool, rules: &AShareMarketRulesConfig) -> f64 {
+    let limit = limit_pct_for(board, is_st, rules);
+    (limit - rules.one_char_tolerance) * 100.0
+}
+
+/// Detect one-char limit-up (一字涨停): pct_chg >= near-limit && open == high == close.
+pub fn is_limit_up_one_char(
+    ts_code: &str,
+    bar: &ABar,
+    is_st: bool,
+    rules: &AShareMarketRulesConfig,
+) -> bool {
+    let threshold = near_limit_pct(board_from_ts_code(ts_code), is_st, rules);
     bar.pct_chg >= threshold
         && (bar.open - bar.high).abs() < 0.01
         && (bar.open - bar.close).abs() < 0.01
 }
 
-/// Detect one-char limit-down (一字跌停): open == low == close, pct_chg <= -9.5%
-fn is_limit_down_one_char(bar: &ABar) -> bool {
-    let threshold = -9.5;
+/// Detect one-char limit-down (一字跌停): pct_chg <= -near-limit && open == low == close.
+pub fn is_limit_down_one_char(
+    ts_code: &str,
+    bar: &ABar,
+    is_st: bool,
+    rules: &AShareMarketRulesConfig,
+) -> bool {
+    let threshold = -near_limit_pct(board_from_ts_code(ts_code), is_st, rules);
     bar.pct_chg <= threshold
         && (bar.open - bar.low).abs() < 0.01
         && (bar.open - bar.close).abs() < 0.01
@@ -297,5 +326,107 @@ fn empty_result() -> ABacktestResult {
         total_return: 0.0, annual_return: 0.0, annual_volatility: 0.0,
         sharpe_ratio: 0.0, max_drawdown: 0.0, calmar_ratio: 0.0,
         win_rate: 0.0, total_trades: 0, annual_turnover: 0.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rules() -> AShareMarketRulesConfig {
+        AShareMarketRulesConfig::default()
+    }
+
+    fn make_bar(pct_chg: f64, open: f64, high: f64, low: f64, close: f64) -> ABar {
+        ABar {
+            open, high, low, close, pre_close: 0.0, pct_chg,
+            vol: 0.0, amount: 0.0, adj_factor: 1.0,
+            turnover_rate: 0.0, pe_ttm: 0.0, pb: 0.0, ps_ttm: 0.0, dv_ttm: 0.0,
+            total_mv: 0.0, circ_mv: 0.0,
+        }
+    }
+
+    #[test]
+    fn board_detection() {
+        assert_eq!(board_from_ts_code("600519.SH"), Board::Main);     // 沪市主板
+        assert_eq!(board_from_ts_code("000001.SZ"), Board::Main);     // 深市主板
+        assert_eq!(board_from_ts_code("002594.SZ"), Board::Main);     // 中小板
+        assert_eq!(board_from_ts_code("300750.SZ"), Board::ChiNext);  // 创业板
+        assert_eq!(board_from_ts_code("301129.SZ"), Board::ChiNext);  // 创业板新
+        assert_eq!(board_from_ts_code("688981.SH"), Board::StarMarket); // 科创板
+        assert_eq!(board_from_ts_code("830799.BJ"), Board::Bse);      // 北交所
+        assert_eq!(board_from_ts_code("430047.BJ"), Board::Bse);      // 北交所 4 开头
+    }
+
+    #[test]
+    fn limit_pct_per_board() {
+        let r = rules();
+        assert_eq!(limit_pct_for(Board::Main, false, &r), 0.10);
+        assert_eq!(limit_pct_for(Board::ChiNext, false, &r), 0.20);
+        assert_eq!(limit_pct_for(Board::StarMarket, false, &r), 0.20);
+        assert_eq!(limit_pct_for(Board::Bse, false, &r), 0.30);
+        // ST overrides everything
+        assert_eq!(limit_pct_for(Board::Main, true, &r), 0.05);
+        assert_eq!(limit_pct_for(Board::ChiNext, true, &r), 0.05);
+    }
+
+    #[test]
+    fn limit_up_main_board_blocks_at_9_5_pct() {
+        let r = rules();
+        // 主板 ±10%，one_char_tolerance 0.5% → 阈值 9.5%
+        let bar = make_bar(9.6, 11.0, 11.0, 10.0, 11.0);
+        assert!(is_limit_up_one_char("600519.SH", &bar, false, &r));
+        // 9.4% 不触发
+        let bar = make_bar(9.4, 11.0, 11.0, 10.0, 11.0);
+        assert!(!is_limit_up_one_char("600519.SH", &bar, false, &r));
+    }
+
+    #[test]
+    fn limit_up_chinext_uses_19_5_pct() {
+        let r = rules();
+        // 创业板 ±20% → 阈值 19.5%
+        let bar = make_bar(19.6, 12.0, 12.0, 10.0, 12.0);
+        assert!(is_limit_up_one_char("300750.SZ", &bar, false, &r));
+        // 主板规则用同 9.6% 涨幅会触发，但创业板 9.6% 不会
+        let bar = make_bar(9.6, 12.0, 12.0, 10.0, 12.0);
+        assert!(!is_limit_up_one_char("300750.SZ", &bar, false, &r));
+    }
+
+    #[test]
+    fn limit_up_st_uses_4_5_pct() {
+        let r = rules();
+        // ST ±5% → 阈值 4.5%
+        let bar = make_bar(4.6, 10.5, 10.5, 10.0, 10.5);
+        assert!(is_limit_up_one_char("600519.SH", &bar, true, &r));
+        let bar = make_bar(4.4, 10.5, 10.5, 10.0, 10.5);
+        assert!(!is_limit_up_one_char("600519.SH", &bar, true, &r));
+    }
+
+    #[test]
+    fn limit_up_requires_one_char_shape() {
+        let r = rules();
+        // 涨幅够但 open != high (非一字板) → 不触发
+        let bar = make_bar(9.6, 10.5, 11.0, 10.0, 11.0);
+        assert!(!is_limit_up_one_char("600519.SH", &bar, false, &r));
+    }
+
+    #[test]
+    fn limit_down_bse_uses_29_5_pct() {
+        let r = rules();
+        // 北交所 ±30% → 阈值 -29.5%
+        let bar = make_bar(-29.6, 7.0, 7.0, 7.0, 7.0);
+        assert!(is_limit_down_one_char("830799.BJ", &bar, false, &r));
+    }
+
+    #[test]
+    fn cost_config_derives_from_a_share() {
+        let a = AShareConfig::default();
+        let cost = ACostConfig::from_a_share(&a);
+        assert_eq!(cost.buy_commission, 0.00075);
+        assert_eq!(cost.stamp_tax, 0.001);
+        assert_eq!(cost.lot_size, 100);
+        assert_eq!(cost.min_commission, 5.0);
+        assert_eq!(cost.market_rules.main_board_limit, 0.10);
+        assert_eq!(cost.market_rules.bse_limit, 0.30);
     }
 }

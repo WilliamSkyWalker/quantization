@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -8,12 +8,22 @@ use tracing_subscriber::EnvFilter;
 use quant_core::config::Config;
 use quant_data::{builder, loader};
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Market {
+    Us,
+    Cn,
+}
+
 #[derive(Parser)]
 #[command(name = "quant", about = "Quantitative Research System (Rust Engine)")]
 struct Cli {
     /// Config file path.
     #[arg(short, long, default_value = "config.toml")]
     config: PathBuf,
+
+    /// Market: us (default) or cn (A-share).
+    #[arg(long, value_enum, default_value_t = Market::Us)]
+    market: Market,
 
     /// Verbosity level (-v, -vv, -vvv).
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -187,7 +197,10 @@ fn main() {
             category: _,
             cache_dir,
         } => {
-            cmd_factors(&cache_dir, &date);
+            match cli.market {
+                Market::Us => cmd_factors(&cache_dir, &date),
+                Market::Cn => cmd_a_factors(&_config, &date),
+            }
         }
         Commands::Score { date, top } => {
             info!("TODO: score --date {date} --top {top}");
@@ -382,6 +395,212 @@ fn cmd_factors(cache_dir: &PathBuf, date_str: &str) {
             top5.join(", "),
             bottom5.join(", "),
         );
+    }
+}
+
+fn cmd_a_factors(config: &Config, date_str: &str) {
+    let date = match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Invalid date format (expected YYYY-MM-DD): {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let db_url = config.database.url();
+    let schema = &config.database.schema;
+    if db_url.contains("@:/") || db_url.contains("postgres://:@") {
+        eprintln!("Database not configured. Set DB_HOST, DB_USER, DB_PASSWORD, DB_DATABASE env vars.");
+        std::process::exit(1);
+    }
+
+    info!("Building A-share cache from DB...");
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    let cache = rt.block_on(async {
+        let pool = quant_db::pool::create_pool(&db_url, schema, 8).await
+            .expect("Failed to connect to database");
+
+        // Load 4 years back: needed for CAGR_3Y (~13 quarters) and momentum (240 days)
+        let load_start = date - chrono::Duration::days(365 * 4);
+        let load_end = date + chrono::Duration::days(1);
+
+        let cache = build_a_share_cache(&pool, load_start, load_end).await;
+        pool.close().await;
+        cache
+    });
+
+    info!(
+        "AShareCache: {} stocks, {} financials, {} industries, {} basics, {} trading days",
+        cache.daily.len(),
+        cache.financials.len(),
+        cache.industry.len(),
+        cache.basics.len(),
+        cache.trading_days.len(),
+    );
+
+    // Build clean universe — factor outputs are intersected with this set.
+    let clean_universe = {
+        use quant_factors::a_share::universe::{AUniverseFilter, get_a_clean_universe};
+        let filter = AUniverseFilter::from_config(&config.a_share.universe);
+        let clean = get_a_clean_universe(date, &cache, &filter);
+        info!("Clean universe on {date}: {}/{}", clean.len(), cache.ts_codes.len());
+        clean
+    };
+
+    let factors = quant_factors::a_share::factors::all_factors();
+    info!("{} A-share factors", factors.len());
+
+    println!(
+        "\n{:<22} {:<11} {:>5} {:>11} {:>11} {:>11}   Top 5 / Bottom 5",
+        "Factor", "Category", "N", "Mean", "Median", "Std",
+    );
+    println!("{}", "-".repeat(120));
+
+    for f in &factors {
+        let raw_all = (f.compute)(date, &cache);
+        // Intersect factor output with clean universe so stats reflect tradeable names only.
+        let raw: rustc_hash::FxHashMap<String, f64> = raw_all.into_iter()
+            .filter(|(code, _)| clean_universe.contains(code))
+            .collect();
+        let mut vals: Vec<f64> = raw.values().copied().collect();
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = vals.len();
+        let mean = if n > 0 { vals.iter().sum::<f64>() / n as f64 } else { 0.0 };
+        let median = if n > 0 {
+            if n % 2 == 0 { (vals[n / 2 - 1] + vals[n / 2]) / 2.0 } else { vals[n / 2] }
+        } else { 0.0 };
+        let std_dev = if n > 1 {
+            (vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0)).sqrt()
+        } else { 0.0 };
+
+        let mut sorted: Vec<(String, f64)> =
+            raw.iter().map(|(k, &v)| (k.clone(), v)).collect();
+        sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top5: Vec<String> = sorted.iter().take(5)
+            .map(|(c, v)| format!("{}({:.3})", c, v)).collect();
+        let bottom5: Vec<String> = sorted.iter().rev().take(5)
+            .map(|(c, v)| format!("{}({:.3})", c, v)).collect();
+
+        println!(
+            "{:<22} {:<11} {:>5} {:>11.4} {:>11.4} {:>11.4}   T: {} | B: {}",
+            f.name, f.category, n, mean, median, std_dev,
+            top5.join(", "),
+            bottom5.join(", "),
+        );
+    }
+}
+
+async fn build_a_share_cache(
+    pool: &sqlx::PgPool,
+    start: chrono::NaiveDate,
+    end: chrono::NaiveDate,
+) -> quant_factors::a_share::cache::AShareCache {
+    use quant_factors::a_share::cache::{AShareCache, ABar, AFinIndicator, AIndustry, AStockInfo};
+    use rustc_hash::FxHashMap;
+
+    info!("Loading a_daily_price [{}, {}]...", start, end);
+    let prices = quant_db::queries::a_read::get_a_daily_prices(pool, start, end).await
+        .expect("Failed to load a_daily_price");
+    info!("Loaded {} price rows", prices.len());
+
+    let mut daily: FxHashMap<String, Vec<(chrono::NaiveDate, ABar)>> = FxHashMap::default();
+    for p in prices {
+        let bar = ABar {
+            open: p.open.unwrap_or(f64::NAN),
+            high: p.high.unwrap_or(f64::NAN),
+            low: p.low.unwrap_or(f64::NAN),
+            close: p.close.unwrap_or(f64::NAN),
+            pre_close: p.pre_close.unwrap_or(f64::NAN),
+            pct_chg: p.pct_chg.unwrap_or(f64::NAN),
+            vol: p.vol.unwrap_or(0.0),
+            amount: p.amount.unwrap_or(0.0),
+            adj_factor: p.adj_factor.unwrap_or(1.0),
+            turnover_rate: p.turnover_rate.unwrap_or(f64::NAN),
+            pe_ttm: p.pe_ttm.unwrap_or(f64::NAN),
+            pb: p.pb.unwrap_or(f64::NAN),
+            ps_ttm: p.ps_ttm.unwrap_or(f64::NAN),
+            dv_ttm: p.dv_ttm.unwrap_or(f64::NAN),
+            total_mv: p.total_mv.unwrap_or(f64::NAN),
+            circ_mv: p.circ_mv.unwrap_or(f64::NAN),
+        };
+        daily.entry(p.ts_code).or_default().push((p.trade_date, bar));
+    }
+    for v in daily.values_mut() {
+        v.sort_by_key(|(d, _)| *d);
+    }
+
+    info!("Loading a_financial_indicator [{}, {}]...", start, end);
+    let fin_rows = quant_db::queries::a_read::get_a_financial_indicators(pool, start, end).await
+        .expect("Failed to load a_financial_indicator");
+    info!("Loaded {} financial rows", fin_rows.len());
+
+    let mut financials: FxHashMap<String, Vec<AFinIndicator>> = FxHashMap::default();
+    for r in fin_rows {
+        let fin = AFinIndicator {
+            end_date: r.end_date.format("%Y%m%d").to_string(),
+            ann_date: r.ann_date.map(|d| d.format("%Y%m%d").to_string()).unwrap_or_default(),
+            eps: r.eps.unwrap_or(f64::NAN),
+            bps: r.bps.unwrap_or(f64::NAN),
+            roe: r.roe.unwrap_or(f64::NAN),
+            gross_margin: r.gross_margin.unwrap_or(f64::NAN),
+            netprofit_margin: r.netprofit_margin.unwrap_or(f64::NAN),
+            q_profit_yoy: r.q_profit_yoy.unwrap_or(f64::NAN),
+            q_sales_yoy: r.q_sales_yoy.unwrap_or(f64::NAN),
+            q_netprofit_yoy: r.q_netprofit_yoy.unwrap_or(f64::NAN),
+            current_ratio: r.current_ratio.unwrap_or(f64::NAN),
+            ocf_to_profit: r.ocf_to_profit.unwrap_or(f64::NAN),
+        };
+        financials.entry(r.ts_code).or_default().push(fin);
+    }
+    // get_latest_fin/get_fin_history scan front-to-back expecting most-recent first.
+    for v in financials.values_mut() {
+        v.sort_by(|a, b| b.end_date.cmp(&a.end_date));
+    }
+
+    info!("Loading a_industry_class (SW2021 L1)...");
+    let inds = quant_db::queries::a_read::get_a_industry_class(pool).await
+        .expect("Failed to load a_industry_class");
+    info!("Loaded {} industry mappings", inds.len());
+    let industry: FxHashMap<String, AIndustry> = inds.into_iter()
+        .map(|i| (i.ts_code, AIndustry {
+            index_code: i.index_code.unwrap_or_default(),
+            industry_name: i.industry_name.unwrap_or_default(),
+        }))
+        .collect();
+
+    info!("Loading a_trade_cal (SSE) [{}, {}]...", start, end);
+    let cal = quant_db::queries::a_read::get_a_trade_cal(pool, "SSE", start, end).await
+        .expect("Failed to load a_trade_cal");
+    let mut trading_days: Vec<chrono::NaiveDate> =
+        cal.into_iter().map(|c| c.cal_date).collect();
+    trading_days.sort();
+    info!("Loaded {} trading days", trading_days.len());
+
+    info!("Loading a_stock_basic (incl. delisted)...");
+    let basic_rows = quant_db::queries::a_read::get_all_a_stocks(pool).await
+        .expect("Failed to load a_stock_basic");
+    info!("Loaded {} stock basics", basic_rows.len());
+    let basics: FxHashMap<String, AStockInfo> = basic_rows.into_iter()
+        .map(|r| (r.ts_code.clone(), AStockInfo {
+            name: r.name.unwrap_or_default(),
+            list_date: r.list_date,
+            delist_date: r.delist_date,
+            is_st: r.is_st != 0,
+            board: r.board,
+            total_share: r.total_share,
+        }))
+        .collect();
+
+    let ts_codes: Vec<String> = daily.keys().cloned().collect();
+
+    AShareCache {
+        daily,
+        financials,
+        industry,
+        basics,
+        trading_days,
+        index_prices: FxHashMap::default(),
+        ts_codes,
     }
 }
 
@@ -601,12 +820,20 @@ fn cmd_backtest(
 
     // Generate signals for each rebalance date
     let mut signals = std::collections::BTreeMap::new();
+    let mut scores_history: std::collections::BTreeMap<
+        chrono::NaiveDate,
+        rustc_hash::FxHashMap<quant_core::types::TickerId, f64>,
+    > = std::collections::BTreeMap::new();
     let mut prev_holdings: rustc_hash::FxHashSet<quant_core::types::TickerId> = Default::default();
 
     // Category-specific neutralize modes (from Python config)
     let cat_neutralize_overrides = &config.factor_processing.category_neutralize_overrides;
 
-    let universe_filter = quant_data::universe::UniverseFilter::default();
+    let universe_filter = quant_data::universe::UniverseFilter {
+        min_market_cap: config.universe.min_market_cap,
+        min_daily_volume: config.universe.min_daily_volume,
+        min_volume_days: 20,
+    };
 
     let t0 = std::time::Instant::now();
     for (i, &date) in rebalance_dates.iter().enumerate() {
@@ -642,7 +869,7 @@ fn cmd_backtest(
 
                 let proc_cfg = quant_factors::processor::ProcessConfig {
                     do_winsorize: true,
-                    do_neutralize: false, // Disabled: alpha comes from sector allocation, not stock selection
+                    do_neutralize: true, // Enabled: force selection within each sector to avoid value-trap concentration in beaten-down sectors
                     do_standardize: true,
                     mad_n: 5.0,
                     neutralize_mode: neut_mode.to_string(),
@@ -673,6 +900,7 @@ fn cmd_backtest(
             config.strategy.missing_factor_threshold,
             config.strategy.missing_factor_max_penalty,
         );
+        scores_history.insert(date, scores.clone());
 
         // === Regime detection (4-dimensional composite) ===
         let regime_state = quant_strategy::regime::detect(&cache, &config.regime, date);
@@ -710,8 +938,20 @@ fn cmd_backtest(
                     candidate_set.insert(*tid);
                 }
             }
-            for &tid in prev_weights.keys() {
-                candidate_set.insert(tid);
+            // Carry over prev holdings only if still in top-K by score. Without
+            // this cap, the candidate set grows monotonically (~10 new each
+            // month over 14 years → 1800+ candidates), and the optimizer's
+            // post-hoc gross-leverage rescale crushes net exposure to ~0%
+            // (target 0.6 × scale 1/60 = 0.01), turning the L/S strategy into
+            // unintended pure market-neutral noise.
+            let prev_keep_top = (long_n + short_n) as usize;
+            let mut prev_scored: Vec<(quant_core::types::TickerId, f64)> = prev_weights
+                .keys()
+                .filter_map(|&tid| scores.get(&tid).map(|&s| (tid, s.abs())))
+                .collect();
+            prev_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            for (tid, _) in prev_scored.iter().take(prev_keep_top) {
+                candidate_set.insert(*tid);
             }
             let candidate_tickers: Vec<quant_core::types::TickerId> =
                 candidate_set.into_iter().collect();
@@ -814,6 +1054,59 @@ fn cmd_backtest(
 
     let signal_time = t0.elapsed().as_secs_f64();
     info!("Signal generation: {:.1}s ({} signals)", signal_time, signals.len());
+
+    // === Dump portfolio holdings at first/middle/last rebalance ===
+    {
+        let signal_dates: Vec<chrono::NaiveDate> = signals.keys().copied().collect();
+        let n = signal_dates.len();
+        let dump_dates: Vec<chrono::NaiveDate> = if n >= 3 {
+            vec![signal_dates[0], signal_dates[n / 2], signal_dates[n - 1]]
+        } else {
+            signal_dates.clone()
+        };
+
+        for d in dump_dates {
+            let weights = match signals.get(&d) {
+                Some(w) => w,
+                None => continue,
+            };
+            let scores_at = scores_history.get(&d);
+            let mut sorted: Vec<(quant_core::types::TickerId, f64)> =
+                weights.iter().map(|(&t, &w)| (t, w)).collect();
+            sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            let gross: f64 = weights.values().map(|v| v.abs()).sum();
+            let net: f64 = weights.values().sum();
+            println!(
+                "\n=== Holdings @ {d} (n={}, gross={:.2}, net={:+.2}) ===",
+                weights.len(), gross, net
+            );
+
+            let longs: Vec<_> = sorted.iter().filter(|(_, w)| *w > 0.0).collect();
+            let shorts: Vec<_> = sorted.iter().rev().filter(|(_, w)| *w < 0.0).collect();
+
+            println!("Top {} longs:  ticker  weight   score   sector", longs.len().min(15));
+            for (tid, w) in longs.iter().take(15) {
+                let tk = cache.ticker_interner.resolve(*tid);
+                let sc = scores_at.and_then(|s| s.get(tid)).copied().unwrap_or(f64::NAN);
+                let sec = cache.sector_map.get(tid)
+                    .map(|sid| cache.sector_interner.resolve(*sid))
+                    .unwrap_or("?");
+                println!("  {tk:<8} {w:>+7.4} {sc:>+7.3}   {sec}");
+            }
+            if !shorts.is_empty() {
+                println!("Bottom {} shorts:", shorts.len().min(15));
+                for (tid, w) in shorts.iter().take(15) {
+                    let tk = cache.ticker_interner.resolve(*tid);
+                    let sc = scores_at.and_then(|s| s.get(tid)).copied().unwrap_or(f64::NAN);
+                    let sec = cache.sector_map.get(tid)
+                        .map(|sid| cache.sector_interner.resolve(*sid))
+                        .unwrap_or("?");
+                    println!("  {tk:<8} {w:>+7.4} {sc:>+7.3}   {sec}");
+                }
+            }
+        }
+    }
 
     // Run backtest
     let engine = quant_backtest::engine::BacktestEngine::from_config(config);

@@ -47,6 +47,9 @@ pub struct Config {
 
     #[serde(default)]
     pub category_weights: HashMap<String, f64>,
+
+    #[serde(default)]
+    pub a_share: AShareConfig,
 }
 
 /// Universe filtering parameters.
@@ -192,6 +195,102 @@ pub struct OptimizerConfig {
     pub cov_lookback: usize,
     pub min_history_days: usize,
     pub gross_leverage: f64,
+}
+
+/// A-share specific parameters (used when CLI `--market cn`).
+#[derive(Debug, Deserialize, Default)]
+pub struct AShareConfig {
+    #[serde(default)]
+    pub universe: AShareUniverseConfig,
+    #[serde(default)]
+    pub execution: AShareExecutionConfig,
+    #[serde(default)]
+    pub market_rules: AShareMarketRulesConfig,
+    #[serde(default)]
+    pub strategy: AShareStrategyConfig,
+    #[serde(default)]
+    pub risk_controls: AShareRiskControlsConfig,
+    #[serde(default)]
+    pub regime: AShareRegimeConfig,
+    #[serde(default)]
+    pub factor_processing: FactorProcessingConfig,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AShareUniverseConfig {
+    pub min_market_cap: f64,
+    pub min_daily_turnover: f64,
+    pub min_listing_days: i32,
+    pub benchmark_index: String,
+    pub exclude_st: bool,
+    pub exclude_star_market: bool,
+    pub exclude_chinext: bool,
+    pub exclude_bse: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AShareExecutionConfig {
+    pub initial_capital: f64,
+    pub buy_commission: f64,
+    pub sell_commission: f64,
+    pub stamp_tax: f64,
+    pub slippage: f64,
+    pub min_commission: f64,
+    pub lot_size: i64,
+}
+
+/// Per-board limit-up/down rules (昨收 ± pct).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AShareMarketRulesConfig {
+    pub main_board_limit: f64,    // 沪市主板 60xxxx / 深市主板 000xxx,002xxx
+    pub chinext_limit: f64,        // 创业板 300xxx
+    pub star_market_limit: f64,    // 科创板 688xxx
+    pub bse_limit: f64,            // 北交所 8/4xxxxx
+    pub st_limit: f64,             // ST/*ST
+    pub delisting_limit: f64,      // 退市整理期
+    pub one_char_tolerance: f64,   // 一字板检测容忍度
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AShareStrategyConfig {
+    pub max_holdings: usize,
+    pub long_n: usize,
+    pub min_select_score: f64,
+    pub weight_temperature: f64,
+    pub rebalance_interval: usize,
+    pub rebalance_min_interval: usize,
+    pub min_valid_categories: usize,
+    pub missing_factor_threshold: f64,
+    pub missing_factor_max_penalty: f64,
+    pub turnover_penalty_lambda: f64,
+    pub max_single_weight: f64,
+    pub max_industry_weight: f64,
+    pub max_industry_group_weight: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AShareRiskControlsConfig {
+    pub enabled: bool,
+    pub use_vol_targeting: bool,
+    pub target_vol: f64,
+    pub vol_lookback_days: usize,
+    pub vol_scale_min: f64,
+    pub vol_scale_max: f64,
+    pub dd_start_threshold: f64,
+    pub dd_max_threshold: f64,
+    pub dd_min_position: f64,
+    pub strategy_mom_window: usize,
+    pub strategy_mom_min_scale: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AShareRegimeConfig {
+    pub enabled: bool,
+    pub index: String,
+    pub ma_window: usize,
+    pub bear_holdings_ratio: f64,
+    pub bear_overrides: HashMap<String, f64>,
+    pub bull_overrides: HashMap<String, f64>,
 }
 
 /// Factor processing (winsorize / neutralize / standardize).
@@ -346,6 +445,114 @@ impl Default for FactorProcessingConfig {
     }
 }
 
+impl Default for AShareUniverseConfig {
+    fn default() -> Self {
+        Self {
+            min_market_cap: 3e9,
+            min_daily_turnover: 5e7,
+            min_listing_days: 180,
+            benchmark_index: "000300.SH".to_string(),
+            exclude_st: true,
+            exclude_star_market: false,
+            exclude_chinext: false,
+            exclude_bse: false,
+        }
+    }
+}
+
+impl Default for AShareExecutionConfig {
+    fn default() -> Self {
+        Self {
+            initial_capital: 1_000_000.0,
+            buy_commission: 0.00075,
+            sell_commission: 0.00075,
+            stamp_tax: 0.001,
+            slippage: 0.001,
+            min_commission: 5.0,
+            lot_size: 100,
+        }
+    }
+}
+
+impl Default for AShareMarketRulesConfig {
+    fn default() -> Self {
+        Self {
+            main_board_limit: 0.10,
+            chinext_limit: 0.20,
+            star_market_limit: 0.20,
+            bse_limit: 0.30,
+            st_limit: 0.05,
+            delisting_limit: 0.10,
+            one_char_tolerance: 0.005,
+        }
+    }
+}
+
+impl Default for AShareStrategyConfig {
+    fn default() -> Self {
+        Self {
+            max_holdings: 20,
+            long_n: 15,
+            min_select_score: 0.0,
+            weight_temperature: 2.0,
+            rebalance_interval: 10,
+            rebalance_min_interval: 5,
+            min_valid_categories: 4,
+            missing_factor_threshold: 0.20,
+            missing_factor_max_penalty: 0.5,
+            turnover_penalty_lambda: 0.15,
+            max_single_weight: 0.12,
+            max_industry_weight: 0.20,
+            max_industry_group_weight: 0.30,
+        }
+    }
+}
+
+impl Default for AShareRiskControlsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            use_vol_targeting: false,
+            target_vol: 0.20,
+            vol_lookback_days: 60,
+            vol_scale_min: 0.4,
+            vol_scale_max: 1.5,
+            dd_start_threshold: 0.05,
+            dd_max_threshold: 0.15,
+            dd_min_position: 0.40,
+            strategy_mom_window: 120,
+            strategy_mom_min_scale: 0.6,
+        }
+    }
+}
+
+impl Default for AShareRegimeConfig {
+    fn default() -> Self {
+        let mut bear = HashMap::new();
+        bear.insert("momentum".to_string(), 1.0);
+        bear.insert("quality".to_string(), 1.5);
+        bear.insert("growth".to_string(), 0.8);
+        bear.insert("value".to_string(), 0.6);
+        bear.insert("technical".to_string(), 0.8);
+
+        let mut bull = HashMap::new();
+        bull.insert("momentum".to_string(), 1.2);
+        bull.insert("quality".to_string(), 0.9);
+        bull.insert("growth".to_string(), 1.2);
+        bull.insert("value".to_string(), 0.5);
+        bull.insert("technical".to_string(), 0.6);
+
+        Self {
+            enabled: true,
+            index: "000300.SH".to_string(),
+            ma_window: 60,
+            bear_holdings_ratio: 0.6,
+            bear_overrides: bear,
+            bull_overrides: bull,
+        }
+    }
+}
+
 impl Config {
     /// Load configuration from a TOML file.
     pub fn load(path: &Path) -> Result<Self> {
@@ -390,6 +597,42 @@ impl Config {
             optimizer: OptimizerConfig::default(),
             factor_processing: FactorProcessingConfig::default(),
             category_weights,
+            a_share: AShareConfig::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_share_defaults_match_spec() {
+        let cfg = AShareConfig::default();
+        assert_eq!(cfg.universe.min_market_cap, 3e9);
+        assert_eq!(cfg.universe.benchmark_index, "000300.SH");
+        assert!(cfg.universe.exclude_st);
+        assert_eq!(cfg.execution.stamp_tax, 0.001);
+        assert_eq!(cfg.execution.lot_size, 100);
+        assert_eq!(cfg.market_rules.main_board_limit, 0.10);
+        assert_eq!(cfg.market_rules.chinext_limit, 0.20);
+        assert_eq!(cfg.market_rules.st_limit, 0.05);
+        assert_eq!(cfg.regime.index, "000300.SH");
+        assert_eq!(cfg.regime.bear_overrides.get("quality"), Some(&1.5));
+    }
+
+    #[test]
+    fn a_share_loads_from_repo_config() {
+        let path = Path::new("../../config.toml");
+        if !path.exists() {
+            return; // skip if running outside repo layout
+        }
+        let cfg = Config::load(path).expect("load config.toml");
+        assert_eq!(cfg.a_share.universe.benchmark_index, "000300.SH");
+        assert_eq!(cfg.a_share.execution.buy_commission, 0.00075);
+        assert_eq!(cfg.a_share.market_rules.bse_limit, 0.30);
+        // US side untouched
+        assert_eq!(cfg.universe.benchmark_index, "^GSPC");
+        assert_eq!(cfg.execution.stamp_tax, 0.0);
     }
 }

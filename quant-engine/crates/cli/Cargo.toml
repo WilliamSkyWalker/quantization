@@ -16,6 +16,7 @@ quant-factors = { path = "../factors" }
 quant-strategy = { path = "../strategy" }
 quant-backtest = { path = "../backtest" }
 tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"] }
 clap = { workspace = true }
 dotenvy = "0.15"
 tracing = { workspace = true }

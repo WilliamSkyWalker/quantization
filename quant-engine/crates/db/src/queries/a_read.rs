@@ -6,11 +6,13 @@ use tracing::debug;
 
 use crate::models::a_stock::*;
 
+/// Load all A-share basics including delisted (avoid survivorship bias).
+/// Universe filter at compute-time uses delist_date to exclude delisted-by-then.
 pub async fn get_all_a_stocks(pool: &PgPool) -> Result<Vec<AStockBasic>, sqlx::Error> {
     let rows = sqlx::query_as::<_, AStockBasic>(
-        "SELECT * FROM a_stock_basic WHERE list_status = 'L'"
+        "SELECT * FROM a_stock_basic"
     ).fetch_all(pool).await?;
-    debug!("Loaded {} A-share stocks", rows.len());
+    debug!("Loaded {} A-share stocks (including delisted)", rows.len());
     Ok(rows)
 }
 
@@ -41,14 +43,42 @@ pub async fn get_a_financial_indicators(
     end: NaiveDate,
 ) -> Result<Vec<AFinancialIndicatorRow>, sqlx::Error> {
     sqlx::query_as::<_, AFinancialIndicatorRow>(
-        "SELECT id, ts_code, ann_date, end_date, eps, bps, roe, roe_waa, gross_margin, \
-         netprofit_margin, dt_roe, roe_yearly, roa, q_roe, q_profit_yoy, q_revenue_yoy, \
-         q_netprofit_yoy, profit_dedt, current_ratio, quick_ratio, ocf_to_profit \
-         FROM a_financial_indicator WHERE end_date >= $1 AND end_date <= $2 \
+        "SELECT * FROM a_financial_indicator WHERE end_date >= $1 AND end_date <= $2 \
          ORDER BY ts_code, end_date DESC"
-    ).bind(start.format("%Y%m%d").to_string())
-    .bind(end.format("%Y%m%d").to_string())
-    .fetch_all(pool).await
+    ).bind(start).bind(end).fetch_all(pool).await
+}
+
+pub async fn get_a_financial_income(
+    pool: &PgPool,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<AFinancialIncomeRow>, sqlx::Error> {
+    sqlx::query_as::<_, AFinancialIncomeRow>(
+        "SELECT * FROM a_financial_income WHERE end_date >= $1 AND end_date <= $2 \
+         ORDER BY ts_code, end_date DESC"
+    ).bind(start).bind(end).fetch_all(pool).await
+}
+
+pub async fn get_a_financial_balance(
+    pool: &PgPool,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<AFinancialBalanceRow>, sqlx::Error> {
+    sqlx::query_as::<_, AFinancialBalanceRow>(
+        "SELECT * FROM a_financial_balance WHERE end_date >= $1 AND end_date <= $2 \
+         ORDER BY ts_code, end_date DESC"
+    ).bind(start).bind(end).fetch_all(pool).await
+}
+
+pub async fn get_a_financial_cashflow(
+    pool: &PgPool,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<AFinancialCashflowRow>, sqlx::Error> {
+    sqlx::query_as::<_, AFinancialCashflowRow>(
+        "SELECT * FROM a_financial_cashflow WHERE end_date >= $1 AND end_date <= $2 \
+         ORDER BY ts_code, end_date DESC"
+    ).bind(start).bind(end).fetch_all(pool).await
 }
 
 pub async fn get_a_industry_class(pool: &PgPool) -> Result<Vec<AIndustryClass>, sqlx::Error> {

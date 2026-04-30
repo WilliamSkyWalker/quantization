@@ -203,125 +203,149 @@ impl BacktestEngine {
                 // === Execute T+0 ===
                 let total_value = self.portfolio_value(&positions, &last_close, cash, today, cache);
 
-                // Generate orders
-                let mut sell_orders: Vec<(TickerId, f64)> = Vec::new();
-                let mut buy_orders: Vec<(TickerId, f64, f64)> = Vec::new(); // (ticker, delta, weight)
+                if total_value > 0.0 {
+                    // Generate orders
+                    let mut sell_orders: Vec<(TickerId, f64)> = Vec::new();
+                    // (ticker, delta, weight, is_cover)
+                    let mut buy_orders: Vec<(TickerId, f64, f64, bool)> = Vec::new();
 
-                let mut all_tickers: std::collections::HashSet<TickerId> = positions.keys().copied().collect();
-                all_tickers.extend(weights.keys());
+                    let mut all_tickers: std::collections::HashSet<TickerId> =
+                        positions.keys().copied().collect();
+                    all_tickers.extend(weights.keys());
 
-                for &ticker in &all_tickers {
-                    let current_shares = positions.get(&ticker).copied().unwrap_or(0.0);
-                    let target_weight = weights.get(&ticker).copied().unwrap_or(0.0);
+                    for &ticker in &all_tickers {
+                        let current_shares = positions.get(&ticker).copied().unwrap_or(0.0);
+                        let target_weight = weights.get(&ticker).copied().unwrap_or(0.0);
 
-                    let close_px = match self.get_close(ticker, today, cache) {
-                        Some(p) if p > 0.0 => p,
-                        _ => continue,
-                    };
+                        let close_px = match self.get_close(ticker, today, cache) {
+                            Some(p) if p > 0.0 => p,
+                            _ => continue,
+                        };
 
-                    let target_shares = (target_weight * total_value / close_px).floor();
-                    let delta = target_shares - current_shares;
+                        // trunc() rounds toward zero; symmetric for longs/shorts.
+                        // floor() systematically over-shorts (-101.7 → -102 vs +101).
+                        let target_shares = (target_weight * total_value / close_px).trunc();
+                        let delta = target_shares - current_shares;
 
-                    if delta.abs() < 1.0 {
-                        continue;
-                    }
+                        if delta.abs() < 1.0 {
+                            continue;
+                        }
 
-                    if delta < 0.0 {
-                        sell_orders.push((ticker, delta.abs()));
-                    } else {
-                        buy_orders.push((ticker, delta, target_weight));
-                    }
-                }
-
-                // Phase 1: Sell/close positions
-                for &(ticker, volume) in &sell_orders {
-                    let close_px = match self.get_close(ticker, today, cache) {
-                        Some(p) => p,
-                        None => continue,
-                    };
-                    let exec_price = close_px * (1.0 - self.slippage);
-                    let amount = volume * exec_price;
-                    let fees = amount * self.sell_commission;
-                    cash += amount - fees;
-                    day_turnover_amount += amount;
-
-                    let current = positions.get(&ticker).copied().unwrap_or(0.0);
-                    let new_shares = current - volume;
-                    if new_shares.abs() < 0.5 {
-                        positions.remove(&ticker);
-                        short_entry_prices.remove(&ticker);
-                    } else {
-                        positions.insert(ticker, new_shares);
-                    }
-
-                    trades.push(TradeRecord {
-                        date: today,
-                        ticker,
-                        direction: "SELL".to_string(),
-                        volume,
-                        price: exec_price,
-                        amount,
-                        fees,
-                    });
-                }
-
-                // Phase 2: Buy/open positions
-                buy_orders.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-                for &(ticker, delta, _weight) in &buy_orders {
-                    let close_px = match self.get_close(ticker, today, cache) {
-                        Some(p) => p,
-                        None => continue,
-                    };
-                    let exec_price = close_px * (1.0 + self.slippage);
-                    let cost_per = exec_price * (1.0 + self.buy_commission);
-                    let max_affordable = if cost_per > 0.0 { (cash / cost_per).floor() } else { 0.0 };
-                    let actual_vol = delta.min(max_affordable);
-                    if actual_vol < 1.0 {
-                        continue;
-                    }
-
-                    let amount = actual_vol * exec_price;
-                    let fees = amount * self.buy_commission;
-                    cash -= amount + fees;
-                    day_turnover_amount += amount;
-
-                    let current = positions.get(&ticker).copied().unwrap_or(0.0);
-                    positions.insert(ticker, current + actual_vol);
-
-                    trades.push(TradeRecord {
-                        date: today,
-                        ticker,
-                        direction: "BUY".to_string(),
-                        volume: actual_vol,
-                        price: exec_price,
-                        amount,
-                        fees,
-                    });
-                }
-
-                // Record turnover
-                let turnover = if total_value > 0.0 {
-                    day_turnover_amount / total_value / 2.0
-                } else {
-                    0.0
-                };
-                turnover_list.push(TurnoverRecord {
-                    date: today,
-                    turnover,
-                });
-
-                // Track short entry prices
-                for (&ticker, &weight) in raw_weights {
-                    if weight < 0.0 && !short_entry_prices.contains_key(&ticker) {
-                        if let Some(px) = self.get_close(ticker, today, cache) {
-                            short_entry_prices.insert(ticker, px);
+                        if delta < 0.0 {
+                            sell_orders.push((ticker, delta.abs()));
+                        } else {
+                            let is_cover = current_shares < 0.0;
+                            buy_orders.push((ticker, delta, target_weight, is_cover));
                         }
                     }
+
+                    // Phase 1: Sell/open-short (both add cash)
+                    for &(ticker, volume) in &sell_orders {
+                        let close_px = match self.get_close(ticker, today, cache) {
+                            Some(p) => p,
+                            None => continue,
+                        };
+                        let exec_price = close_px * (1.0 - self.slippage);
+                        let amount = volume * exec_price;
+                        let fees = amount * self.sell_commission;
+                        cash += amount - fees;
+                        day_turnover_amount += amount;
+
+                        let current = positions.get(&ticker).copied().unwrap_or(0.0);
+                        let new_shares = current - volume;
+                        if new_shares.abs() < 0.5 {
+                            positions.remove(&ticker);
+                            short_entry_prices.remove(&ticker);
+                        } else {
+                            positions.insert(ticker, new_shares);
+                        }
+
+                        trades.push(TradeRecord {
+                            date: today,
+                            ticker,
+                            direction: "SELL".to_string(),
+                            volume,
+                            price: exec_price,
+                            amount,
+                            fees,
+                        });
+                    }
+
+                    // Phase 2: Cover/buy-long (both consume cash). Covers FIRST so short
+                    // obligations clear before remaining cash is spent on new longs.
+                    buy_orders.sort_by(|a, b| {
+                        b.3.cmp(&a.3) // is_cover: true (1) before false (0)
+                            .then(b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+                    });
+                    for &(ticker, delta, _weight, _is_cover) in &buy_orders {
+                        let close_px = match self.get_close(ticker, today, cache) {
+                            Some(p) => p,
+                            None => continue,
+                        };
+                        let exec_price = close_px * (1.0 + self.slippage);
+                        let cost_per = exec_price * (1.0 + self.buy_commission);
+                        let max_affordable = if cost_per > 0.0 {
+                            (cash / cost_per).floor().max(0.0)
+                        } else {
+                            0.0
+                        };
+                        let actual_vol = delta.min(max_affordable);
+                        if actual_vol < 1.0 {
+                            continue;
+                        }
+
+                        let amount = actual_vol * exec_price;
+                        let fees = amount * self.buy_commission;
+                        cash -= amount + fees;
+                        day_turnover_amount += amount;
+
+                        let current = positions.get(&ticker).copied().unwrap_or(0.0);
+                        let new_shares = current + actual_vol;
+                        if new_shares.abs() < 0.5 {
+                            positions.remove(&ticker);
+                        } else {
+                            positions.insert(ticker, new_shares);
+                        }
+
+                        trades.push(TradeRecord {
+                            date: today,
+                            ticker,
+                            direction: "BUY".to_string(),
+                            volume: actual_vol,
+                            price: exec_price,
+                            amount,
+                            fees,
+                        });
+                    }
+
+                    // Record turnover
+                    let turnover = day_turnover_amount / total_value / 2.0;
+                    turnover_list.push(TurnoverRecord {
+                        date: today,
+                        turnover,
+                    });
+
+                    // Track short entry prices
+                    for (&ticker, &weight) in raw_weights {
+                        if weight < 0.0 && !short_entry_prices.contains_key(&ticker) {
+                            if let Some(px) = self.get_close(ticker, today, cache) {
+                                short_entry_prices.insert(ticker, px);
+                            }
+                        }
+                    }
+                    // Remove entry prices for closed/flipped shorts
+                    short_entry_prices.retain(|t, _| {
+                        positions.get(t).map(|&s| s < 0.0).unwrap_or(false)
+                    });
+                } else {
+                    // Sign-flip safeguard: TV ≤ 0 means trunc(weight × TV / px) flips
+                    // signs (long → short, short → long), turning the strategy against
+                    // itself in a runaway cascade. Skip rebalance until equity recovers.
+                    warn!(
+                        "Skipping rebalance at {}: portfolio value = {:.2} (sign-flip safeguard)",
+                        today, total_value
+                    );
                 }
-                // Remove entry prices for closed shorts
-                short_entry_prices.retain(|t, _| {
-                    positions.get(t).map(|&s| s < 0.0).unwrap_or(false)
-                });
 
                 signal_idx += 1;
             }
@@ -362,6 +386,20 @@ impl BacktestEngine {
                         fees,
                     });
                 }
+            }
+
+            // Margin call: if forced covers drove cash negative, liquidate longs
+            // to recover. Mimics broker forced-sale on margin breach. Without this,
+            // negative cash + negative MV → negative NAV → next-rebalance sign flip.
+            if cash < 0.0 {
+                self.margin_call(
+                    &mut positions,
+                    &mut cash,
+                    &mut trades,
+                    &mut last_close,
+                    today,
+                    cache,
+                );
             }
 
             // === Daily NAV ===
@@ -453,6 +491,76 @@ impl BacktestEngine {
             }
         }
         result
+    }
+
+    /// Liquidate longs to bring cash back to non-negative.
+    /// Triggered when stop-loss covers consumed more cash than available.
+    /// Sells largest long positions first (efficient cash recovery).
+    fn margin_call(
+        &self,
+        positions: &mut FxHashMap<TickerId, f64>,
+        cash: &mut f64,
+        trades: &mut Vec<TradeRecord>,
+        last_close: &mut FxHashMap<TickerId, f64>,
+        today: Date,
+        cache: &DataCache,
+    ) {
+        if *cash >= 0.0 {
+            return;
+        }
+
+        let mut longs: Vec<(TickerId, f64, f64)> = positions
+            .iter()
+            .filter(|&(_, &s)| s > 0.0)
+            .filter_map(|(&t, &s)| {
+                self.get_close(t, today, cache)
+                    .or_else(|| last_close.get(&t).copied())
+                    .filter(|p| p.is_finite() && *p > 0.0)
+                    .map(|p| (t, s, p))
+            })
+            .collect();
+        longs.sort_by(|a, b| {
+            (b.1 * b.2)
+                .partial_cmp(&(a.1 * a.2))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        for (ticker, shares, close_px) in longs {
+            if *cash >= 0.0 {
+                break;
+            }
+            let exec_price = close_px * (1.0 - self.slippage);
+            let cash_per_share = exec_price * (1.0 - self.sell_commission);
+            if cash_per_share <= 0.0 {
+                continue;
+            }
+            let needed = (-(*cash) / cash_per_share).ceil();
+            let actual_sell = shares.min(needed);
+            if actual_sell < 1.0 {
+                continue;
+            }
+
+            let amount = actual_sell * exec_price;
+            let fees = amount * self.sell_commission;
+            *cash += amount - fees;
+
+            let new_shares = shares - actual_sell;
+            if new_shares.abs() < 0.5 {
+                positions.remove(&ticker);
+            } else {
+                positions.insert(ticker, new_shares);
+            }
+
+            trades.push(TradeRecord {
+                date: today,
+                ticker,
+                direction: "MARGIN_CALL".to_string(),
+                volume: actual_sell,
+                price: exec_price,
+                amount,
+                fees,
+            });
+        }
     }
 }
 

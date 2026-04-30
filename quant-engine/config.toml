@@ -15,8 +15,8 @@ schema = "quant"
 max_connections = 10
 
 [universe]
-min_market_cap = 5e8          # $500M
-min_daily_volume = 1e6        # $1M average
+min_market_cap = 1e10         # $10B (was $500M; small caps got selected as value traps that lagged growth)
+min_daily_volume = 1e7        # $10M average daily $ volume (was $1M)
 min_listing_days = 180
 benchmark_index = "^GSPC"
 
@@ -45,7 +45,7 @@ strategy_mom_window = 120
 strategy_mom_min_scale = 0.70
 
 [execution]
-initial_capital = 100000.0
+initial_capital = 1000000.0
 buy_commission = 0.0
 sell_commission = 0.0
 stamp_tax = 0.0
@@ -107,11 +107,105 @@ analyst = "size_only"
 sentiment = "none"
 
 [category_weights]
-value = 1.0
-quality = 1.0
-growth = 1.0
-momentum = 1.0
+# Path B (2026-04-30): boost momentum + quality to capture growth bull markets
+# (Quality × Momentum / QMOM combo). Pre-fix: value-heavy mix structurally
+# missed 2019/2020/2023 tech rallies (-65% cumulative underperformance).
+value = 0.7
+quality = 1.5
+growth = 1.2
+momentum = 2.0
 technical = 1.0
 macro = 1.0
-analyst = 1.0
+analyst = 1.2
 sentiment = 1.0
+
+# ============================================================
+# A 股参数（market = cn 时使用）
+# ============================================================
+
+[a_share.universe]
+min_market_cap = 3e9          # 30 亿元 RMB
+min_daily_turnover = 5e7      # 5000 万元日均成交额
+min_listing_days = 180
+benchmark_index = "000300.SH"
+exclude_st = true             # 排除 ST/*ST
+exclude_star_market = false   # 688xxx 科创板
+exclude_chinext = false       # 300xxx 创业板
+exclude_bse = false           # 8/4 北交所
+
+[a_share.execution]
+initial_capital = 1000000.0   # 100 万 RMB
+buy_commission = 0.00075      # 万 7.5
+sell_commission = 0.00075
+stamp_tax = 0.001             # 千一（仅卖出）
+slippage = 0.001
+min_commission = 5.0          # 5 元最低佣金
+lot_size = 100                # 整手 100 股
+
+[a_share.market_rules]
+# 板块涨跌停档位（昨收 ± pct）
+main_board_limit = 0.10       # 主板（沪 60xxxx / 深 000xxx, 002xxx）
+chinext_limit = 0.20          # 创业板（300xxx）
+star_market_limit = 0.20      # 科创板（688xxx）
+bse_limit = 0.30              # 北交所（8/4xxxxx）
+st_limit = 0.05               # ST/*ST
+delisting_limit = 0.10        # 退市整理期
+one_char_tolerance = 0.005    # 一字板检测容忍度（接近涨跌停档的 %）
+
+[a_share.strategy]
+max_holdings = 20
+long_n = 15
+min_select_score = 0.0
+weight_temperature = 2.0
+rebalance_interval = 10
+rebalance_min_interval = 5
+min_valid_categories = 4
+missing_factor_threshold = 0.20
+missing_factor_max_penalty = 0.5
+turnover_penalty_lambda = 0.15
+max_single_weight = 0.12
+max_industry_weight = 0.20
+max_industry_group_weight = 0.30
+
+[a_share.risk_controls]
+enabled = true
+use_vol_targeting = false     # A 股 chop 严重，vol-target 噪声大
+target_vol = 0.20             # A 股波动 > 美股
+vol_lookback_days = 60
+vol_scale_min = 0.4
+vol_scale_max = 1.5
+dd_start_threshold = 0.05
+dd_max_threshold = 0.15
+dd_min_position = 0.40
+strategy_mom_window = 120
+strategy_mom_min_scale = 0.6
+
+[a_share.regime]
+enabled = true
+index = "000300.SH"
+ma_window = 60
+bear_holdings_ratio = 0.6
+
+[a_share.regime.bear_overrides]
+momentum = 1.0
+quality = 1.5
+growth = 0.8
+value = 0.6
+technical = 0.8
+
+[a_share.regime.bull_overrides]
+momentum = 1.2
+quality = 0.9
+growth = 1.2
+value = 0.5
+technical = 0.6
+
+[a_share.factor_processing]
+neutralize_mode = "full"
+standardize_mode = "zscore"
+nonlinear_size = false
+
+[a_share.factor_processing.category_neutralize_overrides]
+momentum = "size_only"
+macro = "size_only"
+sentiment = "size_only"

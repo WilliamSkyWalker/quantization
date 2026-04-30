@@ -119,7 +119,7 @@ pub fn all_factors() -> Vec<AFactorDef> {
             }},
         AFactorDef { name: "REVENUE_YOY", category: "growth", direction: 1,
             compute: |date, cache| {
-                factor_from_fin(date, cache, |f| f.q_revenue_yoy)
+                factor_from_fin(date, cache, |f| f.q_sales_yoy)
             }},
         AFactorDef { name: "NET_PROFIT_CAGR_3Y", category: "growth", direction: 1,
             compute: |date, cache| {

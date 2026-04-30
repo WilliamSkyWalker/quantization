@@ -2582,6 +2582,7 @@ dependencies = [
  "rayon",
  "rustc-hash",
  "serde_json",
+ "sqlx",
  "tokio",
  "tracing",
  "tracing-subscriber",

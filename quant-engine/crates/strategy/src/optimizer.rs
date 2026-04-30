@@ -275,7 +275,11 @@ pub fn optimize(
         DefaultSettingsBuilder, DefaultSolver, IPSolver, SolverStatus, SupportedConeT,
     };
 
-    let nn = 2 * n; // w + t variables
+    // Variables: x = [w₁..wₙ, t₁..tₙ, p₁..pₙ] (3n total).
+    // - wᵢ: portfolio weight
+    // - tᵢ: |wᵢ - w_prev_i| (turnover slack, L1 penalty)
+    // - pᵢ: |wᵢ| (gross slack; enforced via Σpᵢ ≤ gross_leverage)
+    let nn = 3 * n;
 
     // P matrix (upper triangular, CSC format for Clarabel)
     let lambda = config.risk_aversion;
@@ -290,14 +294,15 @@ pub fn optimize(
     }
     let p_csc = dense_to_csc_upper(nn, &p_dense);
 
-    // q vector: min -μ'w + γ·Σtᵢ
+    // q vector: min -μ'w + γ·Σtᵢ + 0·Σpᵢ
     let mut q = vec![0.0f64; nn];
     for i in 0..n {
         q[i] = -mu[i];
     }
-    for i in n..nn {
+    for i in n..2 * n {
         q[i] = gamma;
     }
+    // q[2n..3n] = 0 (p slack has no objective penalty; gross enforced via constraint)
 
     // Build constraint rows: Ax + s = b, s ∈ cone
     // Equality rows first (ZeroCone), then inequality rows (NonnegativeCone)
@@ -351,7 +356,34 @@ pub fn optimize(
         b_vec.push(lower_bound);
     }
 
-    // Gross leverage enforced post-hoc by scaling (avoids extra auxiliary variables)
+    // 7) Σ|wᵢ| ≤ gross_leverage, linearized via auxiliary pᵢ ≥ |wᵢ|.
+    //    Replaces the previous post-hoc scaling, which violated the
+    //    Σwᵢ = net_exposure equality (scaling shrinks net by same factor as
+    //    gross — turning a 0.6-net L/S book into 0.01-net market-neutral noise).
+    //    7a) wᵢ - pᵢ ≤ 0
+    for i in 0..n {
+        rows.push(vec![(i, 1.0), (2 * n + i, -1.0)]);
+        b_vec.push(0.0);
+    }
+    //    7b) -wᵢ - pᵢ ≤ 0
+    for i in 0..n {
+        rows.push(vec![(i, -1.0), (2 * n + i, -1.0)]);
+        b_vec.push(0.0);
+    }
+    //    7c) -pᵢ ≤ 0  (pᵢ ≥ 0)
+    for i in 0..n {
+        rows.push(vec![(2 * n + i, -1.0)]);
+        b_vec.push(0.0);
+    }
+    //    7d) Σpᵢ ≤ gross_leverage
+    {
+        let mut row = Vec::with_capacity(n);
+        for i in 0..n {
+            row.push((2 * n + i, 1.0));
+        }
+        rows.push(row);
+        b_vec.push(config.gross_leverage);
+    }
 
     let n_ineq = rows.len() - n_eq;
     let total_rows = rows.len();
@@ -414,15 +446,12 @@ pub fn optimize(
         net += w;
     }
 
-    // Post-check gross leverage, scale if needed
-    if gross > config.gross_leverage + 1e-6 {
-        let scale = config.gross_leverage / gross;
-        for v in weights.values_mut() {
-            *v *= scale;
-        }
-        gross *= scale;
-        net *= scale;
-        debug!("Scaled weights by {scale:.4} to meet gross leverage {:.2}", config.gross_leverage);
+    // Gross is now enforced inside the QP (constraint 7d). Sanity-check only.
+    if gross > config.gross_leverage + 1e-3 {
+        warn!(
+            "MVO solver returned gross={gross:.4} exceeding gross_leverage={:.2} (numerical tolerance)",
+            config.gross_leverage
+        );
     }
 
     let n_long = weights.values().filter(|&&v| v > 0.0).count();

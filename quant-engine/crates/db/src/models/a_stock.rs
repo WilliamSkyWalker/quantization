@@ -10,20 +10,29 @@ use sqlx::FromRow;
 
 #[derive(Debug, Clone, FromRow)]
 pub struct AStockBasic {
-    pub id: i32,
+    pub id: i64,
     pub ts_code: String,
+    pub symbol: Option<String>,
     pub name: Option<String>,
     pub area: Option<String>,
     pub industry: Option<String>,
+    pub fullname: Option<String>,
+    pub enname: Option<String>,
+    pub cnspell: Option<String>,
     pub market: Option<String>,
-    pub list_date: Option<String>,
-    pub list_status: Option<String>,
-    pub is_hs: Option<String>,
     pub exchange: Option<String>,
     pub curr_type: Option<String>,
-    pub delist_date: Option<String>,
+    pub list_status: Option<String>,
+    pub list_date: Option<NaiveDate>,
+    pub delist_date: Option<NaiveDate>,
+    pub is_hs: Option<String>,
     pub act_name: Option<String>,
     pub act_ent_type: Option<String>,
+    pub is_st: i32,
+    pub board: Option<String>,
+    pub total_share: Option<f64>,
+    pub float_share: Option<f64>,
+    pub free_share: Option<f64>,
     pub updated_at: Option<NaiveDateTime>,
 }
 
@@ -81,59 +90,9 @@ pub struct AIndexDaily {
     pub amount: Option<f64>,
 }
 
-// ── a_financial_income (95 columns — key fields only for typed struct) ──
-
-#[derive(Debug, Clone, FromRow)]
-pub struct AFinancialIncomeRow {
-    pub id: i32,
-    pub ts_code: String,
-    pub ann_date: Option<String>,
-    pub f_ann_date: Option<String>,
-    pub end_date: Option<String>,
-    pub report_type: Option<String>,
-    pub comp_type: Option<String>,
-    pub basic_eps: Option<f64>,
-    pub diluted_eps: Option<f64>,
-    pub total_revenue: Option<f64>,
-    pub revenue: Option<f64>,
-    pub total_cogs: Option<f64>,
-    pub oper_cost: Option<f64>,
-    pub sell_exp: Option<f64>,
-    pub admin_exp: Option<f64>,
-    pub rd_exp: Option<f64>,
-    pub operate_profit: Option<f64>,
-    pub n_income: Option<f64>,
-    pub n_income_attr_p: Option<f64>,
-    pub ebit: Option<f64>,
-    pub ebitda: Option<f64>,
-}
-
-// ── a_financial_indicator (163 columns — key fields) ────────────────────
-
-#[derive(Debug, Clone, FromRow)]
-pub struct AFinancialIndicatorRow {
-    pub id: i32,
-    pub ts_code: String,
-    pub ann_date: Option<String>,
-    pub end_date: Option<String>,
-    pub eps: Option<f64>,
-    pub bps: Option<f64>,
-    pub roe: Option<f64>,
-    pub roe_waa: Option<f64>,
-    pub gross_margin: Option<f64>,
-    pub netprofit_margin: Option<f64>,
-    pub dt_roe: Option<f64>,
-    pub roe_yearly: Option<f64>,
-    pub roa: Option<f64>,
-    pub q_roe: Option<f64>,
-    pub q_profit_yoy: Option<f64>,
-    pub q_revenue_yoy: Option<f64>,
-    pub q_netprofit_yoy: Option<f64>,
-    pub profit_dedt: Option<f64>,
-    pub current_ratio: Option<f64>,
-    pub quick_ratio: Option<f64>,
-    pub ocf_to_profit: Option<f64>,
-}
+// ── Financial tables (full-field, generated from migrate_ashare_schema.sql) ──
+// Income/Balance/Cashflow/Indicator: 96 + 158 + 98 + 167 = 519 columns total.
+include!("a_financial_rows.rs");
 
 // ── a_industry_class ────────────────────────────────────────────────────
 
@@ -205,4 +164,41 @@ pub struct AInsiderTransaction {
     pub after_vol: Option<f64>,
     pub after_amount: Option<f64>,
     pub change_reason: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    /// Ensures the generated `a_financial_rows.rs` field count matches the
+    /// DDL in `scripts/migrate_ashare_schema.sql`. If anyone updates the DDL
+    /// without regenerating the structs (or vice versa), this test fails.
+    #[test]
+    fn financial_row_field_counts_match_ddl() {
+        let generated = include_str!("a_financial_rows.rs");
+
+        let expected = [
+            ("AFinancialIncomeRow", 96),
+            ("AFinancialBalanceRow", 158),
+            ("AFinancialCashflowRow", 98),
+            ("AFinancialIndicatorRow", 167),
+        ];
+
+        for (struct_name, want) in expected {
+            // Find the struct block and count `pub <name>:` lines.
+            let header = format!("pub struct {struct_name} {{");
+            let start = generated.find(&header)
+                .unwrap_or_else(|| panic!("{struct_name} not found in a_financial_rows.rs"));
+            let after = &generated[start..];
+            let body_end = after.find("\n}").expect("missing closing brace");
+            let body = &after[..body_end];
+            let count = body.lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    t.starts_with("pub ") && !t.starts_with("pub struct")
+                })
+                .count();
+            assert_eq!(count, want,
+                "{struct_name}: generated has {count} fields, DDL has {want}. \
+                 Regenerate a_financial_rows.rs from migrate_ashare_schema.sql.");
+        }
+    }
 }
