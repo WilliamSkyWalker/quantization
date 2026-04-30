@@ -51,6 +51,7 @@ impl Factor for Vol20D {
 
 /// Size: -log(market_cap) — favors smaller stocks
 pub struct Size;
+// Note 2026-04-30: mirror of LOG_MARKET_CAP. Kept — removal hurt 14y backtest.
 inventory::submit! { &Size as &dyn Factor }
 
 impl Factor for Size {

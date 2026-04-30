@@ -68,6 +68,7 @@ impl Factor for VolumeRatio {
 
 /// Volatility 21D: annualized std of daily returns
 pub struct Volatility21D;
+// Note 2026-04-30: mirror of VOL_20D. Kept — removal hurt 14y backtest.
 inventory::submit! { &Volatility21D as &dyn Factor }
 impl Factor for Volatility21D {
     fn name(&self) -> &'static str { "VOLATILITY_21D" }

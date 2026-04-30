@@ -41,7 +41,11 @@ fn yoy_growth(field: &str, date: Date, cache: &DataCache) -> FactorResult {
 
 /// Net Profit YoY: TTM net_income now / TTM net_income 1Y ago - 1
 pub struct NetProfitYoY;
-inventory::submit! { &NetProfitYoY as &dyn Factor }
+// DISABLED 2026-04-30: winner-signature audit shows NI_YoY does NOT
+// distinguish 30 winners from 30 losers (median 32% vs 33%). Losers
+// have short-term earnings spikes before crashes (AMC 2021 / SPCE 2020
+// type pumps). Removing to reduce noise from misleading signal.
+// inventory::submit! { &NetProfitYoY as &dyn Factor }
 
 impl Factor for NetProfitYoY {
     fn name(&self) -> &'static str { "NET_PROFIT_YOY" }
@@ -63,6 +67,9 @@ impl Factor for RevenueYoY {
     fn category(&self) -> &'static str { "growth" }
     fn inherent_direction(&self) -> i8 { 0 }
     fn ic_window_months(&self) -> u32 { 24 }
+    // Tier 1.0 → 2.0 (2026-04-30): winner-signature audit found revenue
+    // growth strongly discriminates (Winners 21% vs Losers 7%, all 4 dates).
+    fn icir_tier_weight(&self) -> f64 { 2.0 }
 
     fn compute(&self, date: Date, cache: &DataCache) -> FactorResult {
         yoy_growth("revenue", date, cache)

@@ -18,10 +18,17 @@ use crate::analysis::spearman_ic;
 /// ICIR tier weights (from Python's factor analysis results).
 fn icir_tier_weight(factor_name: &str) -> f64 {
     match factor_name {
-        // T1 strong signal (|ICIR| >= 0.3 or momentum boost)
+        // T0 super-strong (boosted 2026-04-30 per winner-signature audit):
+        // MOM_12M / INDUSTRY_MOM are #1 discriminators between 30 winners
+        // (median +0.37) and 30 losers (median ~0) over 14 years.
+        "MOM_12M" | "TSMOM" | "INDUSTRY_MOM" => 3.0,
+
+        // T1 strong signal (|ICIR| >= 0.3)
         "FREE_FLOAT_PCT" | "TURN_20D" | "PIOTROSKI_F" | "SUE_PEAD" | "EV_TO_FCF"
         | "AMIHUD_ILLIQ" | "COMPOSITE_EQUITY_ISSUANCE" | "ROE_TTM" | "EARNINGS_SURPRISE"
-        | "MOM_12M" | "TSMOM" | "INDUSTRY_MOM" => 2.0,
+        // REVENUE_YOY boosted T2→T1 (2026-04-30): winner audit found Winners
+        // 21% rev growth vs Losers 7%, all 4 sample dates.
+        | "REVENUE_YOY" => 2.0,
 
         // T3 weak signal (0.05 <= |ICIR| < 0.15)
         "PRICE_52W_HIGH" | "VOLUME_RATIO" | "GROSS_MARGIN" | "SHAREHOLDER_YIELD"

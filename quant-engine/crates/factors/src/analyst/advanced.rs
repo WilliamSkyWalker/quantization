@@ -75,7 +75,12 @@ impl Factor for PriceTargetRatio {
     }
 }
 
-/// Recommendation Change: mean rating change over 90 days
+/// Recommendation Change: mean rating level over 90 days
+/// Note 2026-04-30: name is misleading (computes mean LEVEL, not change).
+/// True delta version (recent_45d_mean - older_45d_mean) was tested and hurt
+/// 14y backtest by -0.7%/year — the "level" version functions as a proxy for
+/// "current rating quality" and works empirically. Renaming would lie less
+/// but the implementation is left as-is to preserve alpha.
 pub struct RecChange;
 inventory::submit! { &RecChange as &dyn Factor }
 impl Factor for RecChange {

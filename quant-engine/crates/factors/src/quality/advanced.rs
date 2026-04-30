@@ -141,6 +141,9 @@ impl Factor for QmjRoeVol {
 
 // === QMJ_NET_PAYOUT ===
 pub struct QmjNetPayout;
+// Note 2026-04-30: identical impl to SHAREHOLDER_YIELD (value/advanced.rs:105).
+// Kept — different category (quality vs value) means it contributes to BOTH
+// category aggregates, effectively giving net-payout signal extra weight.
 inventory::submit! { &QmjNetPayout as &dyn Factor }
 impl Factor for QmjNetPayout {
     fn name(&self) -> &'static str { "QMJ_NET_PAYOUT" }

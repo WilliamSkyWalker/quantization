@@ -7,6 +7,10 @@ use quant_data::cache::DataCache;
 use crate::registry::Factor;
 
 pub struct Tsmom;
+// Note 2026-04-30: identical compute to MOM_12M. Kept registered because
+// removing it (along with other duplicates) cut 14y total return -172% in
+// backtest — the second copy was effectively adding signal weight via the
+// category-mean scoring, not actually noise.
 inventory::submit! { &Tsmom as &dyn Factor }
 
 impl Factor for Tsmom {
@@ -14,7 +18,9 @@ impl Factor for Tsmom {
     fn category(&self) -> &'static str { "momentum" }
     fn inherent_direction(&self) -> i8 { 0 }
     fn ic_window_months(&self) -> u32 { 12 }
-    fn icir_tier_weight(&self) -> f64 { 2.0 }
+    // Note: actual tier comes from strategy/rolling_ic.rs::icir_tier_weight
+    // (this trait method is unused). Kept for documentation only.
+    fn icir_tier_weight(&self) -> f64 { 3.0 }
 
     fn compute(&self, date: Date, cache: &DataCache) -> FactorResult {
         let mut result = FactorResult::default();
@@ -54,7 +60,10 @@ impl Factor for IndustryMom {
     fn category(&self) -> &'static str { "momentum" }
     fn inherent_direction(&self) -> i8 { 0 }
     fn ic_window_months(&self) -> u32 { 12 }
-    fn icir_tier_weight(&self) -> f64 { 2.0 }
+    // Tier 2.0 → 3.0 (2026-04-30): sector-relative momentum is more robust
+    // than absolute (avoids single-name bubbles like SPACs/memes), better
+    // captures sector rotation. Per finance-basics: MOM-Grinblatt 1999.
+    fn icir_tier_weight(&self) -> f64 { 3.0 }
 
     fn compute(&self, date: Date, cache: &DataCache) -> FactorResult {
         // First compute 12M returns for all tickers

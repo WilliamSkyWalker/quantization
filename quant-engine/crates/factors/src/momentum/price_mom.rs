@@ -72,7 +72,9 @@ impl Factor for Mom12M {
     fn category(&self) -> &'static str { "momentum" }
     fn inherent_direction(&self) -> i8 { 0 }
     fn ic_window_months(&self) -> u32 { 12 }
-    fn icir_tier_weight(&self) -> f64 { 2.0 }
+    // Tier 2.0 → 3.0 (2026-04-30): winner-signature audit found 12M momentum
+    // is THE strongest discriminator (Winners 0.37 median vs Losers ~0).
+    fn icir_tier_weight(&self) -> f64 { 3.0 }
 
     fn compute(&self, date: Date, cache: &DataCache) -> FactorResult {
         let mut result = FactorResult::default();
