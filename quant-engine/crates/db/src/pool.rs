@@ -1,15 +1,23 @@
 //! PostgreSQL connection pool setup.
 
+use std::time::Duration;
+
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::ConnectOptions;
 use sqlx::PgPool;
 use tracing::info;
+use tracing::log::LevelFilter;
 
 /// Create a PgPool from a database URL string.
 ///
 /// Sets `search_path` to the configured schema on each connection.
 pub async fn create_pool(url: &str, schema: &str, max_connections: u32) -> Result<PgPool, sqlx::Error> {
     let options: PgConnectOptions = url.parse::<PgConnectOptions>()?
-        .options([("search_path", schema)]);
+        .options([("search_path", schema)])
+        // Default sqlx slow_threshold is 1s; raise to 2s to cut log noise
+        // from large daily-price upserts (200-row INSERT batches normally
+        // run ~1.0-1.5s and aren't actually problematic).
+        .log_slow_statements(LevelFilter::Warn, Duration::from_secs(2));
 
     let schema_owned = schema.to_string();
     let pool = PgPoolOptions::new()
