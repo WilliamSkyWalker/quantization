@@ -11,11 +11,12 @@ use std::collections::BTreeMap;
 
 use chrono::NaiveDate;
 use rustc_hash::FxHashMap;
-use tracing::info;
+use tracing::{debug, info};
 
 pub use quant_core::board::{Board, board_from_ts_code, limit_pct_for};
-use quant_core::config::{AShareConfig, AShareMarketRulesConfig};
+use quant_core::config::{AShareConfig, AShareMarketRulesConfig, AShareUniverseConfig};
 use quant_factors::a_share::cache::{AShareCache, ABar};
+use quant_factors::a_share::universe::{AUniverseFilter, get_a_clean_universe};
 
 /// A-share execution cost parameters.
 #[derive(Debug, Clone)]
@@ -74,11 +75,19 @@ pub type APortfolioSignal = FxHashMap<String, f64>;
 ///
 /// `signals`: date → {ts_code: weight}. Must be sorted by date.
 /// T+1 execution: signal on date D triggers trades at open on date D+1.
+///
+/// `universe_cfg`: when `Some`, on each rebalance day the engine recomputes
+/// the clean universe (ST/suspended/IPO/micro-cap/illiquid filtered) and
+/// drops any signal weights pointing to codes outside it. Held positions
+/// already get force-liquidated when they fall out of `target_weights`
+/// (handled by `a_exec::plan_orders`), so this filter only blocks new
+/// purchases of newly-untradable names. Pass `None` to keep legacy behavior.
 pub fn run_backtest(
     signals: &BTreeMap<NaiveDate, APortfolioSignal>,
     cache: &AShareCache,
     config: &ACostConfig,
     benchmark_code: &str,
+    universe_cfg: Option<&AShareUniverseConfig>,
 ) -> ABacktestResult {
     let trading_days = &cache.trading_days;
     if trading_days.is_empty() || signals.is_empty() {
@@ -103,65 +112,41 @@ pub fn run_backtest(
 
     let signal_dates: Vec<NaiveDate> = signals.keys().copied().collect();
     let mut signal_idx = 0;
+    let universe_filter = universe_cfg.map(AUniverseFilter::from_config);
+    let mut total_dropped = 0usize;
 
     for &today in trading_days {
+        let q = crate::a_exec::CachedQuotes { cache, date: today };
+
         // === T+1 execution: execute yesterday's pending signal ===
         if let Some(target_weights) = pending_signal.take() {
-            let total_value = portfolio_value(&positions, cache, today, cash);
-
-            // Phase 1: Sell (reduce/close positions)
-            let mut sell_codes: Vec<String> = Vec::new();
-            for (code, &_shares) in &positions {
-                let target_w = target_weights.get(code).copied().unwrap_or(0.0);
-                if target_w <= 0.0 {
-                    sell_codes.push(code.clone());
+            // Defensive: drop weights on codes that fell out of clean universe.
+            // (Held positions in those codes still get sold via plan_orders since
+            // they won't appear in target_weights.)
+            let owned_weights;
+            let effective_weights: &APortfolioSignal = if let Some(f) = universe_filter.as_ref() {
+                let universe = get_a_clean_universe(today, cache, f);
+                let filtered: APortfolioSignal = target_weights.iter()
+                    .filter(|(c, _)| universe.contains(c.as_str()))
+                    .map(|(c, w)| (c.clone(), *w))
+                    .collect();
+                let dropped = target_weights.len() - filtered.len();
+                if dropped > 0 {
+                    debug!("[{}] dropped {} signal weights outside clean universe", today, dropped);
+                    total_dropped += dropped;
                 }
-            }
-            for code in &sell_codes {
-                let shares = positions.get(code).copied().unwrap_or(0);
-                if shares <= 0 { continue; }
-                if let Some(bar) = cache.get_bar(code, today) {
-                    // Check: can we sell? (not limit-down one-char board)
-                    if is_limit_down_one_char(code, bar, cache.is_st(code), &config.market_rules) { continue; }
-                    let exec_price = bar.open * (1.0 - config.slippage);
-                    let amount = shares as f64 * exec_price;
-                    let fees = calc_sell_fees(amount, config);
-                    cash += amount - fees;
-                    total_turnover += amount;
-                    total_trades += 1;
-                    positions.remove(code);
-                }
-            }
+                owned_weights = filtered;
+                &owned_weights
+            } else {
+                target_weights
+            };
 
-            // Phase 2: Buy (open/increase positions)
-            for (code, &target_w) in target_weights {
-                if target_w <= 0.0 { continue; }
-                let bar = match cache.get_bar(code, today) {
-                    Some(b) => b,
-                    None => continue,
-                };
-                // Check: can we buy? (not limit-up one-char board)
-                if is_limit_up_one_char(code, bar, cache.is_st(code), &config.market_rules) { continue; }
-
-                let current_shares = positions.get(code).copied().unwrap_or(0);
-                let target_value = total_value * target_w;
-                let exec_price = bar.open * (1.0 + config.slippage);
-                if exec_price <= 0.0 { continue; }
-
-                let target_shares = round_to_lot((target_value / exec_price) as i64, config.lot_size);
-                let delta = target_shares - current_shares;
-                if delta <= 0 { continue; }
-
-                let buy_amount = delta as f64 * exec_price;
-                let fees = calc_buy_fees(buy_amount, config);
-                let total_cost = buy_amount + fees;
-
-                if total_cost > cash { continue; } // not enough cash
-
-                cash -= total_cost;
-                total_turnover += buy_amount;
+            let total_value = crate::a_exec::portfolio_value(&positions, &q, cash);
+            let orders = crate::a_exec::plan_orders(&positions, effective_weights, total_value, &q, config);
+            let fills = crate::a_exec::execute_orders(&orders, &mut positions, &mut cash, &q, config);
+            for f in &fills {
+                total_turnover += f.gross;
                 total_trades += 1;
-                *positions.entry(code.clone()).or_insert(0) += delta;
             }
         }
 
@@ -172,7 +157,7 @@ pub fn run_backtest(
         }
 
         // === Daily NAV ===
-        let nav = portfolio_value(&positions, cache, today, cash) / config.initial_capital;
+        let nav = crate::a_exec::portfolio_value(&positions, &q, cash) / config.initial_capital;
         nav_series.push((today, nav));
 
         // Benchmark NAV
@@ -188,8 +173,8 @@ pub fn run_backtest(
     let stats = compute_stats(&nav_series, &benchmark_nav, total_trades, total_turnover, config.initial_capital);
 
     info!(
-        "A-share backtest: NAV={:.4}, return={:.2}%, Sharpe={:.2}, DD={:.2}%, trades={}",
-        stats.0, stats.1 * 100.0, stats.3, stats.4 * 100.0, total_trades,
+        "A-share backtest: NAV={:.4}, return={:.2}%, Sharpe={:.2}, DD={:.2}%, trades={}, universe-dropped={}",
+        stats.0, stats.1 * 100.0, stats.3, stats.4 * 100.0, total_trades, total_dropped,
     );
 
     ABacktestResult {
@@ -208,35 +193,8 @@ pub fn run_backtest(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
-
-fn portfolio_value(
-    positions: &FxHashMap<String, i64>,
-    cache: &AShareCache,
-    date: NaiveDate,
-    cash: f64,
-) -> f64 {
-    let mut value = cash;
-    for (code, &shares) in positions {
-        if let Some(bar) = cache.get_bar(code, date) {
-            value += shares as f64 * bar.close;
-        }
-    }
-    value
-}
-
-fn round_to_lot(shares: i64, lot_size: i64) -> i64 {
-    (shares / lot_size) * lot_size
-}
-
-fn calc_buy_fees(amount: f64, config: &ACostConfig) -> f64 {
-    (amount * config.buy_commission).max(config.min_commission)
-}
-
-fn calc_sell_fees(amount: f64, config: &ACostConfig) -> f64 {
-    let commission = (amount * config.sell_commission).max(config.min_commission);
-    let stamp = amount * config.stamp_tax;
-    commission + stamp
-}
+// Cost / lot / portfolio helpers live in `a_exec` — the engine and trader
+// share that module to keep paper and backtest results identical.
 
 /// Threshold % (e.g. 9.5 for ±10% board with 0.5% tolerance) used to detect
 /// near-limit moves. Returns the up-side cutoff (positive) — flip sign for down.

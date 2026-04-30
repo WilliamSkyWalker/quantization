@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 use sqlx::PgPool;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::http::ApiClient;
 

@@ -7,11 +7,13 @@
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, info};
 
+use quant_core::config::AShareUniverseConfig;
 use quant_factors::a_share::cache::AShareCache;
 use quant_factors::a_share::factors::{all_factors, AFactorResult};
+use quant_factors::a_share::universe::{AUniverseFilter, get_a_clean_universe};
 
 /// A-share category weights (quality-dominant).
 fn category_weights() -> HashMap<&'static str, f64> {
@@ -61,8 +63,16 @@ fn winsorize_zscore(raw: &AFactorResult) -> AFactorResult {
 
 /// Compute composite scores for all stocks on a date.
 ///
+/// `universe`: when `Some`, only score codes in this set (post-cleaner). Tradable
+/// stocks only — delisted, ST, suspended, micro-cap, illiquid are excluded
+/// upstream. When `None`, scores every code seen in factor outputs (legacy).
+///
 /// Returns: ts_code → score (higher = better).
-pub fn compute_scores(date: NaiveDate, cache: &AShareCache) -> AFactorResult {
+pub fn compute_scores(
+    date: NaiveDate,
+    cache: &AShareCache,
+    universe: Option<&FxHashSet<String>>,
+) -> AFactorResult {
     let factors = all_factors();
     let cat_weights = category_weights();
 
@@ -75,10 +85,13 @@ pub fn compute_scores(date: NaiveDate, cache: &AShareCache) -> AFactorResult {
         factor_values.push((f.name, f.category, f.direction, processed));
     }
 
-    // Collect all stock codes
+    // Collect all stock codes (intersect with universe if provided)
     let mut all_codes: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (_, _, _, vals) in &factor_values {
         for code in vals.keys() {
+            if let Some(u) = universe {
+                if !u.contains(code) { continue; }
+            }
             all_codes.insert(code.as_str());
         }
     }
@@ -149,15 +162,21 @@ pub fn select_portfolio(
 }
 
 /// Generate monthly rebalance signals over a date range.
+///
+/// Per-rebalance-date clean universe is computed from `universe_cfg` (cleaner
+/// rules: ST / suspended / IPO age / micro-cap / illiquid / board exclusions).
+/// Pass `None` for `universe_cfg` to disable the filter (legacy behavior).
 pub fn generate_signals(
     cache: &AShareCache,
     n_holdings: usize,
     min_score: f64,
+    universe_cfg: Option<&AShareUniverseConfig>,
 ) -> std::collections::BTreeMap<NaiveDate, FxHashMap<String, f64>> {
     use chrono::Datelike;
 
     let mut signals = std::collections::BTreeMap::new();
     let mut last_ym = (0i32, 0u32);
+    let filter = universe_cfg.map(AUniverseFilter::from_config);
 
     // Monthly rebalance: last trading day of each month
     let mut rebalance_dates = Vec::new();
@@ -173,7 +192,9 @@ pub fn generate_signals(
     info!("A-share signal generation: {} rebalance dates", rebalance_dates.len());
 
     for (i, &date) in rebalance_dates.iter().enumerate() {
-        let scores = compute_scores(date, cache);
+        let universe = filter.as_ref()
+            .map(|f| get_a_clean_universe(date, cache, f));
+        let scores = compute_scores(date, cache, universe.as_ref());
         let weights = select_portfolio(&scores, n_holdings, min_score);
 
         if !weights.is_empty() {
@@ -181,8 +202,10 @@ pub fn generate_signals(
         }
 
         if (i + 1) % 12 == 0 || i + 1 == rebalance_dates.len() {
-            info!("Signal {}/{}: {} scored, {} selected",
-                i + 1, rebalance_dates.len(), scores.len(),
+            info!("Signal {}/{}: universe={} scored={} selected={}",
+                i + 1, rebalance_dates.len(),
+                universe.as_ref().map(|u| u.len() as i64).unwrap_or(-1),
+                scores.len(),
                 signals.get(&date).map(|s| s.len()).unwrap_or(0));
         }
     }

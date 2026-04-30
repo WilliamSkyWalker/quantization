@@ -148,6 +148,30 @@ enum Commands {
         #[arg(long, default_value = "../output/factor_analysis")]
         output: PathBuf,
     },
+
+    /// Paper trade — apply target weights via PaperBroker.
+    /// Currently A-share only; requires --market cn.
+    Trade {
+        /// Account id (creates if absent).
+        #[arg(long, default_value = "default")]
+        account: String,
+
+        /// Target signal date (YYYY-MM-DD). Quotes for THIS date drive execution.
+        #[arg(long)]
+        date: String,
+
+        /// JSON file with target weights: {"ts_code": weight, ...} (sums to ≤ 1.0).
+        #[arg(long)]
+        signals: PathBuf,
+
+        /// Plan + risk-check only; no DB writes.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Skip risk gate (debugging only).
+        #[arg(long)]
+        no_risk: bool,
+    },
 }
 
 fn main() {
@@ -229,6 +253,15 @@ fn main() {
             output,
         } => {
             cmd_analyze(&cache_dir, &start, &end, &output);
+        }
+        Commands::Trade { account, date, signals, dry_run, no_risk } => {
+            match cli.market {
+                Market::Us => {
+                    eprintln!("trade: only --market cn supported currently");
+                    std::process::exit(1);
+                }
+                Market::Cn => cmd_a_trade(&_config, &account, &date, &signals, dry_run, no_risk),
+            }
         }
     }
 }
@@ -1245,13 +1278,14 @@ fn cmd_download(
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     rt.block_on(async {
-        let pool = quant_db::pool::create_pool(&db_url, schema, 20).await
+        let pool = quant_db::pool::create_pool(&db_url, schema, 40).await
             .expect("Failed to connect to database");
 
         match source {
             "fmp" => {
+                // Default 2500/min matches FMP Ultimate plan (3000/min cap, 500 headroom)
                 let rate_limit: u32 = std::env::var("FMP_RATE_LIMIT")
-                    .ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+                    .ok().and_then(|s| s.parse().ok()).unwrap_or(2500);
                 let dl = quant_download::us_fmp::FmpDownloader::new(
                     fmp_key, pool.clone(), rate_limit,
                 ).with_ticker(ticker);
@@ -1478,4 +1512,157 @@ fn estimate_memory(cache: &quant_data::cache::DataCache) -> f64 {
     bytes += cache.insider_trades.values().map(|v| v.len()).sum::<usize>() * 32;
 
     bytes as f64 / 1024.0 / 1024.0
+}
+
+// ── A-share paper trade ─────────────────────────────────────────────────
+
+fn cmd_a_trade(
+    config: &Config,
+    account_id: &str,
+    date_str: &str,
+    signals_path: &PathBuf,
+    dry_run: bool,
+    no_risk: bool,
+) {
+    use quant_backtest::a_exec::{self, ACostConfig, CachedQuotes};
+    use quant_factors::a_share::universe::{AUniverseFilter, get_a_clean_universe};
+    use quant_trading::broker::Broker;
+    use quant_trading::paper::PaperBroker;
+    use quant_trading::risk::{self, RiskConfig};
+
+    let date = match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Invalid date: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Load signals JSON: {"600519.SH": 0.05, ...}
+    let raw = match std::fs::read_to_string(signals_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read signals {}: {e}", signals_path.display());
+            std::process::exit(1);
+        }
+    };
+    let raw_weights: rustc_hash::FxHashMap<String, f64> = match serde_json::from_str(&raw) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("Failed to parse signals JSON: {e}");
+            std::process::exit(1);
+        }
+    };
+    let total_w: f64 = raw_weights.values().sum();
+    info!("Signals: {} tickers, total weight {:.4}", raw_weights.len(), total_w);
+    if total_w > 1.001 {
+        eprintln!("Warning: total weight {} > 1.0", total_w);
+    }
+
+    let db_url = config.database.url();
+    let schema = &config.database.schema;
+    if db_url.contains("@:/") || db_url.contains("postgres://:@") {
+        eprintln!("Database not configured. Set DB_HOST/USER/PASSWORD/DATABASE.");
+        std::process::exit(1);
+    }
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    rt.block_on(async {
+        let pool = quant_db::pool::create_pool(&db_url, schema, 8).await
+            .expect("connect to db");
+
+        // Load cache for the trading day. We need ~60 days of price for liquidity calc
+        // and basics for ST detection.
+        let load_start = date - chrono::Duration::days(120);
+        let load_end = date + chrono::Duration::days(1);
+        info!("Loading A-share cache [{}, {}]...", load_start, load_end);
+        let cache = build_a_share_cache(&pool, load_start, load_end).await;
+        info!("Cache: {} stocks, {} basics, {} industries",
+              cache.daily.len(), cache.basics.len(), cache.industry.len());
+
+        let cost = ACostConfig::from_a_share(&config.a_share);
+
+        // Defensive: enforce clean universe even if upstream signals didn't filter.
+        let filter = AUniverseFilter::from_config(&config.a_share.universe);
+        let universe = get_a_clean_universe(date, &cache, &filter);
+        let dropped: Vec<String> = raw_weights.keys()
+            .filter(|c| !universe.contains(c.as_str())).cloned().collect();
+        if !dropped.is_empty() {
+            info!("Dropped {} signal(s) outside clean universe: {:?}",
+                  dropped.len(), &dropped[..dropped.len().min(10)]);
+        }
+        let target_weights: rustc_hash::FxHashMap<String, f64> = raw_weights.into_iter()
+            .filter(|(c, _)| universe.contains(c.as_str())).collect();
+        info!("Clean universe: {}/{}; signals retained: {}",
+              universe.len(), cache.ts_codes.len(), target_weights.len());
+
+        let quotes = CachedQuotes { cache: &cache, date };
+
+        // ── Plan ──
+        let initial_capital = config.a_share.execution.initial_capital;
+        let broker = PaperBroker::new(pool.clone(), account_id.to_string(), cost.clone(), quotes);
+
+        if !dry_run {
+            broker.init(initial_capital).await
+                .expect("init account");
+        }
+
+        // Load current state (or fresh if dry-run)
+        let positions = if dry_run {
+            rustc_hash::FxHashMap::default()
+        } else {
+            let snap = broker.snapshot().await.expect("snapshot");
+            snap.positions.iter().map(|p| (p.ts_code.clone(), p.shares)).collect()
+        };
+        let cash = if dry_run { initial_capital }
+                   else { broker.snapshot().await.unwrap().cash };
+
+        let q = CachedQuotes { cache: &cache, date };
+        let total_value = a_exec::portfolio_value(&positions, &q, cash);
+        let planned = a_exec::plan_orders(&positions, &target_weights, total_value, &q, &cost);
+        info!("Planned {} orders (total NAV est. {:.0})", planned.len(), total_value);
+
+        // ── Risk gate ──
+        let final_orders = if no_risk {
+            planned
+        } else {
+            let rc = RiskConfig::from_strategy(&config.a_share.strategy);
+            let (filtered, report) = risk::apply(
+                &planned, &positions, cash, total_value, &q, &cache, &rc, &cost,
+            );
+            info!("Risk: {} skipped, {} downscaled",
+                  report.skipped_count(), report.downscaled_count());
+            filtered
+        };
+
+        println!("\n=== Order list ({} orders) ===", final_orders.len());
+        println!("{:<6} {:<12} {:>8} {:>12}", "SIDE", "TS_CODE", "SHARES", "PRICE_EST");
+        for o in &final_orders {
+            let bar = cache.get_bar(&o.ts_code, date);
+            let price = bar.map(|b| b.open).unwrap_or(f64::NAN);
+            println!("{:<6} {:<12} {:>8} {:>12.4}", o.side.as_str(), o.ts_code, o.shares, price);
+        }
+
+        if dry_run {
+            println!("\n[dry-run] no DB writes performed");
+            pool.close().await;
+            return;
+        }
+
+        // ── Submit ──
+        let fills = broker.submit(date, &final_orders).await.expect("submit");
+        let snap = broker.snapshot().await.expect("snapshot");
+        println!("\n=== Fills ({}) ===", fills.len());
+        for f in &fills {
+            println!("{:<6} {:<12} {:>8} @ {:>10.4}  fees={:.2}  gross={:.0}",
+                     f.side.as_str(), f.ts_code, f.shares, f.price, f.fees, f.gross);
+        }
+        println!("\n=== Account snapshot ===");
+        println!("cash         = {:.2}", snap.cash);
+        println!("market value = {:.2}", snap.total_market_value);
+        println!("nav          = {:.4}x", snap.nav);
+        println!("positions    = {}", snap.positions.len());
+
+        pool.close().await;
+    });
 }
