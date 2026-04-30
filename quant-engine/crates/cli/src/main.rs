@@ -1412,7 +1412,7 @@ fn cmd_download(
                     .ok().and_then(|s| s.parse().ok()).unwrap_or(200);
                 let dl = quant_download::a_tushare::TushareDownloader::new(
                     ts_token, pool.clone(), rate_limit,
-                );
+                ).with_ticker(ticker.as_deref());
                 let start = format!("{start_year}0101");
                 if incremental && target == "all" {
                     dl.update_all().await;

@@ -23,6 +23,8 @@ pub struct TushareDownloader {
     pub token: String,
     pub client: ApiClient,
     pub pool: PgPool,
+    /// When set, all per-ticker methods only process this ts_code (e.g. "000001.SZ").
+    pub only_ticker: Option<String>,
 }
 
 impl TushareDownloader {
@@ -31,7 +33,13 @@ impl TushareDownloader {
             token,
             client: ApiClient::new(rate_limit, MAX_CONCURRENT),
             pool,
+            only_ticker: None,
         }
+    }
+
+    pub fn with_ticker(mut self, ticker: Option<&str>) -> Self {
+        self.only_ticker = ticker.map(|s| s.to_string());
+        self
     }
 
     /// Call Tushare Pro API. Returns rows as Vec<Value> (each row = JSON object).
@@ -96,6 +104,9 @@ impl TushareDownloader {
     }
 
     async fn get_all_ts_codes(&self) -> Vec<String> {
+        if let Some(t) = &self.only_ticker {
+            return vec![t.clone()];
+        }
         sqlx::query_scalar::<_, String>(
             "SELECT ts_code FROM a_stock_basic WHERE list_status = 'L'"
         ).fetch_all(&self.pool).await.unwrap_or_default()
@@ -321,7 +332,10 @@ impl TushareDownloader {
             return 0;
         }
 
-        self.run_concurrent(pending, "A-Share Daily", |dl, date| async move {
+        let only = self.only_ticker.clone();
+        self.run_concurrent(pending, "A-Share Daily", move |dl, date| {
+            let only = only.clone();
+            async move {
             let daily = dl.tushare_call("daily", &json!({"trade_date": &date})).await;
             let basic = dl.tushare_call("daily_basic", &json!({"trade_date": &date})).await;
             let adj = dl.tushare_call("adj_factor", &json!({"trade_date": &date})).await;
@@ -331,6 +345,7 @@ impl TushareDownloader {
             let processed: Vec<Value> = merged.into_iter().filter_map(|mut row| {
                 let obj = row.as_object_mut()?;
                 let ts_code = obj.get("ts_code").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(t) = &only { if ts_code != t { return None; } }
                 if !(ts_code.starts_with("00") || ts_code.starts_with("30") || ts_code.starts_with("60") || ts_code.starts_with("68")) {
                     return None;
                 }
@@ -350,6 +365,7 @@ impl TushareDownloader {
             }
             dl.mark_done("a_daily_price", &date).await;
             n
+            }
         }).await
     }
 
@@ -432,6 +448,7 @@ impl TushareDownloader {
                     let members = self.tushare_call("index_member", &json!({"index_code": &index_code})).await;
                     let rows: Vec<Value> = members.iter().filter_map(|m| {
                         let ts_code = m.get("con_code").or(m.get("ts_code")).and_then(|v| v.as_str())?;
+                        if let Some(t) = &self.only_ticker { if ts_code != t { return None; } }
                         Some(json!({
                             "ts_code": ts_code, "index_code": &index_code,
                             "index_name": index_name, "industry_name": industry_name,
@@ -718,6 +735,9 @@ fn to_sql_literal(val: &Value) -> String {
         Value::Null => "NULL".to_string(),
         Value::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
         Value::Number(n) => n.to_string(),
+        // Empty string → NULL: Tushare returns "" for missing date/numeric fields.
+        // Without this, PG rejects "" cast to date/numeric and the row fails.
+        Value::String(s) if s.is_empty() => "NULL".to_string(),
         Value::String(s) => format!("'{}'", s.replace('\'', "''")),
         _ => format!("'{}'", val.to_string().replace('\'', "''")),
     }
