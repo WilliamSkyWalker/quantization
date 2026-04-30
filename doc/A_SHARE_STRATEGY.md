@@ -1,16 +1,22 @@
 # A股多因子量化选股系统 — 算法文档
 
-> **架构注解（P1 迁移已完成，与美股按 app 对齐）：**
-> - 数据：`stocks/models/a_stock.py`（20 个 Django ORM models, managed=False）
-> - 下载：`stocks/services/downloaders/a_tushare_*.py + a_akshare_*.py`（Tushare 全字段保留）
-> - 股票池：`stocks/services/a_cleaner.py`（`get_clean_universe / preload_clean_universes`）
-> - 因子：`stocks/services/factors/a_*.py`（`a_base.py` + value/quality/growth/momentum/technical/dividend/commodity/macro/sentiment/research/processor/evaluation 共 13 文件）
-> - 策略 + 回测：`backtest/services/a_strategy.py / a_engine.py / a_regime.py`
-> - 风控：`trading/services/a_risk.py`
-> - 模拟盘：`trading/services/a_paper_trader.py`（持仓/交易/净值持久化到 paper_*）
-> - 实盘（可选）：`trading/services/a_gm_trader.py`（掘金量化）
-> - 绩效报告：`trading/services/monitor/{performance,report}.py`（跨市场通用）
-> - 命令入口：`python3 manage.py bulk_import --source tushare/akshare`、`python3 manage.py data_update --market cn`、`python3 manage.py backtest --market cn`
+> **⚠️ 2026-04-30 架构变更：A 股已迁移到 Rust。下方旧 Python 实现路径仅供算法/因子定义参考，
+> 实际代码位置以 Rust workspace 为准：**
+>
+> | 旧 Python 路径 | 新 Rust 位置 |
+> |---|---|
+> | `stocks/models/a_stock.py` | `quant-engine/crates/db/src/models/a_stock.rs` |
+> | `stocks/services/downloaders/a_tushare_*.py` | `quant-engine/crates/download/src/a_tushare.rs` |
+> | `stocks/services/a_cleaner.py` | `quant-engine/crates/factors/src/a_share/universe.rs` |
+> | `stocks/services/factors/a_*.py` | `quant-engine/crates/factors/src/a_share/factors.rs` |
+> | `backtest/services/a_strategy.py / a_engine.py / a_regime.py` | `quant-engine/crates/strategy/src/a_strategy.rs` + `crates/backtest/src/a_engine.rs` |
+> | `trading/services/a_paper_trader.py / a_risk.py / a_gm_trader.py` | `quant-engine/crates/trading/src/{paper,risk,broker}.rs` |
+> | `python3 manage.py bulk_import --source tushare` | `quant --market cn download --source tushare --target all` |
+> | `python3 manage.py backtest --market cn` | `quant --market cn factors --date YYYY-MM-DD` (回测命令进行中) |
+> | `python3 manage.py paper --market cn` | `quant --market cn trade --account X --signals Y.json` |
+>
+> 因子设计、信号定义、universe 筛选规则、防前视逻辑等**算法层内容仍然适用**，下文描述以算法逻辑为主。
+> Python 代码已归档至 `legacy_python/`，不再维护。
 
 ## 目录
 

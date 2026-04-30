@@ -4,7 +4,7 @@
 
 > **2026-04-30 重大变更**：所有 Python 代码 + React 前端已归档到 [`legacy_python/`](legacy_python/)，不再维护。生产策略全部迁移到 Rust [`quant-engine/`](quant-engine/)。原因：Python 引擎多个 bug 未修，Rust v25 已达机构级 alpha (α=13.28%, t=3.40, Sharpe 0.99)。
 
-## 系统架构（Rust 单栈，6 crates）
+## 系统架构（Rust 单栈，9 crates）
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -436,8 +436,9 @@ quant-engine/
 
 ## 详细文档
 
-- [A股策略算法](doc/A_SHARE_STRATEGY.md)
-- [美股策略算法](doc/US_SHARE_STRATEGY.md)
-- [数据源详情](doc/DATA_SOURCES.md)
-- [Polymarket 策略](doc/old/PollyMarket_STRATEGY.md)
-- [Polymarket P&L 分析](doc/old/POLYMARKET_PNL_ANALYSIS.md)
+- [A股策略算法](doc/A_SHARE_STRATEGY.md) — 算法描述（Rust 路径已注解）
+- [美股策略算法](doc/US_SHARE_STRATEGY.md) — v25 baseline + 因子 tier 表
+- [数据源详情](doc/DATA_SOURCES.md) — FMP + FRED only
+- [部署指南](doc/DEPLOYMENT.md) — ECS + 台式机 Rust 部署
+- [Legacy Python](legacy_python/README.md) — 归档说明 + 已知 bug
+- [废弃文档](doc/deprecated/2026-04-30-archive/) — Polymarket / Vectorize 等历史

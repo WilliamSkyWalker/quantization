@@ -1,327 +1,217 @@
-# 数据源说明
+# 数据源说明（Rust v25, 2026-04-30 更新）
 
-本文档说明系统所有外部数据的来源、获取方式和用途。
-
-> **架构注解（A 股 P1 迁移已完成）：**
-> - A 股下载器：`stocks/services/downloaders/a_tushare_*.py + a_akshare_*.py`（8 文件）
-> - A 股全字段保留：Tushare 端点不指定 `fields=`，财报拆 4 表（income/balance/cashflow/indicator）
-> - 美股下载器：`stocks/services/downloaders/{fmp,bulk,fred,edgar,...}.py`（待重命名为 `us_*.py` 对齐 A 股）
-> - DDL：`scripts/migrate_ashare_schema.sql`（drop+recreate 20 张 A 股表）
+> **架构变更（2026-04-30）**：所有 Python 代码已归档至 `legacy_python/`。
+> 生产 = Rust `quant-engine/`。本文档只反映**当前在用**的数据源。
+> 已废弃的 UW / Fiscal.ai / Quiver / AlphaVantage 详见 [废弃章节](#已废弃数据源)。
 
 ---
 
-## 一、A股市场数据
+## 一、生产数据源（仅 2 家）
 
-### Tushare Pro (`stocks/services/downloaders/a_tushare_*.py`)
-
-| 数据 | API 调用 | 频率 | 用途 |
-|------|---------|------|------|
-| 沪深 A 股列表 | `pro.stock_basic()` | 按需 | 股票池、退市/ST 过滤 |
-| 日线行情 (OHLCV) | `pro.daily()` | 日 | 行情、因子计算 |
-| 每日指标 (换手率/估值/市值等) | `pro.daily_basic()` | 日 | TURN_20D 技术因子、DIV_YIELD 股息率因子、pe_ttm/pb/ps_ttm 估值、total_mv/circ_mv 市值、turnover_rate_f 自由流通换手率、volume_ratio 量比 |
-| 复权因子 | `pro.adj_factor()` | 日 | 前复权价格计算 |
-| 交易日历 | `pro.trade_cal()` | 按需 | 交易日判断 |
-| 指数日线 | `pro.index_daily()` | 日 | 基准指数 |
-| 申万行业指数 | `pro.sw_daily()` | 日 | IND_MOM 行业动量因子 |
-
-- **依赖**: `TUSHARE_TOKEN` 环境变量
-- **限速**: 180 req/min（可配置 `TUSHARE_RATE_LIMIT`）
-- **起始日期**: `DATA_START_DATE`，默认 `20150101`
-
-### Tushare 财务数据 (`stocks/services/downloaders/a_tushare_financials.py`)
-
-| 数据 | API 调用 | 用途 |
-|------|---------|------|
-| 利润表 | `pro.income()` | EP、ROE_TTM、GROSS_MARGIN 等 |
-| 资产负债表 | `pro.balancesheet()` | BP、SIZE |
-| 现金流量表 | `pro.cashflow()` | 质量因子 |
-| 财务审计 | `pro.fina_audit()` | 公告日（ann_date）防前视偏差 |
+| 数据源 | 费用 | 用途 | Rust crate |
+|--------|------|------|------------|
+| **FMP Ultimate** | 付费 (~$300/月) | 美股全部财务/价格/EPS/insider/dividend | `quant-download/src/us_fmp.rs` |
+| **FRED** | **完全免费** | 美股 12 个宏观指标 | `quant-download/src/us_fred.rs` |
+| **Tushare Pro** | 免费/付费 token | A 股全部数据 | `quant-download/src/a_tushare.rs` |
 
 ---
 
-## 二、A股宏观数据
+## 二、美股 — FMP Ultimate
 
-### Tushare 宏观指标 (`stocks/services/downloaders/a_tushare_macro.py`)
+### 端点（`quant download --source fmp --target X`）
 
-| 指标 | API 调用 | 频率 |
-|------|---------|------|
-| SHIBOR (隔夜/3M) | `pro.shibor()` | 日 |
-| LPR (1年期) | `pro.shibor_lpr()` | 日 |
-| CPI (同比) | `pro.cn_cpi()` | 月 |
-| PPI (同比) | `pro.cn_ppi()` | 月 |
-| PMI (制造业/新订单) | `pro.cn_pmi()` | 月 |
-| M2/M1 货币供应 (同比) | `pro.cn_m()` | 月 |
-| GDP (同比) | `pro.cn_gdp()` | 季 |
-| 美债收益率 (10Y/2Y-10Y 利差) | `pro.us_tycr()` | 日 |
+| target | 表 | 说明 |
+|--------|----|------|
+| `stock_list` | `us_stock_basic` | 股票列表 + 上市/退市状态 |
+| `profile` | `us_company_profile` | 公司基本信息 + 行业 + sector |
+| `daily_price` | `us_daily_price` | 日线 OHLCV（split-adjusted close）|
+| `financial` | `us_financial_data` | 财报（130 列全字段，含 NI/Rev/Equity/Assets 等）|
+| `key_metric` | `us_key_metric` | 104 列衍生指标（ROE/ROIC/EV-FCF 等）|
+| `growth` | `us_financial_growth` | 增长率指标 |
+| `enterprise_value` | `us_enterprise_value` | EV + market cap（季度）|
+| `earnings` | `us_earnings_surprise` | 财报暴击数据（PEAD 因子用）|
+| `eps_estimate` | `us_eps_estimate` | 分析师 EPS 一致预测 |
+| `insider` | `us_insider_trade` | 内部人交易 |
+| `analyst` | `us_analyst_recommendation` | 分析师评级 |
+| `dividend` | `us_corporate_action_div` | 派息记录 |
+| `score` | `us_financial_score` | FMP 自算 Piotroski/Altman（对照用）|
+| `float` | `us_shares_float` | 自由流通股本 |
+| `employee` | `us_employee_count` | 员工数（增长率因子用）|
+| `price_target` | `us_price_target` | 分析师目标价 |
+| `esg` | `us_esg_rating` | ESG 评分 |
+| `dcf` | `us_dcf_valuation` | FMP 自算 DCF |
+| `peer` | `us_stock_peer` | 同业列表 |
+| `index` | `us_index_daily` | S&P 500 / NASDAQ 指数日线 |
+| `macro` | `us_macro_indicator` | 部分宏观（与 FRED 互补）|
+| `congress` | `us_congress_trade` | 国会议员交易 |
+| `press` | `us_press_release` | 财报新闻稿 |
+| `revenue_segment` | `us_revenue_segment` | 产品+地理 收入分段 |
 
-- **存储表**: `macro_indicator`
-- **用途**: MACRO_CYCLE、MACRO_LIQD、MACRO_INFL、MACRO_EXTR 四个宏观因子
+### 配置
+- **依赖**：`FMP_API_KEY` 环境变量
+- **限速**：默认 2500 req/min（Ultimate plan 上限 3000）；`FMP_RATE_LIMIT` 可调
+- **并发**：30 worker (tokio Semaphore)，DB pool 40
+- **起始年**：`--start-year 1995`（Ultimate 历史回到 1980s）
+- **增量更新**：`--incremental` 自动按 ticker 取最新日期续拉
 
----
-
-## 三、A股商品期货
-
-### Tushare 期货 (`stocks/services/downloaders/a_tushare_commodity.py`)
-
-| API 调用 | 说明 |
-|---------|------|
-| `pro.fut_mapping()` | 主力合约映射 |
-| `pro.fut_daily()` | 期货日线 (OHLC/结算价/持仓量) |
-
-**15 个品种**:
-
-| 分类 | 品种 | 交易所 |
-|------|------|--------|
-| 贵金属 | AU (黄金)、AG (白银) | 上期所 |
-| 工业金属 | CU (铜)、AL (铝)、ZN (锌)、PB (铅)、NI (镍)、SN (锡) | 上期所 |
-| 黑色系 | RB (螺纹钢)、I (铁矿石)、J (焦炭)、JM (焦煤) | 上期所/大商所 |
-| 能源 | SC (原油) | 上海国际能源交易中心 |
-| 化工 | SA (纯碱)、MA (甲醇) | 郑商所 |
-
-- **存储表**: `commodity_price`
-- **用途**: CMDTY_MOM 商品动量因子
-
----
-
-## 四、美股市场数据
-
-统一下载器：`stocks/services/downloaders/bulk.py`（美股 FMP 全源）（六源：FMP/UW/Fiscal.ai/Quiver/AlphaVantage/FRED）
-
-### 4.1 FMP (Financial Modeling Prep) — 主力数据源
-
-配置：`FMP_API_KEY`（Ultimate $149/月，3000 req/min，bulk 按年独立限流）
-
-| 数据 | 端点 | 方式 | 表 |
-|------|------|------|-----|
-| 全市场股票列表 | stock-screener | per-ticker | us_stock_basic |
-| 公司详情（快照） | **stable/profile** | per-ticker | us_company_profile |
-| 日线行情 | historical-price-full | per-ticker 5/批 | us_daily_price |
-| 季度财报 (IS+BS+CF) | stable/income-statement + balance-sheet + cash-flow | per-ticker 季度 | us_financial_data |
-| Key Metrics | stable/key-metrics | per-ticker 季度 | us_key_metric |
-| Financial Ratios | stable/ratios | per-ticker 季度 | us_key_metric（共享表，COALESCE upsert） |
-| Enterprise Values（含历史市值） | stable/enterprise-values | per-ticker 季度 | us_enterprise_value |
-| Financial Growth | stable/financial-growth | per-ticker 季度 | us_financial_growth |
-| Owner Earnings | stable/owner-earnings | per-ticker | us_owner_earnings |
-| Earnings Surprise | **stable/earnings** | per-ticker | us_earnings_surprise |
-| EPS Consensus | **v3/analyst-estimates** | per-ticker | us_eps_estimate |
-| Insider Trading (Form 4) | insider-trading (v4) | per-ticker 分页 2003+ | us_insider_trade |
-| Insider Statistics | stable/insider-trade-statistics | per-ticker | us_insider_statistic |
-| GICS 行业 | stock-screener | per-ticker | us_industry_class |
-| 分红/拆股 | stock_dividend, stock_split | per-ticker | us_corporate_action |
-| 分析师评级变更 | grade (v3) | per-ticker | us_analyst_recommendation |
-| ESG 评级 | stable/esg-environmental-social-governance-data | per-ticker | us_esg_rating |
-| 员工数 | stable/employee-count | per-ticker | us_employee_count |
-| 国会交易 | senate-trading (v4) + house-disclosure (v4) | per-ticker | us_congress_trade |
-| 指数日线 | historical-price-full | per-ticker | us_index_daily |
-| 指数成分历史 | sp500_constituent + nasdaq_constituent + historical | per-ticker | us_index_constituent |
-| 商品日线 | historical-price-full | per-ticker (GC=F→GCUSD) | us_commodity_price |
-| 宏观经济 | economic (v4), treasury (v4) | per-ticker | us_macro_indicator |
-| 退市公司 | delisted-companies (v3) | bulk | us_delisted |
-| 代码变更 | symbol_change (v4) | bulk | us_symbol_change |
-
-> **已废弃端点**:
-> - ~~historical-market-capitalization~~: Ultimate plan 只有 ~90 天，`from`/`to` 需 Enterprise plan（402）。历史市值改用 `us_enterprise_value.market_capitalization`（季度精度，1983-至今）。
-> - ~~v3/earnings-surprises/{ticker}~~: 字段名不匹配 DB（`actualEarningResult` vs `epsActual`），已切换到 `stable/earnings`。
-> - ~~v3/profile/{ticker} batch~~: 字段名不匹配 DB（`mktCap` vs `marketCap`），已切换到 `stable/profile`。
->
-> **COALESCE upsert**: Key Metrics 和 Ratios 共享 `us_key_metric` 表。`database.py:upsert()` 使用 `COALESCE(EXCLUDED.col, table.col)` 确保后写入端点不覆盖前者字段为 NULL。
-
-### 4.2 Unusual Whales — 替代数据
-
-配置：`UW_API_KEY`（$150/月，100+ 端点）
-
-| 数据 | 端点 | 表 |
-|------|------|-----|
-| 期权异常活动 | /api/option-trades/flow-alerts | us_options_flow |
-| 暗池交易 | /api/darkpool/recent | us_dark_pool |
-| 国会交易 | /api/congress/recent-trades | us_congress_trade |
-| 新闻 | /api/news/headlines | us_news |
-
-### 4.3 Fiscal.ai — 日频估值
-
-配置：`FISCAL_API_KEY`（$99/月）
-
-| 数据 | 端点 | 表 |
-|------|------|-----|
-| 日频 PE/PB/EV | /v1/daily-ratios | us_daily_ratio |
-
-### 4.4 Quiver Quantitative — 政治/另类数据
-
-配置：`QUIVER_API_KEY`（Hobbyist $10/月）
-
-| 数据 | 端点 | 表 |
-|------|------|-----|
-| 游说活动 | historical/lobbying/{ticker} | us_lobbying | ✅ 已导入（223k 行, 1546 ticker, 1999-2026）|
-| 政府合同 | historical/govcontracts/{ticker} | us_gov_contract | ✅ 已导入（36k 行, 1415 ticker, 2008-2026）|
-| ~~WSB 情绪~~ | ~~historical/wallstreetbets/{ticker}~~ | ~~us_wsb_sentiment~~ | 已废弃（只有 3 个 ticker，无截面区分力）|
-
-### 4.5 Alpha Vantage — 新闻情绪/期权数据
-
-配置：`ALPHAVANTAGE_API_KEY`（Premium $99-150/月）
-
-| 数据 | 端点 | 表 |
-|------|------|-----|
-| AI 新闻情绪 | NEWS_SENTIMENT | us_news_sentiment |
-| 期权快照（IV/Greeks 聚合） | HISTORICAL_OPTIONS | us_options_snapshot |
+### 命令
+```bash
+cd quant-engine
+./target/release/quant download --source fmp --target all --start-year 1995
+./target/release/quant download --source fmp --target all --incremental   # 日常增量
+./target/release/quant download --source fmp --target daily_price --incremental  # 单端点增量
+```
 
 ---
 
-## 五、美国宏观数据
+## 三、美股 — FRED 宏观（免费）
 
-### FMP 宏观端点（主力）
+12 个 FRED series（NFCI, HY OAS, IG OAS, 短端利率, 通胀预期, 失业率等）：
 
-FMP `/api/v4/economic` 和 `/api/v4/treasury` 提供 GDP、CPI、失业率、国债收益率等主要宏观指标。
+```bash
+./target/release/quant download --source fred --target all --start-year 2000
+```
 
-### FRED（补充）
-
-`stocks/services/downloaders/fred.py`（待重命名为 us_fred.py），通过 `fredapi` 库补充 FMP 未覆盖的指标（VIX、TED 利差、DXY 等）。
-
-| 指标代码 | FRED Series | 说明 | 频率 |
-|----------|-------------|------|------|
-| US_GDP | GDP | 美国 GDP | 季 |
-| US_CPI_YOY | CPIAUCSL | CPI | 月 |
-| US_CORE_CPI | CPILFESL | 核心 CPI | 月 |
-| US_PPI | PPIACO | PPI | 月 |
-| US_UNEMP | UNRATE | 失业率 | 月 |
-| US_NONFARM | PAYEMS | 非农就业人数 | 月 |
-| US_FED_RATE | FEDFUNDS | 联邦基金利率 | 日 |
-| US_M2 | M2SL | M2 货币供应量 | 月 |
-| US_10Y | DGS10 | 10 年期美债收益率 | 日 |
-| US_2Y | DGS2 | 2 年期美债收益率 | 日 |
-| US_2Y10Y | T10Y2Y | 10Y-2Y 利差 | 日 |
-| US_VIX | VIXCLS | VIX 波动率指数 | 日 |
-| US_DXY | DTWEXBGS | 美元指数 | 日 |
-| US_INIT_CLAIMS | ICSA | 首次申领失业金 | 周 |
-| US_PCE | PCEPI | PCE 价格指数 | 月 |
-
-- **依赖**: `FRED_API_KEY` 环境变量
-- **存储表**: `us_macro_indicator`
+- **依赖**：`FRED_API_KEY`（[免费注册](https://fred.stlouisfed.org/docs/api/api_key.html)）
+- **存储表**：`us_macro_indicator`
+- **当前 strategy 使用**：MACRO_CYCLE/MACRO_LIQD/MACRO_INFL/MACRO_EXTR（实际 IC 较弱，主要用于 regime 检测）
 
 ---
 
-## 六、券商研报
+## 四、A 股 — Tushare Pro
 
-### AKShare / 东方财富 (`stocks/services/downloaders/a_akshare_reports.py`)
+### 端点（`quant --market cn download --source tushare --target X`）
 
-| 数据 | API 调用 | 说明 |
-|------|---------|------|
-| 券商研报 | `akshare.stock_research_report_em()` | 东方财富研报数据 |
+| target | 表 | 用途 |
+|--------|----|------|
+| `stock_list` | `a_stock_basic` | 股票列表 + ST/退市标记 |
+| `trade_cal` | `a_trade_cal` | 交易日历 |
+| `daily_price` | `a_daily_price` | 日线 + 换手率/估值 |
+| `income` | `a_financial_income` | 利润表（全字段）|
+| `balance` | `a_financial_balance` | 资产负债表 |
+| `cashflow` | `a_financial_cashflow` | 现金流表 |
+| `indicator` | `a_financial_indicator` | 财务指标 |
+| `industry` | `a_industry_class` | 申万行业分类 |
+| `index` | `a_index_daily` | 沪深 300 / 中证 500 |
+| `macro` | `a_macro_indicator` | SHIBOR/LPR/CPI/PPI/PMI/M2/GDP/美债 |
 
-- **字段**: 报告日期、股票代码、分析师、机构、评级（买入 5.0 → 卖出 1.0）
-- **直接 API**: `https://reportapi.eastmoney.com/report/list`
-- **存储表**: `research_report`
-- **因子用途**: ANALYST_RATING（共识评级）、ANALYST_COVERAGE（覆盖度）
+- **依赖**：`TUSHARE_TOKEN`
+- **限速**：默认 200 req/min；`TUSHARE_RATE_LIMIT` 可调
+- **并发**：10 worker（Tushare 限速更严）
+- **起始年**：默认 2015
 
----
-
-## 七、舆情数据
-
-### 政策新闻爬虫 (`sentiment/services/scrapers/`)
-
-16 个爬虫分 5 个层级，由 `SentimentDownloader` 统一调度。
-
-**Tier 1 — 最高层（国家级）**
-
-| 来源 | 文件 | 获取方式 |
-|------|------|---------|
-| 中国政府网 (gov.cn) | `gov_cn.py` | JSON API `gov.cn/zhengce/zuixin/ZUIXINZHENGCE.json` |
-| 新华社 | `xinhua.py` | HTML 爬取 |
-| 人民网 | `people.py` | HTML 爬取 |
-| CCTV 新闻联播 | `cctv.py` | AKShare `ak.news_cctv(date)` 获取文字稿 |
-
-**Tier 2 — 产业层**
-
-| 来源 | 文件 | 获取方式 |
-|------|------|---------|
-| 国家发改委 (NDRC) | `ndrc.py` | HTML 爬取 |
-| 工信部 (MIIT) | `miit.py` | HTML 爬取 |
-| 商务部 (MOFCOM) | `mofcom.py` | HTML 爬取 |
-| 巨潮公告 (cninfo) | `cninfo.py` | POST API `cninfo.com.cn/new/hisAnnouncement/query` |
-
-**Tier 3 — 金融监管**
-
-| 来源 | 文件 | 获取方式 |
-|------|------|---------|
-| 证监会 (CSRC) | `csrc.py` | HTML 爬取 |
-| 央行 (PBC) | `pbc.py` | HTML 爬取 |
-| 国家金融监督管理总局 (NFRA) | `nfra.py` | HTML 爬取 |
-
-**Tier 4 — 专项行业**
-
-| 来源 | 文件 | 获取方式 |
-|------|------|---------|
-| 国家能源局 (NEA) | `nea.py` | HTML 爬取 |
-| 住建部 (MOHURD) | `mohurd.py` | HTML 爬取 |
-
-**Tier 5 — 美国政策 (Twitter/X)**
-
-| 来源 | 文件 | 获取方式 |
-|------|------|---------|
-| @realDonaldTrump | `twitter_trump.py` | twikit 库（免费登录方式） |
-| JD Vance | `twitter_vance.py` | twikit 库 |
-| Marco Rubio | `twitter_rubio.py` | twikit 库 |
-
-- **依赖**: `TWITTER_USERNAME` / `TWITTER_EMAIL` / `TWITTER_PASSWORD`（可选，缺失时跳过）
-- **限速**: Twitter 90 req/min，其他网站 600 req/min/域名
-- **存储表**: `policy_article`
-
-### 舆情分析 (`sentiment/services/scrapers/analyzer.py`)
-
-两层分析管道：
-
-1. **关键词分析** (`keyword_analyzer.py`) — 基于 `INDUSTRY_KEYWORDS` 字典匹配行业关键词，计算初始 intensity
-2. **LLM 增强** (`llm_analyzer.py`) — 对 intensity >= 0.5 的文章调用 LLM 做深度分析
-
-LLM 支持两种后端:
-- **Anthropic Claude**: `LLM_PROVIDER="anthropic"`，默认模型 `claude-haiku-4-5-20251001`
-- **OpenAI 兼容** (DeepSeek/通义千问等): `LLM_PROVIDER="openai"`，可配置 `LLM_API_BASE`
-
-- **存储表**: `policy_analysis`
-- **因子用途**: POLICY_SENT（政策情感）、POLICY_INTENSITY（政策力度）
+### 命令
+```bash
+./target/release/quant --market cn download --source tushare --target all --start-year 2015
+./target/release/quant --market cn download --source tushare --target all --incremental
+```
 
 ---
 
-## 八、环境变量汇总
+## 五、Fama-French 5 因子（免费）
 
-| 变量 | 必需 | 说明 |
-|------|------|------|
-| `TUSHARE_TOKEN` | A 股必需 | Tushare Pro API token |
-| `FMP_API_KEY` | 美股必需 | FMP Ultimate ($149/月) |
-| `UW_API_KEY` | 美股可选 | Unusual Whales ($150/月) |
-| `FISCAL_API_KEY` | 美股可选 | Fiscal.ai ($99/月) |
-| `QUIVER_API_KEY` | 美股可选 | Quiver Quantitative ($10/月) |
-| `ALPHAVANTAGE_API_KEY` | 美股可选 | Alpha Vantage Premium ($99-150/月) |
-| `FRED_API_KEY` | 美股宏观补充 | FRED API key |
-| `TWITTER_USERNAME` / `TWITTER_EMAIL` / `TWITTER_PASSWORD` | 可选 | Twitter 爬虫登录凭证 |
-| `LLM_PROVIDER` | 可选 | `anthropic` 或 `openai` |
-| `LLM_API_KEY` | 可选 | LLM API key |
-| `LLM_MODEL` | 可选 | LLM 模型名 |
-| `LLM_API_BASE` | 可选 | OpenAI 兼容 API 地址 |
-| MySQL 连接 | 必需 | `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` |
+用于 Rust backtest 末端的 strategy NAV 回归（α / β_HML / β_RMW 等）。
+
+```bash
+# 一次性下载（Ken French Data Library 永久免费）
+cd /tmp && curl -fsSL -o ff5.zip \
+  "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_5_Factors_2x3_daily_CSV.zip"
+unzip -o ff5.zip
+awk 'NR==4 {print "date,Mkt-RF,SMB,HML,RMW,CMA,RF"; next} NR>4 && /^[0-9]{8},/ {print}' \
+  F-F_Research_Data_5_Factors_2x3_daily.csv > /Users/daweilun/Documents/quantization/cache/ff5_daily.csv
+```
+
+格式：`date,Mkt-RF,SMB,HML,RMW,CMA,RF`（百分比，engine `pct=true` 自动 ÷100）。
+backtest 自动检测 `cache/ff5_daily.csv` 存在即跑回归。
 
 ---
 
-## 九、数据流总览
+## 六、PostgreSQL 数据库
 
 ```
-┌─ A股 ───────────────────────────────────────────────────┐
-│  Tushare Pro ──→ 股票列表/日线/财务/指数/行业 ──→ MySQL │
-│  Tushare Pro ──→ 宏观指标 (SHIBOR/CPI/PPI/M2...) ──→ MySQL │
-│  Tushare Pro ──→ 商品期货 (15品种主力合约) ──→ MySQL    │
-│  AKShare ────→ 券商研报 (东方财富) ──→ MySQL            │
-├─ 美股 ──────────────────────────────────────────────────┤
-│  FMP bulk ───→ metrics/earnings/estimates (按年 1995+)     │
-│  FMP ticker ─→ 季度财报(IS+BS+CF)/行情/行业/insider/分析师 │
-│  FMP ticker ─→ 分红拆股/指数/商品/宏观/SP500+NQ100成分    │
-│  UW ─────────→ 期权flow/暗池/国会交易/新闻 ──→ MySQL    │
-│  Fiscal.ai ──→ 日频 PE/PB/EV ──→ MySQL                 │
-│  Quiver ─────→ 游说活动/政府合同/WSB情绪 ──→ MySQL      │
-│  FRED ───────→ 宏观指标补充 ──→ MySQL                   │
-├─ 舆情 ──────────────────────────────────────────────────┤
-│  16 个爬虫 ──→ 政策文章 ──→ MySQL                       │
-│  关键词+LLM ──→ 行业情感分析 ──→ MySQL                  │
-└─────────────────────────────────────────────────────────┘
-          ↓
-   A股: 因子计算 → 选股 → 回测/模拟交易（详见 A_SHARE_STRATEGY.md）
-   美股: 31因子多空对冲 + FF5 回归（详见 US_SHARE_STRATEGY.md）
+.env:
+DB_HOST=...
+DB_PORT=5432
+DB_USER=...
+DB_PASSWORD=...
+DB_DATABASE=...
+DB_SCHEMA=quant
 ```
+
+- **连接管理**：sqlx PgPool，pool size 40（download）/ 8（query/CLI）
+- **upsert 语义**：`INSERT ... ON CONFLICT (unique_keys) DO UPDATE`
+- **慢 SQL 警告**：阈值 2s（sqlx `log_slow_statements`）
+
+---
+
+## 七、Parquet 缓存（本地数据加速）
+
+回测/因子计算前需把 PostgreSQL 数据导出到 `cache/*.parquet`。
+
+```
+cache/
+├── us_daily_price_<start>_<end>.parquet         33M+ 行
+├── alpha_financial_<start>_<end>.parquet         29W+ 行
+├── alpha_key_metric_<start>_<end>.parquet        27W+ 行
+├── alpha_enterprise_value_<start>_<end>.parquet  23W+ 行
+├── us_industry_class_all.parquet                 1.4W
+├── us_index_daily_gspc_<start>_<end>.parquet     ~3700
+├── ff5_daily.csv                                  Ken French
+└── 其他 us_* / a_* 数据 parquet
+```
+
+DataCache 启动时一次性加载到内存（约 1-2GB），后续因子计算/回测全部从内存查询。
+
+---
+
+## 八、已废弃数据源
+
+**2026-04-30 决定**：去除 4 家付费第三方数据源，节约 ~$600+/年。
+
+| 数据源 | 月费 | 废弃理由 | 替代/影响 |
+|--------|------|---------|----------|
+| **Quiver** | ~$50 | 5 个相关因子 IC 全部 < \|0.35\|，部分方向反学术 | 5 因子禁用；alpha 仅退 0.25%/yr |
+| **Unusual Whales** | ~$50-100 | 期权流/dark pool 已被 Quiver dark pool 替代后又一并废弃 | 无影响 |
+| **Fiscal.ai** | 不详 | `us_daily_ratio` 表从未导入数据 | 无影响 |
+| **AlphaVantage** | $0-250 | NEWS_SENTIMENT/IV_SKEW/PUT_CALL_RATIO 数据从未积累 | 无影响 |
+
+废弃因子列表：
+- `CONGRESS_NET_BUY` (ICIR=-0.183)
+- `GOV_CONTRACT_FLOW` (ICIR=-0.346)
+- `LOBBY_INTENSITY` (ICIR=-0.029)
+- `DARK_POOL_SHORT` (ICIR=-0.168)
+- `INST_OWNERSHIP_DELTA` (ICIR=-0.100)
+
+代码中 `inventory::submit!` 注释保留，结构体仍编译通过，便于将来恢复。
+
+---
+
+## 九、舆情数据（暂缓，已归档）
+
+中国政府网站爬虫 + Twitter 美国政策爬虫 + Polymarket 桥接（共 20 个）：
+
+- 位置：`legacy_python/sentiment/scrapers/`
+- 状态：暂未迁移到 Rust（POLYMARKET_SENT 因子 IC 接近零，性价比低）
+- 如未来做 NLP sentiment 再决定迁移路径
+
+---
+
+## 十、数据流（Rust 版）
+
+```
+FMP / FRED / Tushare API
+     ↓ rate-limited HTTP (reqwest + tokio)
+PostgreSQL (sqlx upsert)
+     ↓ parquet export (定期)
+cache/*.parquet
+     ↓ DataCache::build (内存)
+quant_factors (71 美股 + A 股因子)
+     ↓
+quant_strategy (scoring + MVO + regime)
+     ↓
+quant_backtest (T+0 引擎 + FF5 回归)
+     ↓
+output/*.csv (NAV / signals / FM / IC)
+```
+
+完成全部加载后，因子计算 / 回测 / 因子分析全部内存执行，**无 DB 查询**。

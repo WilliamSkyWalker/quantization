@@ -76,103 +76,67 @@ cargo run --release -p quant-cli -- backtest \
 
 ---
 
-## 三、系统概述（双栈）
+## 三、系统概述（Rust 单栈）
 
-| 栈 | 状态 | 用途 |
-|----|------|------|
-| **Rust (quant-engine)** | ⭐ Production baseline | 因子计算 + 回测 + MVO 优化（性能强、bug 已修） |
-| **Python (Django MVT)** | 历史/前端 | 数据下载 + 前端 API + 实盘交易（含 stop_cover bug，非 production） |
+> **2026-04-30 重大变更**：Python (Django) + 前端 (React) 全部归档至 `legacy_python/`。
+> 生产策略 100% 在 Rust `quant-engine/` 中。
 
-Python 仍提供 **三套策略** 作为前端展示和 A/B 对比：
-
-| 策略 | 代码 | 核心理念 | 适用场景 |
-|------|------|---------|---------|
-| **Alpha（多因子多空）** | `us_multi_factor.py` | 31 因子 × 7 大类，两层类别打分，多空对冲 | 追求超额收益 |
-| **Beta（Regime 控制）** | `us_beta_strategy.py` | 不做选股，Regime 择时 + 质量筛选等权，吃市场 beta | 追求稳健、低回撤 |
-| **Baseline / Alpha v2** | `us_baseline_strategy.py` | 委托 Alpha 打分 + 月频调仓 | 策略实验、A/B 对比 |
-
-Rust 引擎实现的策略相当于 Python Alpha 的等价物 + 修了 10 个 bug + 用了 winner-signature 调权。
-
-核心管道：
 ```
-FMP/UW/Fiscal.ai/Quiver/AlphaVantage/FRED → 数据层 (parquet cache)
-  → Rust quant-engine (因子计算 + MVO 优化 + 回测)
-  → Python Django (前端 API + 实盘交易接入)
+FMP / FRED → quant-download → PostgreSQL → parquet cache
+                                              ↓
+                            quant-data (DataCache 内存加载)
+                                              ↓
+                            quant-factors (71 因子)
+                                              ↓
+                            quant-strategy (scoring + MVO + regime)
+                                              ↓
+                            quant-backtest (T+0 引擎 + FF5 回归)
+                                              ↓
+                            output/*.csv (NAV / signals / α)
 ```
+
+历史 Python 三套策略（Alpha/Beta/Baseline）已合并为 Rust 单一 v25 实现。Rust v25 ≈ Python Alpha 修了 10 bug + winner-signature 调权 + Layer 1 sum scoring + 杠杆 1.2。
 
 ---
 
 ## 四、数据源
 
-六家 API 数据源：FMP（主力）、Unusual Whales（替代数据）、Fiscal.ai（日频估值）、Quiver（政治/另类）、Alpha Vantage（新闻情绪/期权）、FRED（宏观）。
+> **2026-04-30 精简**：仅 FMP + FRED 两家，去掉 Quiver / UW / Fiscal.ai / AlphaVantage（节约 ~$600+/年，alpha 仅退 0.25%/yr）。详见 [DATA_SOURCES.md](DATA_SOURCES.md)。
 
-统一下载器：`services/data/bulk_downloader.py`
+### 4.1 FMP Ultimate — 主力（付费 ~$300/月）
 
-### 2.1 FMP (Financial Modeling Prep) — 主力数据源
+涵盖：股票列表 / 日线 OHLCV / 季度财报全字段 / key metrics / 财务增长 / 分析师评级 / EPS estimates / earnings surprise / insider trading / 分红 / GICS 行业 / 指数日线 / 宏观（部分）/ ESG / DCF / shares float / employee count / revenue segments。
 
-| 数据 | FMP 端点 | 方式 | 说明 |
-|------|----------|------|------|
-| 全市场股票列表 | stock-screener | per-ticker | NYSE+NASDAQ+AMEX 共 ~13,700 只 |
-| SP500 + NASDAQ 100 成分 | sp500_constituent, nasdaq_constituent | per-ticker | 含历史变更（幸存者偏差修正）|
-| 日线行情 | historical-price-full | per-ticker | OHLCV + adjClose，5 ticker/批 |
-| 季度财报 | income-statement-bulk | **bulk 按年** | 全市场 1995+，含 filingDate |
-| Key Metrics | stable/key-metrics | **per-ticker** 季度 | PE/PB/ROE/EV 等 80+ 指标（全量导入）|
-| Financial Ratios | stable/ratios | **per-ticker** 季度 | 60+ 比率（全量导入）|
-| Earnings Surprise | **stable/earnings** | per-ticker | actual vs estimated EPS/Revenue |
-| EPS Consensus | v3/analyst-estimates | per-ticker 季度 | 分析师共识预期 |
-| Insider Trading | insider-trading (v4) | per-ticker 分页 | SEC Form 4，2003+ |
-| GICS 行业 | profile | per-ticker 50/批 | sector / industry |
-| 分红/拆股 | stock_dividend, stock_split | per-ticker | 全历史 |
-| 指数日线 | historical-price-full | per-ticker | ^GSPC, ^IXIC, ^DJI, ^RUI |
-| 商品日线 | historical-price-full | per-ticker | 黄金/原油/天然气等（GC=F→GCUSD） |
-| 宏观经济 | economic (v4), treasury (v4) | per-ticker | GDP/CPI/失业率/国债收益率等 |
+CLI：`quant download --source fmp --target {stock_list|daily_price|financial|...|all}`，30 并发，2500 req/min。
 
-配置：`FMP_API_KEY`（Ultimate 套餐 $149/月，3000 req/min）
+### 4.2 FRED — 宏观（永久免费）
 
-### 2.2 Unusual Whales — 替代数据
+12 个 series：NFCI, HY OAS, IG OAS, 短端利率, 通胀预期, 失业率等。
 
-| 数据 | 端点 | 说明 |
-|------|------|------|
-| 期权异常活动 | /api/option-trades/flow-alerts | 异常权利金、volume spike |
-| 暗池交易 | /api/darkpool/recent | 机构 off-exchange 交易 |
-| 国会交易 | /api/congress/recent-trades | 参议员/众议员股票交易披露 |
-| 新闻 | /api/news/headlines | 带 ticker 关联和情绪标签 |
+CLI：`quant download --source fred --target all --start-year 2000`
 
-配置：`UW_API_KEY`（$150/月，100+ 端点）
+### 4.3 Fama-French 5 因子（永久免费）
 
-### 2.3 Fiscal.ai — 日频估值
+Ken French Data Library。一次性 wget + 清洗到 `cache/ff5_daily.csv`。
+backtest 自动检测此文件存在则跑 α / β_HML / β_RMW / β_CMA 回归。
+详见 [DATA_SOURCES.md](DATA_SOURCES.md) §五。
 
-| 数据 | 端点 | 说明 |
-|------|------|------|
-| 日频 PE/PB/EV | /v1/daily-ratios | 每日估值比率时序（比季报更及时）|
+### 4.4 已废弃数据源（v25 不依赖）
 
-配置：`FISCAL_API_KEY`（$99/月）
-
-### 2.4 Fama-French 五因子
-
-下载器：`services/strategy/ff5.py`
-
-从 Kenneth French Data Library 自动下载 FF5 日度因子收益（Mkt-RF, SMB, HML, RMW, CMA, RF），本地 CSV 缓存 30 天。
-
-### 2.5 FRED 宏观（补充）
-
-下载器：`services/data/fred_downloader.py`
-
-20 项 FRED 宏观指标（GDP、CPI、PPI、VIX 等）。FMP 宏观端点已可覆盖大部分，FRED 作为补充/备用。
-
-### 2.6 旧数据源（保留，`--old-source` 回退）
-
-- yfinance → `services/data/fmp_downloader.py`（类名保留兼容）
-- SEC EDGAR → `services/data/edgar_downloader.py`
-- SimFin → `services/data/simfin_downloader.py`
+| 数据源 | 月费 | 废弃因子 |
+|--------|------|---------|
+| Quiver | ~$50 | CONGRESS_NET_BUY / GOV_CONTRACT_FLOW / LOBBY_INTENSITY / DARK_POOL_SHORT / INST_OWNERSHIP_DELTA |
+| Unusual Whales | ~$50-100 | 期权流 / dark pool（替代品已废） |
+| Fiscal.ai | 不详 | daily_ratio 表从未导入 |
+| AlphaVantage | $0-250 | NEWS_SENTIMENT / IV_SKEW / PUT_CALL_RATIO（数据从未积累） |
 
 ---
 
-## 五、因子体系（Rust 引擎 v21：77 因子 × 8 大类，Python 旧版：31 因子 × 7 大类）
+## 五、因子体系（Rust v25：71 因子）
 
-> Rust 引擎在原 31 因子基础上扩展至 77（新增 Quality 进阶 / Momentum 进阶 / 另类数据），并修正了 EV_TO_FCF / EV_TO_EBIT 的方向（empirical IC=+0.875/+0.565，原 reverse 列表是错的）。
+> v25 = v21 减 5 个 Quiver 付费因子。当前在 `quant-engine/crates/factors/src/` 下，按大类分目录，每个 `.rs` 文件加 `us_` 前缀，对应 A 股的 `factors/src/a_share/`。
 
-### Rust 引擎 v21 Tier 权重（`strategy/src/rolling_ic.rs::icir_tier_weight`）
+### Rust v25 Tier 权重（`strategy/src/rolling_ic.rs::icir_tier_weight`）
 
 | Tier | 权重 | 因子 |
 |------|------|------|
@@ -182,7 +146,7 @@ FMP/UW/Fiscal.ai/Quiver/AlphaVantage/FRED → 数据层 (parquet cache)
 | T3 weak | 0.5 | PRICE_52W_HIGH, VOLUME_RATIO 等 |
 | Direction-flip | 0.3 | BP, INTANGIBLE_ADJ_BP, RD_INTENSITY, MOM_1M 等 |
 | Noise | 0.0 | GEO_CONCENTRATION |
-| **DISABLED** | — | NET_PROFIT_YOY (winner audit 显示 32% ≈ Losers 33% 不区分), EPS_REVISION (FMP date 是 forecast period 不是 publication date，misnamed) |
+| **DISABLED** | — | NET_PROFIT_YOY (winner audit 显示 32% ≈ Losers 33% 不区分), EPS_REVISION (FMP date 是 forecast period 不是 publication date，misnamed), 5 个 Quiver 付费因子 (CONGRESS_NET_BUY / GOV_CONTRACT_FLOW / LOBBY_INTENSITY / DARK_POOL_SHORT / INST_OWNERSHIP_DELTA, 数据源已退订) |
 
 ### Rust 引擎 Category 权重（`config.toml`）
 
@@ -211,9 +175,10 @@ sentiment = 1.0
 | max_long_weight 0.08 | α 退 1.2%（过分散） |
 | max_long_weight 0.12 | α 退 0.5%（过集中） |
 
-### Python 旧版因子体系（已并入 Rust 但 Python 端仍保留）
+### 已归档的 Python 旧版因子体系（仅供参考）
 
-代码位置：`services/us_factors/`
+> Python 因子代码已归档至 `legacy_python/stocks/services/factors/`，不再维护。
+> 下面 Python-era 31 因子定义保留作算法描述参考；真实实现以 Rust `quant-engine/crates/factors/src/` 为准。
 
 ### 设计原则
 
