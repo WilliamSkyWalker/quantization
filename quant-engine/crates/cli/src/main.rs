@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use quant_core::config::Config;
@@ -100,6 +100,11 @@ enum Commands {
         /// Disable short leg.
         #[arg(long)]
         no_short: bool,
+
+        /// Export the last-rebalance target weights to JSON (for paper trading).
+        /// Path is written under the `output` dir as `signals_<last_date>.json`.
+        #[arg(long)]
+        export_signals: bool,
     },
 
     /// Show database table row counts and connection status.
@@ -264,8 +269,9 @@ fn main() {
             cache_dir,
             no_optimizer,
             no_short,
+            export_signals,
         } => {
-            cmd_backtest(&_config, &cache_dir, &start, &end, &output, no_short, no_optimizer);
+            cmd_backtest(&_config, &cache_dir, &start, &end, &output, no_short, no_optimizer, export_signals);
         }
         Commands::Analyze {
             start,
@@ -835,6 +841,7 @@ fn cmd_backtest(
     output_dir: &PathBuf,
     no_short: bool,
     no_optimizer: bool,
+    export_signals: bool,
 ) {
     let start = chrono::NaiveDate::parse_from_str(start_str, "%Y-%m-%d")
         .expect("Invalid start date (expected YYYY-MM-DD)");
@@ -1115,6 +1122,46 @@ fn cmd_backtest(
 
     let signal_time = t0.elapsed().as_secs_f64();
     info!("Signal generation: {:.1}s ({} signals)", signal_time, signals.len());
+
+    // === Export last-rebalance target weights to JSON (for paper trading) ===
+    if export_signals {
+        if let Some((&last_date, last_weights)) = signals.iter().next_back() {
+            let mut weights_str: std::collections::BTreeMap<String, f64> =
+                std::collections::BTreeMap::new();
+            for (&tid, &w) in last_weights {
+                weights_str.insert(cache.ticker_interner.resolve(tid).to_string(), w);
+            }
+            let n_long = last_weights.values().filter(|&&w| w > 0.0).count();
+            let n_short = last_weights.values().filter(|&&w| w < 0.0).count();
+            let gross: f64 = last_weights.values().map(|w| w.abs()).sum();
+            let net: f64 = last_weights.values().sum();
+
+            let payload = serde_json::json!({
+                "date": last_date.to_string(),
+                "weights": weights_str,
+                "metadata": {
+                    "n_long": n_long,
+                    "n_short": n_short,
+                    "n_total": last_weights.len(),
+                    "gross": gross,
+                    "net": net,
+                    "backtest_start": start_str,
+                    "backtest_end": end_str,
+                    "generated_at": chrono::Utc::now().to_rfc3339(),
+                }
+            });
+
+            std::fs::create_dir_all(output_dir).ok();
+            let path = output_dir.join(format!("signals_{last_date}.json"));
+            std::fs::write(&path, serde_json::to_string_pretty(&payload).unwrap()).ok();
+            info!(
+                "Exported signals → {} ({}L/{}S, gross={:.2}, net={:+.2})",
+                path.display(), n_long, n_short, gross, net
+            );
+        } else {
+            warn!("--export-signals: no signals generated, skipping export");
+        }
+    }
 
     // === Dump portfolio holdings at first/middle/last rebalance ===
     {
