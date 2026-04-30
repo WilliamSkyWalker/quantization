@@ -205,14 +205,63 @@ python3 cli.py polymarket history --min-volume 1000000      # Polymarket 历史
 | 2025 | 108.25% | 16.65% | **+91.61%** ⚠️ | OOS |
 | 2026 | -2.33% | -5.97% | +3.64% | OOS |
 
-**跨时代 FF5 Alpha 一致性验证：**
+**跨时代 FF5 Alpha 一致性验证（Python 旧引擎，待重新验证）：**
 
 | 区间 | FF5 Alpha | t-stat | β_mkt | β_rmw | Sharpe | 超额年化 | 下行捕获 |
 |------|-----------|--------|-------|-------|--------|---------|---------|
 | 2000-2011（无 analyst 大类） | **6.18%** | **2.19** | 0.37 | -0.05 | 0.51 | +12.33% | 0.30 |
 | 2012-2023（完整因子） | **6.58%** | **2.20** | 0.44 | -0.21 | 0.63 | +0.89% | 0.44 |
 
-> **策略特征：** FF5 Alpha 跨时代一致（~6.2%, t~2.2），行业内选股 alpha 确认存在（EPS_REVISION 行业内 ICIR=0.43）。熊市保护极强（2002 +36%, 2008 +32%, 2022 +17%），牛市跟不上（半仓 L/S 天然代价）。2025 +108% 是 AI 泡沫风格红利（β_rmw=-1.01），不可持续。
+> ⚠️ **2026-04-30 重要更新**：发现 Python 引擎也有部分 bug（stop_cover 不限 cash + 候选集累积 + initial_capital=$100K），上面 Python 跑分**未用修复版引擎**重新核对，仅供历史参考。Rust 引擎修复后 2012-2025 真实表现见下方 **🚀 Rust 引擎 v21 baseline**。
+
+---
+
+## 🚀 Rust 引擎 v25 Baseline（2026-04-30，FMP+FRED only 机构级 alpha）
+
+修完 10 个 engine + optimizer + scoring bug + 禁用 5 个 Quiver 付费因子后，Rust 引擎 14 年回测（**仅 FMP + FRED 免费/已订阅数据**）：
+
+```
+Total Return    +1293.65%      (Annual 20.76%)
+Sharpe Ratio    0.99           ⭐ 机构级
+FF5 α           13.28%         ⭐⭐⭐ Harvey-Liu-Zhu |t|>3 真 alpha
+FF5 t-stat      3.40
+Down Capture    -8.62%         ⭐⭐ S&P 跌月策略反赚
+Capture Ratio   -8.51
+Excess vs S&P   +7.98%/年
+Max Drawdown    -29.29%
+Calmar          0.71
+
+数据成本：FMP Ultimate (~$300/月) + FRED (免费)
+不需要：Quiver / Unusual Whales / Fiscal.ai / Alpha Vantage
+(节约 ~$600+/年, alpha 仅退 0.25%/年 vs 含 Quiver 版)
+```
+
+**演进路径**（详见 [memory project_winner_signature_baseline_2026_04_30.md](.claude/projects/memory/)）：
+1. 修 8 个 engine bug（floor() / sign-flip / cover starvation / margin call）
+2. 修 optimizer 致命 bug（post-hoc gross scaling 把 net 0.6 压成 0.01）
+3. 修 wiring bug（universe filter 不读 config / sector neutralize 默认关）
+4. Layer 1 类内归总 weighted-avg → weighted-sum
+5. Winner-signature 调权（MOM_12M/SUE_PEAD/EARNINGS_SURPRISE 进 T0）
+6. EV_TO_FCF/EV_TO_EBIT 方向修正（empirical IC 与原 reverse 列表矛盾）
+7. gross_leverage 1.0 → 1.2（轻杠杆放大 alpha）
+
+**Rust 引擎复现命令：**
+```bash
+cd quant-engine
+cargo run --release -p quant-cli -- backtest \
+  --start 2012-01-01 --end 2025-12-31 \
+  --cache-dir ../cache --output ../output/rust_v21
+```
+
+**Winner Signature 核心（14 年 30 大赢家中位数）**：
+- MOM_12M: 0.37（vs Losers ~0）— 4/4 期持续，#1 信号
+- REV_YoY: 21%（vs Losers 7%）
+- RD_INTENSITY: 13%（vs Losers 2%，6× 差距）
+- EV_TO_FCF: 113（贵！）vs Losers 7（便宜）— **传统 value 方向反了**
+- NI_YoY: 32% ≈ Losers 33% — **不区分赢家/输家**（已删除）
+
+**14 年大赢家 Top 10**（剔除杠杆 ETF）：
+NVDA 530× / CELH 472× / TSLA 239× / AVGO 119× / AXON 106× / NFLX 90× / MPWR 59× / BLDR 49× / LRCX 46× / FICO 45× — 33% 是半导体（穿越 14 年最稳行业主题）。
 
 ## 核心设计决策
 
@@ -247,8 +296,14 @@ python3 cli.py polymarket history --min-volume 1000000      # Polymarket 历史
 | PRICE_TARGET_RATIO v2 | 前瞻偏差修复：<2021 Forward EP / ≥2021 per-analyst PT detail | ✅ |
 | 滚动 IC v2 | 连续权重（EMA + ICIR 缩放 + 置信度）替代二值 +1/-1 | ✅ |
 | CLI 统一 | cli.py 删除，全部迁移到 Django management commands | ✅ |
+| Rust 引擎 v0.1 | 美股因子 + 回测 + MVO 优化器 (qrs-* 6 crates) | ✅ |
+| **Rust 引擎 8 bug 修复** (2026-04-30) | floor()/sign-flip/cover-starvation/margin-call/post-hoc-gross-scaling | ✅ |
+| **Layer 1 sum scoring** (2026-04-30) | 类内归总 weighted-avg → weighted-sum，FF5 α=8.24% (t=2.47) | ✅ |
+| **Winner signature 审计** (2026-04-30) | 14 年 30 大赢家 vs 30 大输家因子签名，6 项调参 | ✅ |
+| v21 baseline | α=13.53% t=3.47 / Sharpe 1.01（含 Quiver 5 因子） | ✅ |
+| **🏆 v25 baseline** (2026-04-30) | **仅 FMP+FRED, α=13.28% t=3.40 / Sharpe 0.99 / Down Capture -8.62%** | ✅ |
 | P1 空头 v5 | 独立因子模型 + Regime 渐进 + 融券约束 + 止损，待回测 | 🔄 |
-| 待办 | 回测验证 / 因子权重分级 / 回测鲁棒性 / 实盘 | 📋 |
+| 待办 | Python 引擎同步修复 / 实盘验证 / 多周期 momentum 探索 | 📋 |
 
 **当前待办（按优先级）：**
 
@@ -268,21 +323,29 @@ python3 cli.py polymarket history --min-volume 1000000      # Polymarket 历史
 | 方向翻转 | <0.05 但单年 >0.5 | 12 | EPS_REVISION, BP, MOM_1M, VOL_20D, ALTMAN_Z, BENEISH_M（滚动 IC 处理） |
 | 真噪音 | <0.05 且无信号 | 1 | GEO_CONCENTRATION |
 
-**当前待办（按优先级）：**
+**当前待办（基于 v21 Rust baseline，2026-04-30）：**
 
-**P0 — 回测验证（滚动 IC v2 + MVO + 81 因子）：**
-- 跑 2012-2025 完整回测，对比 v3 基线
-- 验证滚动 IC v2 连续权重的效果
+**P0 — 验证 v21 鲁棒性：**
+- 用 Walk-forward 切样本（2012-2018 IS，2019-2025 OOS）验证 winner-signature 不是过拟合
+- 跑 1995-2011 数据看 alpha 是否穿越早期年份
+- Python 引擎同步 8 个 bug 修复，做 Python ↔ Rust 交叉验证
 
-**P1 — 因子权重分级**：基于 ICIR 分析结果，T1 因子权重 2.0，T2 因子 1.0，T3 因子 0.5
+**P1 — 突破 v21 局部最优（结构性改造）：**
+- 多周期 momentum 组合（3M/6M/12M/24M）
+- 行业 sleeve（Tech 单独配额，避免 sector neutralize 把 NVDA 拉平）
+- Layer 2 也改 sum，加 quality × momentum 交互项
+- 季频 vs 月频 rebalance
 
-**P2 — 回测鲁棒性**：换手率控制 + 滑点敏感性 + Regime 参数扰动
+**P2 — 回测鲁棒性 / 风控：**
+- 换手率控制（v21 年化 ~400%，工业级 ~150%）
+- 滑点敏感性 / 交易成本压力测试
+- Regime 参数扰动（Credit Veto / 拥挤度阈值）
 
-**P3 — 数据修复**：INSIDER_NET_BUY 数据缺失 / INST_OWNERSHIP_DELTA 覆盖不足
+**P3 — 数据修复**：INSIDER_NET_BUY 数据缺失 / INST_OWNERSHIP_DELTA 覆盖不足 / EPS_REVISION PIT 快照表
 
 **P4 — 空头 v5**：独立因子模型 + Regime 渐进 + 融券约束 + 15% 止损
 
-**P5 — 工程与实盘**：增量采集自动化 + Alpaca 模拟盘已接入 + 实盘验证 3-6 月
+**P5 — 工程与实盘**：Alpaca 模拟盘已接入 + 实盘验证 3-6 月
 
 **P7 — 长期架构升级**：
 - PCA 统计风险因子（Barra 开源替代，前 20-30 主成分作风格因子）

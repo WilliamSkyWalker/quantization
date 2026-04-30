@@ -1,46 +1,108 @@
 # 美股量化策略文档
 
-本文档说明美股量化系统的完整算法逻辑。系统包含三套独立策略，共享数据层和回测引擎。
+本文档说明美股量化系统的完整算法逻辑。系统包含 **Python (Django MVT)** 和 **Rust (quant-engine)** 双栈，共享数据层。
 
 ---
 
-## 一、系统概述
+## 一、当前 Production Baseline：Rust 引擎 v25（2026-04-30）
 
-美股量化系统提供 **三套策略**，用户可在 CLI / API / 前端切换：
+**仅 FMP + FRED 数据，14 年回测（2012-2025）：**
+
+```
+Total Return    +1293.65%      (Annual 20.76%)
+Sharpe Ratio    0.99           ⭐ 机构级
+Calmar Ratio    0.71
+Max Drawdown    -29.29%
+Annual Turnover ~400%
+
+FF5 α           13.28%         ⭐⭐⭐ Harvey-Liu-Zhu |t|>3 真 alpha
+FF5 t-stat      3.40
+FF5 R²          0.260          (74% 收益不被 FF5 解释)
+
+β_Mkt-RF        0.41
+β_HML           -0.33          (anti-value)
+β_RMW           -0.22          (anti-quality-profit)
+β_CMA           +0.16
+
+Up Capture      73.35%
+Down Capture    -8.62%         ⭐⭐ S&P 跌月策略反赚 8.6%（市场中性 alpha）
+Capture Ratio   -8.51
+Excess vs S&P   +7.98%/年
+```
+
+**数据源（仅 2 家）：**
+- **FMP Ultimate**（~$300/月）— 主力数据：财务/价格/EPS/insider/dividend
+- **FRED**（永久免费）— 12 个宏观指标
+
+不需要：Quiver / Unusual Whales / Fiscal.ai / AlphaVantage（已禁用 5 个对应因子，alpha 仅退 0.25%/年）
+
+**v25 复现命令：**
+```bash
+cd quant-engine
+cargo run --release -p quant-cli -- backtest \
+  --start 2012-01-01 --end 2025-12-31 \
+  --cache-dir ../cache --output ../output/rust_v25
+```
+
+需要 `cache/ff5_daily.csv`（Ken French 5-factor daily, 免费）才能跑 FF5 回归。
+
+### v25 vs v21 对比（去 Quiver 影响）
+
+| 指标 | v21 (76 因子) | **v25 (71 因子)** | Δ |
+|------|--------------|------------------|----|
+| Sharpe | 1.01 | 0.99 | -0.02 |
+| FF5 α | 13.53% (t=3.47) | 13.28% (t=3.40) | -0.25% |
+| Excess vs S&P | +8.30% | +7.98% | -0.32% |
+| Max DD | -30.65% | **-29.29%** | -1.36 ✓ |
+| Calmar | 0.69 | **0.71** | +0.02 ✓ |
+
+**禁用因子（IC 都很弱）：**
+- CONGRESS_NET_BUY (ICIR=-0.183)
+- GOV_CONTRACT_FLOW (ICIR=-0.346)
+- LOBBY_INTENSITY (ICIR=-0.029)
+- DARK_POOL_SHORT (ICIR=-0.168)
+- INST_OWNERSHIP_DELTA (ICIR=-0.100)
+
+---
+
+## 二、Python 旧引擎绩效（2026-04-30 待重新核对）
+
+| 区间 | FF5 Alpha | t-stat | Sharpe | β_mkt | β_rmw | 超额年化 | 下行捕获 |
+|------|-----------|--------|--------|-------|-------|---------|---------|
+| 2000-2011（无 analyst 大类） | 6.18% | 2.19 | 0.51 | 0.37 | -0.05 | +12.33% | 0.30 |
+| 2012-2023（完整 31 因子） | 6.58% | 2.20 | 0.63 | 0.44 | -0.21 | +0.89% | 0.44 |
+
+> ⚠️ **Python 引擎也含 3 个未修 bug**：stop_cover 不限 cash / 候选集累积 / initial_capital=$100K。需用修复版 Python 引擎重跑核对。Rust 引擎已修完 10 个 bug，是当前可信 baseline。
+
+---
+
+## 三、系统概述（双栈）
+
+| 栈 | 状态 | 用途 |
+|----|------|------|
+| **Rust (quant-engine)** | ⭐ Production baseline | 因子计算 + 回测 + MVO 优化（性能强、bug 已修） |
+| **Python (Django MVT)** | 历史/前端 | 数据下载 + 前端 API + 实盘交易（含 stop_cover bug，非 production） |
+
+Python 仍提供 **三套策略** 作为前端展示和 A/B 对比：
 
 | 策略 | 代码 | 核心理念 | 适用场景 |
 |------|------|---------|---------|
 | **Alpha（多因子多空）** | `us_multi_factor.py` | 31 因子 × 7 大类，两层类别打分，多空对冲 | 追求超额收益 |
 | **Beta（Regime 控制）** | `us_beta_strategy.py` | 不做选股，Regime 择时 + 质量筛选等权，吃市场 beta | 追求稳健、低回撤 |
-| **Baseline / Alpha v2** | `us_baseline_strategy.py` | 委托 Alpha 打分 + 月频调仓，开发迭代用 | 策略实验、A/B 对比 |
+| **Baseline / Alpha v2** | `us_baseline_strategy.py` | 委托 Alpha 打分 + 月频调仓 | 策略实验、A/B 对比 |
+
+Rust 引擎实现的策略相当于 Python Alpha 的等价物 + 修了 10 个 bug + 用了 winner-signature 调权。
 
 核心管道：
 ```
-FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline 策略
-→ 风控调整（Baseline 禁用） → 回测引擎 / 模拟交易
+FMP/UW/Fiscal.ai/Quiver/AlphaVantage/FRED → 数据层 (parquet cache)
+  → Rust quant-engine (因子计算 + MVO 优化 + 回测)
+  → Python Django (前端 API + 实盘交易接入)
 ```
-
-### Alpha v3 策略绩效（基准 S&P 500，含幸存者偏差修正）
-
-| 区间 | FF5 Alpha | t-stat | Sharpe | β_mkt | β_rmw | 超额年化 | 下行捕获 |
-|------|-----------|--------|--------|-------|-------|---------|---------|
-| 2000-2011（无 analyst 大类） | **6.18%** | **2.19** | 0.51 | 0.37 | -0.05 | +12.33% | 0.30 |
-| 2012-2023（完整 31 因子） | **6.58%** | **2.20** | 0.63 | 0.44 | -0.21 | +0.89% | 0.44 |
-
-### Beta 策略绩效（基准 S&P 500）
-
-| 区间 | FF5 Alpha | t-stat | Sharpe | β_mkt | 超额年化 |
-|------|-----------|--------|--------|-------|---------|
-| 2012-2023 | 1.28% | 0.76 | 0.27 | 0.33 | -5.32% |
-
-> **Alpha 策略：** 31 因子 × 7 大类，分因子滚动 IC 动态方向 + LightGBM ML blend。FF5 Alpha 跨时代一致（~6.2%, t~2.2）。行业内选股 alpha 确认存在（EPS_REVISION 行业内 ICIR=0.43）。
-> **Beta 策略：** 不追求选股 alpha，通过四维 Regime 感知动态调仓（牛市高仓位吃 beta，熊市低仓位 + 现金保护）。
-> **幸存者偏差修正：** 股票池含 227 只历史 S&P 500/NASDAQ 100 退市成分股。
-> **基准：** S&P 500（^GSPC），此前版本使用 S&P 500，已切换。
 
 ---
 
-## 二、数据源
+## 四、数据源
 
 六家 API 数据源：FMP（主力）、Unusual Whales（替代数据）、Fiscal.ai（日频估值）、Quiver（政治/另类）、Alpha Vantage（新闻情绪/期权）、FRED（宏观）。
 
@@ -106,7 +168,50 @@ FMP/UW/Fiscal.ai/FRED → 数据层 → 因子处理 → Alpha / Beta / Baseline
 
 ---
 
-## 三、因子体系（31 因子 × 7 大类）
+## 五、因子体系（Rust 引擎 v21：77 因子 × 8 大类，Python 旧版：31 因子 × 7 大类）
+
+> Rust 引擎在原 31 因子基础上扩展至 77（新增 Quality 进阶 / Momentum 进阶 / 另类数据），并修正了 EV_TO_FCF / EV_TO_EBIT 的方向（empirical IC=+0.875/+0.565，原 reverse 列表是错的）。
+
+### Rust 引擎 v21 Tier 权重（`strategy/src/rolling_ic.rs::icir_tier_weight`）
+
+| Tier | 权重 | 因子 |
+|------|------|------|
+| **T0 super-strong** | **3.0** | MOM_12M, TSMOM, INDUSTRY_MOM, SUE_PEAD, EARNINGS_SURPRISE |
+| T1 strong (\|ICIR\|≥0.3) | 2.0 | FREE_FLOAT_PCT, TURN_20D, PIOTROSKI_F, EV_TO_FCF, AMIHUD_ILLIQ, COMPOSITE_EQUITY_ISSUANCE, ROE_TTM, REVENUE_YOY |
+| T2 default | 1.0 | 其他 |
+| T3 weak | 0.5 | PRICE_52W_HIGH, VOLUME_RATIO 等 |
+| Direction-flip | 0.3 | BP, INTANGIBLE_ADJ_BP, RD_INTENSITY, MOM_1M 等 |
+| Noise | 0.0 | GEO_CONCENTRATION |
+| **DISABLED** | — | NET_PROFIT_YOY (winner audit 显示 32% ≈ Losers 33% 不区分), EPS_REVISION (FMP date 是 forecast period 不是 publication date，misnamed) |
+
+### Rust 引擎 Category 权重（`config.toml`）
+
+```toml
+[category_weights]
+value = 0.7        # 降权 (winner signature 显示反 value)
+quality = 1.5
+growth = 1.5       # 1.2 → 1.5 (winner audit)
+momentum = 2.5     # 2.0 → 2.5 (winner audit, MOM_12M 是 #1 信号)
+technical = 1.0
+macro = 1.0
+analyst = 1.2
+sentiment = 1.0
+```
+
+### 已测试且被拒的方向（避免重复试）
+
+| 测试 | 结果 |
+|------|------|
+| EV_TO_FCF 进 T0 (3.0) | α 退 0.22%/yr |
+| PIOTROSKI_F 进 T0 (3.0) | α 退 1.70%/yr（过度防守） |
+| AMIHUD_ILLIQ 进 T0 | 无效（universe min_dvol=$10M 已过滤） |
+| Momentum 不 neutralize | α 退 0.55%/yr |
+| ANALYST_DISP/QMJ_LEVERAGE 翻方向 | α 退 0.71%/yr |
+| gross_leverage 1.5 | α 升但 Sharpe 跌 |
+| max_long_weight 0.08 | α 退 1.2%（过分散） |
+| max_long_weight 0.12 | α 退 0.5%（过集中） |
+
+### Python 旧版因子体系（已并入 Rust 但 Python 端仍保留）
 
 代码位置：`services/us_factors/`
 
@@ -343,7 +448,7 @@ LOBBY_INTENSITY 在 Technology 行业内 |ICIR|=0.36（显著），可能反映�
 
 ---
 
-## 四、多空选股策略
+## 六、多空选股策略
 
 代码：`services/strategy/us_multi_factor.py`（USMultiFactorStrategy）
 
@@ -448,7 +553,7 @@ Regime 影响：
 
 ---
 
-## 4B、Beta 策略（Regime 驱动仓位控制）
+## 六-B、Beta 策略（Regime 驱动仓位控制）
 
 代码：`services/strategy/us_beta_strategy.py`（USBetaStrategy）
 
@@ -489,7 +594,7 @@ Regime strength [0, 1] 线性映射到 equity_pct [10%, 90%]：
 
 ---
 
-## 五、风控
+## 七、风控
 
 代码：`services/risk/us_risk_manager.py`（USRiskManager）
 
@@ -505,7 +610,7 @@ Regime strength [0, 1] 线性映射到 equity_pct [10%, 90%]：
 
 ---
 
-## 4C、Baseline / Alpha v2 实验策略
+## 六-C、Baseline / Alpha v2 实验策略
 
 代码：`services/strategy/us_baseline_strategy.py`（USBaselineStrategy）
 
