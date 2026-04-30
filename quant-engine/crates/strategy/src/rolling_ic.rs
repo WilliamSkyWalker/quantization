@@ -18,14 +18,19 @@ use crate::analysis::spearman_ic;
 /// ICIR tier weights (from Python's factor analysis results).
 fn icir_tier_weight(factor_name: &str) -> f64 {
     match factor_name {
-        // T0 super-strong (boosted 2026-04-30 per winner-signature audit):
-        // MOM_12M / INDUSTRY_MOM are #1 discriminators between 30 winners
-        // (median +0.37) and 30 losers (median ~0) over 14 years.
-        "MOM_12M" | "TSMOM" | "INDUSTRY_MOM" => 3.0,
+        // T0 super-strong (boosted 2026-04-30 per winner-signature audit +
+        // earnings-surprise momentum):
+        //   MOM_12M / INDUSTRY_MOM: #1 winner-discriminator (4/4 dates)
+        //   SUE_PEAD / EARNINGS_SURPRISE: beat-and-raise → "NVDA 2023" type
+        //     fundamental-driven runs that ride MOM_12M into multi-year
+        //     compound. Both have ICIR ~0.5+ and academic foundation
+        //     (Bernard-Thomas 1989 PEAD).
+        "MOM_12M" | "TSMOM" | "INDUSTRY_MOM"
+        | "SUE_PEAD" | "EARNINGS_SURPRISE" => 3.0,
 
         // T1 strong signal (|ICIR| >= 0.3)
-        "FREE_FLOAT_PCT" | "TURN_20D" | "PIOTROSKI_F" | "SUE_PEAD" | "EV_TO_FCF"
-        | "AMIHUD_ILLIQ" | "COMPOSITE_EQUITY_ISSUANCE" | "ROE_TTM" | "EARNINGS_SURPRISE"
+        "FREE_FLOAT_PCT" | "TURN_20D" | "PIOTROSKI_F" | "EV_TO_FCF"
+        | "AMIHUD_ILLIQ" | "COMPOSITE_EQUITY_ISSUANCE" | "ROE_TTM"
         // REVENUE_YOY boosted T2→T1 (2026-04-30): winner audit found Winners
         // 21% rev growth vs Losers 7%, all 4 sample dates.
         | "REVENUE_YOY" => 2.0,
