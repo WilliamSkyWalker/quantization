@@ -18,3 +18,4 @@ rustc-hash = { workspace = true }
 async-trait = "0.1"
 thiserror = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

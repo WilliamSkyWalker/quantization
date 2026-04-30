@@ -34,6 +34,28 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum AlpacaAction {
+    /// 显示账户 + 当前持仓
+    Status,
+
+    /// 计算 rebalance plan（不下单），从 signals JSON 读 target weights
+    Plan {
+        #[arg(long)]
+        signals: PathBuf,
+    },
+
+    /// 计算 plan + 提交 market 订单（market day-order）
+    Run {
+        #[arg(long)]
+        signals: PathBuf,
+
+        /// 不真正下单，仅打印 plan
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Validate parquet cache files (schema + row counts).
     Validate {
@@ -152,6 +174,12 @@ enum Commands {
         /// Output directory.
         #[arg(long, default_value = "../output/factor_analysis")]
         output: PathBuf,
+    },
+
+    /// 美股 Alpaca paper / live 交易
+    Alpaca {
+        #[command(subcommand)]
+        action: AlpacaAction,
     },
 
     /// Paper trade — apply target weights via PaperBroker.
@@ -285,11 +313,14 @@ fn main() {
         Commands::Trade { account, date, signals, dry_run, no_risk } => {
             match cli.market {
                 Market::Us => {
-                    eprintln!("trade: only --market cn supported currently");
+                    eprintln!("trade: 美股请用 `quant alpaca`，不要用 trade");
                     std::process::exit(1);
                 }
                 Market::Cn => cmd_a_trade(&_config, &account, &date, &signals, dry_run, no_risk),
             }
+        }
+        Commands::Alpaca { action } => {
+            cmd_alpaca(action);
         }
         Commands::MigratePolicy {
             mysql_host, mysql_port, mysql_user, mysql_password, mysql_database, batch, dry_run,
@@ -1787,4 +1818,136 @@ fn cmd_migrate_policy(
 
         pg_pool.close().await;
     });
+}
+
+// ============================================================
+// Alpaca paper / live trading (US)
+// ============================================================
+
+fn cmd_alpaca(action: AlpacaAction) {
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    rt.block_on(async {
+        let client = match quant_trading::us_alpaca::AlpacaClient::from_env() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Alpaca client init failed: {e}");
+                eprintln!("Env vars required: ALPACA_API_KEY, ALPACA_SECRET_KEY (ALPACA_PAPER=true default)");
+                std::process::exit(1);
+            }
+        };
+
+        match action {
+            AlpacaAction::Status => alpaca_status(&client).await,
+            AlpacaAction::Plan { signals } => alpaca_plan(&client, &signals, true).await,
+            AlpacaAction::Run { signals, dry_run } => alpaca_plan(&client, &signals, dry_run).await,
+        }
+    });
+}
+
+async fn alpaca_status(client: &quant_trading::us_alpaca::AlpacaClient) {
+    let state = match client.portfolio_state().await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("portfolio_state failed: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    println!("\n=== Alpaca Account ===");
+    println!("ID:                 {}", state.account.id);
+    println!("Status:             {}", state.account.status);
+    println!("Cash:               ${:>14.2}", state.account.cash);
+    println!("Equity:             ${:>14.2}", state.account.equity);
+    println!("Portfolio Value:    ${:>14.2}", state.account.portfolio_value);
+    println!("Buying Power:       ${:>14.2}", state.account.buying_power);
+    println!("Long Market Value:  ${:>14.2}", state.account.long_market_value);
+    println!("Short Market Value: ${:>14.2}", state.account.short_market_value);
+    println!("PDT:                {}", state.account.pattern_day_trader);
+
+    println!("\n=== Positions ({}) ===", state.positions.len());
+    if state.positions.is_empty() {
+        println!("(空)");
+    } else {
+        println!("{:<8} {:>9} {:>10} {:>10} {:>12} {:>10} {:<6}",
+                 "Symbol", "Qty", "Avg Cost", "Current", "MktValue", "PnL", "Side");
+        let mut sorted: Vec<_> = state.positions.values().collect();
+        sorted.sort_by(|a, b| {
+            b.market_value.abs().partial_cmp(&a.market_value.abs()).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for p in sorted {
+            println!(
+                "{:<8} {:>9.0} {:>10.2} {:>10.2} ${:>10.2} {:>+10.2} {:<6}",
+                p.symbol, p.qty, p.avg_entry_price, p.current_price,
+                p.market_value, p.unrealized_pl, p.side
+            );
+        }
+    }
+}
+
+async fn alpaca_plan(
+    client: &quant_trading::us_alpaca::AlpacaClient,
+    signals_path: &std::path::Path,
+    dry_run: bool,
+) {
+    let weights = match quant_trading::us_alpaca::load_signals_json(signals_path) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("Load signals failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    info!("Loaded {} target weights from {}", weights.len(), signals_path.display());
+
+    let plan = match client.plan_rebalance(&weights, None).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("plan_rebalance failed: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    println!("\n=== Rebalance Plan ===");
+    println!("Equity: ${:.2} / Cash: ${:.2}", plan.equity, plan.cash);
+    println!("\n{:<8} {:>10} {:>10} {:>10} {:>12} {:<6}",
+             "Symbol", "Current", "Target", "Δ", "$Target", "Side");
+    println!("{}", "-".repeat(72));
+    for o in &plan.orders {
+        println!(
+            "{:<8} {:>10.0} {:>10.0} {:>+10.0} ${:>10.2} {:<6}",
+            o.symbol, o.current_shares, o.target_shares, o.delta_shares,
+            o.target_dollar, o.side
+        );
+    }
+    let total_buy: f64 = plan.orders.iter()
+        .filter(|o| o.side == "buy")
+        .map(|o| o.delta_shares.abs() * o.current_price)
+        .sum();
+    let total_sell: f64 = plan.orders.iter()
+        .filter(|o| o.side == "sell")
+        .map(|o| o.delta_shares.abs() * o.current_price)
+        .sum();
+    println!("\nTotal: {} orders, ~${:.0} buy + ~${:.0} sell",
+             plan.orders.len(), total_buy, total_sell);
+
+    if dry_run {
+        println!("\n[DRY RUN] 不下单。要真正提交请不带 --dry-run 跑 `alpaca run`。");
+        return;
+    }
+
+    println!("\n提交订单...");
+    match client.execute_plan(&plan).await {
+        Ok(orders) => {
+            println!("✓ Submitted {} orders.", orders.len());
+            for o in orders.iter().take(5) {
+                println!("  {} {} {} (id={}, status={})", o.side, o.qty, o.symbol, o.id, o.status);
+            }
+            if orders.len() > 5 {
+                println!("  ... ({} more)", orders.len() - 5);
+            }
+        }
+        Err(e) => {
+            eprintln!("execute_plan failed: {e}");
+            std::process::exit(1);
+        }
+    }
 }
