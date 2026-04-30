@@ -436,6 +436,7 @@ quant-engine/
 
 ## 详细文档
 
+- [**TODO.md**](TODO.md) — **当前活跃待办（每次先看这个）**
 - [A股策略算法](doc/A_SHARE_STRATEGY.md) — 算法描述（Rust 路径已注解）
 - [美股策略算法](doc/US_SHARE_STRATEGY.md) — v25 baseline + 因子 tier 表
 - [数据源详情](doc/DATA_SOURCES.md) — FMP + FRED only
