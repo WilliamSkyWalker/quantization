@@ -487,39 +487,64 @@ impl TushareDownloader {
     }
 
     /// Download macro indicators.
+    /// Collect all rows in memory first, then ONE upsert_rows call — avoids
+    /// 20k+ single-row INSERTs (~5h before this fix vs ~10s after).
     pub async fn download_macro(&self) -> usize {
         info!("Downloading A-share macro indicators...");
-        let mut total = 0;
+        let mut all_rows: Vec<Value> = Vec::new();
 
         let data = self.tushare_call("shibor", &json!({"start_date": "20060101"})).await;
         for row in &data {
             let date = match row.get("date").and_then(|v| v.as_str()) { Some(d) => d, None => continue };
             for (field, code) in [("on", "SHIBOR_ON"), ("1w", "SHIBOR_1W"), ("1m", "SHIBOR_1M"), ("3m", "SHIBOR_3M")] {
                 if let Some(val) = row.get(field).and_then(|v| v.as_f64()) {
-                    let r = json!({"indicator": code, "report_date": date, "freq": "D", "value": val});
-                    total += self.upsert_rows("a_macro_indicator", &[r], &["indicator", "report_date", "freq"]).await;
+                    all_rows.push(json!({"indicator": code, "report_date": date, "freq": "D", "value": val}));
                 }
             }
         }
+        info!("  shibor: {} rows queued", all_rows.len());
 
+        let cpi_start = all_rows.len();
         let data = self.tushare_call("cn_cpi", &json!({"start_m": "200001"})).await;
         for row in &data {
             let month = match row.get("month").and_then(|v| v.as_str()) { Some(m) => m, None => continue };
-            let date = format!("{}-01", month.replace('.', "-"));
+            // Tushare cn_cpi/cn_ppi.month is "YYYYMM" (e.g. "202603"). Older docs say
+            // "YYYY.MM" but actual API returns no separator — handle both defensively.
+            let normalized = month.replace('.', "");
+            let date = if normalized.len() == 6 {
+                format!("{}-{}-01", &normalized[..4], &normalized[4..])
+            } else {
+                continue;
+            };
             if let Some(val) = row.get("nt_yoy").and_then(|v| v.as_f64()) {
-                let r = json!({"indicator": "CPI_YOY", "report_date": date, "freq": "M", "value": val});
-                total += self.upsert_rows("a_macro_indicator", &[r], &["indicator", "report_date", "freq"]).await;
+                all_rows.push(json!({"indicator": "CPI_YOY", "report_date": date, "freq": "M", "value": val}));
             }
         }
+        info!("  cn_cpi: {} rows queued", all_rows.len() - cpi_start);
 
+        let ppi_start = all_rows.len();
         let data = self.tushare_call("cn_ppi", &json!({"start_m": "200001"})).await;
         for row in &data {
             let month = match row.get("month").and_then(|v| v.as_str()) { Some(m) => m, None => continue };
-            let date = format!("{}-01", month.replace('.', "-"));
+            // Tushare cn_cpi/cn_ppi.month is "YYYYMM" (e.g. "202603"). Older docs say
+            // "YYYY.MM" but actual API returns no separator — handle both defensively.
+            let normalized = month.replace('.', "");
+            let date = if normalized.len() == 6 {
+                format!("{}-{}-01", &normalized[..4], &normalized[4..])
+            } else {
+                continue;
+            };
             if let Some(val) = row.get("ppi_yoy").and_then(|v| v.as_f64()) {
-                let r = json!({"indicator": "PPI_YOY", "report_date": date, "freq": "M", "value": val});
-                total += self.upsert_rows("a_macro_indicator", &[r], &["indicator", "report_date", "freq"]).await;
+                all_rows.push(json!({"indicator": "PPI_YOY", "report_date": date, "freq": "M", "value": val}));
             }
+        }
+        info!("  cn_ppi: {} rows queued", all_rows.len() - ppi_start);
+
+        // Single batched upsert — chunk inside upsert_rows handles >200 rows.
+        let mut total = 0;
+        if !all_rows.is_empty() {
+            total = self.upsert_rows("a_macro_indicator", &all_rows,
+                &["indicator", "report_date", "freq"]).await;
         }
 
         info!("Macro indicators: {total} rows");
