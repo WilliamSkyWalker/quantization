@@ -182,6 +182,17 @@ enum Commands {
         action: AlpacaAction,
     },
 
+    /// 把 PostgreSQL 表导出到 parquet 缓存（替代旧 Python pandas 脚本）
+    ExportParquet {
+        /// 输出目录（默认 ../cache）
+        #[arg(long, default_value = "../cache")]
+        output_dir: PathBuf,
+
+        /// 仅导出指定 PG 表（多次指定）。不传时导出所有 v25 baseline 需要的表。
+        #[arg(long)]
+        table: Vec<String>,
+    },
+
     /// Paper trade — apply target weights via PaperBroker.
     /// Currently A-share only; requires --market cn.
     Trade {
@@ -315,6 +326,9 @@ fn main() {
         }
         Commands::Alpaca { action } => {
             cmd_alpaca(action);
+        }
+        Commands::ExportParquet { output_dir, table } => {
+            cmd_export_parquet(&_config, &output_dir, &table);
         }
         Commands::MigratePolicy {
             mysql_host, mysql_port, mysql_user, mysql_password, mysql_database, batch, dry_run,
@@ -1944,4 +1958,238 @@ async fn alpaca_plan(
             std::process::exit(1);
         }
     }
+}
+
+// ============================================================
+// PostgreSQL → Parquet 导出（替代旧 Python pandas 脚本）
+// ============================================================
+
+struct ResolvedDb {
+    host: String,
+    port: u16,
+    user: String,
+    password: String,
+    database: String,
+    schema: String,
+}
+
+/// (PG 表名, parquet 文件名前缀, 时序列名 / 快照表用 None)
+struct ExportSpec {
+    pg_table: &'static str,
+    parquet_basename: &'static str,
+    /// 时序表的日期列。None = snapshot 表，文件名 `{name}_all.parquet`
+    date_col: Option<&'static str>,
+}
+
+/// v25 baseline + A 股迁移后需要的所有表
+const EXPORT_TABLES: &[ExportSpec] = &[
+    // 美股时序
+    ExportSpec { pg_table: "us_daily_price",            parquet_basename: "us_daily_price",            date_col: Some("trade_date") },
+    ExportSpec { pg_table: "us_index_daily",            parquet_basename: "us_index_daily",            date_col: Some("trade_date") },
+    ExportSpec { pg_table: "us_financial_data",         parquet_basename: "alpha_financial",           date_col: Some("filing_date") },
+    ExportSpec { pg_table: "us_key_metric",             parquet_basename: "alpha_key_metric",          date_col: Some("date") },
+    ExportSpec { pg_table: "us_enterprise_value",       parquet_basename: "alpha_enterprise_value",    date_col: Some("date") },
+    ExportSpec { pg_table: "us_analyst_recommendation", parquet_basename: "us_analyst_recommendation", date_col: Some("date") },
+    ExportSpec { pg_table: "us_earnings_surprise",      parquet_basename: "us_earnings_surprise",      date_col: Some("date") },
+    ExportSpec { pg_table: "us_eps_estimate",           parquet_basename: "us_eps_estimate",           date_col: Some("date") },
+    ExportSpec { pg_table: "us_corporate_action",       parquet_basename: "us_corporate_action_div",   date_col: Some("date") },
+    ExportSpec { pg_table: "us_insider_trade",          parquet_basename: "us_insider_trade",          date_col: Some("transaction_date") },
+    ExportSpec { pg_table: "us_employee_count",         parquet_basename: "us_employee_count",         date_col: Some("filing_date") },
+    ExportSpec { pg_table: "us_revenue_segment",        parquet_basename: "us_revenue_segment",        date_col: Some("date") },
+    ExportSpec { pg_table: "us_macro_indicator",        parquet_basename: "us_macro_indicator",        date_col: Some("report_date") },
+    // 美股快照
+    ExportSpec { pg_table: "us_stock_basic",            parquet_basename: "us_stock_basic",            date_col: None },
+    ExportSpec { pg_table: "us_industry_class",         parquet_basename: "us_industry_class",         date_col: None },
+    ExportSpec { pg_table: "us_shares_float",           parquet_basename: "us_shares_float",           date_col: None },
+    ExportSpec { pg_table: "us_esg_rating",             parquet_basename: "us_esg_rating",             date_col: None },
+    // A 股时序
+    ExportSpec { pg_table: "a_daily_price",             parquet_basename: "a_daily_price",             date_col: Some("trade_date") },
+    ExportSpec { pg_table: "a_financial_indicator",     parquet_basename: "a_financial_indicator",     date_col: Some("end_date") },
+    ExportSpec { pg_table: "a_index_daily",             parquet_basename: "a_index_daily",             date_col: Some("trade_date") },
+    ExportSpec { pg_table: "a_macro_indicator",         parquet_basename: "a_macro_indicator",         date_col: Some("date") },
+    // A 股快照
+    ExportSpec { pg_table: "a_stock_basic",             parquet_basename: "a_stock_basic",             date_col: None },
+    ExportSpec { pg_table: "a_industry_class",          parquet_basename: "a_industry_class",          date_col: None },
+    ExportSpec { pg_table: "a_trade_cal",               parquet_basename: "a_trade_cal",               date_col: None },
+];
+
+fn cmd_export_parquet(
+    config: &quant_core::config::Config,
+    output_dir: &PathBuf,
+    filter_tables: &[String],
+) {
+    // 从 config 拿，空则从 env 读取（config.toml 里 host/user 等默认是空字符串）
+    let host = if !config.database.host.is_empty() { config.database.host.clone() }
+               else { std::env::var("DB_HOST").unwrap_or_default() };
+    let port = if config.database.port != 0 { config.database.port }
+               else { std::env::var("DB_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(5432) };
+    let user = if !config.database.user.is_empty() { config.database.user.clone() }
+               else { std::env::var("DB_USER").unwrap_or_default() };
+    let password = if !config.database.password.is_empty() { config.database.password.clone() }
+                   else { std::env::var("DB_PASSWORD").unwrap_or_default() };
+    let database = if !config.database.database.is_empty() { config.database.database.clone() }
+                   else { std::env::var("DB_DATABASE").unwrap_or_default() };
+    let schema = if !config.database.schema.is_empty() { config.database.schema.clone() }
+                 else { std::env::var("DB_SCHEMA").unwrap_or_else(|_| "quant".to_string()) };
+
+    if host.is_empty() || user.is_empty() {
+        eprintln!("Database not configured. Set DB_HOST/DB_USER/DB_PASSWORD/DB_DATABASE in .env");
+        std::process::exit(1);
+    }
+
+    let db = ResolvedDb { host, port, user, password, database, schema };
+
+    // 找 psql 二进制
+    let psql = which_psql().unwrap_or_else(|| {
+        eprintln!("psql binary not found. Install PostgreSQL client.");
+        std::process::exit(1);
+    });
+
+    std::fs::create_dir_all(output_dir).expect("Failed to create output dir");
+
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    let url = format!("postgres://{}:{}@{}:{}/{}", db.user, db.password, db.host, db.port, db.database);
+    let pool = rt.block_on(async {
+        quant_db::pool::create_pool(&url, &db.schema, 4).await
+            .expect("Failed to connect to database")
+    });
+
+    let specs: Vec<&ExportSpec> = if filter_tables.is_empty() {
+        EXPORT_TABLES.iter().collect()
+    } else {
+        EXPORT_TABLES.iter()
+            .filter(|s| filter_tables.iter().any(|f| f == s.pg_table || f == s.parquet_basename))
+            .collect()
+    };
+
+    println!("\n=== Export {} tables → {} ===", specs.len(), output_dir.display());
+    let total_t0 = std::time::Instant::now();
+    let mut total_rows = 0usize;
+    let mut failures = Vec::new();
+
+    for spec in &specs {
+        let t0 = std::time::Instant::now();
+        match rt.block_on(export_one_table(spec, &pool, &psql, &db, output_dir)) {
+            Ok((path, rows)) => {
+                total_rows += rows;
+                println!(
+                    "✓ {:<35} {:>12} rows → {} ({:.1}s)",
+                    spec.pg_table, rows, path.file_name().unwrap().to_string_lossy(), t0.elapsed().as_secs_f64()
+                );
+            }
+            Err(e) => {
+                println!("✗ {:<35} FAILED: {}", spec.pg_table, e);
+                failures.push(spec.pg_table.to_string());
+            }
+        }
+    }
+
+    println!(
+        "\nTotal: {} tables, {} rows, {:.1}s",
+        specs.len() - failures.len(), total_rows, total_t0.elapsed().as_secs_f64()
+    );
+    if !failures.is_empty() {
+        eprintln!("Failed: {}", failures.join(", "));
+        std::process::exit(1);
+    }
+
+    rt.block_on(async { pool.close().await });
+}
+
+fn which_psql() -> Option<std::path::PathBuf> {
+    for candidate in ["psql", "/usr/bin/psql", "/usr/local/bin/psql", "/opt/homebrew/bin/psql"] {
+        let path = std::path::PathBuf::from(candidate);
+        if path.is_absolute() && path.exists() {
+            return Some(path);
+        }
+        if let Ok(out) = std::process::Command::new("which").arg(candidate).output() {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(std::path::PathBuf::from(s));
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn export_one_table(
+    spec: &ExportSpec,
+    pool: &sqlx::PgPool,
+    psql: &std::path::Path,
+    db: &ResolvedDb,
+    output_dir: &PathBuf,
+) -> Result<(std::path::PathBuf, usize), String> {
+    // Step 1: 决定文件名（snapshot vs 时序）
+    let suffix = if let Some(date_col) = spec.date_col {
+        // 取 min/max date 作日期范围
+        let row: (Option<chrono::NaiveDate>, Option<chrono::NaiveDate>) =
+            sqlx::query_as(&format!(
+                "SELECT MIN({date_col}), MAX({date_col}) FROM {}.{}",
+                db.schema, spec.pg_table
+            ))
+            .fetch_one(pool)
+            .await
+            .map_err(|e| format!("min/max query: {e}"))?;
+        match (row.0, row.1) {
+            (Some(min), Some(max)) => format!("{min}_{max}"),
+            _ => return Err("table is empty".to_string()),
+        }
+    } else {
+        "all".to_string()
+    };
+
+    let parquet_name = format!("{}_{}.parquet", spec.parquet_basename, suffix);
+    let parquet_path = output_dir.join(&parquet_name);
+    let csv_path = output_dir.join(format!(".{}_{}_tmp.csv", spec.parquet_basename, suffix));
+
+    // Step 2: psql \COPY → CSV
+    let copy_sql = format!(
+        "\\COPY (SELECT * FROM {}.{}) TO STDOUT WITH CSV HEADER",
+        db.schema, spec.pg_table
+    );
+    let csv_file = std::fs::File::create(&csv_path)
+        .map_err(|e| format!("create csv: {e}"))?;
+
+    let status = std::process::Command::new(psql)
+        .env("PGPASSWORD", &db.password)
+        .args([
+            "-h", &db.host,
+            "-p", &db.port.to_string(),
+            "-U", &db.user,
+            "-d", &db.database,
+            "-c", &copy_sql,
+        ])
+        .stdout(csv_file)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("spawn psql: {e}"))?;
+
+    if !status.success() {
+        let _ = std::fs::remove_file(&csv_path);
+        return Err(format!("psql exit {}", status.code().unwrap_or(-1)));
+    }
+
+    // Step 3: polars CSV → parquet
+    use polars::prelude::*;
+    let mut df = LazyCsvReader::new(&csv_path)
+        .with_has_header(true)
+        .with_try_parse_dates(true)
+        .finish()
+        .map_err(|e| format!("read csv: {e}"))?
+        .collect()
+        .map_err(|e| format!("collect csv: {e}"))?;
+
+    let mut parquet_file = std::fs::File::create(&parquet_path)
+        .map_err(|e| format!("create parquet: {e}"))?;
+    ParquetWriter::new(&mut parquet_file)
+        .finish(&mut df)
+        .map_err(|e| format!("write parquet: {e}"))?;
+
+    // Step 4: 删 CSV temp
+    let _ = std::fs::remove_file(&csv_path);
+
+    let n_rows = df.height();
+    Ok((parquet_path, n_rows))
 }

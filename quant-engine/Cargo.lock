@@ -2586,6 +2586,7 @@ dependencies = [
  "chrono",
  "clap",
  "indicatif",
+ "polars",
  "quant-backtest",
  "quant-core",
  "quant-data",

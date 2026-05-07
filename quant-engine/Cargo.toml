@@ -21,7 +21,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rayon = "1.10"
 rustc-hash = "2"
-polars = { version = "0.46", features = ["parquet", "lazy", "dtype-date", "dtype-datetime", "dtype-struct"] }
+polars = { version = "0.46", features = ["parquet", "lazy", "csv", "dtype-date", "dtype-datetime", "dtype-struct"] }
 nalgebra = "0.33"
 clap = { version = "4", features = ["derive", "env"] }
 indicatif = "0.17"

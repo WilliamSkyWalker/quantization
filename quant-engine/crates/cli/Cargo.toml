@@ -26,3 +26,4 @@ indicatif = { workspace = true }
 chrono = { workspace = true }
 rayon = { workspace = true }
 rustc-hash = { workspace = true }
+polars = { workspace = true }
