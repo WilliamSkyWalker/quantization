@@ -66,21 +66,22 @@ quant db-status
 
 ## 配置
 
-环境变量在 `.env`（项目根目录）。Rust CLI 通过 `dotenvy` 自动加载。
+配置文件 `quant-engine/env.json`（mercury 标准）。CLI 启动时 `quant_core::env::load()` 自动加载，搜索 `./env.json` → `../env.json` → `../../env.json`，按顶层 `ENV`（`test`/`prod`）字段拍平到 process env vars。**已存在的 process env 优先**——k8s/docker 用 `-e VAR=...` 注入可覆盖文件值。Docker build 设 `QUANT_BUILDING=1` 跳过加载。
 
-**最小配置（FMP + FRED + DB）**：
-```
-FMP_API_KEY=xxx              # FMP Ultimate plan
-FRED_API_KEY=xxx             # FRED (永久免费)
-DB_HOST=...                  # PostgreSQL 连接
-DB_PORT=5432
-DB_USER=...
-DB_PASSWORD=...
-DB_DATABASE=...
-DB_SCHEMA=quant
+**Schema**（脱敏样例见 `quant-engine/env.json.demo`）：
+```json
+{
+  "ENV": "test",
+  "quant":   { "test": {"host":"...","port":5432,"user":"...","password":"...","database":"...","schema":"quant"}, "prod": {...} },
+  "alpaca":  { "test": {"api_key":"...","secret_key":"...","paper":true},                                          "prod": {...} },
+  "fmp":     { "api_key":"...", "rate_limit":2500 },
+  "tushare": { "token":"...",   "rate_limit":200  },
+  "fred":    { "api_key":"..." },
+  "quiver":  { "api_key":"...", "rate_limit":60   }
+}
 ```
 
-**A 股额外**：`TUSHARE_TOKEN`
+**多环境分组**：`quant`（PG）和 `alpaca`（paper vs live）按 `ENV` 拆；`fmp`/`tushare`/`fred`/`quiver` 是只读外部 API，单环境平铺。
 
 **Strategy 参数**（`quant-engine/config.toml`）：
 - `[universe]`: min_market_cap = 1e10, min_daily_volume = 1e7

@@ -28,7 +28,7 @@ Claude Code 编码规范。**所有代码变更必须遵守，无例外。**
 13. **一次只做一件事** — 不在一个 commit 里同时重构 + 加功能。
 14. **不写 magic number** — 用类常量或 config。
 15. **不静默吞错误** — 至少 logger.warning。
-16. **不硬编码环境值** — URL、路径、密钥用环境变量。Rust CLI 必须自动加载 `.env` 文件（dotenvy），不能要求用户手动 `source .env && export`。**[违反 1 次：2026-04-24 用户跑 `quant download` 报 "Database not configured"，因为没读 .env]**
+16. **不硬编码环境值** — URL、路径、密钥用 `quant-engine/env.json`（mercury 标准）。Rust CLI 通过 `quant_core::env::load()` 自动加载（搜索 `./env.json` → `../env.json` → `../../env.json`），按顶层 `ENV` 字段（`test`/`prod`）拍平到现有 env var 名。已存在的 process env 优先（k8s `-e VAR=…` 可覆盖）。Docker build 用 `QUANT_BUILDING=1` 跳过加载。**[违反 1 次：2026-04-24 用户跑 `quant download` 报 "Database not configured"，因为没读 .env]**
 17. **float 用 `_safe_float`** — 防空字符串/None/NaN。日期用 `_date_col_to_date`。datetime 用 timezone aware。
 18. **DataFrame 去重在 upsert 前做** — `drop_duplicates(subset=unique_keys, keep="last")`。
 19. **每个方法都用 ThreadPoolExecutor** — 除非数据量 < 20 条。每个方法都有 tqdm + logger.info 汇总。

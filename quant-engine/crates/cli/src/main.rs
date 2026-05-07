@@ -230,13 +230,7 @@ enum Commands {
 }
 
 fn main() {
-    // Load .env file (search current dir and parent dirs)
-    for path in &["../.env", ".env", "../../.env"] {
-        if std::path::Path::new(path).exists() {
-            dotenvy::from_path(path).ok();
-            break;
-        }
-    }
+    quant_core::env::load();
 
     let cli = Cli::parse();
 

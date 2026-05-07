@@ -1,6 +1,8 @@
 .env
 .env.local.bak
 /quant_system/.env
+quant-engine/env.json
+!quant-engine/env.json.demo
 twitter_cookies.json
 .claude/settings.local.json
 .mcp.json

@@ -2585,7 +2585,6 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
- "dotenvy",
  "indicatif",
  "quant-backtest",
  "quant-core",
@@ -2611,6 +2610,7 @@ dependencies = [
  "chrono",
  "rustc-hash",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "toml",
  "tracing",
