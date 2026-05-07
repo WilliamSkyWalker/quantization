@@ -438,7 +438,11 @@ impl TushareDownloader {
         for src in ["SW2021", "SW2014"] {
             for level in ["L1", "L2"] {
                 let indices = self.tushare_call("index_classify", &json!({"level": level, "src": src})).await;
-                for idx in &indices {
+                let n_idx = indices.len();
+                info!("Industry {src}/{level}: {n_idx} indices, fetching members...");
+                if n_idx == 0 { continue; }
+                let mut sub_total = 0;
+                for (i, idx) in indices.iter().enumerate() {
                     let index_code = match idx.get("index_code").and_then(|v| v.as_str()) {
                         Some(c) => c.to_string(), None => continue,
                     };
@@ -458,10 +462,14 @@ impl TushareDownloader {
                         }))
                     }).collect();
                     if !rows.is_empty() {
-                        total += self.upsert_rows("a_industry_class", &rows,
+                        sub_total += self.upsert_rows("a_industry_class", &rows,
                             &["ts_code", "src", "level", "index_code", "in_date"]).await;
                     }
+                    if (i + 1) % 30 == 0 || i + 1 == n_idx {
+                        info!("Industry {src}/{level}: {}/{n_idx} indices, {sub_total} rows so far", i + 1);
+                    }
                 }
+                total += sub_total;
             }
         }
         info!("Industry class: {total} rows");

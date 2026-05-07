@@ -136,7 +136,16 @@ impl FredDownloader {
                     Value::String(s) => s.clone(),
                     other => other.to_string(),
                 });
-                p
+                // PG extended protocol binds everything as text; PG won't
+                // implicit-cast text → date or text → numeric. Cast in SQL.
+                let cast = if col == "date" || col.ends_with("_date") {
+                    "::date"
+                } else if matches!(val, Value::Number(_)) {
+                    "::float8"
+                } else {
+                    ""
+                };
+                format!("{p}{cast}")
             }).collect();
             values_clauses.push(format!("({})", placeholders.join(", ")));
         }
