@@ -16,7 +16,7 @@ use crate::camel::snake_keys;
 use crate::http::ApiClient;
 use crate::progress::ticker_progress;
 
-const MAX_CONCURRENT: usize = 10;
+const MAX_CONCURRENT: usize = 5;
 
 /// FMP downloader context.
 #[derive(Clone)]
