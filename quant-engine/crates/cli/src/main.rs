@@ -129,8 +129,13 @@ enum Commands {
         export_signals: bool,
     },
 
-    /// Show database table row counts and connection status.
-    DbStatus,
+    /// Show database table row counts, latest data date, last update time,
+    /// and per-ticker import progress.
+    DbStatus {
+        /// Filter by market: us | cn | all (default: all)
+        #[arg(long, default_value = "all")]
+        market: String,
+    },
 
     /// Download data from external APIs into PostgreSQL.
     Download {
@@ -289,8 +294,8 @@ fn main() {
         Commands::Score { date, top } => {
             info!("TODO: score --date {date} --top {top}");
         }
-        Commands::DbStatus => {
-            cmd_db_status(&_config);
+        Commands::DbStatus { market } => {
+            cmd_db_status(&_config, &market);
         }
         Commands::Download { source, target, start_year, incremental, ticker } => {
             cmd_download(&_config, &source, &target, start_year, incremental, ticker.as_deref());
@@ -1547,11 +1552,87 @@ fn cmd_download(
     });
 }
 
-fn cmd_db_status(config: &quant_core::config::Config) {
+/// Per-table metadata for db-status. `date_col` = MAX() target for "latest data
+/// date" (None → snapshot table, only updated_at meaningful). Column names were
+/// verified against live PG `information_schema.columns` — do not edit blindly.
+struct DbStatusTable {
+    name: &'static str,
+    market: &'static str,           // "us" | "cn" | "shared"
+    date_col: Option<&'static str>,
+}
+
+const DB_STATUS_TABLES: &[DbStatusTable] = &[
+    // ── US ───────────────────────────────────────────────────────────────
+    // Snapshot
+    DbStatusTable { name: "us_stock_basic",            market: "us", date_col: None },
+    DbStatusTable { name: "us_industry_class",         market: "us", date_col: None },
+    DbStatusTable { name: "us_company_profile",        market: "us", date_col: None },
+    DbStatusTable { name: "us_esg_rating",             market: "us", date_col: None },
+    DbStatusTable { name: "us_financial_score",        market: "us", date_col: None },
+    DbStatusTable { name: "us_insider_statistic",      market: "us", date_col: None },
+    DbStatusTable { name: "us_stock_peer",             market: "us", date_col: None },
+    DbStatusTable { name: "us_press_release",          market: "us", date_col: None },
+    DbStatusTable { name: "us_delisted",               market: "us", date_col: None },
+    DbStatusTable { name: "us_gov_contract",           market: "us", date_col: None },
+    DbStatusTable { name: "us_price_target",           market: "us", date_col: None },
+    // Time-series
+    DbStatusTable { name: "us_daily_price",            market: "us", date_col: Some("trade_date") },
+    DbStatusTable { name: "us_index_daily",            market: "us", date_col: Some("trade_date") },
+    DbStatusTable { name: "us_commodity_price",        market: "us", date_col: Some("trade_date") },
+    DbStatusTable { name: "us_macro_indicator",        market: "us", date_col: Some("report_date") },
+    DbStatusTable { name: "us_financial_data",         market: "us", date_col: Some("filing_date") },
+    DbStatusTable { name: "us_key_metric",             market: "us", date_col: Some("date") },
+    DbStatusTable { name: "us_enterprise_value",       market: "us", date_col: Some("date") },
+    DbStatusTable { name: "us_financial_growth",       market: "us", date_col: Some("date") },
+    DbStatusTable { name: "us_owner_earnings",         market: "us", date_col: Some("date") },
+    DbStatusTable { name: "us_analyst_recommendation", market: "us", date_col: Some("date") },
+    DbStatusTable { name: "us_earnings_surprise",      market: "us", date_col: Some("date") },
+    DbStatusTable { name: "us_eps_estimate",           market: "us", date_col: Some("date") },
+    DbStatusTable { name: "us_price_target_detail",    market: "us", date_col: Some("published_date") },
+    DbStatusTable { name: "us_corporate_action",       market: "us", date_col: Some("date") },
+    DbStatusTable { name: "us_insider_trade",          market: "us", date_col: Some("transaction_date") },
+    DbStatusTable { name: "us_congress_trade",         market: "us", date_col: Some("transaction_date") },
+    DbStatusTable { name: "us_dark_pool_volume",       market: "us", date_col: Some("date") },
+    DbStatusTable { name: "us_institutional_holder",   market: "us", date_col: Some("date") },
+    DbStatusTable { name: "us_employee_count",         market: "us", date_col: Some("filing_date") },
+    DbStatusTable { name: "us_revenue_segment",        market: "us", date_col: Some("date") },
+    DbStatusTable { name: "us_sec_filing",             market: "us", date_col: Some("filing_date") },
+    DbStatusTable { name: "us_lobbying",               market: "us", date_col: Some("date") },
+    DbStatusTable { name: "us_dcf_valuation",          market: "us", date_col: Some("date") },
+    DbStatusTable { name: "us_index_constituent",      market: "us", date_col: Some("date") },
+    DbStatusTable { name: "us_news",                   market: "us", date_col: Some("published_at") },
+    DbStatusTable { name: "us_symbol_change",          market: "us", date_col: Some("date") },
+    DbStatusTable { name: "us_shares_float",           market: "us", date_col: Some("date") },
+    // ── CN ───────────────────────────────────────────────────────────────
+    DbStatusTable { name: "a_stock_basic",             market: "cn", date_col: None },
+    DbStatusTable { name: "a_trade_cal",               market: "cn", date_col: None },
+    DbStatusTable { name: "a_industry_class",          market: "cn", date_col: None },
+    DbStatusTable { name: "a_daily_price",             market: "cn", date_col: Some("trade_date") },
+    DbStatusTable { name: "a_index_daily",             market: "cn", date_col: Some("trade_date") },
+    DbStatusTable { name: "a_commodity_price",         market: "cn", date_col: Some("trade_date") },
+    DbStatusTable { name: "a_macro_indicator",         market: "cn", date_col: Some("report_date") },
+    // f_ann_date = 实际公告日 (PIT-correct), 不是 end_date (报告期 forward-looking)
+    DbStatusTable { name: "a_financial_income",        market: "cn", date_col: Some("f_ann_date") },
+    DbStatusTable { name: "a_financial_balance",       market: "cn", date_col: Some("f_ann_date") },
+    DbStatusTable { name: "a_financial_cashflow",      market: "cn", date_col: Some("f_ann_date") },
+    DbStatusTable { name: "a_financial_indicator",     market: "cn", date_col: Some("ann_date") }, // no f_ann_date
+    DbStatusTable { name: "a_insider_transaction",     market: "cn", date_col: Some("ann_date") },
+    DbStatusTable { name: "a_research_report",         market: "cn", date_col: Some("publish_date") },
+    // ── shared ──────────────────────────────────────────────────────────
+    DbStatusTable { name: "import_progress",           market: "shared", date_col: None },
+];
+
+fn cmd_db_status(config: &quant_core::config::Config, market_filter: &str) {
     let db_url = config.database.url();
     let schema = &config.database.schema;
     if db_url.contains("@:/") || db_url.contains("postgres://:@") {
         eprintln!("Database not configured. Set DB_HOST, DB_USER, DB_PASSWORD, DB_DATABASE env vars.");
+        std::process::exit(1);
+    }
+
+    let market_filter = market_filter.to_lowercase();
+    if !["us", "cn", "all"].contains(&market_filter.as_str()) {
+        eprintln!("Invalid --market: {market_filter}. Use us | cn | all");
         std::process::exit(1);
     }
 
@@ -1566,38 +1647,100 @@ fn cmd_db_status(config: &quant_core::config::Config) {
             }
         };
 
-        let tables = [
-            "us_stock_basic", "us_daily_price", "us_financial_data", "us_key_metric",
-            "us_index_daily", "us_industry_class", "us_enterprise_value",
-            "us_analyst_recommendation", "us_earnings_surprise", "us_eps_estimate",
-            "us_corporate_action", "us_insider_trade", "us_macro_indicator",
-            "us_shares_float", "us_dark_pool_volume", "us_institutional_holder",
-            "us_employee_count", "us_congress_trade", "us_gov_contract", "us_lobbying",
-            "us_revenue_segment", "us_esg_rating", "us_company_profile",
-            "us_sec_filing", "us_press_release", "us_news",
-            "import_progress",
-        ];
+        // ── Pre-fetch import_progress map: table_name -> done ticker count ──
+        let progress_rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT table_name, COUNT(DISTINCT ticker) FROM import_progress GROUP BY table_name"
+        ).fetch_all(&pool).await.unwrap_or_default();
+        let progress_map: std::collections::HashMap<String, i64> = progress_rows.into_iter().collect();
 
-        println!("\n{:<35} {:>12}", "Table", "Rows");
-        println!("{}", "-".repeat(49));
+        // ── Active ticker totals ────────────────────────────────────────────
+        let us_total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM us_stock_basic WHERE is_actively_trading = 1"
+        ).fetch_one(&pool).await.unwrap_or(0);
+        let cn_total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM a_stock_basic WHERE list_status = 'L'"
+        ).fetch_one(&pool).await.unwrap_or(0);
 
-        let mut total = 0i64;
-        for table in &tables {
-            match quant_db::queries::us_read::count_rows(&pool, table).await {
-                Ok(count) => {
-                    println!("{:<35} {:>12}", table, count);
-                    total += count;
-                }
-                Err(_) => {
-                    println!("{:<35} {:>12}", table, "N/A");
-                }
+        // ── Header ──────────────────────────────────────────────────────────
+        let sep = "─".repeat(105);
+        println!();
+        println!("{:<32} {:>12} {:>13} {:>19} {:>15}", "TABLE", "ROWS", "LATEST DATA", "LAST UPDATE", "PROGRESS");
+        println!("{sep}");
+
+        let mut current_market = "";
+        let mut total_rows = 0i64;
+        for spec in DB_STATUS_TABLES {
+            if market_filter != "all" && spec.market != market_filter && spec.market != "shared" {
+                continue;
             }
+            // Group header
+            if spec.market != current_market {
+                let label = match spec.market {
+                    "us" => "[US]",
+                    "cn" => "[CN]",
+                    _ => "[shared]",
+                };
+                println!("{label}");
+                current_market = spec.market;
+            }
+
+            let denom = match spec.market {
+                "us" => us_total,
+                "cn" => cn_total,
+                _ => 0,
+            };
+            print_db_status_row(&pool, spec, &progress_map, denom, &mut total_rows).await;
         }
-        println!("{}", "-".repeat(49));
-        println!("{:<35} {:>12}", "TOTAL", total);
+
+        println!("{sep}");
+        println!("{:<32} {:>12}", "TOTAL", total_rows);
 
         pool.close().await;
     });
+}
+
+async fn print_db_status_row(
+    pool: &sqlx::PgPool,
+    spec: &DbStatusTable,
+    progress_map: &std::collections::HashMap<String, i64>,
+    denom: i64,
+    total_rows: &mut i64,
+) {
+    // Single scan for COUNT, MAX(date_col), MAX(updated_col).
+    // import_progress uses `completed_at` instead of `updated_at`.
+    let updated_col = if spec.name == "import_progress" { "completed_at" } else { "updated_at" };
+    let select_cols = match spec.date_col {
+        Some(c) => format!("COUNT(*), MAX({c})::text, MAX({updated_col})::text"),
+        None    => format!("COUNT(*), NULL::text, MAX({updated_col})::text"),
+    };
+    let sql = format!("SELECT {select_cols} FROM {}", spec.name);
+    let row: Result<(i64, Option<String>, Option<String>), _> =
+        sqlx::query_as(&sql).fetch_one(pool).await;
+
+    let (count, latest, last_update) = match row {
+        Ok(r) => r,
+        Err(e) => {
+            println!("{:<32} {:>12} {:>13} {:>19} {:>15}", spec.name, "ERR", "-", "-", "-");
+            warn!("db-status query failed for {}: {e}", spec.name);
+            return;
+        }
+    };
+    *total_rows += count;
+
+    // YYYY-MM-DD (10) for date, YYYY-MM-DD HH:MM (16) for timestamp
+    let latest_str = latest.as_deref().map(|s| s.get(..10).unwrap_or(s).to_string()).unwrap_or_else(|| "-".to_string());
+    let last_str = last_update.as_deref().map(|s| s.get(..16).unwrap_or(s).to_string()).unwrap_or_else(|| "-".to_string());
+
+    let progress_str = match progress_map.get(spec.name) {
+        Some(&done) if denom > 0 => format!("{done}/{denom}"),
+        Some(&done) => format!("{done}/-"),
+        None => "-".to_string(),
+    };
+
+    println!(
+        "{:<32} {:>12} {:>13} {:>19} {:>15}",
+        spec.name, count, latest_str, last_str, progress_str
+    );
 }
 
 fn estimate_memory(cache: &quant_data::cache::DataCache) -> f64 {
