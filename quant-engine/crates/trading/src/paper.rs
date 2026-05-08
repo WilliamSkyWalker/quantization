@@ -66,9 +66,9 @@ impl<Q: QuoteSource + Send + Sync> PaperBroker<Q> {
     ) -> Result<(), BrokerError> {
         let mut tx = self.pool.begin().await?;
 
-        // Cash
+        // Cash (updated_at 由 DB trigger 自动维护)
         sqlx::query(
-            "UPDATE a_paper_account SET cash = $1, updated_at = NOW() WHERE account_id = $2"
+            "UPDATE a_paper_account SET cash = $1 WHERE account_id = $2"
         ).bind(new_cash).bind(&self.account_id).execute(&mut *tx).await?;
 
         // Position changes — diff old vs new
@@ -88,7 +88,7 @@ impl<Q: QuoteSource + Send + Sync> PaperBroker<Q> {
                     "INSERT INTO a_paper_position (account_id, ts_code, shares, avg_cost) \
                      VALUES ($1, $2, $3, $4) \
                      ON CONFLICT (account_id, ts_code) \
-                     DO UPDATE SET shares = EXCLUDED.shares, avg_cost = EXCLUDED.avg_cost, updated_at = NOW()"
+                     DO UPDATE SET shares = EXCLUDED.shares, avg_cost = EXCLUDED.avg_cost"
                 )
                 .bind(&self.account_id).bind(code).bind(new_n).bind(cost)
                 .execute(&mut *tx).await?;

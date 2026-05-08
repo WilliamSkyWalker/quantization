@@ -179,12 +179,14 @@ impl FmpDownloader {
             None => return 0,
         };
 
-        // Filter columns to only those that exist in DB + skip 'id' and 'updated_at' (auto-generated)
+        // Filter columns: skip id (serial PK) + created_at/updated_at (DB trigger
+        // quant.set_updated_at 自动维护) + 任何 DB 不认识的字段
         let db_columns = self.get_table_columns(table).await;
         let columns: Vec<String> = first.keys()
             .filter(|k| {
                 let k = k.as_str();
-                k != "id" && k != "updated_at" && (db_columns.is_empty() || db_columns.contains(k))
+                k != "id" && k != "updated_at" && k != "created_at"
+                    && (db_columns.is_empty() || db_columns.contains(k))
             })
             .cloned()
             .collect();

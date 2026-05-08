@@ -137,18 +137,16 @@ impl TushareDownloader {
         let first = match rows[0].as_object() { Some(m) => m, None => return 0 };
 
         let db_columns = self.get_table_columns(table).await;
-        let has_updated_at = db_columns.contains("updated_at");
-        let mut columns: Vec<String> = first.keys()
+        // created_at / updated_at 由 DB trigger 自动维护（quant.set_updated_at），
+        // 应用层一律不写。
+        let columns: Vec<String> = first.keys()
             .filter(|k| {
                 let k = k.as_str();
-                k != "id" && k != "updated_at" && (db_columns.is_empty() || db_columns.contains(k))
+                k != "id" && k != "updated_at" && k != "created_at"
+                    && (db_columns.is_empty() || db_columns.contains(k))
             })
             .cloned().collect();
         if columns.is_empty() { return 0; }
-        // Add updated_at = NOW() for tables that require it
-        if has_updated_at {
-            columns.push("updated_at".to_string());
-        }
 
         // Dedup
         let mut seen = HashSet::new();
@@ -176,8 +174,7 @@ impl TushareDownloader {
             for row in chunk {
                 let obj = match row.as_object() { Some(m) => m, None => continue };
                 let vals: Vec<String> = columns.iter().map(|col| {
-                    if col == "updated_at" { "NOW()".to_string() }
-                    else { to_sql_literal(obj.get(col).unwrap_or(&Value::Null)) }
+                    to_sql_literal(obj.get(col).unwrap_or(&Value::Null))
                 }).collect();
                 values_clauses.push(format!("({})", vals.join(",")));
             }
