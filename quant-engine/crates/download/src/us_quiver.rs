@@ -62,7 +62,10 @@ impl QuiverDownloader {
     async fn upsert_rows(&self, table: &str, rows: &[Value], unique_keys: &[&str]) -> usize {
         if rows.is_empty() { return 0; }
         let first = match rows[0].as_object() { Some(m) => m, None => return 0 };
-        let columns: Vec<String> = first.keys().cloned().collect();
+        // created_at / updated_at 由 DB trigger 维护，应用层一律不写
+        let columns: Vec<String> = first.keys()
+            .filter(|k| k.as_str() != "updated_at" && k.as_str() != "created_at")
+            .cloned().collect();
         if columns.is_empty() { return 0; }
 
         let chunk_size = 200;

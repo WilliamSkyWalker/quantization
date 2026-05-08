@@ -36,7 +36,6 @@ struct ArticleRow {
     content: Option<String>,
     content_hash: Option<String>,
     scraped_at: Option<NaiveDateTime>,
-    updated_at: Option<NaiveDateTime>,
 }
 
 #[derive(Debug, FromRow)]
@@ -92,7 +91,7 @@ pub async fn migrate(
     while (offset as usize) < stats.articles_read {
         let rows: Vec<ArticleRow> = sqlx::query_as(
             "SELECT id, source, tier, title, url, publish_date, category, summary, \
-             content, content_hash, scraped_at, updated_at \
+             content, content_hash, scraped_at \
              FROM policy_article ORDER BY id LIMIT ? OFFSET ?"
         )
         .bind(batch_size as i64).bind(offset)
@@ -102,10 +101,11 @@ pub async fn migrate(
         for r in &rows { if r.id > max_article_id { max_article_id = r.id; } }
         if !dry_run {
             // Batch INSERT (single round-trip per chunk): ~100x faster than per-row.
+            // updated_at 由 DB trigger 维护，应用层一律不写（即使是 migration 工具）
             let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
                 "INSERT INTO policy_article \
                  (id, source, tier, title, url, publish_date, category, summary, \
-                  content, content_hash, scraped_at, updated_at) "
+                  content, content_hash, scraped_at) "
             );
             qb.push_values(&rows, |mut b, r| {
                 b.push_bind(r.id)
@@ -118,8 +118,7 @@ pub async fn migrate(
                  .push_bind(&r.summary)
                  .push_bind(&r.content)
                  .push_bind(&r.content_hash)
-                 .push_bind(r.scraped_at)
-                 .push_bind(r.updated_at);
+                 .push_bind(r.scraped_at);
             });
             qb.push(" ON CONFLICT (id) DO NOTHING");
             let n = qb.build().execute(pg_pool).await?.rows_affected() as usize;
