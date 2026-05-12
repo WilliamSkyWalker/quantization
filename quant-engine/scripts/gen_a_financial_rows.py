@@ -31,8 +31,11 @@ def parse_table(sql: str, table: str):
         if not col_m:
             continue
         name, rest = col_m.group(1), col_m.group(2)
+        # `timestamp with time zone` MUST be checked before bare `timestamp`
+        # (which would otherwise greedy-match the prefix and drop the modifier,
+        # turning TIMESTAMPTZ into a NaiveDateTime decode mismatch at runtime).
         type_m = re.match(
-            r'(varchar\(\d+\)|double precision|bigint|integer|timestamp[^,]*?|date|text)',
+            r'(varchar\(\d+\)|double precision|bigint|integer|timestamp\s+with\s+time\s+zone|timestamp|date|text)',
             rest,
         )
         typ = type_m.group(1) if type_m else "?"
@@ -52,6 +55,8 @@ def map_type(typ: str, null: str) -> str:
         rs = "i64"
     elif typ == "integer":
         rs = "i32"
+    elif typ == "timestamp with time zone":
+        rs = "DateTime<Utc>"
     elif typ.startswith("timestamp"):
         rs = "NaiveDateTime"
     else:

@@ -3,7 +3,7 @@
 //! Schema: `quant.a_*` tables. Tushare convention: ts_code (e.g., "000001.SZ").
 //! Financial data split into 4 tables (income/balance/cashflow/indicator).
 
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::FromRow;
 
 // ── a_stock_basic ───────────────────────────────────────────────────────
@@ -33,7 +33,7 @@ pub struct AStockBasic {
     pub total_share: Option<f64>,
     pub float_share: Option<f64>,
     pub free_share: Option<f64>,
-    pub updated_at: Option<NaiveDateTime>,
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 // ── a_daily_price ───────────────────────────────────────────────────────
@@ -41,7 +41,7 @@ pub struct AStockBasic {
 
 #[derive(Debug, Clone, FromRow)]
 pub struct ADailyPrice {
-    pub id: i32,
+    pub id: i64,
     pub ts_code: String,
     pub trade_date: NaiveDate,
     pub open: Option<f64>,
@@ -76,7 +76,7 @@ pub struct ADailyPrice {
 
 #[derive(Debug, Clone, FromRow)]
 pub struct AIndexDaily {
-    pub id: i32,
+    pub id: i64,
     pub ts_code: String,
     pub trade_date: NaiveDate,
     pub open: Option<f64>,
@@ -98,7 +98,7 @@ include!("a_financial_rows.rs");
 
 #[derive(Debug, Clone, FromRow)]
 pub struct AIndustryClass {
-    pub id: i32,
+    pub id: i64,
     pub ts_code: String,
     pub index_code: Option<String>,
     pub index_name: Option<String>,
@@ -113,7 +113,7 @@ pub struct AIndustryClass {
 
 #[derive(Debug, Clone, FromRow)]
 pub struct AMacroIndicator {
-    pub id: i32,
+    pub id: i64,
     pub indicator: String,
     pub report_date: NaiveDate,
     pub freq: Option<String>,
@@ -124,7 +124,7 @@ pub struct AMacroIndicator {
 
 #[derive(Debug, Clone, FromRow)]
 pub struct ATradeCal {
-    pub id: i32,
+    pub id: i64,
     pub exchange: String,
     pub cal_date: NaiveDate,
     pub is_open: Option<i32>,
@@ -135,7 +135,7 @@ pub struct ATradeCal {
 
 #[derive(Debug, Clone, FromRow)]
 pub struct ACommodityPrice {
-    pub id: i32,
+    pub id: i64,
     pub ts_code: String,
     pub trade_date: NaiveDate,
     pub open: Option<f64>,
@@ -154,7 +154,7 @@ pub struct ACommodityPrice {
 
 #[derive(Debug, Clone, FromRow)]
 pub struct AInsiderTransaction {
-    pub id: i32,
+    pub id: i64,
     pub ts_code: String,
     pub change_date: Option<NaiveDate>,
     pub holder_name: Option<String>,

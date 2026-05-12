@@ -100,7 +100,7 @@ pub struct AFinancialIncomeRow {
     pub continued_net_profit: Option<f64>,
     pub end_net_profit: Option<f64>,
     pub update_flag: Option<String>,
-    pub updated_at: NaiveDateTime,
+    pub updated_at: DateTime<Utc>,
 }
 
 // ── a_financial_balance (158 cols)
@@ -263,7 +263,7 @@ pub struct AFinancialBalanceRow {
     pub use_right_assets: Option<f64>,
     pub lease_liab: Option<f64>,
     pub update_flag: Option<String>,
-    pub updated_at: NaiveDateTime,
+    pub updated_at: DateTime<Utc>,
 }
 
 // ── a_financial_cashflow (98 cols)
@@ -366,7 +366,7 @@ pub struct AFinancialCashflowRow {
     pub end_bal_cash_equ: Option<f64>,
     pub beg_bal_cash_equ: Option<f64>,
     pub update_flag: Option<String>,
-    pub updated_at: NaiveDateTime,
+    pub updated_at: DateTime<Utc>,
 }
 
 // ── a_financial_indicator (167 cols)
@@ -538,5 +538,5 @@ pub struct AFinancialIndicatorRow {
     pub equity_yoy: Option<f64>,
     pub rd_exp: Option<f64>,
     pub update_flag: Option<String>,
-    pub updated_at: NaiveDateTime,
+    pub updated_at: DateTime<Utc>,
 }
