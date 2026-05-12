@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, info};
 
@@ -76,14 +77,16 @@ pub fn compute_scores(
     let factors = all_factors();
     let cat_weights = category_weights();
 
-    // Compute all factors
-    let mut factor_values: Vec<(&str, &str, i8, AFactorResult)> = Vec::new();
-    for f in &factors {
-        let raw = (f.compute)(date, cache);
-        if raw.is_empty() { continue; }
-        let processed = winsorize_zscore(&raw);
-        factor_values.push((f.name, f.category, f.direction, processed));
-    }
+    // Compute all factors in parallel (rayon). Matches US `cmd_backtest` US-path
+    // which does `factors.par_iter().filter_map(...)`.
+    let factor_values: Vec<(&str, &str, i8, AFactorResult)> = factors.par_iter()
+        .filter_map(|f| {
+            let raw = (f.compute)(date, cache);
+            if raw.is_empty() { return None; }
+            let processed = winsorize_zscore(&raw);
+            Some((f.name, f.category, f.direction, processed))
+        })
+        .collect();
 
     // Collect all stock codes (intersect with universe if provided)
     let mut all_codes: std::collections::HashSet<&str> = std::collections::HashSet::new();
