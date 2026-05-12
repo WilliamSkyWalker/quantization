@@ -2275,6 +2275,23 @@ async fn alpaca_status(client: &quant_trading::us_alpaca::AlpacaClient) {
             );
         }
     }
+
+    match client.open_orders().await {
+        Ok(orders) => {
+            println!("\n=== Open Orders ({}) ===", orders.len());
+            if orders.is_empty() {
+                println!("(无挂单)");
+            } else {
+                println!("{:<8} {:>6} {:<6} {:<12} {}",
+                         "Symbol", "Qty", "Side", "Status", "Created");
+                for o in &orders {
+                    println!("{:<8} {:>6} {:<6} {:<12} {}",
+                             o.symbol, o.qty, o.side, o.status, o.created_at);
+                }
+            }
+        }
+        Err(e) => eprintln!("open_orders 查询失败: {e}"),
+    }
 }
 
 async fn alpaca_plan(
@@ -2328,20 +2345,23 @@ async fn alpaca_plan(
     }
 
     println!("\n提交订单...");
-    match client.execute_plan(&plan).await {
-        Ok(orders) => {
-            println!("✓ Submitted {} orders.", orders.len());
-            for o in orders.iter().take(5) {
-                println!("  {} {} {} (id={}, status={})", o.side, o.qty, o.symbol, o.id, o.status);
-            }
-            if orders.len() > 5 {
-                println!("  ... ({} more)", orders.len() - 5);
-            }
+    let report = client.execute_plan(&plan).await;
+
+    println!("✓ Submitted {} orders.", report.submitted.len());
+    for o in report.submitted.iter().take(5) {
+        println!("  {} {} {} (id={}, status={})", o.side, o.qty, o.symbol, o.id, o.status);
+    }
+    if report.submitted.len() > 5 {
+        println!("  ... ({} more)", report.submitted.len() - 5);
+    }
+
+    if !report.failed.is_empty() {
+        eprintln!("\n✗ {} order(s) FAILED — 实际持仓将偏离目标组合:", report.failed.len());
+        for f in &report.failed {
+            eprintln!("  {} {} {}: {}", f.side, f.shares, f.symbol, f.error);
         }
-        Err(e) => {
-            eprintln!("execute_plan failed: {e}");
-            std::process::exit(1);
-        }
+        eprintln!("\n处理建议: 手动补单 / 换标的 / 下次 rebalance 重试。退出码 = 2。");
+        std::process::exit(2);
     }
 }
 

@@ -268,6 +268,11 @@ impl AlpacaClient {
         Ok(PortfolioState { account, positions })
     }
 
+    /// GET /v2/orders?status=open — 当前所有未成交挂单（含 accepted/new/pending）
+    pub async fn open_orders(&self) -> Result<Vec<Order>, AlpacaError> {
+        self.get("/v2/orders?status=open&limit=500").await
+    }
+
     /// POST /v2/orders — market 单
     pub async fn submit_market_order(
         &self,
@@ -368,9 +373,12 @@ impl AlpacaClient {
         })
     }
 
-    /// 执行 plan：依次提交所有订单（market day-order）
-    pub async fn execute_plan(&self, plan: &RebalancePlan) -> Result<Vec<Order>, AlpacaError> {
-        let mut filled = Vec::new();
+    /// 执行 plan：依次提交所有订单（market day-order）。
+    /// 返回 (已提交订单, 失败订单)。失败 = ticker/side/shares/错误原因，
+    /// 调用方需自行决定是否补单/放弃/abort（不在此处静默吞错）。
+    pub async fn execute_plan(&self, plan: &RebalancePlan) -> ExecutionReport {
+        let mut submitted = Vec::new();
+        let mut failed = Vec::new();
         for o in &plan.orders {
             let shares = o.delta_shares.abs() as i64;
             if shares < 1 {
@@ -383,15 +391,38 @@ impl AlpacaClient {
                         "submitted {} {} {} (id={})",
                         o.side, shares, o.symbol, order.id
                     );
-                    filled.push(order);
+                    submitted.push(order);
                 }
                 Err(e) => {
-                    warn!("submit failed {} {}: {e}", o.side, o.symbol);
+                    let msg = e.to_string();
+                    tracing::error!("submit failed {} {} {}: {msg}", o.side, shares, o.symbol);
+                    failed.push(FailedOrder {
+                        symbol: o.symbol.clone(),
+                        side: o.side.to_string(),
+                        shares,
+                        error: msg,
+                    });
                 }
             }
         }
-        Ok(filled)
+        ExecutionReport { submitted, failed }
     }
+}
+
+/// 单笔订单提交失败的明细
+#[derive(Debug, Clone)]
+pub struct FailedOrder {
+    pub symbol: String,
+    pub side: String,
+    pub shares: i64,
+    pub error: String,
+}
+
+/// `execute_plan` 的返回值：分开记录已提交 / 失败
+#[derive(Debug, Clone)]
+pub struct ExecutionReport {
+    pub submitted: Vec<Order>,
+    pub failed: Vec<FailedOrder>,
 }
 
 /// serde 反序列化辅助：Alpaca 返回字符串数字，要转 f64
