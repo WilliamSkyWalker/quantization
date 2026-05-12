@@ -669,7 +669,7 @@ impl FmpDownloader {
             let data = if *endpoint_type == "treasury" {
                 self.fmp_get_v4("treasury", &[("from", "2000-01-01"), ("to", "2026-12-31")]).await
             } else {
-                self.fmp_get_v4(&format!("economic?name={param}"), &[]).await
+                self.fmp_get_v4("economic", &[("name", param)]).await
             };
 
             if data.is_empty() { continue; }
