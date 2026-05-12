@@ -309,7 +309,7 @@ fn main() {
             no_short,
             export_signals,
         } => {
-            cmd_backtest(&_config, &cache_dir, &start, &end, &output, no_short, no_optimizer, export_signals);
+            cmd_backtest(&_config, cli.market, &cache_dir, &start, &end, &output, no_short, no_optimizer, export_signals);
         }
         Commands::Analyze {
             start,
@@ -879,6 +879,7 @@ fn cmd_analyze(
 
 fn cmd_backtest(
     config: &quant_core::config::Config,
+    market: Market,
     cache_dir: &PathBuf,
     start_str: &str,
     end_str: &str,
@@ -891,7 +892,248 @@ fn cmd_backtest(
         .expect("Invalid start date (expected YYYY-MM-DD)");
     let end = chrono::NaiveDate::parse_from_str(end_str, "%Y-%m-%d")
         .expect("Invalid end date (expected YYYY-MM-DD)");
+    if end < start {
+        eprintln!("end ({end}) is before start ({start})");
+        std::process::exit(1);
+    }
 
+    // ── A-share path: long-only equal-weight, T+1 engine. ──
+    // Regime / MVO / short / rolling-IC NOT wired here (US-only today; tracked as TODOs).
+    if matches!(market, Market::Cn) {
+        use chrono::Datelike;
+        use quant_backtest::a_engine::{run_backtest as a_run_backtest, ACostConfig};
+        use quant_strategy::a_strategy;
+
+        if no_short {
+            warn!("--no-short: A 股策略本就是 long-only，flag 已忽略");
+        }
+        if no_optimizer {
+            warn!("--no-optimizer: A 股 a_strategy 暂未接入 MVO，flag 已忽略");
+        }
+
+        let db_url = config.database.url();
+        let schema = &config.database.schema;
+        if db_url.contains("@:/") || db_url.contains("postgres://:@") {
+            eprintln!("Database not configured. Set DB_HOST/USER/PASSWORD/DATABASE.");
+            std::process::exit(1);
+        }
+
+        let benchmark_code = config.a_share.universe.benchmark_index.clone();
+        // 4-year lookback: CAGR_3Y (~13 quarters) + momentum (240 days).
+        let load_start = start - chrono::Duration::days(365 * 4);
+        let load_end = end + chrono::Duration::days(1);
+
+        info!("Loading A-share cache from DB [{}, {}]...", load_start, load_end);
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let mut cache = rt.block_on(async {
+            let pool = quant_db::pool::create_pool(&db_url, schema, 8).await
+                .expect("connect to db");
+            let mut cache = build_a_share_cache(&pool, load_start, load_end).await;
+
+            // build_a_share_cache leaves index_prices empty; load benchmark series here.
+            info!("Loading benchmark index {} [{}, {}]...", benchmark_code, load_start, load_end);
+            let idx_rows = quant_db::queries::a_read::get_a_index_daily(
+                &pool, &benchmark_code, load_start, load_end,
+            ).await.expect("Failed to load a_index_daily");
+            let mut series: Vec<(chrono::NaiveDate, f64)> = idx_rows.into_iter()
+                .filter_map(|r| r.close.map(|c| (r.trade_date, c)))
+                .collect();
+            series.sort_by_key(|(d, _)| *d);
+            info!("Loaded {} benchmark index rows", series.len());
+            cache.index_prices.insert(benchmark_code.clone(), series);
+
+            pool.close().await;
+            cache
+        });
+
+        if cache.daily.is_empty() {
+            eprintln!("No A-share price data in DB for [{}, {}].", load_start, load_end);
+            std::process::exit(1);
+        }
+        let bm_rows = cache.index_prices.get(&benchmark_code).map(|v| v.len()).unwrap_or(0);
+        if bm_rows == 0 {
+            warn!("Benchmark {} has 0 rows — benchmark NAV will stay flat.", benchmark_code);
+        }
+        info!(
+            "AShareCache: {} stocks, {} financials, {} industries, {} basics, {} trading days, {} benchmark rows",
+            cache.daily.len(),
+            cache.financials.len(),
+            cache.industry.len(),
+            cache.basics.len(),
+            cache.trading_days.len(),
+            bm_rows,
+        );
+
+        // Trim trading_days + benchmark to backtest window. Per-stock daily and
+        // financials are date-keyed independently and stay intact for lookback.
+        cache.trading_days.retain(|d| *d >= start && *d <= end);
+        if let Some(s) = cache.index_prices.get_mut(&benchmark_code) {
+            s.retain(|(d, _)| *d >= start && *d <= end);
+        }
+        if cache.trading_days.is_empty() {
+            eprintln!("No trading days in [{}, {}] — check a_trade_cal SSE coverage.", start, end);
+            std::process::exit(1);
+        }
+        info!("Backtest window: {} trading days [{}, {}]",
+            cache.trading_days.len(),
+            cache.trading_days.first().unwrap(),
+            cache.trading_days.last().unwrap(),
+        );
+
+        // === Generate monthly signals ===
+        let t0 = std::time::Instant::now();
+        let signals = a_strategy::generate_signals(
+            &cache,
+            config.a_share.strategy.max_holdings,
+            config.a_share.strategy.min_select_score,
+            Some(&config.a_share.universe),
+        );
+        info!(
+            "Signal generation: {:.1}s ({} monthly signals)",
+            t0.elapsed().as_secs_f64(),
+            signals.len(),
+        );
+
+        if signals.is_empty() {
+            eprintln!("No signals generated — check universe filter / factor coverage.");
+            return;
+        }
+
+        // === Dump holdings @ first/middle/last rebalance ===
+        {
+            let dates: Vec<chrono::NaiveDate> = signals.keys().copied().collect();
+            let n = dates.len();
+            let dump_dates: Vec<chrono::NaiveDate> = if n >= 3 {
+                vec![dates[0], dates[n / 2], dates[n - 1]]
+            } else {
+                dates.clone()
+            };
+
+            for d in dump_dates {
+                let w = match signals.get(&d) {
+                    Some(x) => x,
+                    None => continue,
+                };
+                let mut sorted: Vec<(&String, f64)> =
+                    w.iter().map(|(k, &v)| (k, v)).collect();
+                sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let gross: f64 = w.values().map(|v| v.abs()).sum();
+                let net: f64 = w.values().sum();
+                println!(
+                    "\n=== Holdings @ {d} (n={}, gross={:.2}, net={:+.2}) ===",
+                    w.len(), gross, net
+                );
+                println!("  ts_code      weight   name         industry");
+                for (code, weight) in sorted.iter().take(15) {
+                    let name = cache.basics.get(*code)
+                        .map(|b| b.name.as_str()).unwrap_or("?");
+                    let ind = cache.industry.get(*code)
+                        .map(|i| i.industry_name.as_str()).unwrap_or("?");
+                    println!("  {code:<12} {weight:>+7.4}   {name:<12} {ind}");
+                }
+            }
+        }
+
+        // === Run backtest ===
+        let cost = ACostConfig::from_a_share(&config.a_share);
+        let result = a_run_backtest(
+            &signals,
+            &cache,
+            &cost,
+            &benchmark_code,
+            Some(&config.a_share.universe),
+        );
+
+        // === Print results ===
+        let bm_label = if benchmark_code == "000300.SH" { "CSI 300" } else { benchmark_code.as_str() };
+        println!("\n{}", "=".repeat(70));
+        println!("A-SHARE BACKTEST: {} to {}", start, end);
+        println!("Benchmark: {} ({})", benchmark_code, bm_label);
+        println!("{}", "=".repeat(70));
+        println!("Total Return:       {:>10.2}%", result.total_return * 100.0);
+        println!("Annual Return:      {:>10.2}%", result.annual_return * 100.0);
+        println!("Annual Volatility:  {:>10.2}%", result.annual_volatility * 100.0);
+        println!("Sharpe Ratio:       {:>10.2}", result.sharpe_ratio);
+        println!("Max Drawdown:       {:>10.2}%", result.max_drawdown * 100.0);
+        println!("Calmar Ratio:       {:>10.2}", result.calmar_ratio);
+        println!("Win Rate:           {:>10.2}%", result.win_rate * 100.0);
+        println!("Total Trades:       {:>10}", result.total_trades);
+        println!("Annual Turnover:    {:>10.2}x", result.annual_turnover);
+
+        // Yearly breakdown (only meaningful when window spans >100 trading days).
+        if result.nav.len() > 100 {
+            println!("\nYearly Returns:");
+            println!("{:>6} {:>10} {:>10} {:>10}", "Year", "Strategy", bm_label, "Excess");
+            println!("{}", "-".repeat(42));
+
+            let mut year_ends: std::collections::BTreeMap<i32, f64> = std::collections::BTreeMap::new();
+            let mut bm_year_ends: std::collections::BTreeMap<i32, f64> = std::collections::BTreeMap::new();
+            for &(date, nav) in &result.nav {
+                year_ends.insert(date.year(), nav);
+            }
+            for &(date, nav) in &result.benchmark_nav {
+                bm_year_ends.insert(date.year(), nav);
+            }
+
+            let mut prev_nav = 1.0;
+            let mut prev_bm = 1.0;
+            for (year, &nav) in &year_ends {
+                let bm = bm_year_ends.get(year).copied().unwrap_or(prev_bm);
+                let strat_ret = nav / prev_nav - 1.0;
+                let bm_ret = bm / prev_bm - 1.0;
+                let excess = strat_ret - bm_ret;
+                println!(
+                    "{:>6} {:>9.2}% {:>9.2}% {:>+9.2}%",
+                    year, strat_ret * 100.0, bm_ret * 100.0, excess * 100.0
+                );
+                prev_nav = nav;
+                prev_bm = bm;
+            }
+        }
+
+        // === Export last-rebalance signal ===
+        if export_signals {
+            if let Some((last_date, last_weights)) = signals.iter().next_back() {
+                let weights_map: std::collections::BTreeMap<String, f64> = last_weights.iter()
+                    .map(|(k, &v)| (k.clone(), v))
+                    .collect();
+                let gross: f64 = last_weights.values().map(|w| w.abs()).sum();
+                let net: f64 = last_weights.values().sum();
+                let n_long = last_weights.values().filter(|&&w| w > 0.0).count();
+                let n_short = last_weights.values().filter(|&&w| w < 0.0).count();
+
+                let payload = serde_json::json!({
+                    "date": last_date.to_string(),
+                    "weights": weights_map,
+                    "metadata": {
+                        "n_long": n_long,
+                        "n_short": n_short,
+                        "n_total": last_weights.len(),
+                        "gross": gross,
+                        "net": net,
+                        "market": "cn",
+                        "benchmark": benchmark_code,
+                        "backtest_start": start_str,
+                        "backtest_end": end_str,
+                        "generated_at": chrono::Utc::now().to_rfc3339(),
+                    }
+                });
+
+                std::fs::create_dir_all(output_dir).ok();
+                let path = output_dir.join(format!("signals_{last_date}.json"));
+                std::fs::write(&path, serde_json::to_string_pretty(&payload).unwrap()).ok();
+                info!(
+                    "Exported signals → {} ({} positions, gross={:.2})",
+                    path.display(), last_weights.len(), gross
+                );
+            } else {
+                warn!("--export-signals: no signals generated, skipping export");
+            }
+        }
+        return;
+    }
+
+    // ── US path (default) ──
     info!("Loading data...");
     let cache = builder::build_cache_ranged(cache_dir, Some(start), Some(end))
         .expect("Failed to build DataCache");
