@@ -89,6 +89,30 @@ pub struct OrderRequest {
     pub time_in_force: String, // "day" | "gtc" | "ioc" | "fok"
 }
 
+/// GET /v2/account/portfolio/history response
+#[derive(Debug, Clone, Deserialize)]
+pub struct PortfolioHistory {
+    /// Unix epoch seconds for each sample
+    pub timestamp: Vec<i64>,
+    pub equity: Vec<f64>,
+    pub profit_loss: Vec<f64>,
+    pub profit_loss_pct: Vec<f64>,
+    pub base_value: f64,
+    pub timeframe: String,
+}
+
+/// 单根 K 线（data.alpaca.markets bars）
+#[derive(Debug, Clone, Deserialize)]
+pub struct Bar {
+    /// RFC3339 timestamp，例如 "2026-05-12T00:00:00Z"
+    pub t: String,
+    pub o: f64,
+    pub h: f64,
+    pub l: f64,
+    pub c: f64,
+    pub v: f64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Order {
     pub id: String,
@@ -255,6 +279,63 @@ impl AlpacaClient {
             .and_then(|p| p.as_f64())
             .ok_or_else(|| AlpacaError::Parse("trade.p missing".to_string()))?;
         Ok(price)
+    }
+
+    /// GET /v2/account/portfolio/history — 组合 equity 时间序列
+    ///
+    /// period: "1D" / "1W" / "1M" / "3M" / "1A" / "all"
+    /// timeframe: "1Min" / "5Min" / "15Min" / "1H" / "1D"
+    pub async fn portfolio_history(
+        &self,
+        period: &str,
+        timeframe: &str,
+    ) -> Result<PortfolioHistory, AlpacaError> {
+        let path = format!(
+            "/v2/account/portfolio/history?period={period}&timeframe={timeframe}"
+        );
+        self.get(&path).await
+    }
+
+    /// GET data.alpaca.markets /v2/stocks/{symbol}/bars — 历史日线
+    ///
+    /// start/end: ISO date "YYYY-MM-DD"
+    /// timeframe: "1Day" / "1Hour" / "1Min" 等
+    pub async fn historical_bars(
+        &self,
+        symbol: &str,
+        start: &str,
+        end: &str,
+        timeframe: &str,
+    ) -> Result<Vec<Bar>, AlpacaError> {
+        // feed=iex — free / 入门 data plan 不允许查 SIP feed 最近 15 分钟数据。
+        // IEX 单交易所覆盖足够做 SPY 之类宽基对比，正式付费用户可加 feed=sip。
+        let url = format!(
+            "{DATA_BASE}/v2/stocks/{symbol}/bars?timeframe={timeframe}&start={start}&end={end}&adjustment=all&feed=iex&limit=10000"
+        );
+        let mut req = self.http.get(&url);
+        for (k, v) in self.auth_headers() {
+            req = req.header(k, v);
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AlpacaError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        let json: serde_json::Value = resp.json().await?;
+        let bars = json
+            .get("bars")
+            .and_then(|b| b.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let parsed: Vec<Bar> = bars
+            .into_iter()
+            .filter_map(|v| serde_json::from_value::<Bar>(v).ok())
+            .collect();
+        Ok(parsed)
     }
 
     /// 当前组合状态：账户 + 所有持仓

@@ -53,6 +53,21 @@ enum AlpacaAction {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// 组合 NAV vs benchmark（默认 SPY）对比
+    Compare {
+        /// Alpaca portfolio_history period: 1D / 1W / 1M / 3M / 1A / all
+        #[arg(long, default_value = "1M")]
+        period: String,
+
+        /// Benchmark ticker
+        #[arg(long, default_value = "SPY")]
+        benchmark: String,
+
+        /// 可选：导出 CSV 路径（列：time / portfolio_nav / benchmark_nav / excess）
+        #[arg(long)]
+        csv: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2233,6 +2248,9 @@ fn cmd_alpaca(action: AlpacaAction) {
             AlpacaAction::Status => alpaca_status(&client).await,
             AlpacaAction::Plan { signals } => alpaca_plan(&client, &signals, true).await,
             AlpacaAction::Run { signals, dry_run } => alpaca_plan(&client, &signals, dry_run).await,
+            AlpacaAction::Compare { period, benchmark, csv } => {
+                alpaca_compare(&client, &period, &benchmark, csv.as_deref()).await
+            }
         }
     });
 }
@@ -2362,6 +2380,172 @@ async fn alpaca_plan(
         }
         eprintln!("\n处理建议: 手动补单 / 换标的 / 下次 rebalance 重试。退出码 = 2。");
         std::process::exit(2);
+    }
+}
+
+/// 组合 NAV vs benchmark 对比（默认 SPY）
+///
+/// Alpaca portfolio_history 端点返回 unix-second 时间戳 + equity 序列。
+/// Benchmark 走 data.alpaca.markets 历史日线（adjustment=all 含 splits/dividends）。
+/// 按日期对齐两条序列、归一化到起点 = 1.0，输出 NAV + 累计 ret 表。
+async fn alpaca_compare(
+    client: &quant_trading::us_alpaca::AlpacaClient,
+    period: &str,
+    benchmark: &str,
+    csv_out: Option<&std::path::Path>,
+) {
+    use chrono::TimeZone;
+
+    // period=1D 必须用 intraday timeframe，否则 EOD 快照前永远是 0 样本。
+    // 其余 period 用日线最实用。
+    let intraday = period == "1D";
+    let timeframe = if intraday { "5Min" } else { "1D" };
+    let bar_timeframe = if intraday { "5Min" } else { "1Day" };
+
+    let history = match client.portfolio_history(period, timeframe).await {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("portfolio_history 查询失败: {e}");
+            eprintln!("提示: period 必须是 1D/1W/1M/3M/1A/all 之一");
+            std::process::exit(1);
+        }
+    };
+
+    if history.timestamp.is_empty() {
+        eprintln!("portfolio_history 返回空 — 账户太新或 period 无样本");
+        std::process::exit(1);
+    }
+
+    // unix-sec → NaiveDateTime (UTC)。daily 模式会按日期 dedup（一日一点），
+    // intraday 保留每 5 分钟样本。
+    let mut port_series: Vec<(chrono::NaiveDateTime, f64)> = history.timestamp.iter()
+        .zip(history.equity.iter())
+        .filter_map(|(&ts, &eq)| {
+            if eq <= 0.0 { return None; }
+            let dt = chrono::Utc.timestamp_opt(ts, 0).single()?;
+            Some((dt.naive_utc(), eq))
+        })
+        .collect();
+    port_series.sort_by_key(|(t, _)| *t);
+    if !intraday {
+        port_series.dedup_by_key(|(t, _)| t.date());
+    }
+
+    if port_series.len() < 2 {
+        eprintln!(
+            "组合只有 {} 个样本（period={period}），至少需要 2 个日点才能算累计 ret。\
+             \n账户刚开仓时正常 — 等积累几天后再跑。",
+            port_series.len()
+        );
+        if let Some(&(_, eq)) = port_series.first() {
+            println!("当前 equity: ${:.2}（base_value=${:.2}）", eq, history.base_value);
+        }
+        return;
+    }
+
+    let start_dt = port_series.first().unwrap().0;
+    let end_dt = port_series.last().unwrap().0;
+
+    // 拉 benchmark bars。intraday 用 5Min，daily 用 1Day；起点回看 1 天/5 天保证对齐。
+    let lookback_days = if intraday { 1 } else { 5 };
+    let bm_start = (start_dt.date() - chrono::Duration::days(lookback_days))
+        .format("%Y-%m-%d").to_string();
+    let bm_end = (end_dt.date() + chrono::Duration::days(1))
+        .format("%Y-%m-%d").to_string();
+    let bars = match client.historical_bars(benchmark, &bm_start, &bm_end, bar_timeframe).await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{benchmark} 历史 K 线查询失败: {e}");
+            std::process::exit(1);
+        }
+    };
+    if bars.is_empty() {
+        eprintln!("{benchmark} 在 [{bm_start}, {bm_end}] 无 bar — 检查 ticker 拼写");
+        std::process::exit(1);
+    }
+
+    // Bar.t = "2026-05-12T04:00:00Z" — parse to NaiveDateTime
+    let mut bm_by_time: std::collections::BTreeMap<chrono::NaiveDateTime, f64> =
+        std::collections::BTreeMap::new();
+    for b in &bars {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&b.t) {
+            bm_by_time.insert(dt.naive_utc(), b.c);
+        }
+    }
+
+    // 起点对齐：找组合首点 ≤ 的最近 bm bar
+    let bm_base = bm_by_time.range(..=start_dt).next_back().map(|(_, &c)| c)
+        .or_else(|| bm_by_time.values().next().copied());
+    let bm_base = match bm_base {
+        Some(c) if c > 0.0 => c,
+        _ => {
+            eprintln!("{benchmark} 起点价格无效");
+            std::process::exit(1);
+        }
+    };
+
+    let port_base = port_series.first().unwrap().1;
+
+    println!("\n=== NAV 对比: 组合 vs {} ===", benchmark);
+    let stamp_fmt = if intraday { "%Y-%m-%d %H:%M" } else { "%Y-%m-%d" };
+    let stamp_w = if intraday { 17 } else { 12 };
+    println!("Period: {period} ({} 个样本, {} → {})",
+        port_series.len(),
+        start_dt.format(stamp_fmt),
+        end_dt.format(stamp_fmt),
+    );
+    println!("起点 equity = ${:.2}, 起点 {} 价 = ${:.2}\n", port_base, benchmark, bm_base);
+    println!("{:<width$} {:>12} {:>10} {:>12} {:>10} {:>10}",
+        "Time", "Equity", "Port NAV", &format!("{} Close", benchmark), "BM NAV", "Excess",
+        width = stamp_w);
+    println!("{}", "-".repeat(stamp_w + 58));
+
+    let mut last_bm_price = bm_base;
+    let mut last_port_nav = 1.0;
+    let mut last_bm_nav = 1.0;
+    let mut csv_rows: Vec<(String, f64, f64)> = Vec::new();
+    for (t, eq) in &port_series {
+        // 取最近 ≤t 的 bm bar
+        let bm_close = bm_by_time.range(..=*t).next_back().map(|(_, &c)| c)
+            .unwrap_or(last_bm_price);
+        last_bm_price = bm_close;
+
+        let port_nav = eq / port_base;
+        let bm_nav = bm_close / bm_base;
+        let excess = port_nav - bm_nav;
+        println!("{:<width$} ${:>11.2} {:>10.4} ${:>11.2} {:>10.4} {:>+10.4}",
+            t.format(stamp_fmt).to_string(), eq, port_nav, bm_close, bm_nav, excess,
+            width = stamp_w);
+        last_port_nav = port_nav;
+        last_bm_nav = bm_nav;
+        csv_rows.push((t.format(stamp_fmt).to_string(), port_nav, bm_nav));
+    }
+
+    let port_total_ret = (last_port_nav - 1.0) * 100.0;
+    let bm_total_ret = (last_bm_nav - 1.0) * 100.0;
+    let excess_total = port_total_ret - bm_total_ret;
+    println!("\n=== 累计 ===");
+    println!("组合:     {:>+8.2}%", port_total_ret);
+    println!("{}:     {:>+8.2}%", benchmark, bm_total_ret);
+    println!("超额:     {:>+8.2}% ({})",
+        excess_total,
+        if excess_total >= 0.0 { "组合跑赢" } else { "组合跑输" });
+
+    // 注意事项
+    if port_series.len() < 10 {
+        println!("\n⚠ 样本只有 {} 个日点，统计噪声很大，仅供参考。", port_series.len());
+    }
+
+    if let Some(out) = csv_out {
+        let mut csv = String::from("time,portfolio_nav,benchmark_nav,excess\n");
+        for (t, pn, bn) in &csv_rows {
+            csv.push_str(&format!("{},{},{},{}\n", t, pn, bn, pn - bn));
+        }
+        if let Err(e) = std::fs::write(out, csv) {
+            eprintln!("写 CSV {} 失败: {e}", out.display());
+        } else {
+            println!("\nCSV 导出 → {}", out.display());
+        }
     }
 }
 
