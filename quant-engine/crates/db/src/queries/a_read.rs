@@ -16,14 +16,53 @@ pub async fn get_all_a_stocks(pool: &PgPool) -> Result<Vec<AStockBasic>, sqlx::E
     Ok(rows)
 }
 
+/// Parallel-sharded load of 4-year-ish `a_daily_price` window.
+///
+/// Single SELECT decodes ~5M rows × 30 cols serially on one thread (~50 min).
+/// Sharding by `ts_code` into N buckets (N = pool max_connections) lets sqlx
+/// decode N partitions concurrently on the tokio multi-thread runtime.
 pub async fn get_a_daily_prices(
     pool: &PgPool,
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<Vec<ADailyPrice>, sqlx::Error> {
-    sqlx::query_as::<_, ADailyPrice>(
-        "SELECT * FROM a_daily_price WHERE trade_date >= $1 AND trade_date <= $2 ORDER BY ts_code, trade_date"
-    ).bind(start).bind(end).fetch_all(pool).await
+    const N_SHARDS: usize = 8;
+
+    // Step 1: discover ts_codes with data in the window (index-only scan, fast).
+    let codes: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT ts_code FROM a_daily_price \
+         WHERE trade_date >= $1 AND trade_date <= $2"
+    ).bind(start).bind(end).fetch_all(pool).await?;
+    let codes: Vec<String> = codes.into_iter().map(|t| t.0).collect();
+    if codes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Step 2: shard ts_codes into N buckets. div_ceil so the last bucket isn't oversized.
+    let per_bucket = codes.len().div_ceil(N_SHARDS);
+    let buckets: Vec<Vec<String>> = codes.chunks(per_bucket).map(|c| c.to_vec()).collect();
+
+    // Step 3: spawn N concurrent SELECTs. Each task gets its own pool handle
+    // (PgPool is Arc-internally) and owns its bucket vector.
+    let mut tasks = Vec::with_capacity(buckets.len());
+    for bucket in buckets {
+        let pool = pool.clone();
+        tasks.push(tokio::spawn(async move {
+            sqlx::query_as::<_, ADailyPrice>(
+                "SELECT * FROM a_daily_price \
+                 WHERE ts_code = ANY($1) AND trade_date >= $2 AND trade_date <= $3 \
+                 ORDER BY ts_code, trade_date"
+            ).bind(&bucket).bind(start).bind(end).fetch_all(&pool).await
+        }));
+    }
+
+    // Step 4: collect. Reserve roughly the right capacity to avoid reallocs.
+    let mut all_rows: Vec<ADailyPrice> = Vec::new();
+    for t in tasks {
+        let part = t.await.expect("tokio join")?;
+        all_rows.extend(part);
+    }
+    Ok(all_rows)
 }
 
 pub async fn get_a_index_daily(
