@@ -343,11 +343,248 @@ pub fn fama_macbeth(
     summaries
 }
 
+// ======================================================================
+// A-share variants (String keys, AShareCache)
+// ======================================================================
+
+use quant_factors::a_share::cache::AShareCache;
+
+fn spearman_ic_a(
+    factor_values: &std::collections::HashMap<String, f64>,
+    forward_returns: &std::collections::HashMap<String, f64>,
+) -> Option<f64> {
+    let mut pairs: Vec<(f64, f64)> = Vec::new();
+    for (tid, &fv) in factor_values {
+        if let Some(&ret) = forward_returns.get(tid) {
+            if fv.is_finite() && ret.is_finite() {
+                pairs.push((fv, ret));
+            }
+        }
+    }
+    if pairs.len() < 30 { return None; }
+
+    let n = pairs.len();
+    let fv_ranks = rank_values(&pairs.iter().map(|(f, _)| *f).collect::<Vec<_>>());
+    let ret_ranks = rank_values(&pairs.iter().map(|(_, r)| *r).collect::<Vec<_>>());
+
+    let nf = n as f64;
+    let mean_f = fv_ranks.iter().sum::<f64>() / nf;
+    let mean_r = ret_ranks.iter().sum::<f64>() / nf;
+
+    let mut cov = 0.0;
+    let mut var_f = 0.0;
+    let mut var_r = 0.0;
+    for i in 0..n {
+        let df = fv_ranks[i] - mean_f;
+        let dr = ret_ranks[i] - mean_r;
+        cov += df * dr;
+        var_f += df * df;
+        var_r += dr * dr;
+    }
+    let denom = (var_f * var_r).sqrt();
+    if denom < 1e-10 { return None; }
+    let rho = cov / denom;
+    if rho.is_finite() { Some(rho) } else { None }
+}
+
+fn compute_forward_returns_a(
+    date: chrono::NaiveDate,
+    horizon_days: usize,
+    cache: &AShareCache,
+) -> std::collections::HashMap<String, f64> {
+    let idx = cache.trading_days.partition_point(|&d| d <= date);
+    let future_idx = idx + horizon_days;
+    if future_idx >= cache.trading_days.len() {
+        return std::collections::HashMap::new();
+    }
+    let future_date = cache.trading_days[future_idx];
+
+    let mut result = std::collections::HashMap::new();
+    for (ts_code, bars) in &cache.daily {
+        let cur = match bars.binary_search_by_key(&date, |(d, _)| *d) {
+            Ok(i) => &bars[i].1,
+            Err(_) => continue,
+        };
+        let fut = match bars.binary_search_by_key(&future_date, |(d, _)| *d) {
+            Ok(i) => &bars[i].1,
+            Err(_) => continue,
+        };
+        let adj_cur = cur.close * cur.adj_factor;
+        let adj_fut = fut.close * fut.adj_factor;
+        if adj_cur > 0.0 && adj_fut.is_finite() && adj_cur.is_finite() {
+            let ret = adj_fut / adj_cur - 1.0;
+            if ret.is_finite() {
+                result.insert(ts_code.clone(), ret);
+            }
+        }
+    }
+    result
+}
+
+/// IC analysis for A-share factors.
+pub fn compute_ic_panel_a(
+    factor_panel: &std::collections::HashMap<chrono::NaiveDate, std::collections::HashMap<String, std::collections::HashMap<String, f64>>>,
+    cache: &AShareCache,
+    horizon_days: usize,
+) -> Vec<IcSummary> {
+    let factor_names: Vec<String> = {
+        let mut names = std::collections::HashSet::new();
+        for fmap in factor_panel.values() {
+            names.extend(fmap.keys().cloned());
+        }
+        let mut v: Vec<_> = names.into_iter().collect();
+        v.sort();
+        v
+    };
+
+    let mut ic_series: HashMap<String, Vec<f64>> = HashMap::new();
+    let mut dates: Vec<chrono::NaiveDate> = factor_panel.keys().copied().collect();
+    dates.sort();
+
+    for &date in &dates {
+        let fwd_rets = compute_forward_returns_a(date, horizon_days, cache);
+        if fwd_rets.len() < 50 { continue; }
+
+        let fmap = &factor_panel[&date];
+        for fname in &factor_names {
+            if let Some(fvals) = fmap.get(fname) {
+                if let Some(ic) = spearman_ic_a(fvals, &fwd_rets) {
+                    ic_series.entry(fname.clone()).or_default().push(ic);
+                }
+            }
+        }
+    }
+
+    let mut summaries: Vec<IcSummary> = Vec::new();
+    for fname in &factor_names {
+        let ics = ic_series.get(fname).map(|v| v.as_slice()).unwrap_or(&[]);
+        let n = ics.len();
+        if n < 3 {
+            summaries.push(IcSummary {
+                factor_name: fname.clone(), n_months: n,
+                mean_ic: f64::NAN, std_ic: f64::NAN, icir: f64::NAN,
+                t_stat: f64::NAN, pct_positive: f64::NAN,
+            });
+            continue;
+        }
+        let nf = n as f64;
+        let mean = ics.iter().sum::<f64>() / nf;
+        let var = ics.iter().map(|ic| (ic - mean).powi(2)).sum::<f64>() / (nf - 1.0);
+        let std = var.sqrt();
+        let icir = if std > 1e-10 { mean / std } else { f64::NAN };
+        let t_stat = if std > 1e-10 { mean / (std / nf.sqrt()) } else { f64::NAN };
+        let pct_pos = ics.iter().filter(|ic| **ic > 0.0).count() as f64 / nf;
+        summaries.push(IcSummary {
+            factor_name: fname.clone(), n_months: n,
+            mean_ic: mean, std_ic: std, icir, t_stat, pct_positive: pct_pos,
+        });
+    }
+    summaries.sort_by(|a, b| b.icir.abs().total_cmp(&a.icir.abs()));
+    summaries
+}
+
+/// Fama-MacBeth regression for A-share factors.
+pub fn fama_macbeth_a(
+    factor_panel: &std::collections::HashMap<chrono::NaiveDate, std::collections::HashMap<String, std::collections::HashMap<String, f64>>>,
+    cache: &AShareCache,
+    horizon_days: usize,
+) -> Vec<FmSummary> {
+    let factor_names: Vec<String> = {
+        let mut names = std::collections::HashSet::new();
+        for fmap in factor_panel.values() {
+            names.extend(fmap.keys().cloned());
+        }
+        let mut v: Vec<_> = names.into_iter().collect();
+        v.sort();
+        v
+    };
+
+    let mut gamma_series: HashMap<String, Vec<f64>> = HashMap::new();
+    let mut dates: Vec<chrono::NaiveDate> = factor_panel.keys().copied().collect();
+    dates.sort();
+
+    for &date in &dates {
+        let fwd_rets = compute_forward_returns_a(date, horizon_days, cache);
+        if fwd_rets.len() < 100 { continue; }
+
+        let fmap = &factor_panel[&date];
+        let mut avail_factors: Vec<&str> = Vec::new();
+        for fname in &factor_names {
+            if let Some(fvals) = fmap.get(fname) {
+                let common = fvals.keys().filter(|t| fwd_rets.contains_key(*t)).count();
+                if common >= 30 { avail_factors.push(fname); }
+            }
+        }
+        if avail_factors.len() < 5 { continue; }
+
+        let common_tickers: Vec<&String> = fwd_rets.keys().collect();
+        if common_tickers.len() < 100 { continue; }
+
+        let n = common_tickers.len();
+        let k = avail_factors.len();
+        let y: Vec<f64> = common_tickers.iter().map(|t| fwd_rets[*t]).collect();
+
+        let mut x_data = vec![0.0f64; n * (k + 1)];
+        for row in 0..n { x_data[row * (k + 1)] = 1.0; }
+
+        for (j, fname) in avail_factors.iter().enumerate() {
+            let fvals = &fmap[*fname];
+            let raw: Vec<f64> = common_tickers.iter()
+                .map(|t| fvals.get(t.as_str()).copied().unwrap_or(0.0))
+                .collect();
+            let mean = raw.iter().sum::<f64>() / n as f64;
+            let var = raw.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
+            let std = var.sqrt();
+            for (row, &val) in raw.iter().enumerate() {
+                x_data[row * (k + 1) + j + 1] = if std > 1e-10 { (val - mean) / std } else { 0.0 };
+            }
+        }
+
+        let x = nalgebra::DMatrix::from_row_slice(n, k + 1, &x_data);
+        let y_vec = nalgebra::DVector::from_row_slice(&y);
+        let xtx = x.transpose() * &x;
+        let xty = x.transpose() * &y_vec;
+        let svd = xtx.svd(true, true);
+        let beta = match svd.solve(&xty, 1e-10) { Ok(b) => b, Err(_) => continue };
+
+        for (j, fname) in avail_factors.iter().enumerate() {
+            let gamma = beta[j + 1];
+            if gamma.is_finite() {
+                gamma_series.entry(fname.to_string()).or_default().push(gamma);
+            }
+        }
+    }
+
+    let mut summaries: Vec<FmSummary> = Vec::new();
+    for fname in &factor_names {
+        let gammas = gamma_series.get(fname).map(|v| v.as_slice()).unwrap_or(&[]);
+        let n = gammas.len();
+        if n < 3 {
+            summaries.push(FmSummary {
+                factor_name: fname.clone(), n_months: n,
+                mean_gamma: f64::NAN, std_gamma: f64::NAN, t_stat: f64::NAN,
+            });
+            continue;
+        }
+        let nf = n as f64;
+        let mean = gammas.iter().sum::<f64>() / nf;
+        let var = gammas.iter().map(|g| (g - mean).powi(2)).sum::<f64>() / (nf - 1.0);
+        let std = var.sqrt();
+        let t = if std > 1e-10 { mean / (std / nf.sqrt()) } else { f64::NAN };
+        summaries.push(FmSummary {
+            factor_name: fname.clone(), n_months: n,
+            mean_gamma: mean, std_gamma: std, t_stat: t,
+        });
+    }
+    summaries.sort_by(|a, b| b.t_stat.abs().total_cmp(&a.t_stat.abs()));
+    summaries
+}
+
 /// Compute average rank (1-based, ties get average).
 fn rank_values(values: &[f64]) -> Vec<f64> {
     let n = values.len();
     let mut indexed: Vec<(usize, f64)> = values.iter().copied().enumerate().collect();
-    indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    indexed.sort_by(|a, b| a.1.total_cmp(&b.1));
 
     let mut ranks = vec![0.0; n];
     let mut i = 0;

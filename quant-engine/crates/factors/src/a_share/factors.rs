@@ -111,6 +111,37 @@ pub fn all_factors() -> Vec<AFactorDef> {
                 }
                 r
             }},
+        AFactorDef { name: "PIOTROSKI_F", category: "quality", direction: 1,
+            compute: |date, cache| {
+                let mut r = AFactorResult::new();
+                for code in cache.active_codes_on(date) {
+                    if let Some(fin) = cache.get_latest_fin(code, date) {
+                        let mut score: f64 = 0.0;
+                        if fin.roa.is_finite() && fin.roa > 0.0 { score += 1.0; }
+                        if fin.ocf_to_profit.is_finite() && fin.ocf_to_profit > 1.0 { score += 1.0; }
+                        if fin.current_ratio.is_finite() && fin.current_ratio > 1.5 { score += 1.0; }
+                        if fin.gross_margin.is_finite() && fin.gross_margin > 20.0 { score += 1.0; }
+                        if fin.debt_to_assets.is_finite() && fin.debt_to_assets < 50.0 { score += 1.0; }
+                        if fin.assets_turn.is_finite() && fin.assets_turn > 0.5 { score += 1.0; }
+                        if score > 0.0 { r.insert(code.to_string(), score); }
+                    }
+                }
+                r
+            }},
+        AFactorDef { name: "ACCRUALS", category: "quality", direction: -1,
+            compute: |date, cache| {
+                let mut r = AFactorResult::new();
+                for code in cache.active_codes_on(date) {
+                    let fins = cache.get_fin_history(code, date, 5);
+                    if fins.len() < 2 { continue; }
+                    let now = fins[0].ocf_to_profit;
+                    let prev = fins[1].ocf_to_profit;
+                    if now.is_finite() && prev.is_finite() {
+                        r.insert(code.to_string(), now - prev);
+                    }
+                }
+                r
+            }},
 
         // ── Growth (3) ──────────────────────────────────────────────
         AFactorDef { name: "NET_PROFIT_YOY", category: "growth", direction: 1,
@@ -132,6 +163,34 @@ pub fn all_factors() -> Vec<AFactorDef> {
                     if now_eps > 0.0 && old_eps > 0.0 && now_eps.is_finite() && old_eps.is_finite() {
                         let cagr = (now_eps / old_eps).powf(1.0 / 3.0) - 1.0;
                         if cagr.is_finite() { r.insert(code.to_string(), cagr); }
+                    }
+                }
+                r
+            }},
+        AFactorDef { name: "REVENUE_ACCELERATION", category: "growth", direction: 1,
+            compute: |date, cache| {
+                let mut r = AFactorResult::new();
+                for code in cache.active_codes_on(date) {
+                    let fins = cache.get_fin_history(code, date, 5);
+                    if fins.len() < 2 { continue; }
+                    let now_yoy = fins[0].q_sales_yoy;
+                    let prev_yoy = fins[1].q_sales_yoy;
+                    if now_yoy.is_finite() && prev_yoy.is_finite() {
+                        r.insert(code.to_string(), now_yoy - prev_yoy);
+                    }
+                }
+                r
+            }},
+        AFactorDef { name: "GROSS_MARGIN_CHG", category: "growth", direction: 1,
+            compute: |date, cache| {
+                let mut r = AFactorResult::new();
+                for code in cache.active_codes_on(date) {
+                    let fins = cache.get_fin_history(code, date, 5);
+                    if fins.len() < 2 { continue; }
+                    let now = fins[0].gross_margin;
+                    let prev = fins.last().unwrap().gross_margin;
+                    if now.is_finite() && prev.is_finite() {
+                        r.insert(code.to_string(), now - prev);
                     }
                 }
                 r
@@ -188,6 +247,25 @@ pub fn all_factors() -> Vec<AFactorDef> {
                 // Commodity index momentum — needs commodity price data
                 // Placeholder: return empty (will be populated when commodity cache is loaded)
                 AFactorResult::new()
+            }},
+        AFactorDef { name: "PRICE_52W_HIGH", category: "momentum", direction: 1,
+            compute: |date, cache| {
+                let mut r = AFactorResult::new();
+                for code in cache.active_codes_on(date) {
+                    let bars = cache.get_bars_before(code, date, 380);
+                    if bars.len() < 200 { continue; }
+                    let max_adj: f64 = bars.iter()
+                        .map(|b| b.close * b.adj_factor)
+                        .filter(|v| v.is_finite() && *v > 0.0)
+                        .fold(0.0_f64, |a, b| a.max(b));
+                    if let Some(bar) = bars.last() {
+                        let cur = bar.close * bar.adj_factor;
+                        if max_adj > 0.0 && cur.is_finite() {
+                            r.insert(code.to_string(), cur / max_adj);
+                        }
+                    }
+                }
+                r
             }},
 
         // ── Technical (5) ───────────────────────────────────────────
@@ -274,6 +352,121 @@ pub fn all_factors() -> Vec<AFactorDef> {
                         let div = vol_trend - price_trend;
                         if div.is_finite() { r.insert(code.to_string(), div); }
                     }
+                }
+                r
+            }},
+        AFactorDef { name: "FREE_FLOAT_PCT", category: "technical", direction: 1,
+            compute: |date, cache| {
+                let mut r = AFactorResult::new();
+                for code in cache.active_codes_on(date) {
+                    if let Some(info) = cache.basics.get(code) {
+                        if let (Some(free), Some(total)) = (info.free_share, info.total_share) {
+                            if total > 0.0 && free.is_finite() && total.is_finite() {
+                                r.insert(code.to_string(), free / total);
+                            }
+                        }
+                    }
+                }
+                r
+            }},
+        AFactorDef { name: "AMIHUD_ILLIQ", category: "technical", direction: -1,
+            compute: |date, cache| {
+                let mut r = AFactorResult::new();
+                for code in cache.active_codes_on(date) {
+                    let bars = cache.get_bars_before(code, date, 21);
+                    if bars.len() < 15 { continue; }
+                    let illiq: f64 = bars.iter()
+                        .filter_map(|b| {
+                            let dollar_vol = b.close * b.amount;
+                            if dollar_vol > 0.0 && b.pct_chg.is_finite() {
+                                Some(b.pct_chg.abs() / dollar_vol)
+                            } else { None }
+                        })
+                        .sum();
+                    if illiq.is_finite() && illiq > 0.0 {
+                        r.insert(code.to_string(), illiq);
+                    }
+                }
+                r
+            }},
+        AFactorDef { name: "BAB_BETA", category: "technical", direction: -1,
+            compute: |date, cache| {
+                let idx = match cache.index_prices.get("000300.SH") {
+                    Some(v) => v,
+                    None => return AFactorResult::new(),
+                };
+                let mut r = AFactorResult::new();
+                for code in cache.active_codes_on(date) {
+                    let bars = cache.get_bars_before(code, date, 252);
+                    if bars.len() < 120 { continue; }
+                    let idx_end = idx.partition_point(|(d, _)| *d <= date);
+                    let idx_start = if idx_end >= bars.len() + 1 { idx_end - bars.len() - 1 } else { 0 };
+                    let idx_slice = &idx[idx_start..idx_end];
+                    if idx_slice.len() < 60 { continue; }
+                    let idx_rets: Vec<f64> = idx_slice.windows(2)
+                        .filter_map(|w| if w[0].1 > 0.0 { Some(w[1].1 / w[0].1 - 1.0) } else { None })
+                        .collect();
+                    let stock_rets: Vec<f64> = bars.windows(2)
+                        .filter_map(|w| {
+                            let p0 = w[0].close * w[0].adj_factor;
+                            let p1 = w[1].close * w[1].adj_factor;
+                            if p0 > 0.0 { Some(p1 / p0 - 1.0) } else { None }
+                        })
+                        .collect();
+                    let n = stock_rets.len().min(idx_rets.len());
+                    if n < 60 { continue; }
+                    let sr = &stock_rets[stock_rets.len()-n..];
+                    let ir = &idx_rets[idx_rets.len()-n..];
+                    let m = n as f64;
+                    let sx: f64 = ir.iter().sum();
+                    let sy: f64 = sr.iter().sum();
+                    let sxx: f64 = ir.iter().map(|v| v * v).sum();
+                    let sxy: f64 = ir.iter().zip(sr.iter()).map(|(x, y)| x * y).sum();
+                    let denom = m * sxx - sx * sx;
+                    if denom.abs() > 1e-12 {
+                        let beta = (m * sxy - sx * sy) / denom;
+                        if beta.is_finite() { r.insert(code.to_string(), beta); }
+                    }
+                }
+                r
+            }},
+        AFactorDef { name: "RSI_14", category: "technical", direction: -1,
+            compute: |date, cache| {
+                let mut r = AFactorResult::new();
+                for code in cache.active_codes_on(date) {
+                    let bars = cache.get_bars_before(code, date, 20);
+                    if bars.len() < 15 { continue; }
+                    let chgs: Vec<f64> = bars.windows(2)
+                        .filter_map(|w| {
+                            let p0 = w[0].close * w[0].adj_factor;
+                            let p1 = w[1].close * w[1].adj_factor;
+                            if p0 > 0.0 { Some(p1 / p0 - 1.0) } else { None }
+                        })
+                        .collect();
+                    if chgs.len() < 14 { continue; }
+                    let recent = &chgs[chgs.len() - 14..];
+                    let avg_gain: f64 = recent.iter().filter(|v| **v > 0.0).map(|v| *v).sum::<f64>() / 14.0;
+                    let avg_loss: f64 = recent.iter().filter(|v| **v < 0.0).map(|v| v.abs()).sum::<f64>() / 14.0;
+                    if avg_loss < 1e-10 { continue; }
+                    let rs = avg_gain / avg_loss;
+                    let rsi = 100.0 - 100.0 / (1.0 + rs);
+                    if rsi.is_finite() { r.insert(code.to_string(), rsi); }
+                }
+                r
+            }},
+        AFactorDef { name: "MAX_RET", category: "technical", direction: -1,
+            compute: |date, cache| {
+                let mut r = AFactorResult::new();
+                for code in cache.active_codes_on(date) {
+                    let bars = cache.get_bars_before(code, date, 35);
+                    if bars.len() < 20 { continue; }
+                    let mut rets: Vec<f64> = bars.iter()
+                        .filter_map(|b| if b.pct_chg.is_finite() { Some(b.pct_chg) } else { None })
+                        .collect();
+                    if rets.len() < 20 { continue; }
+                    rets.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                    let top5_avg = rets[..5].iter().sum::<f64>() / 5.0;
+                    if top5_avg.is_finite() { r.insert(code.to_string(), top5_avg); }
                 }
                 r
             }},

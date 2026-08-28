@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, info};
 
-use quant_core::config::AShareUniverseConfig;
+use quant_core::config::{AShareRegimeConfig, AShareUniverseConfig};
 use quant_factors::a_share::cache::AShareCache;
 use quant_factors::a_share::factors::{all_factors, AFactorResult};
 use quant_factors::a_share::universe::{AUniverseFilter, get_a_clean_universe};
@@ -27,6 +27,100 @@ fn category_weights() -> HashMap<&'static str, f64> {
     w.insert("macro", 0.6);
     w.insert("sentiment", 0.6);
     w
+}
+
+/// A-share regime detection — trend + volatility composite.
+///
+/// Returns `strength` in [0, 1]: >= 0.8 = bull, <= 0.3 = bear.
+fn detect_a_regime(
+    cache: &AShareCache,
+    index: &str,
+    date: NaiveDate,
+    ma_window: usize,
+) -> f64 {
+    let series = match cache.index_prices.get(index) {
+        Some(s) => s,
+        None => return 0.5,
+    };
+    let end_pos = match series.partition_point(|(d, _)| *d <= date) {
+        0 => return 0.5,
+        p => p,
+    };
+
+    // Trend: price vs MA
+    let ma_n = ma_window.min(end_pos);
+    let ma_start = end_pos - ma_n;
+    let ma_sum: f64 = series[ma_start..end_pos].iter().map(|(_, p)| p).sum();
+    let ma = ma_sum / ma_n as f64;
+    let current_price = series[end_pos - 1].1;
+    let dev_pct = if ma > 0.0 { (current_price / ma - 1.0) * 100.0 } else { 0.0 };
+    let trend = ((dev_pct + 5.0) / 10.0).clamp(0.0, 1.0);
+
+    // Volatility: 20-day realized vol, percentile over trailing 252 days
+    let vol_window = 20;
+    let lookback = 252.min(end_pos);
+    let mut vol_series = Vec::with_capacity(lookback - vol_window);
+    for i in vol_window..lookback {
+        let idx = end_pos - lookback + i;
+        let prev_idx = idx - 1;
+        if idx < end_pos && prev_idx < series.len() && idx < series.len() {
+            let ret = if series[prev_idx].1 > 0.0 {
+                (series[idx].1 / series[prev_idx].1).ln()
+            } else {
+                0.0
+            };
+            vol_series.push(ret);
+        }
+    }
+    let mut rolling_vols = Vec::new();
+    for i in vol_window..vol_series.len() {
+        let window = &vol_series[i - vol_window..i];
+        let mean = window.iter().sum::<f64>() / vol_window as f64;
+        let var = window.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (vol_window - 1) as f64;
+        rolling_vols.push(var.sqrt() * (252.0_f64).sqrt());
+    }
+    let current_vol = if vol_series.len() >= vol_window {
+        let w = &vol_series[vol_series.len() - vol_window..];
+        let mean = w.iter().sum::<f64>() / vol_window as f64;
+        let var = w.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (vol_window - 1) as f64;
+        var.sqrt() * (252.0_f64).sqrt()
+    } else {
+        0.0
+    };
+    let vol_pct = if rolling_vols.is_empty() {
+        0.5
+    } else {
+        let below = rolling_vols.iter().filter(|&&v| v < current_vol).count();
+        below as f64 / rolling_vols.len() as f64
+    };
+    let vol_score = 1.0 - vol_pct;
+
+    (0.6 * trend + 0.4 * vol_score).clamp(0.0, 1.0)
+}
+
+/// Linear interpolation for holdings ratio based on regime strength.
+fn holdings_ratio(strength: f64, bear_ratio: f64) -> f64 {
+    if strength >= 0.8 { 1.0 }
+    else if strength <= 0.3 { bear_ratio }
+    else {
+        let t = (strength - 0.3) / 0.5;
+        bear_ratio + t * (1.0 - bear_ratio)
+    }
+}
+
+/// Factor processing: winsorize + standardize (z-score).
+pub fn winsorize_zscore_public(raw: &AFactorResult) -> AFactorResult {
+    winsorize_zscore(raw)
+}
+
+/// Regime detection public wrapper.
+pub fn detect_a_regime_public(
+    cache: &AShareCache,
+    index: &str,
+    date: chrono::NaiveDate,
+    ma_window: usize,
+) -> f64 {
+    detect_a_regime(cache, index, date, ma_window)
 }
 
 /// Factor processing: winsorize + standardize (z-score).
@@ -73,9 +167,18 @@ pub fn compute_scores(
     date: NaiveDate,
     cache: &AShareCache,
     universe: Option<&FxHashSet<String>>,
+    regime_overrides: Option<&HashMap<String, f64>>,
 ) -> AFactorResult {
     let factors = all_factors();
-    let cat_weights = category_weights();
+    let base_weights = category_weights();
+    let cat_weights: HashMap<&str, f64> = if let Some(overrides) = regime_overrides {
+        base_weights.iter().map(|(cat, w)| {
+            let mult = overrides.get(*cat).copied().unwrap_or(1.0);
+            (*cat, w * mult)
+        }).collect()
+    } else {
+        base_weights
+    };
 
     // Compute all factors in parallel (rayon). Matches US `cmd_backtest` US-path
     // which does `factors.par_iter().filter_map(...)`.
@@ -174,6 +277,7 @@ pub fn generate_signals(
     n_holdings: usize,
     min_score: f64,
     universe_cfg: Option<&AShareUniverseConfig>,
+    regime_cfg: Option<&AShareRegimeConfig>,
 ) -> std::collections::BTreeMap<NaiveDate, FxHashMap<String, f64>> {
     use chrono::Datelike;
 
@@ -197,15 +301,40 @@ pub fn generate_signals(
     for (i, &date) in rebalance_dates.iter().enumerate() {
         let universe = filter.as_ref()
             .map(|f| get_a_clean_universe(date, cache, f));
-        let scores = compute_scores(date, cache, universe.as_ref());
-        let weights = select_portfolio(&scores, n_holdings, min_score);
+
+        // Regime detection: only for position sizing, not factor weight overrides.
+        let h_ratio = if let Some(cfg) = regime_cfg {
+            if cfg.enabled {
+                let strength = detect_a_regime(cache, &cfg.index, date, cfg.ma_window);
+                holdings_ratio(strength, cfg.bear_holdings_ratio)
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
+
+        let scores = compute_scores(date, cache, universe.as_ref(), None);
+        let effective_n = if h_ratio < 0.99 {
+            (n_holdings as f64 * h_ratio).round().max(1.0) as usize
+        } else {
+            n_holdings
+        };
+        let weights = select_portfolio(&scores, effective_n, min_score);
 
         if !weights.is_empty() {
             signals.insert(date, weights);
         }
 
         if (i + 1) % 12 == 0 || i + 1 == rebalance_dates.len() {
-            info!("Signal {}/{}: universe={} scored={} selected={}",
+            let regime_str = regime_cfg
+                .filter(|c| c.enabled)
+                .map(|c| {
+                    let s = detect_a_regime(cache, &c.index, date, c.ma_window);
+                    format!(" regime={:.2} ratio={:.2}", s, h_ratio)
+                })
+                .unwrap_or_default();
+            info!("Signal {}/{}: universe={} scored={} selected={}{regime_str}",
                 i + 1, rebalance_dates.len(),
                 universe.as_ref().map(|u| u.len() as i64).unwrap_or(-1),
                 scores.len(),

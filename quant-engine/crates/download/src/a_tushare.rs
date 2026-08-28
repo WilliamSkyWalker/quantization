@@ -16,7 +16,7 @@ use tracing::{info, warn};
 use crate::http::ApiClient;
 use crate::progress::ticker_progress;
 
-const MAX_CONCURRENT: usize = 20;
+const MAX_CONCURRENT: usize = 10;
 
 #[derive(Clone)]
 pub struct TushareDownloader {
@@ -164,7 +164,7 @@ impl TushareDownloader {
             .map(|c| format!("`{c}` = VALUES(`{c}`)"))
             .collect::<Vec<_>>().join(", ");
 
-        let chunk_size = 200;
+        let chunk_size = 50;
         let mut total = 0usize;
         let mut error_count = 0usize;
 

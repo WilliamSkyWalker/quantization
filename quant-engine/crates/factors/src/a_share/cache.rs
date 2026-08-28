@@ -43,6 +43,10 @@ pub struct AFinIndicator {
     pub q_netprofit_yoy: f64,
     pub current_ratio: f64,
     pub ocf_to_profit: f64,
+    pub roa: f64,
+    pub quick_ratio: f64,
+    pub assets_turn: f64,
+    pub debt_to_assets: f64,
 }
 
 /// Sector/industry mapping.
@@ -61,6 +65,7 @@ pub struct AStockInfo {
     pub is_st: bool,
     pub board: Option<String>,        // 主板 / 创业板 / 科创板 / 北交所
     pub total_share: Option<f64>,     // 万股
+    pub free_share: Option<f64>,      // 万股
 }
 
 /// Central A-share data cache.

@@ -285,7 +285,10 @@ fn main() {
             }
         }
         Commands::Score { date, top } => {
-            info!("TODO: score --date {date} --top {top}");
+            match cli.market {
+                Market::Us => info!("Score not implemented for US market"),
+                Market::Cn => cmd_a_score(&_config, &date, top),
+            }
         }
         Commands::DbStatus { market } => {
             cmd_db_status(&_config, &market);
@@ -311,7 +314,13 @@ fn main() {
             workers: _,
             output,
         } => {
-            cmd_analyze(&cache_dir, &start, &end, &output);
+            match cli.market {
+                Market::Cn => {
+                    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+                    rt.block_on(cmd_analyze_cn(&_config, &start, &end, &output));
+                }
+                Market::Us => cmd_analyze(&cache_dir, &start, &end, &output),
+            }
         }
         Commands::Trade { account, date, signals, dry_run, no_risk } => {
             match cli.market {
@@ -588,6 +597,117 @@ fn cmd_a_factors(config: &Config, date_str: &str) {
     }
 }
 
+fn cmd_a_score(config: &Config, date_str: &str, top_n: usize) {
+    let date = match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Invalid date format (expected YYYY-MM-DD): {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let db_url = config.database.url();
+    let schema = &config.database.schema;
+    if db_url.contains("@:/") || db_url.contains("mysql://:@") {
+        eprintln!("Database not configured. Set DB_HOST, DB_USER, DB_PASSWORD, DB_DATABASE env vars.");
+        std::process::exit(1);
+    }
+
+    info!("Building A-share cache from DB...");
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    let cache = rt.block_on(async {
+        let pool = quant_db::pool::create_pool(&db_url, schema, 8).await
+            .expect("Failed to connect to database");
+        let load_start = date - chrono::Duration::days(365 * 4);
+        let load_end = date + chrono::Duration::days(1);
+        let cache = build_a_share_cache(&pool, load_start, load_end).await;
+        pool.close().await;
+        cache
+    });
+
+    info!(
+        "AShareCache: {} stocks, {} trading days",
+        cache.daily.len(),
+        cache.trading_days.len(),
+    );
+
+    // Build clean universe
+    let clean_universe = {
+        use quant_factors::a_share::universe::{AUniverseFilter, get_a_clean_universe};
+        let filter = AUniverseFilter::from_config(&config.a_share.universe);
+        let clean = get_a_clean_universe(date, &cache, &filter);
+        info!("Clean universe on {date}: {}/{}", clean.len(), cache.ts_codes.len());
+        clean
+    };
+
+    // Regime detection
+    let regime_cfg = &config.a_share.regime;
+    let regime_overrides = if regime_cfg.enabled {
+        let strength = quant_strategy::a_strategy::detect_a_regime_public(
+            &cache, &regime_cfg.index, date, regime_cfg.ma_window,
+        );
+        let is_bear = strength < 0.3;
+        info!("Regime strength: {strength:.2} ({})", if is_bear { "bear" } else { "bull/neutral" });
+        if is_bear {
+            Some(regime_cfg.bear_overrides.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Compute scores
+    let scores = quant_strategy::a_strategy::compute_scores(
+        date,
+        &cache,
+        Some(&clean_universe),
+        regime_overrides.as_ref(),
+    );
+
+    info!("Scored {} stocks", scores.len());
+
+    // Select top-N
+    let portfolio = quant_strategy::a_strategy::select_portfolio(
+        &scores,
+        top_n,
+        config.a_share.strategy.min_select_score,
+    );
+
+    if portfolio.is_empty() {
+        println!("\nNo stocks passed the selection criteria on {date}");
+        return;
+    }
+
+    // Sort by score descending
+    let mut sorted: Vec<(&str, f64)> = scores.iter()
+        .filter(|(code, _)| portfolio.contains_key(*code))
+        .map(|(k, &v)| (k.as_str(), v))
+        .collect();
+    sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+    let weight = 1.0 / sorted.len() as f64;
+
+    println!("\n=== A股多因子选股 — {date} ===");
+    println!("选股数: {} | 等权权重: {:.2}% | Regime: {}\n",
+        sorted.len(),
+        weight * 100.0,
+        regime_overrides.as_ref().map_or("bull/neutral", |_| "bear"),
+    );
+    println!("{:<4} {:<12} {:<10} {:>8} {:>12}", "#", "代码", "名称", "得分", "行业");
+    println!("{}", "-".repeat(56));
+
+    for (i, (code, score)) in sorted.iter().enumerate() {
+        let name = cache.basics.get(*code)
+            .map(|b| b.name.as_str()).unwrap_or("?");
+        let industry = cache.industry.get(*code)
+            .map(|i| i.industry_name.as_str()).unwrap_or("?");
+        println!("{:<4} {:<12} {:<10} {:>+8.4} {:>12}", i + 1, code, name, score, industry);
+    }
+    println!("{}", "-".repeat(56));
+    println!("合计 {} 只股票", sorted.len());
+}
+
 async fn build_a_share_cache(
     pool: &sqlx::MySqlPool,
     start: chrono::NaiveDate,
@@ -647,6 +767,10 @@ async fn build_a_share_cache(
             q_netprofit_yoy: r.q_netprofit_yoy.unwrap_or(f64::NAN),
             current_ratio: r.current_ratio.unwrap_or(f64::NAN),
             ocf_to_profit: r.ocf_to_profit.unwrap_or(f64::NAN),
+            roa: r.roa.unwrap_or(f64::NAN),
+            quick_ratio: r.quick_ratio.unwrap_or(f64::NAN),
+            assets_turn: r.assets_turn.unwrap_or(f64::NAN),
+            debt_to_assets: r.debt_to_assets.unwrap_or(f64::NAN),
         };
         financials.entry(r.ts_code).or_default().push(fin);
     }
@@ -686,10 +810,27 @@ async fn build_a_share_cache(
             is_st: r.is_st != 0,
             board: r.board,
             total_share: r.total_share,
+            free_share: r.free_share,
         }))
         .collect();
 
     let ts_codes: Vec<String> = daily.keys().cloned().collect();
+
+    info!("Loading a_index_daily (000300.SH for BAB_BETA)...");
+    let mut index_prices: FxHashMap<String, Vec<(chrono::NaiveDate, f64)>> = FxHashMap::default();
+    match quant_db::queries::a_read::get_a_index_daily(pool, "000300.SH", start, end).await {
+        Ok(rows) => {
+            let mut pairs: Vec<(chrono::NaiveDate, f64)> = rows.into_iter()
+                .filter_map(|r| r.close.map(|c| (r.trade_date, c)))
+                .collect();
+            pairs.sort_by_key(|(d, _)| *d);
+            if !pairs.is_empty() {
+                info!("Loaded {} CSI 300 index prices", pairs.len());
+                index_prices.insert("000300.SH".to_string(), pairs);
+            }
+        }
+        Err(e) => { warn!("Failed to load index prices: {e}"); }
+    }
 
     AShareCache {
         daily,
@@ -697,7 +838,7 @@ async fn build_a_share_cache(
         industry,
         basics,
         trading_days,
-        index_prices: FxHashMap::default(),
+        index_prices,
         ts_codes,
     }
 }
@@ -864,6 +1005,139 @@ fn cmd_analyze(
     info!("Saved IC → {}, FM → {}", csv_path.display(), fm_path.display());
 }
 
+async fn cmd_analyze_cn(
+    config: &quant_core::config::Config,
+    start_str: &str,
+    end_str: &str,
+    output_dir: &PathBuf,
+) {
+    use chrono::Datelike;
+    use quant_factors::a_share::factors::all_factors;
+    use quant_strategy::analysis::{compute_ic_panel_a, fama_macbeth_a};
+
+    let start = chrono::NaiveDate::parse_from_str(start_str, "%Y-%m-%d")
+        .expect("Invalid start date");
+    let end = chrono::NaiveDate::parse_from_str(end_str, "%Y-%m-%d")
+        .expect("Invalid end date");
+
+    let db_url = config.database.url();
+    let schema = &config.database.schema;
+    let load_start = start - chrono::Duration::days(365 * 4);
+    let load_end = end + chrono::Duration::days(30);
+
+    info!("Loading A-share cache from DB [{}, {}]...", load_start, load_end);
+    let pool = quant_db::pool::create_pool(&db_url, schema, 8).await
+        .expect("connect to db");
+    let cache = build_a_share_cache(&pool, load_start, load_end).await;
+    pool.close().await;
+
+    let factors = all_factors();
+    info!("{} A-share factors registered", factors.len());
+
+    let rebalance_dates: Vec<chrono::NaiveDate> = {
+        let mut dates = Vec::new();
+        let mut last_ym = (0i32, 0u32);
+        for &d in cache.trading_days.iter().rev() {
+            let ym = (d.year(), d.month());
+            if ym != last_ym {
+                if d >= start && d <= end { dates.push(d); }
+                last_ym = ym;
+            }
+        }
+        dates.reverse();
+        dates
+    };
+    info!("{} dates for analysis", rebalance_dates.len());
+
+    let t0 = std::time::Instant::now();
+    let mut factor_panel: std::collections::HashMap<
+        chrono::NaiveDate,
+        std::collections::HashMap<String, std::collections::HashMap<String, f64>>,
+    > = std::collections::HashMap::new();
+
+    for (i, &date) in rebalance_dates.iter().enumerate() {
+        let mut date_factors = std::collections::HashMap::new();
+        for f in &factors {
+            let raw = (f.compute)(date, &cache);
+            if raw.is_empty() { continue; }
+            let processed = quant_strategy::a_strategy::winsorize_zscore_public(&raw);
+            if !processed.is_empty() {
+                date_factors.insert(f.name.to_string(), processed);
+            }
+        }
+        factor_panel.insert(date, date_factors);
+
+        if (i + 1) % 12 == 0 || i + 1 == rebalance_dates.len() {
+            info!("Panel {}/{} ({:.1}s)", i + 1, rebalance_dates.len(), t0.elapsed().as_secs_f64());
+        }
+    }
+    info!("Factor panel: {:.1}s", t0.elapsed().as_secs_f64());
+
+    info!("Computing IC (horizon=21d)...");
+    let ic_summaries = compute_ic_panel_a(&factor_panel, &cache, 21);
+
+    println!("\n{}", "=".repeat(90));
+    println!("A-SHARE FACTOR ANALYSIS: {} to {} ({} months)", start, end, rebalance_dates.len());
+    println!("{}", "=".repeat(90));
+
+    println!(
+        "\n{:<30} {:>5} {:>9} {:>9} {:>7} {:>7} {:>6}",
+        "Factor", "N", "Mean IC", "Std IC", "ICIR", "t-stat", "%Pos"
+    );
+    println!("{}", "-".repeat(90));
+
+    for s in &ic_summaries {
+        let star = if s.t_stat.abs() > 3.0 { "***" }
+            else if s.t_stat.abs() > 2.0 { "**" }
+            else { "" };
+        println!(
+            "{:<30} {:>5} {:>9.4} {:>9.4} {:>+7.3} {:>+7.2} {:>5.0}% {}",
+            s.factor_name, s.n_months, s.mean_ic, s.std_ic,
+            s.icir, s.t_stat, s.pct_positive * 100.0, star,
+        );
+    }
+
+    info!("Computing Fama-MacBeth (horizon=21d)...");
+    let fm_summaries = fama_macbeth_a(&factor_panel, &cache, 21);
+
+    println!("\n\n{:<30} {:>5} {:>12} {:>12} {:>8}",
+        "Factor (FM)", "N", "Mean γ", "Std γ", "t-stat");
+    println!("{}", "-".repeat(75));
+
+    for s in &fm_summaries {
+        let star = if s.t_stat.abs() > 3.0 { "***" }
+            else if s.t_stat.abs() > 2.0 { "**" }
+            else { "" };
+        println!(
+            "{:<30} {:>5} {:>12.6} {:>12.6} {:>+7.2} {}",
+            s.factor_name, s.n_months, s.mean_gamma, s.std_gamma, s.t_stat, star,
+        );
+    }
+    println!("\n> Harvey-Liu-Zhu (2016): |t| > 3.0 for statistical significance.");
+
+    std::fs::create_dir_all(output_dir).ok();
+    let csv_path = output_dir.join(format!("a_ic_summary_{start}_{end}.csv"));
+    let mut csv = String::from("factor,n_months,mean_ic,std_ic,icir,t_stat,pct_positive\n");
+    for s in &ic_summaries {
+        csv.push_str(&format!(
+            "{},{},{:.6},{:.6},{:.6},{:.6},{:.4}\n",
+            s.factor_name, s.n_months, s.mean_ic, s.std_ic, s.icir, s.t_stat, s.pct_positive,
+        ));
+    }
+    std::fs::write(&csv_path, csv).ok();
+
+    let fm_path = output_dir.join(format!("a_fama_macbeth_{start}_{end}.csv"));
+    let mut fm_csv = String::from("factor,n_months,mean_gamma,std_gamma,t_stat\n");
+    for s in &fm_summaries {
+        fm_csv.push_str(&format!(
+            "{},{},{:.8},{:.8},{:.4}\n",
+            s.factor_name, s.n_months, s.mean_gamma, s.std_gamma, s.t_stat,
+        ));
+    }
+    std::fs::write(&fm_path, fm_csv).ok();
+    info!("Saved IC → {}, FM → {}", csv_path.display(), fm_path.display());
+}
+
 fn cmd_backtest(
     config: &quant_core::config::Config,
     market: Market,
@@ -974,6 +1248,7 @@ fn cmd_backtest(
             config.a_share.strategy.max_holdings,
             config.a_share.strategy.min_select_score,
             Some(&config.a_share.universe),
+            Some(&config.a_share.regime),
         );
         info!(
             "Signal generation: {:.1}s ({} monthly signals)",

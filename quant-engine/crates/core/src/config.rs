@@ -543,10 +543,10 @@ impl Default for AShareRegimeConfig {
         bull.insert("technical".to_string(), 0.6);
 
         Self {
-            enabled: true,
+            enabled: false,
             index: "000300.SH".to_string(),
-            ma_window: 60,
-            bear_holdings_ratio: 0.6,
+            ma_window: 40,
+            bear_holdings_ratio: 0.75,
             bear_overrides: bear,
             bull_overrides: bull,
         }

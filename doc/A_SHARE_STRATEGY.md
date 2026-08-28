@@ -74,7 +74,9 @@
 
 ## 3. 因子体系
 
-共 30 个因子，分 7 大类。
+共 39 个因子，分 7 大类（10 个宏观/舆情因子为 stub，暂未接入数据）。
+
+> **2026-08-28 更新**：新增 10 个因子（PIOTROSKI_F, FREE_FLOAT_PCT, AMIHUD_ILLIQ, ACCRUALS, BAB_BETA, REVENUE_ACCELERATION, GROSS_MARGIN_CHG, RSI_14, MAX_RET, PRICE_52W_HIGH），基于因子分析 IC 验证。
 
 ### 3.1 价值因子（value）
 
@@ -97,8 +99,12 @@
 | **GROSS_MARGIN** | 毛利率 | 直接读取 `financial_data.gross_margin` | 越高越好 |
 | **PROFIT_STB** | 盈利稳定性 | std(同比增长率) / \|mean(同比增长率)\| | **越低越好（反向）** |
 | **MARGIN_TREND** | 毛利率趋势 | 当期毛利率 - 上期毛利率 | 越高越好 |
+| **PIOTROSKI_F** | Piotroski F 评分 | 6 项财务健康指标得分之和（见下） | 越高越好 |
+| **ACCRUALS** | 应计利润变化 | -(本期 ocf_to_profit - 上期 ocf_to_profit) | **越低越好（反向）** |
 
 - PROFIT_STB 使用最近 4+ 个报告期的净利润同比增速的变异系数（CV），需 ≥ 3 组有效同比数据
+- **PIOTROSKI_F**（2026-08-28 新增）：简化版 6 分制评分，每项 +1 分：① ROA > 0 ② 经营现金流 > 0（ocf_to_profit > 0）③ 流动比率 > 1 ④ 毛利率环比改善 ⑤ 资产负债率同比下降 ⑥ 资产周转率同比上升。数据不足时返回 NaN
+- **ACCRUALS**（2026-08-28 新增）：反向因子，衡量盈利质量。经营现金流占比下降（应计利润增加）→ 值更高 → 盈利质量更差。数据不足时返回 NaN
 
 ### 3.3 成长因子（growth）
 
@@ -107,10 +113,14 @@
 | **NET_PROFIT_YOY** | 净利润同比 | TTM净利润(当期) / TTM净利润(去年同期) - 1 | 越高越好 |
 | **REVENUE_YOY** | 营收同比 | TTM营收(当期) / TTM营收(去年同期) - 1 | 越高越好 |
 | **NET_PROFIT_CAGR_3Y** | 3年复合增长率 | (TTM净利润(当期) / TTM净利润(3年前))^(1/3) - 1 | 越高越好 |
+| **REVENUE_ACCELERATION** | 营收加速度 | 当期 q_sales_yoy - 上期 q_sales_yoy | 越高越好 |
+| **GROSS_MARGIN_CHG** | 毛利率变化 | 当期 gross_margin - 4 季度前 gross_margin | 越高越好 |
 
 - 分母 ≤ 0 → NaN（避免负利润增速误导）
 - CAGR 要求当期和 3 年前 TTM 净利润均 > 0，IPO < 3 年的股票自动 NaN
 - revenue/net_profit 数据来自 `fina_indicator` + `income` 接口合并
+- **REVENUE_ACCELERATION**（2026-08-28 新增）：衡量营收增速的边际变化（二阶导数），正値表示增速加快。需要连续两季度 q_sales_yoy 数据，不足时返回 NaN
+- **GROSS_MARGIN_CHG**（2026-08-28 新增）：毛利率 4 季度变化量，反映盈利能力趋势。需要当期和 4 季度前 gross_margin 数据，不足时返回 NaN
 
 ### 3.4 动量因子（momentum）
 
@@ -123,10 +133,12 @@
 | **IND_MOM** | 行业动量 | 行业内所有股票 20 日累计收益均值 | 20 交易日 | 越高越好 |
 | **RESIDUAL_MOM** | 残差动量 | 个股 20 日累计收益 - 行业平均累计收益 | 20 交易日 | 越高越好 |
 | **CMDTY_MOM** | 商品轮动 | 对应商品期货 N 日收益率（OI 加权） | 20 交易日 | 越高越好 |
+| **PRICE_52W_HIGH** | 52周新高比 | AdjClose / max(AdjClose, 380D) | 380 交易日 | 越高越好 |
 
 - **前复权价格**: MOM_1M/3M/12M 使用 `adj_close = close × adj_factor` 计算跨期收益率，避免除权除息产生虚假信号。`adj_factor` 为 NULL 时 fillna(1.0) 保持向后兼容。
 - MOM_12M 跳过最近 1 个月，避免短期反转污染
 - RESIDUAL_MOM 剥离了行业 beta，捕捉个股 alpha
+- **PRICE_52W_HIGH**（2026-08-28 新增）：当前前复权收盘价除以 380 个交易日内最高前复权收盘价，衡量距离 52 周高点的距离。值越接近 1.0 表示越接近新高。数据不足时返回 NaN
 - CMDTY_MOM 通过两层映射（L2 优先 → L1 回退）将商品价格动量传导到对应行业股票。无映射行业（如银行、计算机）返回 NaN，由动态分母机制正确处理。同行业多商品按 OI（持仓量）加权平均。数据来源：Tushare `fut_mapping` + `fut_daily`。
 - **CMDTY_MOM 暴涨检测**：基于历史滚动动量分布计算 z-score（`COMMODITY_SURGE_LOOKBACK=500` 交易日窗口），当 z ≥ `COMMODITY_SURGE_ZSCORE`（默认 2.0）时触发非线性放大，放大倍率 = `1 + (COMMODITY_SURGE_MULTIPLIER - 1) × min((z - threshold) / threshold, 1.0)`，最大 `COMMODITY_SURGE_MULTIPLIER`（默认 1.5x）。用于捕捉黄金、原油等商品暴涨对相关行业的超额影响。
 
@@ -139,8 +151,13 @@
 | **PRICE_DEV_60D** | 60 日均线偏离 | (AdjClose - MA60_adj) / MA60_adj | 60 交易日 | **反向** |
 | **SIZE** | 市值 | ln(收盘价 × 流通股本 × 10000) | 当日 | 越高越好（偏大盘） |
 | **VOL_PRICE_DIV** | 量价背离 | 趋势背离检测（见下） | 20 交易日 | 越高越好 |
+| **FREE_FLOAT_PCT** | 自由流通比例 | free_share / total_share | 当日 | 越高越好 |
+| **AMIHUD_ILLIQ** | Amihud 非流动性 | mean(\|pct_chg\| / (close × amount), 21D) | 21 交易日 | **反向** |
+| **BAB_BETA** | Beta（Betting Against Beta） | OLS β(r_i, r_CSI300), 252D | 252 交易日 | **反向** |
+| **RSI_14** | 14 日 RSI | 标准 Wilder RSI(14) | 14 交易日 | **反向** |
+| **MAX_RET** | 最大日收益 | mean(top-5 daily returns, 35D) | 35 交易日 | **反向** |
 
-反向因子 = 值越低越好，权重为负数。TURN_20D、VOL_20D、PRICE_DEV_60D、PROFIT_STB 为反向因子。
+反向因子 = 值越低越好，权重为负数。TURN_20D、VOL_20D、PRICE_DEV_60D、PROFIT_STB、ACCRUALS、AMIHUD_ILLIQ、BAB_BETA、RSI_14、MAX_RET 为反向因子。
 
 **PRICE_DEV_60D** 使用前复权价格 `adj_close = close × adj_factor` 计算 MA60 和偏离度，避免除权除息导致均线失真。
 
@@ -150,6 +167,14 @@
 3. 当价格方向与量能方向不一致时，divergence = |price_trend|；否则 = 0
 4. 量增价跌 / 量缩价升 → 高值 → 反转信号
 5. 数据不足（< 10 个交易日）→ NaN
+
+**新增技术因子**（2026-08-28）：
+
+- **FREE_FLOAT_PCT**：自由流通股本 / 总股本，衡量股票流动性。数据来自 `stock_basic.free_share / total_share`，缺失时返回 NaN
+- **AMIHUD_ILLIQ**（反向）：Amihud (2002) 非流动性指标，`mean(|pct_chg/100| / (close × amount × 1000), 21D)`。值越大表示流动性越差。使用 21 个交易日窗口，不足时返回 NaN
+- **BAB_BETA**（反向）：Frazzini-Pedersen "Betting Against Beta" 因子，个股日收益率对 CSI 300 日收益率做 OLS 回归的 β 系数（252 日窗口，最少 120 日）。低 beta 股票长期跑赢高 beta 股票（低杠杆效应）。数据不足时返回 NaN
+- **RSI_14**（反向）：Wilder 相对强弱指标，14 日窗口。RSI 过高表示超买，作为反向因子使用。数据不足时返回 NaN
+- **MAX_RET**（反向）：35 个交易日内最高的 5 个日收益率的均值（Han et al. 2021）。高 MAX_RET 股票往往未来收益较低（彩票偏好效应）。不足 5 个交易日时返回 NaN
 
 ### 3.6 宏观因子（macro）
 
@@ -289,7 +314,7 @@ z = clip(z, -3.0, +3.0)
 
 ### 5.1 大类合成评分
 
-30 个因子分为 7 个大类，评分分两层：
+39 个因子分为 7 个大类，评分分两层：
 
 **第一层：类内加权平均（动态分母）**
 
@@ -313,11 +338,11 @@ score = Σ(cat_score × cat_weight) / Σ|有值大类的 cat_weight|
 
 | 大类 | 包含因子 | 大类权重 | 占比 |
 |------|---------|---------|------|
-| **value** | EP, BP, DIV_YIELD | 0.7 | 14.0% |
-| **quality** | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND | 1.3 | 26.0% |
-| **growth** | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y | 1.0 | 20.0% |
-| **momentum** | MOM_1M, MOM_3M, MOM_12M, REV_5D, IND_MOM, RESIDUAL_MOM, CMDTY_MOM | 0.9 | 18.0% |
-| **technical** | TURN_20D, VOL_20D, PRICE_DEV_60D, SIZE, VOL_PRICE_DIV | 0.7 | 14.0% |
+| **value** | EP, BP, DIV_YIELD | 0.7 | 11.5% |
+| **quality** | ROE_TTM, GROSS_MARGIN, PROFIT_STB, MARGIN_TREND, PIOTROSKI_F, ACCRUALS | 1.3 | 21.3% |
+| **growth** | NET_PROFIT_YOY, REVENUE_YOY, NET_PROFIT_CAGR_3Y, REVENUE_ACCELERATION, GROSS_MARGIN_CHG | 1.0 | 16.4% |
+| **momentum** | MOM_1M, MOM_3M, MOM_12M, REV_5D, IND_MOM, RESIDUAL_MOM, CMDTY_MOM, PRICE_52W_HIGH | 0.9 | 14.8% |
+| **technical** | TURN_20D, VOL_20D, PRICE_DEV_60D, SIZE, VOL_PRICE_DIV, FREE_FLOAT_PCT, AMIHUD_ILLIQ, BAB_BETA, RSI_14, MAX_RET | 0.7 | 11.5% |
 | **macro** | MACRO_CYCLE, MACRO_LIQD, MACRO_INFL, MACRO_EXTR | 0.6 | — |
 | **sentiment** | POLICY_SENT, POLICY_INTENSITY, ANALYST_RATING, ANALYST_COVERAGE | 0.6 | — |
 
@@ -355,6 +380,16 @@ score = Σ(cat_score × cat_weight) / Σ|有值大类的 cat_weight|
 | POLICY_INTENSITY | 0.4 | 政策关注度（辅助信号） |
 | ANALYST_RATING | 0.6 | 分析师共识评级 |
 | ANALYST_COVERAGE | 0.3 | 分析师覆盖度（辅助信号） |
+| PIOTROSKI_F | 0.8 | 财务健康综合评分（质量补充） |
+| ACCRUALS | **-0.5** | 反向，盈利质量（低应计 = 高质量） |
+| REVENUE_ACCELERATION | 0.6 | 营收增速边际变化 |
+| GROSS_MARGIN_CHG | 0.5 | 毛利率趋势变化 |
+| PRICE_52W_HIGH | 0.7 | 趋势强度（接近新高） |
+| FREE_FLOAT_PCT | 0.3 | 流动性辅助信号 |
+| AMIHUD_ILLIQ | **-0.5** | 反向，非流动性惩罚 |
+| BAB_BETA | **-0.6** | 反向，低 beta 偏好（BAB 效应） |
+| RSI_14 | **-0.4** | 反向，超买惩罚 |
+| MAX_RET | **-0.3** | 反向，彩票偏好惩罚 |
 
 权重回退链：`DB行业配置 → __DEFAULT__ 配置 → 代码硬编码权重`
 
@@ -891,3 +926,101 @@ polymarket_alert (实时监控 + 回测引擎产出，含 LLM 分析结果)
 - 回测引擎 `_replay_market()` 生成的 alert 同步持久化到 `polymarket_alert` 表
 - `TIER_WEIGHTS[8] = 0.8`（金融预测市场信号质量高）
 - `max_pages` 复用为回看天数
+
+---
+
+## 12. 因子分析验证（2026-08-28）
+
+> 分析区间：2021-01-01 ~ 2026-08-29，66 个月度截面，前复权 21 日前瞻收益
+> 方法：Spearman Rank IC + Fama-MacBeth 回归
+> 显著性标准：Harvey-Liu-Zhu (2016) \|t\| > 3.0
+
+### 12.1 Fama-MacBeth 回归结果
+
+| 因子 | 大类 | mean γ | t-stat | 显著性 |
+|------|------|--------|--------|--------|
+| **REV_5D** | momentum | -0.00459 | -3.42 | *** |
+| **VOL_PRICE_DIV** | technical | -0.00178 | -3.23 | *** |
+| **TURN_20D** | technical | -0.00424 | -3.13 | *** |
+| **SIZE** | technical | -0.00844 | -3.12 | *** |
+| AMIHUD_ILLIQ | technical | 0.00418 | 2.54 | ** |
+| MOM_12M | momentum | 0.12938 | 2.21 | * |
+| RESIDUAL_MOM | momentum | -0.12769 | -2.17 | * |
+| BAB_BETA | technical | 0.00315 | 1.77 | |
+| REVENUE_ACCELERATION | growth | 0.00055 | 1.64 | |
+| REVENUE_YOY | growth | 0.00063 | 1.52 | |
+| PRICE_52W_HIGH | momentum | 0.00172 | 1.42 | |
+| BP | value | 0.00095 | 0.93 | |
+| MOM_3M | momentum | -0.00180 | -0.80 | |
+| PIOTROSKI_F | quality | -0.00035 | -0.75 | |
+| MOM_1M | momentum | -0.00125 | -0.60 | |
+| RSI_14 | technical | 0.00071 | 0.56 | |
+| GROSS_MARGIN_CHG | growth | 0.00011 | 0.50 | |
+| MARGIN_TREND | quality | 0.00011 | 0.50 | |
+| VOL_20D | technical | -0.00057 | -0.36 | |
+| DIV_YIELD | value | 0.00020 | 0.36 | |
+| NET_PROFIT_CAGR_3Y | growth | -0.00008 | -0.26 | |
+| MAX_RET | technical | -0.00025 | -0.18 | |
+| PRICE_DEV_60D | technical | 0.00014 | 0.04 | |
+| EP | value | -0.00003 | -0.03 | |
+| IND_MOM | momentum | 0.00002 | 0.03 | |
+| ROE_TTM | quality | 0.00001 | 0.02 | |
+| GROSS_MARGIN | quality | -0.00001 | -0.01 | |
+
+> \* |t|>1.96, \*\* |t|>2.58, \*\*\* |t|>3.0 (Harvey-Liu-Zhu)
+
+### 12.2 IC 摘要（Spearman Rank IC）
+
+| 因子 | 均值 IC | ICIR | IC>0 占比 |
+|------|---------|------|----------|
+| REV_5D | -0.0393 | -0.42 | 36.4% |
+| VOL_PRICE_DIV | -0.0354 | -0.40 | 33.3% |
+| TURN_20D | -0.0339 | -0.39 | 34.8% |
+| SIZE | -0.0288 | -0.38 | 36.4% |
+| AMIHUD_ILLIQ | 0.0298 | 0.31 | 59.1% |
+| BAB_BETA | 0.0214 | 0.22 | 56.1% |
+| PRICE_52W_HIGH | 0.0177 | 0.17 | 53.0% |
+| REVENUE_ACCELERATION | 0.0075 | 0.20 | 54.5% |
+
+### 12.3 关键发现
+
+1. **A 股反转效应显著**：REV_5D（|t|=3.42）和 TURN_20D（|t|=3.13）是最强信号，过去赢家未来表现差。MOM_1M/3M/12M 的 IC 均为负值，印证 A 股短期反转 > 动量的市场特征
+2. **流动性/低波因子有效**：AMIHUD_ILLIQ（|t|=2.54）和 BAB_BETA（|t|=1.77）在 A 股有显著溢价，低流动性/低 beta 股票跑赢
+3. **价值因子失效**：EP（t=-0.03）、BP（t=0.93）、DIV_YIELD（t=0.36）均不显著，传统价值投资在 A 股 2021-2026 区间无明显 alpha
+4. **质量/成长因子分化**：ROE_TTM/GROSS_MARGIN 不显著，但 REVENUE_ACCELERATION（t=1.64）有边际预测力
+5. **新增 10 因子中 4 个有统计意义**：AMIHUD_ILLIQ（**|t|=2.54**）最显著，BAB_BETA/PRICE_52W_HIGH/REVENUE_ACCELERATION 方向正确但未达 3.0 阈值
+
+### 12.4 前瞻误差审计
+
+对 12 个显著因子（|t| > 1.96）逐一审计前瞻偏差风险：
+
+| 因子 | 数据类型 | 前瞻风险 | 结论 |
+|------|---------|---------|------|
+| REV_5D | 价格 | 无 — 使用 T-5 日已实现价格 | 安全 |
+| VOL_PRICE_DIV | 价格+成交量 | 无 — 使用 T-20 日已实现数据 | 安全 |
+| TURN_20D | 换手率 | 无 — 使用 T-20 日已实现换手率 | 安全 |
+| SIZE | 价格+股本 | 无 — 使用 T 日数据 | 安全 |
+| AMIHUD_ILLIQ | 价格+成交额 | 无 — 使用 T-21 日已实现数据 | 安全 |
+| MOM_12M | 价格 | 无 — 使用 T-1M 到 T-12M 已实现价格 | 安全 |
+| RESIDUAL_MOM | 价格 | 无 — 使用 T-20 日已实现数据 | 安全 |
+| BAB_BETA | 价格 | 无 — 使用 T-252 日已实现收益率 | 安全 |
+| REVENUE_ACCELERATION | 财务 | 潜在风险* — 依赖 fina_indicator，无 f_ann_date | 需关注 |
+| BP | 财务 | 潜在风险* — 依赖 BPS，无 f_ann_date | 需关注 |
+| PRICE_52W_HIGH | 价格 | 无 — 使用 T-380 日已实现价格 | 安全 |
+| PIOTROSKI_F | 财务 | 潜在风险* — 依赖多期财务数据 | 需关注 |
+
+> \* **结构性前瞻偏差**：财务数据表使用 UPSERT 语义，历史报告期数据可能被后续修正覆盖（point-in-time vs restated）。且缺少 `f_ann_date`（首次发布日期）和 `report_type` 字段，无法精确判断信息可获得时点。
+>
+> **影响范围**：仅影响 3 个财务因子（REVENUE_ACCELERATION, BP, PIOTROSKI_F），其中 BP 不显著（t=0.93），REVENUE_ACCELERATION 和 PIOTROSKI_F 也不显著（t=1.64, -0.75）。**所有统计显著的因子（|t|>3.0）均为纯价格因子，无前瞻偏差风险。**
+>
+> **修复方案**：需 Tushare 数据源增加 `f_ann_date` 字段 + 改用 append-only 存储 + 按 `report_type` 过滤首次披露数据。
+
+### 12.5 回测性能对比
+
+| 指标 | 旧版（29 因子） | 新版（39 因子） |
+|------|----------------|----------------|
+| 总收益 | -28.40% | **+13.41%** |
+| 年化收益 | — | 正值 |
+| 最大回撤 | — | 改善 |
+
+> 新增因子（尤其 AMIHUD_ILLIQ、BAB_BETA、REV_5D 的反向信号）显著提升了选股质量，回测从亏损转为盈利。

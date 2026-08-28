@@ -651,8 +651,9 @@ CREATE TABLE a_industry_class (
   level VARCHAR(5) NOT NULL,
   index_code VARCHAR(20) NULL,
   index_name VARCHAR(100) NULL,
-  in_date DATE NULL,
-  out_date DATE NULL,
+  industry_name VARCHAR(100) NULL,
+  in_date VARCHAR(20) NULL,
+  out_date VARCHAR(20) NULL,
   is_new VARCHAR(5) NULL,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );

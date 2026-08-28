@@ -122,10 +122,11 @@ pub fn get_a_clean_universe(
             stats.too_small += 1; continue;
         }
 
-        // 7. Liquidity (rolling avg amount, 元).
+        // 7. Liquidity (rolling avg amount, 千元 → 元).
         if filter.min_daily_turnover > 0.0 {
             let avg = cache.avg_amount(code, date, filter.turnover_lookback);
-            if !avg.is_finite() || avg < filter.min_daily_turnover {
+            let avg_yuan = avg * 1_000.0;
+            if !avg_yuan.is_finite() || avg_yuan < filter.min_daily_turnover {
                 stats.illiquid += 1; continue;
             }
         }
