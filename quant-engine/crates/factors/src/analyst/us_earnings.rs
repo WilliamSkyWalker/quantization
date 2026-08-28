@@ -33,6 +33,7 @@ impl Factor for EarningsSurprise {
 }
 
 /// EPS Revision: (recent EPS estimate - prior) / |prior|
+#[allow(dead_code)]
 pub struct EpsRevision;
 // DEPRECATED 2026-04-30: misnamed. FMP `us_eps_estimate.date` is the FORECAST
 // PERIOD (e.g., 2024-Q1 target = 2024-03-31), not the publication date of the

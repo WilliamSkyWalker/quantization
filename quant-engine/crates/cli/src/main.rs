@@ -152,9 +152,9 @@ enum Commands {
         market: String,
     },
 
-    /// Download data from external APIs into PostgreSQL.
+    /// Download data from external APIs into MySQL.
     Download {
-        /// Data source: fmp, quiver, fred.
+        /// Data source: tushare, fmp, quiver, fred.
         #[arg(long)]
         source: String,
 
@@ -202,13 +202,13 @@ enum Commands {
         action: AlpacaAction,
     },
 
-    /// 把 PostgreSQL 表导出到 parquet 缓存（替代旧 Python pandas 脚本）
+    /// 把 MySQL 表导出到 parquet 缓存
     ExportParquet {
         /// 输出目录（默认 ../cache）
         #[arg(long, default_value = "../cache")]
         output_dir: PathBuf,
 
-        /// 仅导出指定 PG 表（多次指定）。不传时导出所有 v25 baseline 需要的表。
+        /// 仅导出指定 MySQL 表（多次指定）。不传时导出所有 v25 baseline 需要的表。
         #[arg(long)]
         table: Vec<String>,
     },
@@ -235,28 +235,6 @@ enum Commands {
         /// Skip risk gate (debugging only).
         #[arg(long)]
         no_risk: bool,
-    },
-
-    /// One-time migration: policy_article + policy_analysis + scrape_log
-    /// from legacy MySQL → PostgreSQL. Reads from MYSQL_* env vars unless
-    /// overridden by flags.
-    MigratePolicy {
-        #[arg(long, env = "MYSQL_HOST", default_value = "127.0.0.1")]
-        mysql_host: String,
-        #[arg(long, env = "MYSQL_PORT", default_value = "3306")]
-        mysql_port: u16,
-        #[arg(long, env = "MYSQL_USER", default_value = "root")]
-        mysql_user: String,
-        #[arg(long, env = "MYSQL_PASSWORD", default_value = "")]
-        mysql_password: String,
-        #[arg(long, env = "MYSQL_DATABASE", default_value = "quant")]
-        mysql_database: String,
-        /// Rows per fetch batch.
-        #[arg(long, default_value = "1000")]
-        batch: usize,
-        /// Read MySQL only; report counts but don't write to PG.
-        #[arg(long)]
-        dry_run: bool,
     },
 }
 
@@ -349,12 +327,6 @@ fn main() {
         }
         Commands::ExportParquet { output_dir, table } => {
             cmd_export_parquet(&_config, &output_dir, &table);
-        }
-        Commands::MigratePolicy {
-            mysql_host, mysql_port, mysql_user, mysql_password, mysql_database, batch, dry_run,
-        } => {
-            cmd_migrate_policy(&_config, &mysql_host, mysql_port, &mysql_user,
-                               &mysql_password, &mysql_database, batch, dry_run);
         }
     }
 }
@@ -535,7 +507,7 @@ fn cmd_a_factors(config: &Config, date_str: &str) {
 
     let db_url = config.database.url();
     let schema = &config.database.schema;
-    if db_url.contains("@:/") || db_url.contains("postgres://:@") {
+    if db_url.contains("@:/") || db_url.contains("mysql://:@") {
         eprintln!("Database not configured. Set DB_HOST, DB_USER, DB_PASSWORD, DB_DATABASE env vars.");
         std::process::exit(1);
     }
@@ -617,7 +589,7 @@ fn cmd_a_factors(config: &Config, date_str: &str) {
 }
 
 async fn build_a_share_cache(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::MySqlPool,
     start: chrono::NaiveDate,
     end: chrono::NaiveDate,
 ) -> quant_factors::a_share::cache::AShareCache {
@@ -928,7 +900,7 @@ fn cmd_backtest(
 
         let db_url = config.database.url();
         let schema = &config.database.schema;
-        if db_url.contains("@:/") || db_url.contains("postgres://:@") {
+        if db_url.contains("@:/") || db_url.contains("mysql://:@") {
             eprintln!("Database not configured. Set DB_HOST/USER/PASSWORD/DATABASE.");
             std::process::exit(1);
         }
@@ -1641,7 +1613,7 @@ fn cmd_download(
 ) {
     let db_url = config.database.url();
     let schema = &config.database.schema;
-    if db_url.contains("@:/") || db_url.contains("postgres://:@") {
+    if db_url.contains("@:/") || db_url.contains("mysql://:@") {
         eprintln!("Database not configured. Set DB_HOST, DB_USER, DB_PASSWORD, DB_DATABASE env vars.");
         std::process::exit(1);
     }
@@ -1882,7 +1854,7 @@ const DB_STATUS_TABLES: &[DbStatusTable] = &[
 fn cmd_db_status(config: &quant_core::config::Config, market_filter: &str) {
     let db_url = config.database.url();
     let schema = &config.database.schema;
-    if db_url.contains("@:/") || db_url.contains("postgres://:@") {
+    if db_url.contains("@:/") || db_url.contains("mysql://:@") {
         eprintln!("Database not configured. Set DB_HOST, DB_USER, DB_PASSWORD, DB_DATABASE env vars.");
         std::process::exit(1);
     }
@@ -1957,7 +1929,7 @@ fn cmd_db_status(config: &quant_core::config::Config, market_filter: &str) {
 }
 
 async fn print_db_status_row(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::MySqlPool,
     spec: &DbStatusTable,
     progress_map: &std::collections::HashMap<String, i64>,
     denom: i64,
@@ -2076,7 +2048,7 @@ fn cmd_a_trade(
 
     let db_url = config.database.url();
     let schema = &config.database.schema;
-    if db_url.contains("@:/") || db_url.contains("postgres://:@") {
+    if db_url.contains("@:/") || db_url.contains("mysql://:@") {
         eprintln!("Database not configured. Set DB_HOST/USER/PASSWORD/DATABASE.");
         std::process::exit(1);
     }
@@ -2179,52 +2151,6 @@ fn cmd_a_trade(
         println!("positions    = {}", snap.positions.len());
 
         pool.close().await;
-    });
-}
-
-// ── MySQL → PG one-time migration: policy_article / policy_analysis ─────
-
-fn cmd_migrate_policy(
-    config: &Config,
-    mysql_host: &str,
-    mysql_port: u16,
-    mysql_user: &str,
-    mysql_password: &str,
-    mysql_database: &str,
-    batch: usize,
-    dry_run: bool,
-) {
-    let pg_url = config.database.url();
-    let schema = &config.database.schema;
-    if pg_url.contains("@:/") || pg_url.contains("postgres://:@") {
-        eprintln!("PG not configured. Set DB_HOST/USER/PASSWORD/DATABASE.");
-        std::process::exit(1);
-    }
-    let mysql_url = quant_download::a_policy_migrate::mysql_url(
-        mysql_host, mysql_port, mysql_user, mysql_password, mysql_database,
-    );
-    info!("MySQL: {}@{}:{}/{}", mysql_user, mysql_host, mysql_port, mysql_database);
-    info!("PG: {}", pg_url.split('@').last().unwrap_or(""));
-    info!("batch={} dry_run={}", batch, dry_run);
-
-    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    rt.block_on(async {
-        let pg_pool = quant_db::pool::create_pool(&pg_url, schema, 8).await
-            .expect("connect to PG");
-
-        let stats = quant_download::a_policy_migrate::migrate(
-            &mysql_url, &pg_pool, batch, dry_run,
-        ).await.expect("migration failed");
-
-        println!("\n=== Migration {}===", if dry_run { "(dry-run) " } else { "" });
-        println!("policy_article  read={:>7} inserted={:>7} skipped={:>7}",
-                 stats.articles_read, stats.articles_inserted, stats.articles_skipped);
-        println!("policy_analysis read={:>7} inserted={:>7} skipped={:>7}",
-                 stats.analyses_read, stats.analyses_inserted, stats.analyses_skipped);
-        println!("scrape_log      read={:>7} inserted={:>7}",
-                 stats.scrape_logs_read, stats.scrape_logs_inserted);
-
-        pg_pool.close().await;
     });
 }
 
@@ -2637,7 +2563,7 @@ fn cmd_export_parquet(
     std::fs::create_dir_all(output_dir).expect("Failed to create output dir");
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-    let url = format!("postgres://{}:{}@{}:{}/{}", db.user, db.password, db.host, db.port, db.database);
+    let url = format!("mysql://{}:{}@{}:{}/{}", db.user, db.password, db.host, db.port, db.database);
     let pool = rt.block_on(async {
         quant_db::pool::create_pool(&url, &db.schema, 4).await
             .expect("Failed to connect to database")
@@ -2705,7 +2631,7 @@ fn which_psql() -> Option<std::path::PathBuf> {
 
 async fn export_one_table(
     spec: &ExportSpec,
-    pool: &sqlx::PgPool,
+    pool: &sqlx::MySqlPool,
     psql: &std::path::Path,
     db: &ResolvedDb,
     output_dir: &PathBuf,

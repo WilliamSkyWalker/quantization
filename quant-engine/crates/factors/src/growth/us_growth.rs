@@ -40,6 +40,7 @@ fn yoy_growth(field: &str, date: Date, cache: &DataCache) -> FactorResult {
 }
 
 /// Net Profit YoY: TTM net_income now / TTM net_income 1Y ago - 1
+#[allow(dead_code)]
 pub struct NetProfitYoY;
 // DISABLED 2026-04-30: winner-signature audit shows NI_YoY does NOT
 // distinguish 30 winners from 30 losers (median 32% vs 33%). Losers

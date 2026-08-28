@@ -145,7 +145,7 @@ impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
             host: std::env::var("DB_HOST").unwrap_or_default(),
-            port: std::env::var("DB_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(5432),
+            port: std::env::var("DB_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(3306),
             user: std::env::var("DB_USER").unwrap_or_default(),
             password: std::env::var("DB_PASSWORD").unwrap_or_default(),
             database: std::env::var("DB_DATABASE").unwrap_or_default(),
@@ -156,7 +156,7 @@ impl Default for DatabaseConfig {
 }
 
 impl DatabaseConfig {
-    /// Build a PostgreSQL connection URL.
+    /// Build a MySQL connection URL.
     pub fn url(&self) -> String {
         let host = if self.host.is_empty() {
             std::env::var("DB_HOST").unwrap_or_else(|_| "localhost".to_string())
@@ -178,7 +178,7 @@ impl DatabaseConfig {
         } else {
             self.database.clone()
         };
-        format!("postgres://{user}:{password}@{host}:{}/{}",
+        format!("mysql://{user}:{password}@{host}:{}/{}",
             self.port, database)
     }
 }

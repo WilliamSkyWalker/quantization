@@ -6,13 +6,13 @@ output_dir = "../output"
 
 [database]
 # Override via environment: DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_DATABASE, DB_SCHEMA
-host = ""
-port = 5432
-user = ""
-password = ""
-database = ""
-schema = "quant"
-max_connections = 10
+host = "127.0.0.1"
+port = 3306
+user = "root"
+password = "123456"
+database = "quant"
+schema = ""
+max_connections = 40
 
 [universe]
 min_market_cap = 1e10         # $10B (was $500M; small caps got selected as value traps that lagged growth)

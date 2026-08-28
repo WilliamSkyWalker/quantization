@@ -1,40 +1,28 @@
-//! PostgreSQL connection pool setup.
+//! MySQL connection pool setup.
 
 use std::time::Duration;
 
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
 use sqlx::ConnectOptions;
-use sqlx::PgPool;
+use sqlx::MySqlPool;
 use tracing::info;
 use tracing::log::LevelFilter;
 
-/// Create a PgPool from a database URL string.
-///
-/// Sets `search_path` to the configured schema on each connection.
-pub async fn create_pool(url: &str, schema: &str, max_connections: u32) -> Result<PgPool, sqlx::Error> {
-    let options: PgConnectOptions = url.parse::<PgConnectOptions>()?
-        .options([("search_path", schema)])
-        // Default sqlx slow_threshold is 1s; raise to 2s to cut log noise
-        // from large daily-price upserts (200-row INSERT batches normally
-        // run ~1.0-1.5s and aren't actually problematic).
+/// Create a MySqlPool from a database URL string.
+pub async fn create_pool(url: &str, _schema: &str, max_connections: u32) -> Result<MySqlPool, sqlx::Error> {
+    let mut options: MySqlConnectOptions = url.parse::<MySqlConnectOptions>()?
         .log_slow_statements(LevelFilter::Warn, Duration::from_secs(2));
 
-    let schema_owned = schema.to_string();
-    let pool = PgPoolOptions::new()
+    // Disable SSL for local connections and set connect timeout
+    options = options.ssl_mode(sqlx::mysql::MySqlSslMode::Disabled);
+
+    let pool = MySqlPoolOptions::new()
         .max_connections(max_connections)
-        .after_connect(move |conn, _meta| {
-            let schema = schema_owned.clone();
-            Box::pin(async move {
-                sqlx::query(&format!("SET search_path TO {schema}, public"))
-                    .execute(&mut *conn)
-                    .await?;
-                Ok(())
-            })
-        })
+        .acquire_timeout(Duration::from_secs(10))
         .connect_with(options)
         .await?;
 
-    info!("PostgreSQL pool created: max_connections={max_connections}, schema={schema}");
+    info!("MySQL pool created: max_connections={max_connections}");
     Ok(pool)
 }
 
@@ -45,9 +33,9 @@ pub async fn create_pool_from_config(
     user: &str,
     password: &str,
     database: &str,
-    schema: &str,
+    _schema: &str,
     max_connections: u32,
-) -> Result<PgPool, sqlx::Error> {
-    let url = format!("postgres://{user}:{password}@{host}:{port}/{database}");
-    create_pool(&url, schema, max_connections).await
+) -> Result<MySqlPool, sqlx::Error> {
+    let url = format!("mysql://{user}:{password}@{host}:{port}/{database}");
+    create_pool(&url, _schema, max_connections).await
 }

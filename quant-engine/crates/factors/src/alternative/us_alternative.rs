@@ -44,6 +44,7 @@ impl Factor for EmployeeGrowth {
     }
 }
 
+#[allow(dead_code)]
 pub struct CongressNetBuy;
 // DISABLED 2026-04-30: Quiver 数据源（付费）依赖。ICIR=-0.183，方向反学术（应为正
 // 但实测负向），weak signal，移除以摆脱付费数据。仅保留代码方便回退。
@@ -68,6 +69,7 @@ impl Factor for CongressNetBuy {
     }
 }
 
+#[allow(dead_code)]
 pub struct GovContractFlow;
 // DISABLED 2026-04-30: Quiver 付费数据源依赖。ICIR=-0.346（弱）。
 // inventory::submit! { &GovContractFlow as &dyn Factor }
@@ -97,6 +99,7 @@ impl Factor for GovContractFlow {
     }
 }
 
+#[allow(dead_code)]
 pub struct LobbyIntensity;
 // DISABLED 2026-04-30: Quiver 付费数据源依赖。ICIR=-0.029（噪声）。
 // inventory::submit! { &LobbyIntensity as &dyn Factor }

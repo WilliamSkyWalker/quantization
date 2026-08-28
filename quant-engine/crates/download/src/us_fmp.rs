@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::MySqlPool;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
@@ -23,13 +23,13 @@ const MAX_CONCURRENT: usize = 5;
 pub struct FmpDownloader {
     pub api_key: String,
     pub client: ApiClient,
-    pub pool: PgPool,
+    pub pool: MySqlPool,
     /// If set, only process this single ticker (for testing).
     pub ticker_filter: Option<String>,
 }
 
 impl FmpDownloader {
-    pub fn new(api_key: String, pool: PgPool, rate_limit: u32) -> Self {
+    pub fn new(api_key: String, pool: MySqlPool, rate_limit: u32) -> Self {
         Self {
             api_key,
             client: ApiClient::new(rate_limit, 10),
@@ -96,14 +96,14 @@ impl FmpDownloader {
 
     async fn get_done_tickers(&self, table: &str) -> HashSet<String> {
         sqlx::query_scalar::<_, String>(
-            "SELECT ticker FROM import_progress WHERE table_name = $1"
+            "SELECT ticker FROM import_progress WHERE table_name = ?"
         ).bind(table).fetch_all(&self.pool).await.unwrap_or_default().into_iter().collect()
     }
 
     /// Get actual column names from DB for a table (cached).
     async fn get_table_columns(&self, table: &str) -> HashSet<String> {
         let sql = format!(
-            "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = '{table}'"
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = '{table}'"
         );
         let rows: Vec<(String,)> = sqlx::query_as(&sql)
             .fetch_all(&self.pool).await.unwrap_or_default();
@@ -152,7 +152,7 @@ impl FmpDownloader {
     async fn mark_done(&self, table: &str, ticker: &str) {
         sqlx::query(
             "INSERT INTO import_progress (table_name, ticker, completed_at) \
-             VALUES ($1, $2, NOW()) ON CONFLICT (table_name, ticker) DO UPDATE SET completed_at = NOW()"
+             VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE completed_at = NOW()"
         ).bind(table).bind(ticker).execute(&self.pool).await.ok();
     }
 
@@ -160,7 +160,7 @@ impl FmpDownloader {
     /// Returns {ticker: "YYYY-MM-DD"}.
     async fn get_ticker_latest(&self, table: &str, date_field: &str) -> std::collections::HashMap<String, String> {
         let sql = format!(
-            "SELECT ticker, MAX({date_field})::text as latest FROM {table} GROUP BY ticker"
+            "SELECT ticker, CAST(MAX({date_field}) AS CHAR) as latest FROM {table} GROUP BY ticker"
         );
         let rows: Vec<(String, Option<String>)> = sqlx::query_as(&sql)
             .fetch_all(&self.pool).await.unwrap_or_default();
@@ -193,10 +193,9 @@ impl FmpDownloader {
         if columns.is_empty() { return 0; }
 
         let col_list = columns.join(", ");
-        let conflict_cols = unique_keys.join(", ");
         let update_set: String = columns.iter()
             .filter(|c| !unique_keys.contains(&c.as_str()))
-            .map(|c| format!("{c} = EXCLUDED.{c}"))
+            .map(|c| format!("{c} = VALUES({c})"))
             .collect::<Vec<_>>().join(", ");
 
         let chunk_size = 200;
@@ -228,10 +227,10 @@ impl FmpDownloader {
             if values_clauses.is_empty() { continue; }
 
             let sql = if update_set.is_empty() {
-                format!("INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO NOTHING",
+                format!("INSERT IGNORE INTO {table} ({col_list}) VALUES {}",
                     values_clauses.join(","))
             } else {
-                format!("INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO UPDATE SET {update_set}",
+                format!("INSERT INTO {table} ({col_list}) VALUES {} ON DUPLICATE KEY UPDATE {update_set}",
                     values_clauses.join(","))
             };
 

@@ -5,6 +5,7 @@ use quant_data::cache::DataCache;
 use crate::registry::Factor;
 
 /// Dark Pool Short Interest: mean DPI over ~20 trading days
+#[allow(dead_code)]
 pub struct DarkPoolShort;
 // DISABLED 2026-04-30: Quiver 付费数据源依赖。ICIR=-0.168（弱）。
 // inventory::submit! { &DarkPoolShort as &dyn Factor }
@@ -32,6 +33,7 @@ impl Factor for DarkPoolShort {
 }
 
 /// Institutional Ownership Delta: change in 13F shares between latest 2 periods
+#[allow(dead_code)]
 pub struct InstOwnershipDelta;
 // DISABLED 2026-04-30: Quiver 付费数据源依赖（13F holdings）。ICIR=-0.100（接近噪声）。
 // inventory::submit! { &InstOwnershipDelta as &dyn Factor }

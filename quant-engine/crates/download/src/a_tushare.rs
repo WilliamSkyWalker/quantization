@@ -9,26 +9,26 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{json, Value};
-use sqlx::PgPool;
+use sqlx::MySqlPool;
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 use crate::http::ApiClient;
 use crate::progress::ticker_progress;
 
-const MAX_CONCURRENT: usize = 10; // Tushare rate limit is stricter than FMP
+const MAX_CONCURRENT: usize = 20;
 
 #[derive(Clone)]
 pub struct TushareDownloader {
     pub token: String,
     pub client: ApiClient,
-    pub pool: PgPool,
+    pub pool: MySqlPool,
     /// When set, all per-ticker methods only process this ts_code (e.g. "000001.SZ").
     pub only_ticker: Option<String>,
 }
 
 impl TushareDownloader {
-    pub fn new(token: String, pool: PgPool, rate_limit: u32) -> Self {
+    pub fn new(token: String, pool: MySqlPool, rate_limit: u32) -> Self {
         Self {
             token,
             client: ApiClient::new(rate_limit, MAX_CONCURRENT),
@@ -92,14 +92,14 @@ impl TushareDownloader {
 
     async fn get_done_tickers(&self, table: &str) -> HashSet<String> {
         sqlx::query_scalar::<_, String>(
-            "SELECT ticker FROM import_progress WHERE table_name = $1"
+            "SELECT ticker FROM import_progress WHERE table_name = ?"
         ).bind(table).fetch_all(&self.pool).await.unwrap_or_default().into_iter().collect()
     }
 
     async fn mark_done(&self, table: &str, ticker: &str) {
         sqlx::query(
             "INSERT INTO import_progress (table_name, ticker, completed_at) \
-             VALUES ($1, $2, NOW()) ON CONFLICT (table_name, ticker) DO UPDATE SET completed_at = NOW()"
+             VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE completed_at = NOW()"
         ).bind(table).bind(ticker).execute(&self.pool).await.ok();
     }
 
@@ -114,7 +114,7 @@ impl TushareDownloader {
 
     async fn get_table_columns(&self, table: &str) -> HashSet<String> {
         let sql = format!(
-            "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = '{table}'"
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = '{table}'"
         );
         let rows: Vec<(String,)> = sqlx::query_as(&sql)
             .fetch_all(&self.pool).await.unwrap_or_default();
@@ -123,7 +123,7 @@ impl TushareDownloader {
 
     async fn get_ticker_latest(&self, table: &str, date_field: &str) -> std::collections::HashMap<String, String> {
         let sql = format!(
-            "SELECT ts_code, MAX({date_field})::text as latest FROM {table} GROUP BY ts_code"
+            "SELECT ts_code, CAST(MAX({date_field}) AS CHAR) as latest FROM {table} GROUP BY ts_code"
         );
         let rows: Vec<(String, Option<String>)> = sqlx::query_as(&sql)
             .fetch_all(&self.pool).await.unwrap_or_default();
@@ -159,10 +159,9 @@ impl TushareDownloader {
         }).collect();
 
         let col_list = columns.join(", ");
-        let conflict_cols = unique_keys.join(", ");
         let update_set: String = columns.iter()
             .filter(|c| !unique_keys.contains(&c.as_str()))
-            .map(|c| format!("{c} = EXCLUDED.{c}"))
+            .map(|c| format!("{c} = VALUES({c})"))
             .collect::<Vec<_>>().join(", ");
 
         let chunk_size = 200;
@@ -181,10 +180,10 @@ impl TushareDownloader {
             if values_clauses.is_empty() { continue; }
 
             let sql = if update_set.is_empty() {
-                format!("INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO NOTHING",
+                format!("INSERT IGNORE INTO {table} ({col_list}) VALUES {}",
                     values_clauses.join(","))
             } else {
-                format!("INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO UPDATE SET {update_set}",
+                format!("INSERT INTO {table} ({col_list}) VALUES {} ON DUPLICATE KEY UPDATE {update_set}",
                     values_clauses.join(","))
             };
 
@@ -315,7 +314,7 @@ impl TushareDownloader {
         let pending: Vec<String> = if incremental {
             // Find latest date in DB, only process after that
             let latest: Option<String> = sqlx::query_scalar(
-                "SELECT MAX(trade_date)::text FROM a_daily_price"
+                "SELECT CAST(MAX(trade_date) AS CHAR) FROM a_daily_price"
             ).fetch_one(&self.pool).await.ok().flatten();
             let cutoff = latest.unwrap_or_default();
             trade_dates.into_iter().filter(|d| d.as_str() > cutoff.as_str()).collect()

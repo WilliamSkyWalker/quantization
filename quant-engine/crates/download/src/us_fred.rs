@@ -4,7 +4,7 @@
 //! API: https://api.stlouisfed.org/fred/series/observations
 
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::MySqlPool;
 use tracing::{error, info};
 
 use crate::http::ApiClient;
@@ -49,11 +49,11 @@ const FRED_SERIES: &[(&str, &str)] = &[
 pub struct FredDownloader {
     pub api_key: String,
     pub client: ApiClient,
-    pub pool: PgPool,
+    pub pool: MySqlPool,
 }
 
 impl FredDownloader {
-    pub fn new(api_key: String, pool: PgPool) -> Self {
+    pub fn new(api_key: String, pool: MySqlPool) -> Self {
         Self {
             api_key,
             client: ApiClient::new(120, 5), // FRED: 120 req/min
@@ -123,54 +123,50 @@ impl FredDownloader {
             .cloned().collect();
         if columns.is_empty() { return 0; }
 
-        let mut param_idx = 1u32;
-        let mut values_clauses = Vec::new();
-        let mut params: Vec<String> = Vec::new();
-
-        for row in rows {
-            let obj = match row.as_object() { Some(m) => m, None => continue };
-            let placeholders: Vec<String> = columns.iter().map(|col| {
-                let p = format!("${param_idx}");
-                param_idx += 1;
-                let val = obj.get(col).unwrap_or(&Value::Null);
-                params.push(match val {
-                    Value::Null => String::new(),
-                    Value::Number(n) => n.to_string(),
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                });
-                // PG extended protocol binds everything as text; PG won't
-                // implicit-cast text → date or text → numeric. Cast in SQL.
-                let cast = if col == "date" || col.ends_with("_date") {
-                    "::date"
-                } else if matches!(val, Value::Number(_)) {
-                    "::float8"
-                } else {
-                    ""
-                };
-                format!("{p}{cast}")
-            }).collect();
-            values_clauses.push(format!("({})", placeholders.join(", ")));
-        }
-
         let col_list = columns.join(", ");
-        let conflict_cols = unique_keys.join(", ");
         let update_set: String = columns.iter()
             .filter(|c| !unique_keys.contains(&c.as_str()))
-            .map(|c| format!("{c} = EXCLUDED.{c}"))
+            .map(|c| format!("{c} = VALUES({c})"))
             .collect::<Vec<_>>().join(", ");
 
-        let sql = format!(
-            "INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO UPDATE SET {update_set}",
-            values_clauses.join(", ")
-        );
+        let chunk_size = 200;
+        let mut total = 0usize;
 
-        let mut query = sqlx::query(&sql);
-        for p in &params { query = query.bind(p); }
+        for chunk in rows.chunks(chunk_size) {
+            let mut values_clauses = Vec::with_capacity(chunk.len());
+            for row in chunk {
+                let obj = match row.as_object() { Some(m) => m, None => continue };
+                let vals: Vec<String> = columns.iter().map(|col| {
+                    to_sql_literal(obj.get(col).unwrap_or(&Value::Null))
+                }).collect();
+                values_clauses.push(format!("({})", vals.join(",")));
+            }
+            if values_clauses.is_empty() { continue; }
 
-        match query.execute(&self.pool).await {
-            Ok(r) => r.rows_affected() as usize,
-            Err(e) => { error!("FRED upsert {table}: {e}"); 0 }
+            let sql = if update_set.is_empty() {
+                format!("INSERT IGNORE INTO {table} ({col_list}) VALUES {}",
+                    values_clauses.join(","))
+            } else {
+                format!("INSERT INTO {table} ({col_list}) VALUES {} ON DUPLICATE KEY UPDATE {update_set}",
+                    values_clauses.join(","))
+            };
+
+            match sqlx::query(&sql).execute(&self.pool).await {
+                Ok(r) => total += r.rows_affected() as usize,
+                Err(e) => { error!("FRED upsert {table}: {e}"); }
+            }
         }
+        total
+    }
+}
+
+/// Convert a JSON value to a SQL literal string for inline INSERT.
+fn to_sql_literal(val: &Value) -> String {
+    match val {
+        Value::Null => "NULL".to_string(),
+        Value::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        _ => format!("'{}'", val.to_string().replace('\'', "''")),
     }
 }

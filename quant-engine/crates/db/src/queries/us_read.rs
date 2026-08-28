@@ -1,18 +1,17 @@
-//! Read queries for US stock data — SELECT from PostgreSQL.
+//! Read queries for US stock data — SELECT from MySQL.
 //!
-//! All queries use runtime-checked sqlx::query_as (not compile-time checked)
-//! since the DB schema lives in the `quant` schema and compile-time checks
-//! would require DATABASE_URL at build time.
+//! Note: US stock tables are not yet created in MySQL. These queries compile
+//! but will fail at runtime until US DDL is added.
 
 use chrono::NaiveDate;
-use sqlx::PgPool;
+use sqlx::MySqlPool;
 use tracing::debug;
 
 use crate::models::us_stock::*;
 
 // ── Stock Basic ─────────────────────────────────────────────────────────
 
-pub async fn get_all_active_stocks(pool: &PgPool) -> Result<Vec<UsStockBasic>, sqlx::Error> {
+pub async fn get_all_active_stocks(pool: &MySqlPool) -> Result<Vec<UsStockBasic>, sqlx::Error> {
     let rows = sqlx::query_as::<_, UsStockBasic>(
         "SELECT * FROM us_stock_basic WHERE is_actively_trading = 1 AND is_etf = 0 AND is_fund = 0"
     )
@@ -25,12 +24,12 @@ pub async fn get_all_active_stocks(pool: &PgPool) -> Result<Vec<UsStockBasic>, s
 // ── Daily Prices ────────────────────────────────────────────────────────
 
 pub async fn get_daily_prices(
-    pool: &PgPool,
+    pool: &MySqlPool,
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<Vec<UsDailyPrice>, sqlx::Error> {
     let rows = sqlx::query_as::<_, UsDailyPrice>(
-        "SELECT * FROM us_daily_price WHERE trade_date >= $1 AND trade_date <= $2 ORDER BY ticker, trade_date"
+        "SELECT * FROM us_daily_price WHERE trade_date >= ? AND trade_date <= ? ORDER BY ticker, trade_date"
     )
     .bind(start)
     .bind(end)
@@ -41,13 +40,13 @@ pub async fn get_daily_prices(
 }
 
 pub async fn get_daily_prices_for_ticker(
-    pool: &PgPool,
+    pool: &MySqlPool,
     ticker: &str,
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<Vec<UsDailyPrice>, sqlx::Error> {
     sqlx::query_as::<_, UsDailyPrice>(
-        "SELECT * FROM us_daily_price WHERE ticker = $1 AND trade_date >= $2 AND trade_date <= $3 ORDER BY trade_date"
+        "SELECT * FROM us_daily_price WHERE ticker = ? AND trade_date >= ? AND trade_date <= ? ORDER BY trade_date"
     )
     .bind(ticker)
     .bind(start)
@@ -59,13 +58,13 @@ pub async fn get_daily_prices_for_ticker(
 // ── Index Daily ─────────────────────────────────────────────────────────
 
 pub async fn get_index_daily(
-    pool: &PgPool,
+    pool: &MySqlPool,
     index_code: &str,
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<Vec<UsIndexDaily>, sqlx::Error> {
     sqlx::query_as::<_, UsIndexDaily>(
-        "SELECT * FROM us_index_daily WHERE index_code = $1 AND trade_date >= $2 AND trade_date <= $3 ORDER BY trade_date"
+        "SELECT * FROM us_index_daily WHERE index_code = ? AND trade_date >= ? AND trade_date <= ? ORDER BY trade_date"
     )
     .bind(index_code)
     .bind(start)
@@ -77,7 +76,7 @@ pub async fn get_index_daily(
 // ── Financial Data ──────────────────────────────────────────────────────
 
 pub async fn get_financials(
-    pool: &PgPool,
+    pool: &MySqlPool,
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<Vec<UsFinancialRow>, sqlx::Error> {
@@ -94,7 +93,7 @@ pub async fn get_financials(
          operating_cash_flow, capital_expenditure, free_cash_flow, \
          dividends_paid, common_stock_repurchased, \
          COALESCE(debt_repayment, 0) - COALESCE(common_stock_issued, 0) + COALESCE(common_stock_repurchased, 0) as net_stock_issuance \
-         FROM us_financial_data WHERE filing_date >= $1 AND filing_date <= $2 \
+         FROM us_financial_data WHERE filing_date >= ? AND filing_date <= ? \
          ORDER BY ticker, filing_date DESC"
     )
     .bind(start)
@@ -108,13 +107,13 @@ pub async fn get_financials(
 // ── Enterprise Value ────────────────────────────────────────────────────
 
 pub async fn get_enterprise_values(
-    pool: &PgPool,
+    pool: &MySqlPool,
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<Vec<UsEnterpriseValue>, sqlx::Error> {
     sqlx::query_as::<_, UsEnterpriseValue>(
         "SELECT id, ticker, date, market_capitalization, enterprise_value \
-         FROM us_enterprise_value WHERE date >= $1 AND date <= $2 \
+         FROM us_enterprise_value WHERE date >= ? AND date <= ? \
          ORDER BY ticker, date DESC"
     )
     .bind(start)
@@ -125,7 +124,7 @@ pub async fn get_enterprise_values(
 
 // ── Industry Classification ─────────────────────────────────────────────
 
-pub async fn get_industry_class(pool: &PgPool) -> Result<Vec<UsIndustryClass>, sqlx::Error> {
+pub async fn get_industry_class(pool: &MySqlPool) -> Result<Vec<UsIndustryClass>, sqlx::Error> {
     sqlx::query_as::<_, UsIndustryClass>(
         "SELECT * FROM us_industry_class"
     )
@@ -136,12 +135,12 @@ pub async fn get_industry_class(pool: &PgPool) -> Result<Vec<UsIndustryClass>, s
 // ── Earnings Surprise ───────────────────────────────────────────────────
 
 pub async fn get_earnings_surprises(
-    pool: &PgPool,
+    pool: &MySqlPool,
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<Vec<UsEarningsSurprise>, sqlx::Error> {
     sqlx::query_as::<_, UsEarningsSurprise>(
-        "SELECT * FROM us_earnings_surprise WHERE date >= $1 AND date <= $2 ORDER BY ticker, date DESC"
+        "SELECT * FROM us_earnings_surprise WHERE date >= ? AND date <= ? ORDER BY ticker, date DESC"
     )
     .bind(start)
     .bind(end)
@@ -152,12 +151,12 @@ pub async fn get_earnings_surprises(
 // ── EPS Estimates ───────────────────────────────────────────────────────
 
 pub async fn get_eps_estimates(
-    pool: &PgPool,
+    pool: &MySqlPool,
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<Vec<UsEpsEstimate>, sqlx::Error> {
     sqlx::query_as::<_, UsEpsEstimate>(
-        "SELECT * FROM us_eps_estimate WHERE date >= $1 AND date <= $2 ORDER BY ticker, date DESC"
+        "SELECT * FROM us_eps_estimate WHERE date >= ? AND date <= ? ORDER BY ticker, date DESC"
     )
     .bind(start)
     .bind(end)
@@ -168,13 +167,13 @@ pub async fn get_eps_estimates(
 // ── Macro Indicators ────────────────────────────────────────────────────
 
 pub async fn get_macro_indicators(
-    pool: &PgPool,
+    pool: &MySqlPool,
     indicator_code: &str,
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<Vec<UsMacroIndicator>, sqlx::Error> {
     sqlx::query_as::<_, UsMacroIndicator>(
-        "SELECT * FROM us_macro_indicator WHERE indicator_code = $1 AND report_date >= $2 AND report_date <= $3 ORDER BY report_date DESC"
+        "SELECT * FROM us_macro_indicator WHERE indicator_code = ? AND report_date >= ? AND report_date <= ? ORDER BY report_date DESC"
     )
     .bind(indicator_code)
     .bind(start)
@@ -186,11 +185,11 @@ pub async fn get_macro_indicators(
 // ── Import Progress ─────────────────────────────────────────────────────
 
 pub async fn get_completed_tickers(
-    pool: &PgPool,
+    pool: &MySqlPool,
     table_name: &str,
 ) -> Result<Vec<String>, sqlx::Error> {
     let rows = sqlx::query_scalar::<_, String>(
-        "SELECT ticker FROM import_progress WHERE table_name = $1"
+        "SELECT ticker FROM import_progress WHERE table_name = ?"
     )
     .bind(table_name)
     .fetch_all(pool)
@@ -200,7 +199,7 @@ pub async fn get_completed_tickers(
 
 // ── Table counts (for db_status equivalent) ─────────────────────────────
 
-pub async fn count_rows(pool: &PgPool, table: &str) -> Result<i64, sqlx::Error> {
+pub async fn count_rows(pool: &MySqlPool, table: &str) -> Result<i64, sqlx::Error> {
     let count: (i64,) = sqlx::query_as(
         &format!("SELECT COUNT(*) FROM {table}")
     )

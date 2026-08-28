@@ -8,7 +8,7 @@
 use async_trait::async_trait;
 use chrono::{NaiveDate, Utc};
 use rustc_hash::FxHashMap;
-use sqlx::PgPool;
+use sqlx::MySqlPool;
 use tracing::{debug, info};
 
 use quant_backtest::a_exec::{
@@ -20,14 +20,14 @@ use crate::broker::{AccountSnapshot, Broker, BrokerError, Position};
 
 /// PaperBroker — wraps a DB connection + a quote source.
 pub struct PaperBroker<Q: QuoteSource + Send + Sync> {
-    pool: PgPool,
+    pool: MySqlPool,
     account_id: String,
     cost: ACostConfig,
     quotes: Q,
 }
 
 impl<Q: QuoteSource + Send + Sync> PaperBroker<Q> {
-    pub fn new(pool: PgPool, account_id: String, cost: ACostConfig, quotes: Q) -> Self {
+    pub fn new(pool: MySqlPool, account_id: String, cost: ACostConfig, quotes: Q) -> Self {
         Self { pool, account_id, cost, quotes }
     }
 
@@ -68,7 +68,7 @@ impl<Q: QuoteSource + Send + Sync> PaperBroker<Q> {
 
         // Cash (updated_at 由 DB trigger 自动维护)
         sqlx::query(
-            "UPDATE a_paper_account SET cash = $1 WHERE account_id = $2"
+            "UPDATE a_paper_account SET cash = ? WHERE account_id = ?"
         ).bind(new_cash).bind(&self.account_id).execute(&mut *tx).await?;
 
         // Position changes — diff old vs new
@@ -81,14 +81,13 @@ impl<Q: QuoteSource + Send + Sync> PaperBroker<Q> {
             let cost = new_costs.get(code).copied().unwrap_or(0.0);
             if new_n <= 0 {
                 sqlx::query(
-                    "DELETE FROM a_paper_position WHERE account_id = $1 AND ts_code = $2"
+                    "DELETE FROM a_paper_position WHERE account_id = ? AND ts_code = ?"
                 ).bind(&self.account_id).bind(code).execute(&mut *tx).await?;
             } else {
                 sqlx::query(
                     "INSERT INTO a_paper_position (account_id, ts_code, shares, avg_cost) \
-                     VALUES ($1, $2, $3, $4) \
-                     ON CONFLICT (account_id, ts_code) \
-                     DO UPDATE SET shares = EXCLUDED.shares, avg_cost = EXCLUDED.avg_cost"
+                     VALUES (?, ?, ?, ?) \
+                     ON DUPLICATE KEY UPDATE shares = VALUES(shares), avg_cost = VALUES(avg_cost)"
                 )
                 .bind(&self.account_id).bind(code).bind(new_n).bind(cost)
                 .execute(&mut *tx).await?;
@@ -99,7 +98,7 @@ impl<Q: QuoteSource + Send + Sync> PaperBroker<Q> {
         for f in fills {
             sqlx::query(
                 "INSERT INTO a_paper_trade (account_id, trade_date, ts_code, side, shares, price, gross, fees) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             )
             .bind(&self.account_id).bind(date).bind(&f.ts_code).bind(f.side.as_str())
             .bind(f.shares).bind(f.price).bind(f.gross).bind(f.fees)

@@ -11,7 +11,7 @@ quant-backtest = { path = "../backtest" }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "chrono", "macros", "uuid"] }
+sqlx = { version = "0.8", features = ["mysql", "runtime-tokio", "chrono", "macros", "uuid"] }
 tokio = { version = "1", features = ["full"] }
 tracing = { workspace = true }
 rustc-hash = { workspace = true }

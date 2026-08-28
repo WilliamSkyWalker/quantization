@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::MySqlPool;
 use tracing::{info, warn};
 
 use crate::http::ApiClient;
@@ -15,11 +15,11 @@ use crate::progress::ticker_progress;
 pub struct QuiverDownloader {
     pub api_key: String,
     pub client: ApiClient,
-    pub pool: PgPool,
+    pub pool: MySqlPool,
 }
 
 impl QuiverDownloader {
-    pub fn new(api_key: String, pool: PgPool, rate_limit: u32) -> Self {
+    pub fn new(api_key: String, pool: MySqlPool, rate_limit: u32) -> Self {
         Self {
             api_key,
             client: ApiClient::new(rate_limit, 5),
@@ -48,14 +48,14 @@ impl QuiverDownloader {
 
     async fn get_done_tickers(&self, table: &str) -> HashSet<String> {
         sqlx::query_scalar::<_, String>(
-            "SELECT ticker FROM import_progress WHERE table_name = $1"
+            "SELECT ticker FROM import_progress WHERE table_name = ?"
         ).bind(table).fetch_all(&self.pool).await.unwrap_or_default().into_iter().collect()
     }
 
     async fn mark_done(&self, table: &str, ticker: &str) {
         sqlx::query(
             "INSERT INTO import_progress (table_name, ticker, completed_at) \
-             VALUES ($1, $2, NOW()) ON CONFLICT (table_name, ticker) DO UPDATE SET completed_at = NOW()"
+             VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE completed_at = NOW()"
         ).bind(table).bind(ticker).execute(&self.pool).await.ok();
     }
 
@@ -72,10 +72,9 @@ impl QuiverDownloader {
         let mut total = 0usize;
 
         let col_list = columns.join(", ");
-        let conflict_cols = unique_keys.join(", ");
         let update_set: String = columns.iter()
             .filter(|c| !unique_keys.contains(&c.as_str()))
-            .map(|c| format!("{c} = EXCLUDED.{c}"))
+            .map(|c| format!("{c} = VALUES({c})"))
             .collect::<Vec<_>>().join(", ");
 
         for chunk in rows.chunks(chunk_size) {
@@ -90,10 +89,10 @@ impl QuiverDownloader {
             if values_clauses.is_empty() { continue; }
 
             let sql = if update_set.is_empty() {
-                format!("INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO NOTHING",
+                format!("INSERT IGNORE INTO {table} ({col_list}) VALUES {}",
                     values_clauses.join(","))
             } else {
-                format!("INSERT INTO {table} ({col_list}) VALUES {} ON CONFLICT ({conflict_cols}) DO UPDATE SET {update_set}",
+                format!("INSERT INTO {table} ({col_list}) VALUES {} ON DUPLICATE KEY UPDATE {update_set}",
                     values_clauses.join(","))
             };
 
