@@ -71,10 +71,10 @@ impl QuiverDownloader {
         let chunk_size = 200;
         let mut total = 0usize;
 
-        let col_list = columns.join(", ");
+        let col_list = columns.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ");
         let update_set: String = columns.iter()
             .filter(|c| !unique_keys.contains(&c.as_str()))
-            .map(|c| format!("{c} = VALUES({c})"))
+            .map(|c| format!("`{c}` = VALUES(`{c}`)"))
             .collect::<Vec<_>>().join(", ");
 
         for chunk in rows.chunks(chunk_size) {

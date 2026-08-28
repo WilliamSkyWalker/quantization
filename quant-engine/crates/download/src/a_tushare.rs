@@ -108,7 +108,7 @@ impl TushareDownloader {
             return vec![t.clone()];
         }
         sqlx::query_scalar::<_, String>(
-            "SELECT ts_code FROM a_stock_basic WHERE list_status = 'L'"
+            "SELECT ts_code FROM a_stock_basic"
         ).fetch_all(&self.pool).await.unwrap_or_default()
     }
 
@@ -158,10 +158,10 @@ impl TushareDownloader {
             } else { false }
         }).collect();
 
-        let col_list = columns.join(", ");
+        let col_list = columns.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ");
         let update_set: String = columns.iter()
             .filter(|c| !unique_keys.contains(&c.as_str()))
-            .map(|c| format!("{c} = VALUES({c})"))
+            .map(|c| format!("`{c}` = VALUES(`{c}`)"))
             .collect::<Vec<_>>().join(", ");
 
         let chunk_size = 200;
