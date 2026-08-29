@@ -22,3 +22,4 @@ quant-engine/target-linux/
 quant-engine/.claude/
 cache_backup_*.tar.zst
 /.qoder/settings.local.json
+/error.log
