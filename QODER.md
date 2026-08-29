@@ -2,8 +2,9 @@
 
 ## Infrastructure
 - **MySQL runs in Docker** (not system service). Start with `docker start <container>` not `sudo service mysql start`
+- Local MySQL access is configured through `quant-engine/env.json`; never commit credentials or connection-specific commands.
 - Database: MySQL, accessed via sqlx in Rust (not PostgreSQL as CLAUDE.md says — migrated to MySQL)
-- Config: `quant-engine/config.toml` + env vars from `env.json`
+- Config: `quant-engine/config.toml` + env vars from `quant-engine/env.json`
 
 ## Project Structure
 - **Production**: `quant-engine/` (Rust workspace, 9 crates)
@@ -29,29 +30,44 @@
 
 ## Key Commands
 ```bash
+# 重要：使用打包好的二进制，不要用 cargo run
+cd quant-engine
+
 # Stock selection (A-share)
-cargo run --release -- --market cn score --date YYYY-MM-DD --top 30
+./target/release/quant --market cn score --date YYYY-MM-DD --top 30
 
 # Factor analysis (A-share)
-cargo run --release -- --market cn analyze --start 2021-01-01 --end YYYY-MM-DD
+./target/release/quant --market cn factors --date YYYY-MM-DD
 
 # Backtest (A-share)
-cargo run --release -- --market cn backtest --start YYYY-MM-DD --end YYYY-MM-DD
+./target/release/quant --market cn backtest --start YYYY-MM-DD --end YYYY-MM-DD
 
 # Download data
-cargo run --release -- --market cn download --source tushare --target all
+./target/release/quant --market cn download --source tushare --target all
+./target/release/quant --market cn download --source tushare --target indicator  # 只补财务指标
 
-# Build
-cd quant-engine && cargo build --release -p quant-cli
+# Build (only when code changed)
+cargo build --release -p quant-cli
 ```
 
 ## Recent Work (2026-08-28)
 - Added 10 new factors: PIOTROSKI_F, FREE_FLOAT_PCT, AMIHUD_ILLIQ, ACCRUALS, BAB_BETA, REVENUE_ACCELERATION, GROSS_MARGIN_CHG, RSI_14, MAX_RET, PRICE_52W_HIGH
 - Implemented `score` command for A-share (cmd_a_score in main.rs)
+- Added `--detail` flag to show per-category score breakdown
 - Added `detect_a_regime_public` wrapper in a_strategy.rs
 - Factor analysis results: 4 factors significant at |t|>3.0 (REV_5D, VOL_PRICE_DIV, TURN_20D, SIZE), all price-based, no look-ahead bias
 - Backtest improved: -28.40% → +13.41% total return
 - Updated doc/A_SHARE_STRATEGY.md with new factors and analysis results
+- **Fixed 3 factor bugs** (2026-08-29):
+  - GROSS_MARGIN: was reading `gross_margin` (绝对值/元), changed to `grossprofit_margin` (百分比/%)
+  - GROSS_MARGIN_CHG / MARGIN_TREND: 自动修复（共用 cache 字段）
+  - NET_PROFIT_YOY: was reading `q_netprofit_yoy` (全NULL), changed to `netprofit_yoy` (年度同比，有数据)
+  - Added `netprofit_yoy` field to `AFinIndicator` struct in cache.rs
+
+## Known Data Issues
+- Tushare `fina_indicator` API: `gross_margin` = 营业利润(绝对值/元), `grossprofit_margin` = 毛利率(%)
+- `q_netprofit_yoy` / `q_profit_yoy` 全 NULL — Tushare 不返回这些字段
+- `netprofit_yoy` 有数据 (年度同比), `q_sales_yoy` 有数据 (季度营收同比)
 
 ## File Locations
 - CLI entry: `quant-engine/crates/cli/src/main.rs`
