@@ -124,7 +124,8 @@ pub async fn get_a_financial_cashflow(
 
 pub async fn get_a_industry_class(pool: &MySqlPool) -> Result<Vec<AIndustryClass>, sqlx::Error> {
     sqlx::query_as::<_, AIndustryClass>(
-        "SELECT * FROM a_industry_class WHERE src = 'SW2021' AND level = 'L1' AND out_date IS NULL"
+        "SELECT * FROM a_industry_class WHERE src = 'SW2021' AND level = 'L1' \
+         ORDER BY ts_code, in_date"
     ).fetch_all(pool).await
 }
 

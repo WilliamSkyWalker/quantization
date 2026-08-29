@@ -7,7 +7,7 @@
 //! 用法：
 //! ```no_run
 //! use quant_trading::us_alpaca::AlpacaClient;
-//! # async fn run() -> anyhow::Result<()> {
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = AlpacaClient::from_env()?;
 //! let acct = client.account().await?;
 //! println!("cash={}, equity={}", acct.cash, acct.equity);

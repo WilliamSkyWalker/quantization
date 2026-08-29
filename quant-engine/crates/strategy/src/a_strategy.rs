@@ -9,25 +9,15 @@ use std::collections::HashMap;
 use chrono::NaiveDate;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-use quant_core::config::{AShareRegimeConfig, AShareUniverseConfig};
+use quant_core::config::{AShareRegimeConfig, AShareStrategyConfig, AShareUniverseConfig};
 use quant_factors::a_share::cache::AShareCache;
 use quant_factors::a_share::factors::{all_factors, AFactorResult};
 use quant_factors::a_share::universe::{AUniverseFilter, get_a_clean_universe};
 
-/// A-share category weights (quality-dominant).
-fn category_weights() -> HashMap<&'static str, f64> {
-    let mut w = HashMap::new();
-    w.insert("value", 0.7);
-    w.insert("quality", 1.3);
-    w.insert("growth", 1.0);
-    w.insert("momentum", 0.9);
-    w.insert("technical", 0.7);
-    w.insert("macro", 0.6);
-    w.insert("sentiment", 0.6);
-    w
-}
+type FactorValues = Vec<(&'static str, &'static str, i8, AFactorResult)>;
+type ScoreDetails = FxHashMap<String, (f64, FxHashMap<String, f64>)>;
 
 /// A-share regime detection — trend + volatility composite.
 ///
@@ -167,23 +157,42 @@ pub fn compute_scores(
     date: NaiveDate,
     cache: &AShareCache,
     universe: Option<&FxHashSet<String>>,
+    strategy: &AShareStrategyConfig,
     regime_overrides: Option<&HashMap<String, f64>>,
 ) -> AFactorResult {
-    let factors = all_factors();
-    let base_weights = category_weights();
-    let cat_weights: HashMap<&str, f64> = if let Some(overrides) = regime_overrides {
-        base_weights.iter().map(|(cat, w)| {
-            let mult = overrides.get(*cat).copied().unwrap_or(1.0);
-            (*cat, w * mult)
-        }).collect()
-    } else {
-        base_weights
-    };
+    compute_scores_detail(date, cache, universe, strategy, regime_overrides)
+        .into_iter()
+        .map(|(code, (score, _))| (code, score))
+        .collect()
+}
 
-    // Compute all factors in parallel (rayon). Matches US `cmd_backtest` US-path
-    // which does `factors.par_iter().filter_map(...)`.
-    let factor_values: Vec<(&str, &str, i8, AFactorResult)> = factors.par_iter()
+/// Compute scores with per-category breakdown.
+///
+/// Returns: ts_code → (total_score, HashMap<category, cat_score>)
+pub fn compute_scores_detail(
+    date: NaiveDate,
+    cache: &AShareCache,
+    universe: Option<&FxHashSet<String>>,
+    strategy: &AShareStrategyConfig,
+    regime_overrides: Option<&HashMap<String, f64>>,
+) -> ScoreDetails {
+    let factors = all_factors();
+    let deferred_factors: Vec<&str> = factors.iter()
+        .filter(|factor| !matches!(factor.direction, -1 | 1))
+        .map(|factor| factor.name)
+        .collect();
+    if !deferred_factors.is_empty() {
+        warn!(
+            "A-share scores exclude factors without a validated static direction: {}",
+            deferred_factors.join(", "),
+        );
+    }
+
+    let factor_values: FactorValues = factors.par_iter()
         .filter_map(|f| {
+            if !matches!(f.direction, -1 | 1) {
+                return None;
+            }
             let raw = (f.compute)(date, cache);
             if raw.is_empty() { return None; }
             let processed = winsorize_zscore(&raw);
@@ -191,58 +200,96 @@ pub fn compute_scores(
         })
         .collect();
 
-    // Collect all stock codes (intersect with universe if provided)
-    let mut all_codes: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for (_, _, _, vals) in &factor_values {
-        for code in vals.keys() {
-            if let Some(u) = universe {
-                if !u.contains(code) { continue; }
+    let category_weights = category_weights(strategy, regime_overrides);
+    let results = aggregate_score_details(
+        &factor_values,
+        universe,
+        &category_weights,
+        strategy.min_valid_categories,
+    );
+    debug!("A-share scores: {} stocks on {date}", results.len());
+    results
+}
+
+fn category_weights(
+    strategy: &AShareStrategyConfig,
+    regime_overrides: Option<&HashMap<String, f64>>,
+) -> HashMap<String, f64> {
+    strategy.category_weights.iter()
+        .filter_map(|(category, &weight)| {
+            if !weight.is_finite() || weight <= 0.0 {
+                warn!("A-share score ignores invalid category weight {category}={weight}");
+                return None;
             }
-            all_codes.insert(code.as_str());
+            let multiplier = regime_overrides
+                .and_then(|overrides| overrides.get(category))
+                .copied()
+                .unwrap_or(1.0);
+            let effective_weight = weight * multiplier;
+            if !effective_weight.is_finite() || effective_weight <= 0.0 {
+                warn!("A-share score ignores invalid effective category weight {category}={effective_weight}");
+                return None;
+            }
+            Some((category.clone(), effective_weight))
+        })
+        .collect()
+}
+
+fn aggregate_score_details(
+    factor_values: &FactorValues,
+    universe: Option<&FxHashSet<String>>,
+    category_weights: &HashMap<String, f64>,
+    min_valid_categories: usize,
+) -> ScoreDetails {
+    let mut all_codes: FxHashSet<&str> = FxHashSet::default();
+    for (_, _, _, values) in factor_values {
+        for code in values.keys() {
+            if universe.is_none_or(|allowed| allowed.contains(code)) {
+                all_codes.insert(code);
+            }
         }
     }
 
-    let mut scores = AFactorResult::new();
-
+    let mut results = ScoreDetails::default();
     for code in all_codes {
-        // Layer 1: intra-category average
-        let mut cat_scores: HashMap<&str, f64> = HashMap::new();
-        let mut cat_counts: HashMap<&str, usize> = HashMap::new();
+        let mut cat_scores: FxHashMap<String, f64> = FxHashMap::default();
+        let mut cat_counts: FxHashMap<String, usize> = FxHashMap::default();
 
-        for (_name, category, direction, vals) in &factor_values {
+        for (_name, category, direction, vals) in factor_values {
             if let Some(&val) = vals.get(code) {
-                if val.is_finite() {
-                    let signed = if *direction == -1 { -val } else { val };
-                    *cat_scores.entry(category).or_insert(0.0) += signed;
-                    *cat_counts.entry(category).or_insert(0) += 1;
+                if val.is_finite() && matches!(*direction, -1 | 1) {
+                    let signed = *direction as f64 * val;
+                    *cat_scores.entry(category.to_string()).or_insert(0.0) += signed;
+                    *cat_counts.entry(category.to_string()).or_insert(0) += 1;
                 }
             }
         }
 
-        // Average within categories
         for (cat, sum) in &mut cat_scores {
             if let Some(&cnt) = cat_counts.get(cat) {
                 if cnt > 0 { *sum /= cnt as f64; }
             }
         }
 
-        // Layer 2: weighted category sum
         let mut total_score = 0.0;
         let mut total_weight = 0.0;
 
         for (cat, &cat_score) in &cat_scores {
-            let w = cat_weights.get(cat).copied().unwrap_or(1.0);
-            total_score += cat_score * w;
-            total_weight += w;
+            if let Some(&weight) = category_weights.get(cat) {
+                total_score += cat_score * weight;
+                total_weight += weight;
+            }
         }
 
-        if total_weight > 0.0 && cat_scores.len() >= 3 {
-            scores.insert(code.to_string(), total_score / total_weight);
+        let valid_categories = cat_scores.keys()
+            .filter(|category| category_weights.contains_key(*category))
+            .count();
+        if total_weight > 0.0 && valid_categories >= min_valid_categories {
+            results.insert(code.to_string(), (total_score / total_weight, cat_scores));
         }
     }
 
-    debug!("A-share scores: {} stocks on {date}", scores.len());
-    scores
+    results
 }
 
 /// Select top-N equal-weight portfolio from scores.
@@ -277,6 +324,7 @@ pub fn generate_signals(
     n_holdings: usize,
     min_score: f64,
     universe_cfg: Option<&AShareUniverseConfig>,
+    strategy: &AShareStrategyConfig,
     regime_cfg: Option<&AShareRegimeConfig>,
 ) -> std::collections::BTreeMap<NaiveDate, FxHashMap<String, f64>> {
     use chrono::Datelike;
@@ -314,7 +362,7 @@ pub fn generate_signals(
             1.0
         };
 
-        let scores = compute_scores(date, cache, universe.as_ref(), None);
+        let scores = compute_scores(date, cache, universe.as_ref(), strategy, None);
         let effective_n = if h_ratio < 0.99 {
             (n_holdings as f64 * h_ratio).round().max(1.0) as usize
         } else {
@@ -343,4 +391,50 @@ pub fn generate_signals(
     }
 
     signals
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn factor(name: &'static str, category: &'static str, direction: i8, values: &[(&str, f64)]) -> (
+        &'static str,
+        &'static str,
+        i8,
+        AFactorResult,
+    ) {
+        (
+            name,
+            category,
+            direction,
+            values.iter().map(|(code, value)| ((*code).to_string(), *value)).collect(),
+        )
+    }
+
+    #[test]
+    fn aggregation_uses_directions_and_configured_category_coverage() {
+        let values = vec![
+            factor("positive", "value", 1, &[("A", 1.0), ("B", 1.0)]),
+            factor("negative", "quality", -1, &[("A", -2.0), ("B", -2.0)]),
+            factor("growth", "growth", 1, &[("A", 3.0), ("B", 3.0)]),
+            factor("technical", "technical", 1, &[("A", 4.0)]),
+            factor("deferred", "momentum", 0, &[("A", 100.0), ("B", 100.0)]),
+        ];
+        let weights = HashMap::from([
+            ("value".to_string(), 1.0),
+            ("quality".to_string(), 1.0),
+            ("growth".to_string(), 1.0),
+            ("technical".to_string(), 1.0),
+            ("momentum".to_string(), 1.0),
+        ]);
+
+        let details = aggregate_score_details(&values, None, &weights, 4);
+
+        assert_eq!(details.len(), 1);
+        let (score, categories) = details.get("A").expect("A has four valid categories");
+        assert_eq!(*score, 2.5);
+        assert_eq!(categories.get("quality"), Some(&2.0));
+        assert!(!categories.contains_key("momentum"));
+        assert!(!details.contains_key("B"));
+    }
 }

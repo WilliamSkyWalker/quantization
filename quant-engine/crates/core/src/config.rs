@@ -266,6 +266,8 @@ pub struct AShareStrategyConfig {
     pub max_single_weight: f64,
     pub max_industry_weight: f64,
     pub max_industry_group_weight: f64,
+    #[serde(default = "default_a_share_category_weights")]
+    pub category_weights: HashMap<String, f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -504,8 +506,21 @@ impl Default for AShareStrategyConfig {
             max_single_weight: 0.12,
             max_industry_weight: 0.20,
             max_industry_group_weight: 0.30,
+            category_weights: default_a_share_category_weights(),
         }
     }
+}
+
+fn default_a_share_category_weights() -> HashMap<String, f64> {
+    HashMap::from([
+        ("value".to_string(), 0.7),
+        ("quality".to_string(), 1.3),
+        ("growth".to_string(), 1.0),
+        ("momentum".to_string(), 0.9),
+        ("technical".to_string(), 0.7),
+        ("macro".to_string(), 0.6),
+        ("sentiment".to_string(), 0.6),
+    ])
 }
 
 impl Default for AShareRiskControlsConfig {
@@ -619,6 +634,7 @@ mod tests {
         assert_eq!(cfg.market_rules.st_limit, 0.05);
         assert_eq!(cfg.regime.index, "000300.SH");
         assert_eq!(cfg.regime.bear_overrides.get("quality"), Some(&1.5));
+        assert_eq!(cfg.strategy.category_weights.get("quality"), Some(&1.3));
     }
 
     #[test]
@@ -631,6 +647,7 @@ mod tests {
         assert_eq!(cfg.a_share.universe.benchmark_index, "000300.SH");
         assert_eq!(cfg.a_share.execution.buy_commission, 0.00075);
         assert_eq!(cfg.a_share.market_rules.bse_limit, 0.30);
+        assert_eq!(cfg.a_share.strategy.category_weights.get("quality"), Some(&1.3));
         // US side untouched
         assert_eq!(cfg.universe.benchmark_index, "^GSPC");
         assert_eq!(cfg.execution.stamp_tax, 0.0);

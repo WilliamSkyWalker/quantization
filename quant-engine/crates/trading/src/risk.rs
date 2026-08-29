@@ -9,6 +9,7 @@
 //! Violations downscale or drop the offending buy order rather than abort
 //! the whole rebalance — caller logs `RiskAction::Skipped`.
 
+use chrono::NaiveDate;
 use rustc_hash::FxHashMap;
 use tracing::warn;
 
@@ -74,6 +75,7 @@ pub fn apply<Q: QuoteSource>(
     current_positions: &FxHashMap<String, i64>,
     cash: f64,
     total_value: f64,
+    date: NaiveDate,
     quotes: &Q,
     cache: &AShareCache,
     config: &RiskConfig,
@@ -84,7 +86,7 @@ pub fn apply<Q: QuoteSource>(
 
     // Track running exposure in CNY (post-fill) per ts_code, industry, group.
     let mut exposure: FxHashMap<String, f64> = current_value_by_code(current_positions, quotes);
-    let mut industry_exp: FxHashMap<String, f64> = aggregate_by_industry(&exposure, cache);
+    let mut industry_exp: FxHashMap<String, f64> = aggregate_by_industry(&exposure, cache, date);
     let mut group_exp: FxHashMap<String, f64> = aggregate_by_group(&industry_exp, &config.industry_groups);
     let mut available_cash = cash;
 
@@ -110,7 +112,7 @@ pub fn apply<Q: QuoteSource>(
                 let curr = exposure.get(&order.ts_code).copied().unwrap_or(0.0);
                 let new_curr = (curr - order.shares as f64 * bar.close).max(0.0);
                 exposure.insert(order.ts_code.clone(), new_curr);
-                rebuild_aggregates(&exposure, cache, &config.industry_groups,
+                rebuild_aggregates(&exposure, cache, date, &config.industry_groups,
                                    &mut industry_exp, &mut group_exp);
                 out.push(order.clone());
                 actions.push(RiskAction::Pass);
@@ -121,7 +123,7 @@ pub fn apply<Q: QuoteSource>(
                 let curr_single = exposure.get(&order.ts_code).copied().unwrap_or(0.0);
 
                 // Determine industry / group keys.
-                let ind = cache.industry.get(&order.ts_code).map(|i| i.industry_name.clone());
+                let ind = cache.industry_on(&order.ts_code, date).map(|i| i.industry_name.clone());
                 let grp = ind.as_ref().and_then(|n| group_for_industry(n, &config.industry_groups));
 
                 let curr_industry = ind.as_ref()
@@ -207,10 +209,11 @@ fn current_value_by_code<Q: QuoteSource>(
 fn aggregate_by_industry(
     exposure: &FxHashMap<String, f64>,
     cache: &AShareCache,
+    date: NaiveDate,
 ) -> FxHashMap<String, f64> {
     let mut m: FxHashMap<String, f64> = FxHashMap::default();
     for (code, &v) in exposure {
-        if let Some(ind) = cache.industry.get(code) {
+        if let Some(ind) = cache.industry_on(code, date) {
             *m.entry(ind.industry_name.clone()).or_insert(0.0) += v;
         }
     }
@@ -234,11 +237,12 @@ fn aggregate_by_group(
 fn rebuild_aggregates(
     exposure: &FxHashMap<String, f64>,
     cache: &AShareCache,
+    date: NaiveDate,
     groups: &FxHashMap<String, Vec<String>>,
     industry_exp: &mut FxHashMap<String, f64>,
     group_exp: &mut FxHashMap<String, f64>,
 ) {
-    *industry_exp = aggregate_by_industry(exposure, cache);
+    *industry_exp = aggregate_by_industry(exposure, cache, date);
     *group_exp = aggregate_by_group(industry_exp, groups);
 }
 
@@ -288,11 +292,12 @@ mod tests {
             c.daily.insert(code.to_string(), vec![(d(), b.clone())]);
             c.basics.insert(code.to_string(), AStockInfo {
                 name: code.to_string().into(), list_date: None, delist_date: None,
-                is_st: false, board: None, total_share: None,
+                is_st: false, board: None, total_share: None, free_share: None,
             });
-            c.industry.insert(code.to_string(), AIndustry {
+            c.industry.insert(code.to_string(), vec![AIndustry {
                 index_code: "X".into(), industry_name: ind.to_string(),
-            });
+                in_date: None, out_date: None,
+            }]);
         }
         c
     }
@@ -311,7 +316,7 @@ mod tests {
         let orders = vec![OrderIntent {
             ts_code: "600519.SH".into(), side: Side::Buy, shares: 5000,
         }];
-        let (out, report) = apply(&orders, &positions, cash, total_value, &q, &cache, &cfg, &cost);
+        let (out, report) = apply(&orders, &positions, cash, total_value, d(), &q, &cache, &cfg, &cost);
         assert_eq!(out.len(), 1);
         assert!(out[0].shares < 5000, "should downscale to single-cap");
         // 12% of 1M = 120K → at price ~100, ~1200 shares (rounded to 100 lot)
@@ -338,7 +343,7 @@ mod tests {
         let orders = vec![OrderIntent {
             ts_code: "600036.SH".into(), side: Side::Buy, shares: 1000,  // 40K = 4%
         }];
-        let (out, _) = apply(&orders, &positions, cash, total_value, &q, &cache, &cfg, &cost);
+        let (out, _) = apply(&orders, &positions, cash, total_value, d(), &q, &cache, &cfg, &cost);
         // Should downscale to ~2% = 20K = 500 shares, rounded to 500 lots = 500
         assert!(!out.is_empty());
         assert!(out[0].shares <= 500, "got {} shares, expected ≤500 due to industry cap", out[0].shares);
@@ -356,7 +361,7 @@ mod tests {
         let orders = vec![OrderIntent {
             ts_code: "600519.SH".into(), side: Side::Sell, shares: 1000,
         }];
-        let (out, report) = apply(&orders, &positions, 0.0, 1_000_000.0, &q, &cache, &cfg, &cost);
+        let (out, report) = apply(&orders, &positions, 0.0, 1_000_000.0, d(), &q, &cache, &cfg, &cost);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].shares, 1000);
         assert_eq!(report.skipped_count(), 0);
@@ -374,7 +379,7 @@ mod tests {
         let orders = vec![OrderIntent {
             ts_code: "600519.SH".into(), side: Side::Buy, shares: 100,
         }];
-        let (out, report) = apply(&orders, &positions, 500.0, 1_000_000.0, &q, &cache, &cfg, &cost);
+        let (out, report) = apply(&orders, &positions, 500.0, 1_000_000.0, d(), &q, &cache, &cfg, &cost);
         assert!(out.is_empty() || out[0].shares == 0);
         assert_eq!(report.skipped_count() + report.downscaled_count(), 1);
     }

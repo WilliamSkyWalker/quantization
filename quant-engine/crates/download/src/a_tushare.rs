@@ -57,35 +57,21 @@ impl TushareDownloader {
             Err(e) => { warn!("Tushare {api_name}: {e}"); return vec![]; }
         };
 
-        let data = match resp.get("data") {
-            Some(d) => d,
-            None => {
-                let msg = resp.get("msg").and_then(|v| v.as_str()).unwrap_or("unknown error");
-                warn!("Tushare {api_name}: {msg}");
+        let data = match tushare_response_data(&resp) {
+            Ok(data) => data,
+            Err(error) => {
+                warn!("Tushare {api_name}: {error}");
                 return vec![];
             }
         };
 
-        let fields = match data.get("fields").and_then(|v| v.as_array()) {
-            Some(f) => f.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect::<Vec<_>>(),
-            None => return vec![],
-        };
-
-        let items = match data.get("items").and_then(|v| v.as_array()) {
-            Some(i) => i,
-            None => return vec![],
-        };
-
-        items.iter().filter_map(|row| {
-            let arr = row.as_array()?;
-            let mut obj = serde_json::Map::new();
-            for (i, field) in fields.iter().enumerate() {
-                if i < arr.len() {
-                    obj.insert(field.clone(), arr[i].clone());
-                }
+        match decode_tushare_rows(data) {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!("Tushare {api_name}: invalid response data: {error}");
+                Vec::new()
             }
-            Some(Value::Object(obj))
-        }).collect()
+        }
     }
 
     // ── DB helpers ──────────────────────────────────────────────────────
@@ -148,15 +134,9 @@ impl TushareDownloader {
             .cloned().collect();
         if columns.is_empty() { return 0; }
 
-        // Dedup
-        let mut seen = HashSet::new();
-        let deduped: Vec<&Value> = rows.iter().filter(|row| {
-            if let Some(obj) = row.as_object() {
-                let key: Vec<String> = unique_keys.iter()
-                    .map(|k| obj.get(*k).map(|v| v.to_string()).unwrap_or_default()).collect();
-                seen.insert(key)
-            } else { false }
-        }).collect();
+        // API corrections can repeat a natural key within one batch. Keep the
+        // final occurrence so the inserted value matches the latest payload.
+        let deduped = deduplicate_rows(rows, unique_keys);
 
         let col_list = columns.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ");
         let update_set: String = columns.iter()
@@ -442,21 +422,33 @@ impl TushareDownloader {
                     let index_code = match idx.get("index_code").and_then(|v| v.as_str()) {
                         Some(c) => c.to_string(), None => continue,
                     };
-                    let index_name = idx.get("index_name").and_then(|v| v.as_str()).unwrap_or("");
-                    let industry_name = idx.get("industry_name").and_then(|v| v.as_str()).unwrap_or(index_name);
+                    // Tushare `index_classify` returns `industry_name`, not
+                    // `index_name`; retain it in both DB fields for consumers
+                    // of either legacy name.
+                    let industry_name = idx.get("industry_name")
+                        .or_else(|| idx.get("index_name"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    if industry_name.is_empty() {
+                        warn!("Industry {src}/{level}/{index_code}: missing industry_name");
+                        continue;
+                    }
 
                     let members = self.tushare_call("index_member", &json!({"index_code": &index_code})).await;
-                    let rows: Vec<Value> = members.iter().filter_map(|m| {
-                        let ts_code = m.get("con_code").or(m.get("ts_code")).and_then(|v| v.as_str())?;
-                        if let Some(t) = &self.only_ticker { if ts_code != t { return None; } }
-                        Some(json!({
-                            "ts_code": ts_code, "index_code": &index_code,
-                            "index_name": index_name, "industry_name": industry_name,
-                            "src": src, "level": level,
-                            "in_date": m.get("in_date").and_then(|v| v.as_str()).unwrap_or(""),
-                            "out_date": m.get("out_date").and_then(|v| v.as_str()).unwrap_or(""),
-                        }))
-                    }).collect();
+                    let rows = match build_industry_member_rows(
+                        src,
+                        level,
+                        idx,
+                        industry_name,
+                        &members,
+                        self.only_ticker.as_deref(),
+                    ) {
+                        Ok(rows) => rows,
+                        Err(error) => {
+                            warn!("Industry {src}/{level}/{index_code}: invalid member response: {error}");
+                            continue;
+                        }
+                    };
                     if !rows.is_empty() {
                         sub_total += self.upsert_rows("a_industry_class", &rows,
                             &["ts_code", "src", "level", "index_code", "in_date"]).await;
@@ -724,6 +716,7 @@ fn merge_daily(daily: &[Value], basic: &[Value], adj: &[Value]) -> Vec<Value> {
     for row in basic {
         if let Some(code) = row.get("ts_code").and_then(|v| v.as_str()) { basic_map.insert(code, row); }
     }
+
     let mut adj_map: HashMap<&str, &Value> = HashMap::new();
     for row in adj {
         if let Some(code) = row.get("ts_code").and_then(|v| v.as_str()) { adj_map.insert(code, row); }
@@ -750,6 +743,142 @@ fn merge_daily(daily: &[Value], basic: &[Value], adj: &[Value]) -> Vec<Value> {
     }).collect()
 }
 
+/// Decode Tushare's columnar `data` response without dropping fields.
+///
+/// A mismatched row is rejected as a corrupted batch rather than partially
+/// mapped into the database, where omitted trailing fields look like nulls.
+fn decode_tushare_rows(data: &Value) -> Result<Vec<Value>, String> {
+    let fields = data.get("fields")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "missing data.fields array".to_string())?;
+    let fields: Vec<&str> = fields.iter()
+        .map(|field| field.as_str().ok_or_else(|| "non-string field name".to_string()))
+        .collect::<Result<_, _>>()?;
+
+    let items = data.get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "missing data.items array".to_string())?;
+    let mut rows = Vec::with_capacity(items.len());
+    for (row_index, row) in items.iter().enumerate() {
+        let values = row.as_array()
+            .ok_or_else(|| format!("item {row_index} is not an array"))?;
+        if values.len() != fields.len() {
+            return Err(format!(
+                "item {row_index} has {} values for {} fields",
+                values.len(),
+                fields.len(),
+            ));
+        }
+
+        let mut object = serde_json::Map::with_capacity(fields.len());
+        for (field, value) in fields.iter().zip(values) {
+            object.insert((*field).to_string(), value.clone());
+        }
+        rows.push(Value::Object(object));
+    }
+    Ok(rows)
+}
+
+/// Extract data only from a successful Tushare response.
+fn tushare_response_data(response: &Value) -> Result<&Value, String> {
+    let code = response.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    if code != 0 {
+        let message = response.get("msg").and_then(Value::as_str).unwrap_or("unknown error");
+        return Err(format!("API code {code}: {message}"));
+    }
+    response.get("data")
+        .filter(|data| !data.is_null())
+        .ok_or_else(|| "successful response has no data object".to_string())
+}
+
+/// Deduplicate a batch by natural key while retaining each key's final row.
+fn deduplicate_rows<'a>(rows: &'a [Value], unique_keys: &[&str]) -> Vec<&'a Value> {
+    let mut seen = HashSet::new();
+    let mut deduplicated = Vec::new();
+    for row in rows.iter().rev() {
+        let object = match row.as_object() {
+            Some(object) => object,
+            None => continue,
+        };
+        let key: Vec<String> = unique_keys.iter()
+            .map(|key| object.get(*key).map(Value::to_string).unwrap_or_default())
+            .collect();
+        if seen.insert(key) {
+            deduplicated.push(row);
+        }
+    }
+    deduplicated.reverse();
+    deduplicated
+}
+
+fn build_industry_member_rows(
+    src: &str,
+    level: &str,
+    classification: &Value,
+    industry_name: &str,
+    members: &[Value],
+    only_ticker: Option<&str>,
+) -> Result<Vec<Value>, String> {
+    let index_code = classification.get("index_code")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "classification has no index_code".to_string())?;
+    let industry_code = classification.get("industry_code").cloned().unwrap_or(Value::Null);
+    let is_pub = classification.get("is_pub").cloned().unwrap_or(Value::Null);
+    let parent_code = classification.get("parent_code").cloned().unwrap_or(Value::Null);
+    let mut rows = Vec::with_capacity(members.len());
+    for (row_index, member) in members.iter().enumerate() {
+        let ts_code = member.get("con_code")
+            .or_else(|| member.get("ts_code"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("item {row_index} has no con_code or ts_code"))?;
+        if only_ticker.is_some_and(|ticker| ticker != ts_code) {
+            continue;
+        }
+        let in_date = normalize_industry_date(
+            member.get("in_date").and_then(Value::as_str),
+            "in_date",
+            row_index,
+        )?;
+        let out_date = normalize_industry_date(
+            member.get("out_date").and_then(Value::as_str),
+            "out_date",
+            row_index,
+        )?;
+        rows.push(json!({
+            "ts_code": ts_code,
+            "index_code": index_code,
+            "index_name": industry_name,
+            "industry_name": industry_name,
+            "industry_code": industry_code.clone(),
+            "is_pub": is_pub.clone(),
+            "parent_code": parent_code.clone(),
+            "src": src,
+            "level": level,
+            "in_date": in_date,
+            "out_date": out_date,
+            "is_new": member.get("is_new").and_then(Value::as_str).unwrap_or(""),
+        }));
+    }
+    Ok(rows)
+}
+
+fn normalize_industry_date(
+    value: Option<&str>,
+    field: &str,
+    row_index: usize,
+) -> Result<String, String> {
+    let Some(value) = value else {
+        return Ok(String::new());
+    };
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    chrono::NaiveDate::parse_from_str(value, "%Y%m%d")
+        .or_else(|_| chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d"))
+        .map(|date| date.format("%Y-%m-%d").to_string())
+        .map_err(|error| format!("item {row_index} has invalid {field}={value}: {error}"))
+}
+
 /// Detect board type from ts_code prefix (Python: _detect_board).
 fn detect_board(ts_code: &str) -> &'static str {
     let code = ts_code.split('.').next().unwrap_or("");
@@ -769,5 +898,167 @@ fn to_sql_literal(val: &Value) -> String {
         Value::String(s) if s.is_empty() => "NULL".to_string(),
         Value::String(s) => format!("'{}'", s.replace('\'', "''")),
         _ => format!("'{}'", val.to_string().replace('\'', "''")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn decodes_every_tushare_field_without_filtering() {
+        let data = json!({
+            "fields": ["ts_code", "trade_date", "open", "extra"],
+            "items": [["000001.SZ", "20240830", 10.5, null]],
+        });
+
+        let rows = decode_tushare_rows(&data).expect("valid Tushare response");
+
+        assert_eq!(rows.len(), 1);
+        let row = rows[0].as_object().expect("decoded object");
+        assert_eq!(row.len(), 4);
+        assert_eq!(row.get("ts_code"), Some(&json!("000001.SZ")));
+        assert_eq!(row.get("trade_date"), Some(&json!("20240830")));
+        assert_eq!(row.get("open"), Some(&json!(10.5)));
+        assert_eq!(row.get("extra"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn rejects_truncated_tushare_rows() {
+        let data = json!({
+            "fields": ["ts_code", "trade_date", "open"],
+            "items": [["000001.SZ", "20240830"]],
+        });
+
+        let error = decode_tushare_rows(&data).expect_err("truncated rows must fail");
+
+        assert!(error.contains("2 values for 3 fields"));
+    }
+
+    #[test]
+    fn api_error_response_is_not_decoded_as_missing_fields() {
+        let response = json!({
+            "code": -2001,
+            "msg": "permission denied",
+            "data": null,
+        });
+
+        let error = tushare_response_data(&response).expect_err("API error must be surfaced");
+        assert_eq!(error, "API code -2001: permission denied");
+    }
+
+    #[test]
+    fn successful_null_data_is_reported_explicitly() {
+        let response = json!({"code": 0, "msg": "", "data": null});
+
+        let error = tushare_response_data(&response).expect_err("null data must be rejected");
+        assert_eq!(error, "successful response has no data object");
+    }
+
+    #[test]
+    fn merge_daily_keeps_all_sources_and_daily_precedence() {
+        let daily = vec![json!({
+            "ts_code": "000001.SZ",
+            "trade_date": "20240830",
+            "close": 10.0,
+        })];
+        let basic = vec![json!({
+            "ts_code": "000001.SZ",
+            "trade_date": "20240830",
+            "close": 99.0,
+            "pe_ttm": 8.0,
+        })];
+        let adj = vec![json!({
+            "ts_code": "000001.SZ",
+            "trade_date": "20240830",
+            "adj_factor": 2.0,
+        })];
+
+        let merged = merge_daily(&daily, &basic, &adj);
+
+        let row = merged[0].as_object().expect("merged object");
+        assert_eq!(row.len(), 5);
+        assert_eq!(row.get("close"), Some(&json!(10.0)));
+        assert_eq!(row.get("pe_ttm"), Some(&json!(8.0)));
+        assert_eq!(row.get("adj_factor"), Some(&json!(2.0)));
+    }
+
+    #[test]
+    fn deduplication_keeps_latest_row_for_each_natural_key() {
+        let rows = vec![
+            json!({"ts_code": "000001.SZ", "trade_date": "20240830", "close": 10.0}),
+            json!({"ts_code": "000002.SZ", "trade_date": "20240830", "close": 20.0}),
+            json!({"ts_code": "000001.SZ", "trade_date": "20240830", "close": 11.0}),
+        ];
+
+        let deduplicated = deduplicate_rows(&rows, &["ts_code", "trade_date"]);
+
+        assert_eq!(deduplicated.len(), 2);
+        assert_eq!(deduplicated[0].get("ts_code"), Some(&json!("000002.SZ")));
+        assert_eq!(deduplicated[1].get("close"), Some(&json!(11.0)));
+    }
+
+    #[test]
+    fn industry_members_keep_tushare_classification_and_dates() {
+        let members = vec![json!({
+            "index_code": "801010.SI",
+            "con_code": "000001.SZ",
+            "in_date": "20210616",
+            "out_date": null,
+            "is_new": "Y",
+        })];
+
+        let rows = build_industry_member_rows(
+            "SW2021",
+            "L1",
+            &json!({
+                "index_code": "801010.SI",
+                "industry_code": "801010",
+                "is_pub": "1",
+                "parent_code": "801000",
+            }),
+            "农林牧渔",
+            &members,
+            None,
+        ).expect("valid industry members");
+
+        assert_eq!(rows.len(), 1);
+        let row = rows[0].as_object().expect("industry member row");
+        assert_eq!(row.get("industry_name"), Some(&json!("农林牧渔")));
+        assert_eq!(row.get("index_name"), Some(&json!("农林牧渔")));
+        assert_eq!(row.get("industry_code"), Some(&json!("801010")));
+        assert_eq!(row.get("is_pub"), Some(&json!("1")));
+        assert_eq!(row.get("parent_code"), Some(&json!("801000")));
+        assert_eq!(row.get("in_date"), Some(&json!("2021-06-16")));
+        assert_eq!(row.get("out_date"), Some(&json!("")));
+        assert_eq!(row.get("is_new"), Some(&json!("Y")));
+    }
+
+    #[test]
+    fn industry_member_rows_reject_invalid_dates() {
+        let members = vec![json!({
+            "con_code": "000001.SZ",
+            "in_date": "2021-99-99",
+            "out_date": null,
+        })];
+
+        let error = build_industry_member_rows(
+            "SW2021",
+            "L1",
+            &json!({"index_code": "801010.SI"}),
+            "农林牧渔",
+            &members,
+            None,
+        ).expect_err("invalid dates must reject the batch");
+
+        assert!(error.contains("invalid in_date"));
+    }
+
+    #[test]
+    fn sql_literals_quote_tushare_text_safely() {
+        assert_eq!(to_sql_literal(&json!("O'Reilly")), "'O''Reilly'");
+        assert_eq!(to_sql_literal(&json!("")), "NULL");
+        assert_eq!(to_sql_literal(&Value::Null), "NULL");
     }
 }

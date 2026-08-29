@@ -172,6 +172,15 @@ max_single_weight = 0.12
 max_industry_weight = 0.20
 max_industry_group_weight = 0.30
 
+[a_share.strategy.category_weights]
+value = 0.7
+quality = 1.3
+growth = 1.0
+momentum = 0.9
+technical = 0.7
+macro = 0.6
+sentiment = 0.6
+
 [a_share.risk_controls]
 enabled = true
 use_vol_targeting = false     # A 股 chop 严重，vol-target 噪声大

@@ -115,16 +115,34 @@ pub fn plan_orders<Q: QuoteSource>(
 ) -> Vec<OrderIntent> {
     let mut orders = Vec::new();
 
-    // Phase 1: Sells — codes in positions whose target weight is 0 or absent.
+    // Phase 1: Sells — exit removed names and reduce overweight positions.
     for (code, &shares) in positions {
-        if shares <= 0 { continue; }
+        if shares <= 0 {
+            continue;
+        }
         let target = target_weights.get(code).copied().unwrap_or(0.0);
-        if target > 0.0 { continue; }
+        let shares_to_sell = if target <= 0.0 {
+            shares
+        } else {
+            quotes.bar(code)
+                .filter(|bar| bar.open > 0.0)
+                .map(|bar| {
+                    let target_shares = round_to_lot(
+                        (total_value * target / bar.open) as i64,
+                        config.lot_size,
+                    );
+                    (shares - target_shares).max(0)
+                })
+                .unwrap_or(0)
+        };
+        if shares_to_sell == 0 {
+            continue;
+        }
         // Don't gate on quote here — execute_orders will skip if missing/limit-down.
         orders.push(OrderIntent {
             ts_code: code.clone(),
             side: Side::Sell,
-            shares,
+            shares: shares_to_sell,
         });
     }
 
@@ -249,7 +267,7 @@ mod tests {
         c.daily.insert(code.to_string(), vec![(date, b)]);
         c.basics.insert(code.to_string(), AStockInfo {
             name: code.into(), list_date: None, delist_date: None,
-            is_st, board: None, total_share: None,
+            is_st, board: None, total_share: None, free_share: None,
         });
         c
     }
@@ -283,6 +301,31 @@ mod tests {
         assert_eq!(fills.len(), 1);
         assert_eq!(fills[0].side, Side::Sell);
         assert!(positions.is_empty());
+    }
+
+    #[test]
+    fn rebalance_sells_excess_shares_to_target_weight() {
+        let date = d("2024-07-15");
+        let cache = cache_with("600519.SH", date, bar(10.0, 10.0, 0.0), false);
+        let cfg = ACostConfig::from_a_share(&AShareConfig::default());
+        let q = CachedQuotes { cache: &cache, date };
+
+        let mut positions = FxHashMap::default();
+        positions.insert("600519.SH".to_string(), 1_000);
+        let mut cash = 0.0;
+        let mut weights = FxHashMap::default();
+        weights.insert("600519.SH".to_string(), 0.5);
+
+        let total = portfolio_value(&positions, &q, cash);
+        let orders = plan_orders(&positions, &weights, total, &q, &cfg);
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].side, Side::Sell);
+        assert_eq!(orders[0].shares, 500);
+
+        let fills = execute_orders(&orders, &mut positions, &mut cash, &q, &cfg);
+        assert_eq!(fills.len(), 1);
+        assert_eq!(positions["600519.SH"], 500);
+        assert!(cash > 0.0);
     }
 
     #[test]

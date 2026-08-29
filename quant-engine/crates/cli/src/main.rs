@@ -112,6 +112,10 @@ enum Commands {
         /// Number of top stocks to show.
         #[arg(long, default_value = "30")]
         top: usize,
+
+        /// Show per-category score breakdown.
+        #[arg(long)]
+        detail: bool,
     },
 
     /// Run full backtest.
@@ -284,10 +288,10 @@ fn main() {
                 Market::Cn => cmd_a_factors(&_config, &date),
             }
         }
-        Commands::Score { date, top } => {
+        Commands::Score { date, top, detail } => {
             match cli.market {
                 Market::Us => info!("Score not implemented for US market"),
-                Market::Cn => cmd_a_score(&_config, &date, top),
+                Market::Cn => cmd_a_score(&_config, &date, top, detail),
             }
         }
         Commands::DbStatus { market } => {
@@ -597,7 +601,7 @@ fn cmd_a_factors(config: &Config, date_str: &str) {
     }
 }
 
-fn cmd_a_score(config: &Config, date_str: &str, top_n: usize) {
+fn cmd_a_score(config: &Config, date_str: &str, top_n: usize, detail: bool) {
     let date = match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
         Ok(d) => d,
         Err(e) => {
@@ -657,55 +661,109 @@ fn cmd_a_score(config: &Config, date_str: &str, top_n: usize) {
         None
     };
 
-    // Compute scores
-    let scores = quant_strategy::a_strategy::compute_scores(
-        date,
-        &cache,
-        Some(&clean_universe),
-        regime_overrides.as_ref(),
-    );
+    if detail {
+        // Compute scores with category breakdown
+        let detailed = quant_strategy::a_strategy::compute_scores_detail(
+            date,
+            &cache,
+            Some(&clean_universe),
+            &config.a_share.strategy,
+            regime_overrides.as_ref(),
+        );
 
-    info!("Scored {} stocks", scores.len());
+        info!("Scored {} stocks (detail mode)", detailed.len());
 
-    // Select top-N
-    let portfolio = quant_strategy::a_strategy::select_portfolio(
-        &scores,
-        top_n,
-        config.a_share.strategy.min_select_score,
-    );
+        // Select top-N by total score
+        let mut sorted: Vec<(&str, f64, &rustc_hash::FxHashMap<String, f64>)> = detailed.iter()
+            .filter(|(_, (score, _))| *score >= config.a_share.strategy.min_select_score && score.is_finite())
+            .map(|(k, (score, cats))| (k.as_str(), *score, cats))
+            .collect();
+        sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
+        sorted.truncate(top_n);
 
-    if portfolio.is_empty() {
-        println!("\nNo stocks passed the selection criteria on {date}");
-        return;
+        if sorted.is_empty() {
+            println!("\nNo stocks passed the selection criteria on {date}");
+            return;
+        }
+
+        let weight = 1.0 / sorted.len() as f64;
+
+        println!("\n=== A股多因子选股 — {date} (详细模式) ===");
+        println!("选股数: {} | 等权权重: {:.2}% | Regime: {}\n",
+            sorted.len(),
+            weight * 100.0,
+            regime_overrides.as_ref().map_or("bull/neutral", |_| "bear"),
+        );
+        println!("{:<4} {:<12} {:<10} {:>8} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
+            "#", "代码", "名称", "总分", "value", "quality", "growth", "momentum", "tech", "macro", "sent");
+        println!("{}", "-".repeat(100));
+
+        for (i, (code, score, cats)) in sorted.iter().enumerate() {
+            let name = cache.basics.get(*code)
+                .map(|b| b.name.as_str()).unwrap_or("?");
+            let v = cats.get("value").unwrap_or(&0.0);
+            let q = cats.get("quality").unwrap_or(&0.0);
+            let g = cats.get("growth").unwrap_or(&0.0);
+            let m = cats.get("momentum").unwrap_or(&0.0);
+            let t = cats.get("technical").unwrap_or(&0.0);
+            let mc = cats.get("macro").unwrap_or(&0.0);
+            let s = cats.get("sentiment").unwrap_or(&0.0);
+            println!("{:<4} {:<12} {:<10} {:>+8.4} {:>+7.3} {:>+7.3} {:>+7.3} {:>+7.3} {:>+7.3} {:>+7.3} {:>+7.3}",
+                i + 1, code, name, score, v, q, g, m, t, mc, s);
+        }
+        println!("{}", "-".repeat(100));
+        println!("合计 {} 只股票", sorted.len());
+    } else {
+        // Original simple mode
+        let scores = quant_strategy::a_strategy::compute_scores(
+            date,
+            &cache,
+            Some(&clean_universe),
+            &config.a_share.strategy,
+            regime_overrides.as_ref(),
+        );
+
+        info!("Scored {} stocks", scores.len());
+
+        let portfolio = quant_strategy::a_strategy::select_portfolio(
+            &scores,
+            top_n,
+            config.a_share.strategy.min_select_score,
+        );
+
+        if portfolio.is_empty() {
+            println!("\nNo stocks passed the selection criteria on {date}");
+            return;
+        }
+
+        let mut sorted: Vec<(&str, f64)> = scores.iter()
+            .filter(|(code, _)| portfolio.contains_key(*code))
+            .map(|(k, &v)| (k.as_str(), v))
+            .collect();
+        sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+        let weight = 1.0 / sorted.len() as f64;
+
+        println!("\n=== A股多因子选股 — {date} ===");
+        println!("选股数: {} | 等权权重: {:.2}% | Regime: {}\n",
+            sorted.len(),
+            weight * 100.0,
+            regime_overrides.as_ref().map_or("bull/neutral", |_| "bear"),
+        );
+        println!("{:<4} {:<12} {:<10} {:>8} {:>12}", "#", "代码", "名称", "得分", "行业");
+        println!("{}", "-".repeat(56));
+
+        for (i, (code, score)) in sorted.iter().enumerate() {
+            let name = cache.basics.get(*code)
+                .map(|b| b.name.as_str()).unwrap_or("?");
+            let industry = cache.industry_on(code, date)
+                .map(|i| if i.industry_name.is_empty() { "?" } else { i.industry_name.as_str() })
+                .unwrap_or("?");
+            println!("{:<4} {:<12} {:<10} {:>+8.4} {:>12}", i + 1, code, name, score, industry);
+        }
+        println!("{}", "-".repeat(56));
+        println!("合计 {} 只股票", sorted.len());
     }
-
-    // Sort by score descending
-    let mut sorted: Vec<(&str, f64)> = scores.iter()
-        .filter(|(code, _)| portfolio.contains_key(*code))
-        .map(|(k, &v)| (k.as_str(), v))
-        .collect();
-    sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-    let weight = 1.0 / sorted.len() as f64;
-
-    println!("\n=== A股多因子选股 — {date} ===");
-    println!("选股数: {} | 等权权重: {:.2}% | Regime: {}\n",
-        sorted.len(),
-        weight * 100.0,
-        regime_overrides.as_ref().map_or("bull/neutral", |_| "bear"),
-    );
-    println!("{:<4} {:<12} {:<10} {:>8} {:>12}", "#", "代码", "名称", "得分", "行业");
-    println!("{}", "-".repeat(56));
-
-    for (i, (code, score)) in sorted.iter().enumerate() {
-        let name = cache.basics.get(*code)
-            .map(|b| b.name.as_str()).unwrap_or("?");
-        let industry = cache.industry.get(*code)
-            .map(|i| i.industry_name.as_str()).unwrap_or("?");
-        println!("{:<4} {:<12} {:<10} {:>+8.4} {:>12}", i + 1, code, name, score, industry);
-    }
-    println!("{}", "-".repeat(56));
-    println!("合计 {} 只股票", sorted.len());
 }
 
 async fn build_a_share_cache(
@@ -760,11 +818,12 @@ async fn build_a_share_cache(
             eps: r.eps.unwrap_or(f64::NAN),
             bps: r.bps.unwrap_or(f64::NAN),
             roe: r.roe.unwrap_or(f64::NAN),
-            gross_margin: r.gross_margin.unwrap_or(f64::NAN),
+            gross_margin: r.grossprofit_margin.unwrap_or(f64::NAN),
             netprofit_margin: r.netprofit_margin.unwrap_or(f64::NAN),
             q_profit_yoy: r.q_profit_yoy.unwrap_or(f64::NAN),
             q_sales_yoy: r.q_sales_yoy.unwrap_or(f64::NAN),
             q_netprofit_yoy: r.q_netprofit_yoy.unwrap_or(f64::NAN),
+            netprofit_yoy: r.netprofit_yoy.unwrap_or(f64::NAN),
             current_ratio: r.current_ratio.unwrap_or(f64::NAN),
             ocf_to_profit: r.ocf_to_profit.unwrap_or(f64::NAN),
             roa: r.roa.unwrap_or(f64::NAN),
@@ -779,16 +838,41 @@ async fn build_a_share_cache(
         v.sort_by(|a, b| b.end_date.cmp(&a.end_date));
     }
 
-    info!("Loading a_industry_class (SW2021 L1)...");
+    info!("Loading A-share industry membership intervals (SW2021 L1)...");
     let inds = quant_db::queries::a_read::get_a_industry_class(pool).await
         .expect("Failed to load a_industry_class");
-    info!("Loaded {} industry mappings", inds.len());
-    let industry: FxHashMap<String, AIndustry> = inds.into_iter()
-        .map(|i| (i.ts_code, AIndustry {
-            index_code: i.index_code.unwrap_or_default(),
-            industry_name: i.industry_name.unwrap_or_default(),
-        }))
-        .collect();
+    info!("Loaded {} industry membership intervals", inds.len());
+    let mut industry: FxHashMap<String, Vec<AIndustry>> = FxHashMap::default();
+    for row in inds {
+        let in_date = match row.in_date.as_deref()
+            .and_then(|value| parse_industry_date(value, "in_date", &row.ts_code))
+        {
+            Some(date) => date,
+            None => {
+                warn!("Skipping industry record for {} without a valid in_date", row.ts_code);
+                continue;
+            }
+        };
+        let out_date = match row.out_date.as_deref() {
+            Some(value) => match parse_industry_date(value, "out_date", &row.ts_code) {
+                Some(date) => Some(date),
+                None => {
+                    warn!("Skipping industry record for {} with an invalid out_date", row.ts_code);
+                    continue;
+                }
+            },
+            None => None,
+        };
+        industry.entry(row.ts_code).or_default().push(AIndustry {
+            index_code: row.index_code.unwrap_or_default(),
+            industry_name: row.industry_name.unwrap_or_default(),
+            in_date: Some(in_date),
+            out_date,
+        });
+    }
+    for memberships in industry.values_mut() {
+        memberships.sort_by_key(|membership| membership.in_date);
+    }
 
     info!("Loading a_trade_cal (SSE) [{}, {}]...", start, end);
     let cal = quant_db::queries::a_read::get_a_trade_cal(pool, "SSE", start, end).await
@@ -840,6 +924,16 @@ async fn build_a_share_cache(
         trading_days,
         index_prices,
         ts_codes,
+    }
+}
+
+fn parse_industry_date(value: &str, field: &str, ts_code: &str) -> Option<chrono::NaiveDate> {
+    match chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        Ok(date) => Some(date),
+        Err(error) => {
+            warn!("Invalid {field} for industry membership {ts_code}: {value} ({error})");
+            None
+        }
     }
 }
 
@@ -966,7 +1060,7 @@ fn cmd_analyze(
     let fm_summaries = quant_strategy::analysis::fama_macbeth(&factor_panel, &cache, 21);
 
     println!("\n\n{:<30} {:>5} {:>12} {:>12} {:>8}",
-        "Factor (FM)", "N", "Mean γ", "Std γ", "t-stat");
+        "Factor (FM)", "N", "Mean γ", "Std γ", "NW t-stat");
     println!("{}", "-".repeat(75));
 
     for s in &fm_summaries {
@@ -994,7 +1088,7 @@ fn cmd_analyze(
     std::fs::write(&csv_path, csv).ok();
 
     let fm_path = output_dir.join(format!("fama_macbeth_{start}_{end}.csv"));
-    let mut fm_csv = String::from("factor,n_months,mean_gamma,std_gamma,t_stat\n");
+    let mut fm_csv = String::from("factor,n_months,mean_gamma,std_gamma,nw_t_stat\n");
     for s in &fm_summaries {
         fm_csv.push_str(&format!(
             "{},{},{:.8},{:.8},{:.4}\n",
@@ -1013,6 +1107,7 @@ async fn cmd_analyze_cn(
 ) {
     use chrono::Datelike;
     use quant_factors::a_share::factors::all_factors;
+    use quant_factors::a_share::universe::{AUniverseFilter, get_a_clean_universe};
     use quant_strategy::analysis::{compute_ic_panel_a, fama_macbeth_a};
 
     let start = chrono::NaiveDate::parse_from_str(start_str, "%Y-%m-%d")
@@ -1054,12 +1149,17 @@ async fn cmd_analyze_cn(
         chrono::NaiveDate,
         std::collections::HashMap<String, std::collections::HashMap<String, f64>>,
     > = std::collections::HashMap::new();
+    let universe_filter = AUniverseFilter::from_config(&config.a_share.universe);
 
     for (i, &date) in rebalance_dates.iter().enumerate() {
+        let clean_universe = get_a_clean_universe(date, &cache, &universe_filter);
         let mut date_factors = std::collections::HashMap::new();
         for f in &factors {
             let raw = (f.compute)(date, &cache);
             if raw.is_empty() { continue; }
+            let raw: std::collections::HashMap<String, f64> = raw.into_iter()
+                .filter(|(code, _)| clean_universe.contains(code))
+                .collect();
             let processed = quant_strategy::a_strategy::winsorize_zscore_public(&raw);
             if !processed.is_empty() {
                 date_factors.insert(f.name.to_string(), processed);
@@ -1068,7 +1168,13 @@ async fn cmd_analyze_cn(
         factor_panel.insert(date, date_factors);
 
         if (i + 1) % 12 == 0 || i + 1 == rebalance_dates.len() {
-            info!("Panel {}/{} ({:.1}s)", i + 1, rebalance_dates.len(), t0.elapsed().as_secs_f64());
+            info!(
+                "Panel {}/{}: universe={} ({:.1}s)",
+                i + 1,
+                rebalance_dates.len(),
+                clean_universe.len(),
+                t0.elapsed().as_secs_f64(),
+            );
         }
     }
     info!("Factor panel: {:.1}s", t0.elapsed().as_secs_f64());
@@ -1101,7 +1207,7 @@ async fn cmd_analyze_cn(
     let fm_summaries = fama_macbeth_a(&factor_panel, &cache, 21);
 
     println!("\n\n{:<30} {:>5} {:>12} {:>12} {:>8}",
-        "Factor (FM)", "N", "Mean γ", "Std γ", "t-stat");
+        "Factor (FM)", "N", "Mean γ", "Std γ", "NW t-stat");
     println!("{}", "-".repeat(75));
 
     for s in &fm_summaries {
@@ -1127,7 +1233,7 @@ async fn cmd_analyze_cn(
     std::fs::write(&csv_path, csv).ok();
 
     let fm_path = output_dir.join(format!("a_fama_macbeth_{start}_{end}.csv"));
-    let mut fm_csv = String::from("factor,n_months,mean_gamma,std_gamma,t_stat\n");
+    let mut fm_csv = String::from("factor,n_months,mean_gamma,std_gamma,nw_t_stat\n");
     for s in &fm_summaries {
         fm_csv.push_str(&format!(
             "{},{},{:.8},{:.8},{:.4}\n",
@@ -1248,6 +1354,7 @@ fn cmd_backtest(
             config.a_share.strategy.max_holdings,
             config.a_share.strategy.min_select_score,
             Some(&config.a_share.universe),
+            &config.a_share.strategy,
             Some(&config.a_share.regime),
         );
         info!(
@@ -1289,7 +1396,7 @@ fn cmd_backtest(
                 for (code, weight) in sorted.iter().take(15) {
                     let name = cache.basics.get(*code)
                         .map(|b| b.name.as_str()).unwrap_or("?");
-                    let ind = cache.industry.get(*code)
+                    let ind = cache.industry_on(code, d)
                         .map(|i| i.industry_name.as_str()).unwrap_or("?");
                     println!("  {code:<12} {weight:>+7.4}   {name:<12} {ind}");
                 }
@@ -2214,8 +2321,8 @@ async fn print_db_status_row(
     // import_progress uses `completed_at` instead of `updated_at`.
     let updated_col = if spec.name == "import_progress" { "completed_at" } else { "updated_at" };
     let select_cols = match spec.date_col {
-        Some(c) => format!("COUNT(*), MAX({c})::text, MAX({updated_col})::text"),
-        None    => format!("COUNT(*), NULL::text, MAX({updated_col})::text"),
+        Some(c) => format!("COUNT(*), CAST(MAX({c}) AS CHAR), CAST(MAX({updated_col}) AS CHAR)"),
+        None    => format!("COUNT(*), CAST(NULL AS CHAR), CAST(MAX({updated_col}) AS CHAR)"),
     };
     let sql = format!("SELECT {select_cols} FROM {}", spec.name);
     let row: Result<(i64, Option<String>, Option<String>), _> =
@@ -2390,7 +2497,7 @@ fn cmd_a_trade(
         } else {
             let rc = RiskConfig::from_strategy(&config.a_share.strategy);
             let (filtered, report) = risk::apply(
-                &planned, &positions, cash, total_value, &q, &cache, &rc, &cost,
+                &planned, &positions, cash, total_value, date, &q, &cache, &rc, &cost,
             );
             info!("Risk: {} skipped, {} downscaled",
                   report.skipped_count(), report.downscaled_count());
@@ -2751,21 +2858,12 @@ async fn alpaca_compare(
 }
 
 // ============================================================
-// PostgreSQL → Parquet 导出（替代旧 Python pandas 脚本）
+// MySQL → Parquet 导出（替代旧 Python pandas 脚本）
 // ============================================================
 
-struct ResolvedDb {
-    host: String,
-    port: u16,
-    user: String,
-    password: String,
-    database: String,
-    schema: String,
-}
-
-/// (PG 表名, parquet 文件名前缀, 时序列名 / 快照表用 None)
+/// (MySQL 表名, parquet 文件名前缀, 时序列名 / 快照表用 None)
 struct ExportSpec {
-    pg_table: &'static str,
+    table: &'static str,
     parquet_basename: &'static str,
     /// 时序表的日期列。None = snapshot 表，文件名 `{name}_all.parquet`
     date_col: Option<&'static str>,
@@ -2774,33 +2872,33 @@ struct ExportSpec {
 /// v25 baseline + A 股迁移后需要的所有表
 const EXPORT_TABLES: &[ExportSpec] = &[
     // 美股时序
-    ExportSpec { pg_table: "us_daily_price",            parquet_basename: "us_daily_price",            date_col: Some("trade_date") },
-    ExportSpec { pg_table: "us_index_daily",            parquet_basename: "us_index_daily",            date_col: Some("trade_date") },
-    ExportSpec { pg_table: "us_financial_data",         parquet_basename: "alpha_financial",           date_col: Some("filing_date") },
-    ExportSpec { pg_table: "us_key_metric",             parquet_basename: "alpha_key_metric",          date_col: Some("date") },
-    ExportSpec { pg_table: "us_enterprise_value",       parquet_basename: "alpha_enterprise_value",    date_col: Some("date") },
-    ExportSpec { pg_table: "us_analyst_recommendation", parquet_basename: "us_analyst_recommendation", date_col: Some("date") },
-    ExportSpec { pg_table: "us_earnings_surprise",      parquet_basename: "us_earnings_surprise",      date_col: Some("date") },
-    ExportSpec { pg_table: "us_eps_estimate",           parquet_basename: "us_eps_estimate",           date_col: Some("date") },
-    ExportSpec { pg_table: "us_corporate_action",       parquet_basename: "us_corporate_action_div",   date_col: Some("date") },
-    ExportSpec { pg_table: "us_insider_trade",          parquet_basename: "us_insider_trade",          date_col: Some("transaction_date") },
-    ExportSpec { pg_table: "us_employee_count",         parquet_basename: "us_employee_count",         date_col: Some("filing_date") },
-    ExportSpec { pg_table: "us_revenue_segment",        parquet_basename: "us_revenue_segment",        date_col: Some("date") },
-    ExportSpec { pg_table: "us_macro_indicator",        parquet_basename: "us_macro_indicator",        date_col: Some("report_date") },
+    ExportSpec { table: "us_daily_price",            parquet_basename: "us_daily_price",            date_col: Some("trade_date") },
+    ExportSpec { table: "us_index_daily",            parquet_basename: "us_index_daily",            date_col: Some("trade_date") },
+    ExportSpec { table: "us_financial_data",         parquet_basename: "alpha_financial",           date_col: Some("filing_date") },
+    ExportSpec { table: "us_key_metric",             parquet_basename: "alpha_key_metric",          date_col: Some("date") },
+    ExportSpec { table: "us_enterprise_value",       parquet_basename: "alpha_enterprise_value",    date_col: Some("date") },
+    ExportSpec { table: "us_analyst_recommendation", parquet_basename: "us_analyst_recommendation", date_col: Some("date") },
+    ExportSpec { table: "us_earnings_surprise",      parquet_basename: "us_earnings_surprise",      date_col: Some("date") },
+    ExportSpec { table: "us_eps_estimate",           parquet_basename: "us_eps_estimate",           date_col: Some("date") },
+    ExportSpec { table: "us_corporate_action",       parquet_basename: "us_corporate_action_div",   date_col: Some("date") },
+    ExportSpec { table: "us_insider_trade",          parquet_basename: "us_insider_trade",          date_col: Some("transaction_date") },
+    ExportSpec { table: "us_employee_count",         parquet_basename: "us_employee_count",         date_col: Some("filing_date") },
+    ExportSpec { table: "us_revenue_segment",        parquet_basename: "us_revenue_segment",        date_col: Some("date") },
+    ExportSpec { table: "us_macro_indicator",        parquet_basename: "us_macro_indicator",        date_col: Some("report_date") },
     // 美股快照
-    ExportSpec { pg_table: "us_stock_basic",            parquet_basename: "us_stock_basic",            date_col: None },
-    ExportSpec { pg_table: "us_industry_class",         parquet_basename: "us_industry_class",         date_col: None },
-    ExportSpec { pg_table: "us_shares_float",           parquet_basename: "us_shares_float",           date_col: None },
-    ExportSpec { pg_table: "us_esg_rating",             parquet_basename: "us_esg_rating",             date_col: None },
+    ExportSpec { table: "us_stock_basic",            parquet_basename: "us_stock_basic",            date_col: None },
+    ExportSpec { table: "us_industry_class",         parquet_basename: "us_industry_class",         date_col: None },
+    ExportSpec { table: "us_shares_float",           parquet_basename: "us_shares_float",           date_col: None },
+    ExportSpec { table: "us_esg_rating",             parquet_basename: "us_esg_rating",             date_col: None },
     // A 股时序
-    ExportSpec { pg_table: "a_daily_price",             parquet_basename: "a_daily_price",             date_col: Some("trade_date") },
-    ExportSpec { pg_table: "a_financial_indicator",     parquet_basename: "a_financial_indicator",     date_col: Some("end_date") },
-    ExportSpec { pg_table: "a_index_daily",             parquet_basename: "a_index_daily",             date_col: Some("trade_date") },
-    ExportSpec { pg_table: "a_macro_indicator",         parquet_basename: "a_macro_indicator",         date_col: Some("date") },
+    ExportSpec { table: "a_daily_price",             parquet_basename: "a_daily_price",             date_col: Some("trade_date") },
+    ExportSpec { table: "a_financial_indicator",     parquet_basename: "a_financial_indicator",     date_col: Some("end_date") },
+    ExportSpec { table: "a_index_daily",             parquet_basename: "a_index_daily",             date_col: Some("trade_date") },
+    ExportSpec { table: "a_macro_indicator",         parquet_basename: "a_macro_indicator",         date_col: Some("report_date") },
     // A 股快照
-    ExportSpec { pg_table: "a_stock_basic",             parquet_basename: "a_stock_basic",             date_col: None },
-    ExportSpec { pg_table: "a_industry_class",          parquet_basename: "a_industry_class",          date_col: None },
-    ExportSpec { pg_table: "a_trade_cal",               parquet_basename: "a_trade_cal",               date_col: None },
+    ExportSpec { table: "a_stock_basic",             parquet_basename: "a_stock_basic",             date_col: None },
+    ExportSpec { table: "a_industry_class",          parquet_basename: "a_industry_class",          date_col: None },
+    ExportSpec { table: "a_trade_cal",               parquet_basename: "a_trade_cal",               date_col: None },
 ];
 
 fn cmd_export_parquet(
@@ -2808,39 +2906,17 @@ fn cmd_export_parquet(
     output_dir: &PathBuf,
     filter_tables: &[String],
 ) {
-    // 从 config 拿，空则从 env 读取（config.toml 里 host/user 等默认是空字符串）
-    let host = if !config.database.host.is_empty() { config.database.host.clone() }
-               else { std::env::var("DB_HOST").unwrap_or_default() };
-    let port = if config.database.port != 0 { config.database.port }
-               else { std::env::var("DB_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(5432) };
-    let user = if !config.database.user.is_empty() { config.database.user.clone() }
-               else { std::env::var("DB_USER").unwrap_or_default() };
-    let password = if !config.database.password.is_empty() { config.database.password.clone() }
-                   else { std::env::var("DB_PASSWORD").unwrap_or_default() };
-    let database = if !config.database.database.is_empty() { config.database.database.clone() }
-                   else { std::env::var("DB_DATABASE").unwrap_or_default() };
-    let schema = if !config.database.schema.is_empty() { config.database.schema.clone() }
-                 else { std::env::var("DB_SCHEMA").unwrap_or_else(|_| "quant".to_string()) };
-
-    if host.is_empty() || user.is_empty() {
-        eprintln!("Database not configured. Set DB_HOST/DB_USER/DB_PASSWORD/DB_DATABASE in .env");
+    let db_url = config.database.url();
+    if db_url.contains("@:/") || db_url.contains("mysql://:@") {
+        eprintln!("Database not configured. Set DB_HOST/DB_USER/DB_PASSWORD/DB_DATABASE.");
         std::process::exit(1);
     }
-
-    let db = ResolvedDb { host, port, user, password, database, schema };
-
-    // 找 psql 二进制
-    let psql = which_psql().unwrap_or_else(|| {
-        eprintln!("psql binary not found. Install PostgreSQL client.");
-        std::process::exit(1);
-    });
 
     std::fs::create_dir_all(output_dir).expect("Failed to create output dir");
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-    let url = format!("mysql://{}:{}@{}:{}/{}", db.user, db.password, db.host, db.port, db.database);
     let pool = rt.block_on(async {
-        quant_db::pool::create_pool(&url, &db.schema, 4).await
+        quant_db::pool::create_pool(&db_url, &config.database.schema, 4).await
             .expect("Failed to connect to database")
     });
 
@@ -2848,7 +2924,7 @@ fn cmd_export_parquet(
         EXPORT_TABLES.iter().collect()
     } else {
         EXPORT_TABLES.iter()
-            .filter(|s| filter_tables.iter().any(|f| f == s.pg_table || f == s.parquet_basename))
+            .filter(|s| filter_tables.iter().any(|f| f == s.table || f == s.parquet_basename))
             .collect()
     };
 
@@ -2859,17 +2935,17 @@ fn cmd_export_parquet(
 
     for spec in &specs {
         let t0 = std::time::Instant::now();
-        match rt.block_on(export_one_table(spec, &pool, &psql, &db, output_dir)) {
+        match rt.block_on(export_one_table(spec, &pool, output_dir)) {
             Ok((path, rows)) => {
                 total_rows += rows;
                 println!(
                     "✓ {:<35} {:>12} rows → {} ({:.1}s)",
-                    spec.pg_table, rows, path.file_name().unwrap().to_string_lossy(), t0.elapsed().as_secs_f64()
+                    spec.table, rows, path.file_name().unwrap().to_string_lossy(), t0.elapsed().as_secs_f64()
                 );
             }
             Err(e) => {
-                println!("✗ {:<35} FAILED: {}", spec.pg_table, e);
-                failures.push(spec.pg_table.to_string());
+                println!("✗ {:<35} FAILED: {}", spec.table, e);
+                failures.push(spec.table.to_string());
             }
         }
     }
@@ -2886,38 +2962,20 @@ fn cmd_export_parquet(
     rt.block_on(async { pool.close().await });
 }
 
-fn which_psql() -> Option<std::path::PathBuf> {
-    for candidate in ["psql", "/usr/bin/psql", "/usr/local/bin/psql", "/opt/homebrew/bin/psql"] {
-        let path = std::path::PathBuf::from(candidate);
-        if path.is_absolute() && path.exists() {
-            return Some(path);
-        }
-        if let Ok(out) = std::process::Command::new("which").arg(candidate).output() {
-            if out.status.success() {
-                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !s.is_empty() {
-                    return Some(std::path::PathBuf::from(s));
-                }
-            }
-        }
-    }
-    None
-}
-
 async fn export_one_table(
     spec: &ExportSpec,
     pool: &sqlx::MySqlPool,
-    psql: &std::path::Path,
-    db: &ResolvedDb,
     output_dir: &PathBuf,
 ) -> Result<(std::path::PathBuf, usize), String> {
+    use sqlx::Row;
+
     // Step 1: 决定文件名（snapshot vs 时序）
     let suffix = if let Some(date_col) = spec.date_col {
         // 取 min/max date 作日期范围
         let row: (Option<chrono::NaiveDate>, Option<chrono::NaiveDate>) =
             sqlx::query_as(&format!(
-                "SELECT MIN({date_col}), MAX({date_col}) FROM {}.{}",
-                db.schema, spec.pg_table
+                "SELECT MIN(`{date_col}`), MAX(`{date_col}`) FROM `{}`",
+                spec.table
             ))
             .fetch_one(pool)
             .await
@@ -2934,32 +2992,42 @@ async fn export_one_table(
     let parquet_path = output_dir.join(&parquet_name);
     let csv_path = output_dir.join(format!(".{}_{}_tmp.csv", spec.parquet_basename, suffix));
 
-    // Step 2: psql \COPY → CSV
-    let copy_sql = format!(
-        "\\COPY (SELECT * FROM {}.{}) TO STDOUT WITH CSV HEADER",
-        db.schema, spec.pg_table
-    );
-    let csv_file = std::fs::File::create(&csv_path)
-        .map_err(|e| format!("create csv: {e}"))?;
-
-    let status = std::process::Command::new(psql)
-        .env("PGPASSWORD", &db.password)
-        .args([
-            "-h", &db.host,
-            "-p", &db.port.to_string(),
-            "-U", &db.user,
-            "-d", &db.database,
-            "-c", &copy_sql,
-        ])
-        .stdout(csv_file)
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|e| format!("spawn psql: {e}"))?;
-
-    if !status.success() {
-        let _ = std::fs::remove_file(&csv_path);
-        return Err(format!("psql exit {}", status.code().unwrap_or(-1)));
+    // Step 2: query MySQL with textual casts, then write an RFC 4180 CSV.
+    // Casting lets one generic exporter preserve every source column without
+    // relying on database-client-specific CSV protocols.
+    let columns: Vec<String> = sqlx::query_scalar(&format!("SHOW COLUMNS FROM `{}`", spec.table))
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("inspect columns: {e}"))?;
+    if columns.is_empty() {
+        return Err("table has no columns".to_string());
     }
+    let select_exprs = columns.iter()
+        .map(|column| format!("CAST(`{column}` AS CHAR) AS `{column}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rows = sqlx::query(&format!("SELECT {select_exprs} FROM `{}`", spec.table))
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("select rows: {e}"))?;
+
+    let mut csv_file = std::io::BufWriter::new(
+        std::fs::File::create(&csv_path).map_err(|e| format!("create csv: {e}"))?,
+    );
+    write_csv_record(&mut csv_file, columns.iter().map(String::as_str))
+        .map_err(|e| format!("write CSV header: {e}"))?;
+    for row in &rows {
+        let values: Result<Vec<Option<String>>, _> = (0..columns.len())
+            .map(|index| row.try_get(index))
+            .collect();
+        let values = values.map_err(|e| format!("decode row: {e}"))?;
+        write_csv_record(
+            &mut csv_file,
+            values.iter().map(|value| value.as_deref().unwrap_or("")),
+        ).map_err(|e| format!("write CSV row: {e}"))?;
+    }
+    use std::io::Write;
+    csv_file.flush().map_err(|e| format!("flush CSV: {e}"))?;
 
     // Step 3: polars CSV → parquet
     use polars::prelude::*;
@@ -2980,6 +3048,25 @@ async fn export_one_table(
     // Step 4: 删 CSV temp
     let _ = std::fs::remove_file(&csv_path);
 
-    let n_rows = df.height();
+    let n_rows = rows.len();
     Ok((parquet_path, n_rows))
+}
+
+fn write_csv_record<'a>(
+    writer: &mut impl std::io::Write,
+    values: impl IntoIterator<Item = &'a str>,
+) -> std::io::Result<()> {
+    for (index, value) in values.into_iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b",")?;
+        }
+        if value.contains([',', '"', '\n', '\r']) {
+            writer.write_all(b"\"")?;
+            writer.write_all(value.replace('"', "\"\"").as_bytes())?;
+            writer.write_all(b"\"")?;
+        } else {
+            writer.write_all(value.as_bytes())?;
+        }
+    }
+    writer.write_all(b"\n")
 }

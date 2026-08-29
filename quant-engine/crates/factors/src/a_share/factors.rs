@@ -146,7 +146,7 @@ pub fn all_factors() -> Vec<AFactorDef> {
         // ── Growth (3) ──────────────────────────────────────────────
         AFactorDef { name: "NET_PROFIT_YOY", category: "growth", direction: 1,
             compute: |date, cache| {
-                factor_from_fin(date, cache, |f| f.q_netprofit_yoy)
+                factor_from_fin(date, cache, |f| f.netprofit_yoy)
             }},
         AFactorDef { name: "REVENUE_YOY", category: "growth", direction: 1,
             compute: |date, cache| {
@@ -211,14 +211,14 @@ pub fn all_factors() -> Vec<AFactorDef> {
                 let mom = momentum_factor(date, cache, 20);
                 let mut ind_avg: HashMap<String, (f64, usize)> = HashMap::new();
                 for (code, val) in &mom {
-                    if let Some(ind) = cache.industry.get(code.as_str()) {
+                    if let Some(ind) = cache.industry_on(code, date) {
                         let e = ind_avg.entry(ind.industry_name.clone()).or_default();
                         e.0 += val; e.1 += 1;
                     }
                 }
                 let mut r = AFactorResult::new();
                 for (code, _) in &mom {
-                    if let Some(ind) = cache.industry.get(code.as_str()) {
+                    if let Some(ind) = cache.industry_on(code, date) {
                         if let Some((sum, cnt)) = ind_avg.get(&ind.industry_name) {
                             if *cnt > 0 { r.insert(code.clone(), sum / *cnt as f64); }
                         }

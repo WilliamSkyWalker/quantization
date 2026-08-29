@@ -41,6 +41,7 @@ pub struct AFinIndicator {
     pub q_profit_yoy: f64,
     pub q_sales_yoy: f64,
     pub q_netprofit_yoy: f64,
+    pub netprofit_yoy: f64,
     pub current_ratio: f64,
     pub ocf_to_profit: f64,
     pub roa: f64,
@@ -54,6 +55,10 @@ pub struct AFinIndicator {
 pub struct AIndustry {
     pub index_code: String,
     pub industry_name: String,
+    /// Membership start date, inclusive. `None` is treated as unbounded.
+    pub in_date: Option<NaiveDate>,
+    /// Membership end date, inclusive. `None` means the membership remains active.
+    pub out_date: Option<NaiveDate>,
 }
 
 /// Per-stock static info from `a_stock_basic` (used by universe cleaner).
@@ -74,8 +79,8 @@ pub struct AShareCache {
     pub daily: FxHashMap<String, Vec<(NaiveDate, ABar)>>,
     /// Financial indicators: ts_code → sorted Vec<AFinIndicator> (by end_date desc)
     pub financials: FxHashMap<String, Vec<AFinIndicator>>,
-    /// Industry classification: ts_code → AIndustry
-    pub industry: FxHashMap<String, AIndustry>,
+    /// Point-in-time industry classifications: ts_code → membership intervals.
+    pub industry: FxHashMap<String, Vec<AIndustry>>,
     /// Static stock basics: ts_code → AStockInfo
     pub basics: FxHashMap<String, AStockInfo>,
     /// Trading calendar (sorted)
@@ -123,6 +128,21 @@ impl AShareCache {
         self.get_bar(ts_code, date).map(|b| b.total_mv * 10_000.0)
     }
 
+    /// Return the L1 industry membership effective on `date`.
+    ///
+    /// Historical records can overlap during schema migrations. In that case,
+    /// the classification with the latest effective start date takes priority.
+    pub fn industry_on(&self, ts_code: &str, date: NaiveDate) -> Option<&AIndustry> {
+        self.industry.get(ts_code)?
+            .iter()
+            .filter(|membership| {
+                !membership.industry_name.trim().is_empty()
+                    && membership.in_date.is_none_or(|start| start <= date)
+                    && membership.out_date.is_none_or(|end| date <= end)
+            })
+            .max_by_key(|membership| membership.in_date)
+    }
+
     /// Get active ts_codes on a date (have price data).
     pub fn active_codes_on(&self, date: NaiveDate) -> Vec<&str> {
         self.daily.iter()
@@ -158,5 +178,73 @@ impl AShareCache {
         if bars.is_empty() { return f64::NAN; }
         let sum: f64 = bars.iter().map(|b| b.amount).sum();
         sum / bars.len() as f64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn industry_memberships_are_resolved_point_in_time() {
+        let code = "000001.SZ".to_string();
+        let old_end = NaiveDate::from_ymd_opt(2021, 6, 15).unwrap();
+        let new_start = NaiveDate::from_ymd_opt(2021, 6, 16).unwrap();
+        let mut industry = FxHashMap::default();
+        industry.insert(code.clone(), vec![
+            AIndustry {
+                index_code: "801010.SI".into(),
+                industry_name: "旧行业".into(),
+                in_date: Some(NaiveDate::from_ymd_opt(2014, 1, 1).unwrap()),
+                out_date: Some(old_end),
+            },
+            AIndustry {
+                index_code: "801020.SI".into(),
+                industry_name: "新行业".into(),
+                in_date: Some(new_start),
+                out_date: None,
+            },
+        ]);
+        let cache = AShareCache {
+            daily: FxHashMap::default(),
+            financials: FxHashMap::default(),
+            industry,
+            basics: FxHashMap::default(),
+            trading_days: Vec::new(),
+            index_prices: FxHashMap::default(),
+            ts_codes: Vec::new(),
+        };
+
+        assert_eq!(
+            cache.industry_on(&code, old_end).map(|industry| industry.industry_name.as_str()),
+            Some("旧行业"),
+        );
+        assert_eq!(
+            cache.industry_on(&code, new_start).map(|industry| industry.industry_name.as_str()),
+            Some("新行业"),
+        );
+    }
+
+    #[test]
+    fn industry_membership_without_name_is_unknown() {
+        let code = "000001.SZ".to_string();
+        let mut industry = FxHashMap::default();
+        industry.insert(code.clone(), vec![AIndustry {
+            index_code: "801010.SI".into(),
+            industry_name: String::new(),
+            in_date: None,
+            out_date: None,
+        }]);
+        let cache = AShareCache {
+            daily: FxHashMap::default(),
+            financials: FxHashMap::default(),
+            industry,
+            basics: FxHashMap::default(),
+            trading_days: Vec::new(),
+            index_prices: FxHashMap::default(),
+            ts_codes: Vec::new(),
+        };
+
+        assert!(cache.industry_on(&code, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()).is_none());
     }
 }

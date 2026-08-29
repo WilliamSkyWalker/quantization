@@ -325,7 +325,7 @@ pub fn fama_macbeth(
         let mean = gammas.iter().sum::<f64>() / nf;
         let var = gammas.iter().map(|g| (g - mean).powi(2)).sum::<f64>() / (nf - 1.0);
         let std = var.sqrt();
-        let t = if std > 1e-10 { mean / (std / nf.sqrt()) } else { f64::NAN };
+        let t = newey_west_t_stat(gammas, newey_west_lag(horizon_days));
 
         summaries.push(FmSummary {
             factor_name: fname.clone(),
@@ -392,27 +392,33 @@ fn compute_forward_returns_a(
     horizon_days: usize,
     cache: &AShareCache,
 ) -> std::collections::HashMap<String, f64> {
-    let idx = cache.trading_days.partition_point(|&d| d <= date);
-    let future_idx = idx + horizon_days;
+    // Signals are observed at the signal-date close and can first trade at the
+    // next trading-day open. Hold through the close on the horizon-th session.
+    let entry_idx = cache.trading_days.partition_point(|&d| d <= date);
+    if horizon_days == 0 {
+        return std::collections::HashMap::new();
+    }
+    let future_idx = entry_idx + horizon_days - 1;
     if future_idx >= cache.trading_days.len() {
         return std::collections::HashMap::new();
     }
-    let future_date = cache.trading_days[future_idx];
+    let entry_date = cache.trading_days[entry_idx];
+    let exit_date = cache.trading_days[future_idx];
 
     let mut result = std::collections::HashMap::new();
     for (ts_code, bars) in &cache.daily {
-        let cur = match bars.binary_search_by_key(&date, |(d, _)| *d) {
+        let entry = match bars.binary_search_by_key(&entry_date, |(d, _)| *d) {
             Ok(i) => &bars[i].1,
             Err(_) => continue,
         };
-        let fut = match bars.binary_search_by_key(&future_date, |(d, _)| *d) {
+        let exit = match bars.binary_search_by_key(&exit_date, |(d, _)| *d) {
             Ok(i) => &bars[i].1,
             Err(_) => continue,
         };
-        let adj_cur = cur.close * cur.adj_factor;
-        let adj_fut = fut.close * fut.adj_factor;
-        if adj_cur > 0.0 && adj_fut.is_finite() && adj_cur.is_finite() {
-            let ret = adj_fut / adj_cur - 1.0;
+        let adj_entry = entry.open * entry.adj_factor;
+        let adj_exit = exit.close * exit.adj_factor;
+        if adj_entry > 0.0 && adj_exit.is_finite() && adj_entry.is_finite() {
+            let ret = adj_exit / adj_entry - 1.0;
             if ret.is_finite() {
                 result.insert(ts_code.clone(), ret);
             }
@@ -517,7 +523,18 @@ pub fn fama_macbeth_a(
         }
         if avail_factors.len() < 5 { continue; }
 
-        let common_tickers: Vec<&String> = fwd_rets.keys().collect();
+        // Missing factor observations are not zero-valued observations. Using
+        // only complete cases avoids changing a factor's cross-sectional rank
+        // by silently imputing its missing values to the mean.
+        let common_tickers: Vec<&String> = fwd_rets.keys()
+            .filter(|ticker| {
+                avail_factors.iter().all(|factor| {
+                    fmap[*factor]
+                        .get(ticker.as_str())
+                        .is_some_and(|value| value.is_finite())
+                })
+            })
+            .collect();
         if common_tickers.len() < 100 { continue; }
 
         let n = common_tickers.len();
@@ -530,7 +547,7 @@ pub fn fama_macbeth_a(
         for (j, fname) in avail_factors.iter().enumerate() {
             let fvals = &fmap[*fname];
             let raw: Vec<f64> = common_tickers.iter()
-                .map(|t| fvals.get(t.as_str()).copied().unwrap_or(0.0))
+                .map(|ticker| fvals[ticker.as_str()])
                 .collect();
             let mean = raw.iter().sum::<f64>() / n as f64;
             let var = raw.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
@@ -570,7 +587,7 @@ pub fn fama_macbeth_a(
         let mean = gammas.iter().sum::<f64>() / nf;
         let var = gammas.iter().map(|g| (g - mean).powi(2)).sum::<f64>() / (nf - 1.0);
         let std = var.sqrt();
-        let t = if std > 1e-10 { mean / (std / nf.sqrt()) } else { f64::NAN };
+        let t = newey_west_t_stat(gammas, newey_west_lag(horizon_days));
         summaries.push(FmSummary {
             factor_name: fname.clone(), n_months: n,
             mean_gamma: mean, std_gamma: std, t_stat: t,
@@ -600,4 +617,106 @@ fn rank_values(values: &[f64]) -> Vec<f64> {
         i = j;
     }
     ranks
+}
+
+/// Newey-West t statistic for a time series mean, using Bartlett weights.
+///
+/// A factor's forward-return windows can overlap across adjacent rebalance
+/// dates, so the Fama-MacBeth gamma series is not assumed independent.
+fn newey_west_t_stat(values: &[f64], requested_lag: usize) -> f64 {
+    let n = values.len();
+    if n < 2 {
+        return f64::NAN;
+    }
+
+    let mean = values.iter().sum::<f64>() / n as f64;
+    let lag = requested_lag.min(n - 1);
+    let centered: Vec<f64> = values.iter().map(|value| value - mean).collect();
+    let mut long_run_variance = centered.iter().map(|value| value * value).sum::<f64>() / n as f64;
+
+    for offset in 1..=lag {
+        let autocovariance = centered[offset..].iter()
+            .zip(&centered[..n - offset])
+            .map(|(right, left)| right * left)
+            .sum::<f64>() / n as f64;
+        let weight = 1.0 - offset as f64 / (lag + 1) as f64;
+        long_run_variance += 2.0 * weight * autocovariance;
+    }
+
+    let standard_error = (long_run_variance / n as f64).sqrt();
+    if standard_error.is_finite() && standard_error > 1e-10 {
+        mean / standard_error
+    } else {
+        f64::NAN
+    }
+}
+
+fn newey_west_lag(horizon_days: usize) -> usize {
+    horizon_days.div_ceil(21).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+    use quant_factors::a_share::cache::{ABar, AShareCache};
+    use rustc_hash::FxHashMap;
+
+    fn date(day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2024, 7, day).unwrap()
+    }
+
+    fn bar(open: f64, close: f64) -> ABar {
+        ABar {
+            open, high: open.max(close), low: open.min(close), close, pre_close: close,
+            pct_chg: 0.0, vol: 1.0, amount: 1.0, adj_factor: 1.0,
+            turnover_rate: 0.0, pe_ttm: 0.0, pb: 0.0, ps_ttm: 0.0, dv_ttm: 0.0,
+            total_mv: 0.0, circ_mv: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_share_forward_return_starts_at_next_open() {
+        let signal_date = date(1);
+        let mut daily = FxHashMap::default();
+        daily.insert(
+            "000001.SZ".to_string(),
+            vec![
+                (signal_date, bar(9.0, 9.0)),
+                (date(2), bar(10.0, 11.0)),
+                (date(3), bar(11.0, 12.0)),
+            ],
+        );
+        let cache = AShareCache {
+            daily,
+            financials: FxHashMap::default(),
+            industry: FxHashMap::default(),
+            basics: FxHashMap::default(),
+            trading_days: vec![signal_date, date(2), date(3)],
+            index_prices: FxHashMap::default(),
+            ts_codes: vec!["000001.SZ".to_string()],
+        };
+
+        let returns = compute_forward_returns_a(signal_date, 2, &cache);
+        let value = returns.get("000001.SZ").expect("return is available");
+        assert!((value - 0.2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn newey_west_t_stat_accounts_for_serial_correlation() {
+        let values = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06];
+        let iid_t = {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let variance = values.iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>() / (values.len() - 1) as f64;
+            mean / (variance.sqrt() / (values.len() as f64).sqrt())
+        };
+        let nw_t = newey_west_t_stat(&values, 1);
+
+        assert!(nw_t.is_finite());
+        assert!(nw_t < iid_t);
+        assert_eq!(newey_west_lag(21), 1);
+        assert_eq!(newey_west_lag(42), 2);
+    }
 }

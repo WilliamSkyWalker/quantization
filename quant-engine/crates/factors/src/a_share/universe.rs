@@ -192,7 +192,7 @@ mod tests {
         cache.basics.insert(code.to_string(), AStockInfo {
             name: code.to_string(),
             list_date, delist_date, is_st,
-            board: None, total_share: None,
+            board: None, total_share: None, free_share: None,
         });
         cache.daily.insert(code.to_string(), bars);
     }
@@ -285,10 +285,10 @@ mod tests {
     #[test]
     fn excludes_illiquid() {
         let mut c = empty_cache();
-        // amount 1e6 元/天 (avg) < 5e7 default min_daily_turnover
+        // amount is stored in 千元: 1e3 means 1e6 元/天, below the 5e7 threshold.
         add_stock(&mut c, "000006.SZ",
             Some(d("2010-01-01")), None, false,
-            make_bars("2024-07-01", 30, 1e6, 5e5));
+            make_bars("2024-07-01", 30, 1e3, 5e5));
         let f = AUniverseFilter::default();
         let u = get_a_clean_universe(d("2024-07-15"), &c, &f);
         assert!(u.is_empty(), "illiquid stock should be filtered");
