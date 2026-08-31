@@ -521,7 +521,13 @@ pub fn fama_macbeth_a(
                 if common >= 30 { avail_factors.push(fname); }
             }
         }
-        if avail_factors.len() < 5 { continue; }
+        // Require (near-)full multivariate control. For large factor
+        // libraries (v1) this is a floor of 5 factors present; for small
+        // libraries (e.g. v2's 4 sentiment factors) it requires all
+        // registered factors to be present that month, since 5 would be
+        // unreachable and silently zero out every month.
+        let min_avail_factors = factor_names.len().min(5);
+        if avail_factors.len() < min_avail_factors { continue; }
 
         // Missing factor observations are not zero-valued observations. Using
         // only complete cases avoids changing a factor's cross-sectional rank
@@ -695,6 +701,8 @@ mod tests {
             trading_days: vec![signal_date, date(2), date(3)],
             index_prices: FxHashMap::default(),
             ts_codes: vec!["000001.SZ".to_string()],
+            top_list: FxHashMap::default(),
+            margin_detail: FxHashMap::default(),
         };
 
         let returns = compute_forward_returns_a(signal_date, 2, &cache);

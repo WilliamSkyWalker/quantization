@@ -18,10 +18,21 @@ use crate::progress::ticker_progress;
 
 const MAX_CONCURRENT: usize = 10;
 
+/// A handful of Tushare endpoints (top_list, top_inst, margin, margin_detail,
+/// moneyflow_hsgt — all "sensitive"/龙虎榜-adjacent interfaces) enforce a lower
+/// per-interface throughput cap independent of the account's overall points
+/// budget. Observed via live 40203 "频率超限" errors at the account's normal
+/// (500/min) rate: their actual ceiling is ~200/min. Stay safely under it.
+const RESTRICTED_RATE_LIMIT: u32 = 150;
+const RESTRICTED_MAX_CONCURRENT: usize = 2;
+
 #[derive(Clone)]
 pub struct TushareDownloader {
     pub token: String,
     pub client: ApiClient,
+    /// Slower-paced client for endpoints with a per-interface throughput cap
+    /// below the account's general rate limit (see `RESTRICTED_RATE_LIMIT`).
+    restricted_client: ApiClient,
     pub pool: MySqlPool,
     /// When set, all per-ticker methods only process this ts_code (e.g. "000001.SZ").
     pub only_ticker: Option<String>,
@@ -32,6 +43,7 @@ impl TushareDownloader {
         Self {
             token,
             client: ApiClient::new(rate_limit, MAX_CONCURRENT),
+            restricted_client: ApiClient::new(RESTRICTED_RATE_LIMIT, RESTRICTED_MAX_CONCURRENT),
             pool,
             only_ticker: None,
         }
@@ -43,7 +55,46 @@ impl TushareDownloader {
     }
 
     /// Call Tushare Pro API. Returns rows as Vec<Value> (each row = JSON object).
+    ///
+    /// Some Tushare endpoints (e.g. `top_list`/`top_inst`) enforce a lower
+    /// per-interface rate limit (observed: 40203 "频率超限", independent of the
+    /// account's overall points-based rate limit) that our concurrent
+    /// per-date downloads can burst past. Retries with exponential backoff
+    /// on that specific error so a transient throttle doesn't get silently
+    /// treated as "no data for this date" and marked done by the caller.
     async fn tushare_call(&self, api_name: &str, params: &Value) -> Vec<Value> {
+        self.tushare_call_with_client(api_name, params, false).await
+    }
+
+    /// Like `tushare_call`, routed through the slower-paced client for
+    /// endpoints with a known per-interface throughput cap (see
+    /// `RESTRICTED_RATE_LIMIT`).
+    async fn tushare_call_restricted(&self, api_name: &str, params: &Value) -> Vec<Value> {
+        self.tushare_call_with_client(api_name, params, true).await
+    }
+
+    async fn tushare_call_with_client(&self, api_name: &str, params: &Value, restricted: bool) -> Vec<Value> {
+        const MAX_RETRIES: u32 = 5;
+        let mut attempt = 0u32;
+        loop {
+            match self.tushare_call_once(api_name, params, restricted).await {
+                Ok(rows) => return rows,
+                Err(error) if error.contains("40203") && attempt < MAX_RETRIES => {
+                    attempt += 1;
+                    let backoff_secs = 2u64.pow(attempt); // 2, 4, 8, 16, 32s
+                    warn!("Tushare {api_name}: rate-limited, retry {attempt}/{MAX_RETRIES} in {backoff_secs}s");
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                }
+                Err(error) => {
+                    warn!("Tushare {api_name}: {error}");
+                    return Vec::new();
+                }
+            }
+        }
+    }
+
+    /// Single (non-retrying) Tushare API call.
+    async fn tushare_call_once(&self, api_name: &str, params: &Value, restricted: bool) -> Result<Vec<Value>, String> {
         let body = json!({
             "api_name": api_name,
             "token": self.token,
@@ -52,29 +103,14 @@ impl TushareDownloader {
         });
 
         let url = "https://api.tushare.pro";
-        let resp = match self.client.post_json(url, &body).await {
-            Ok(v) => v,
-            Err(e) => { warn!("Tushare {api_name}: {e}"); return vec![]; }
-        };
-
-        let data = match tushare_response_data(&resp) {
-            Ok(data) => data,
-            Err(error) => {
-                warn!("Tushare {api_name}: {error}");
-                return vec![];
-            }
-        };
-
-        match decode_tushare_rows(data) {
-            Ok(rows) => rows,
-            Err(error) => {
-                warn!("Tushare {api_name}: invalid response data: {error}");
-                Vec::new()
-            }
-        }
+        let client = if restricted { &self.restricted_client } else { &self.client };
+        let resp = client.post_json(url, &body).await?;
+        let data = tushare_response_data(&resp)?;
+        decode_tushare_rows(data).map_err(|error| format!("invalid response data: {error}"))
     }
 
     // ── DB helpers ──────────────────────────────────────────────────────
+
 
     async fn get_done_tickers(&self, table: &str) -> HashSet<String> {
         sqlx::query_scalar::<_, String>(
@@ -345,12 +381,158 @@ impl TushareDownloader {
         }).await
     }
 
-    /// Download financial table (per ts_code, concurrent).
-    async fn download_financial_table(&self, api_name: &str, table: &str, unique_keys: &[&str], incremental: bool) -> usize {
+    /// Shared driver for market-wide, per-trade-date Tushare endpoints (one API
+    /// call per date, concurrent across dates) — same incremental/mark_done
+    /// contract as `download_daily_prices`.
+    ///
+    /// `ts_code_field`: `Some(field)` applies `self.only_ticker` filtering to
+    /// rows carrying a per-stock dimension (e.g. "ts_code"); `None` for
+    /// endpoints with no per-stock dimension (e.g. exchange- or market-level
+    /// aggregates), where `only_ticker` has no meaning and is ignored.
+    async fn download_by_trade_date(
+        &self,
+        api_name: &str,
+        table: &str,
+        unique_keys: &[&str],
+        start_date: &str,
+        incremental: bool,
+        ts_code_field: Option<&str>,
+        restricted: bool,
+    ) -> usize {
+        let cal_data = self.tushare_call("trade_cal", &json!({
+            "exchange": "SSE", "start_date": start_date, "end_date": "20261231", "is_open": 1,
+        })).await;
+
+        let trade_dates: Vec<String> = cal_data.iter().filter_map(|v| {
+            v.get("cal_date").and_then(|d| d.as_str()).map(|s| s.to_string())
+        }).collect();
+
+        let pending: Vec<String> = if incremental {
+            let latest: Option<String> = sqlx::query_scalar(
+                &format!("SELECT CAST(MAX(trade_date) AS CHAR) FROM {table}")
+            ).fetch_one(&self.pool).await.ok().flatten();
+            let cutoff = latest.unwrap_or_default();
+            trade_dates.into_iter().filter(|d| d.as_str() > cutoff.as_str()).collect()
+        } else {
+            let done = self.get_done_tickers(table).await;
+            trade_dates.into_iter().filter(|d| !done.contains(d.as_str())).collect()
+        };
+
+        if pending.is_empty() {
+            info!("All trade dates done for {table}");
+            return 0;
+        }
+
+        let label = format!("Tushare {api_name}");
+        let api_name = api_name.to_string();
+        let table = table.to_string();
+        let unique_keys: Vec<String> = unique_keys.iter().map(|s| s.to_string()).collect();
+        let only = self.only_ticker.clone();
+        let ts_code_field = ts_code_field.map(|s| s.to_string());
+
+        self.run_concurrent(pending, &label, move |dl, date| {
+            let api_name = api_name.clone();
+            let table = table.clone();
+            let unique_keys = unique_keys.clone();
+            let only = only.clone();
+            let ts_code_field = ts_code_field.clone();
+            async move {
+                let data = if restricted {
+                    dl.tushare_call_restricted(&api_name, &json!({"trade_date": &date})).await
+                } else {
+                    dl.tushare_call(&api_name, &json!({"trade_date": &date})).await
+                };
+                let processed: Vec<Value> = match (&only, &ts_code_field) {
+                    (Some(ticker), Some(field)) => data.into_iter().filter(|row| {
+                        row.get(field).and_then(|v| v.as_str()).map(|c| c == ticker).unwrap_or(false)
+                    }).collect(),
+                    _ => data,
+                };
+
+                let mut n = 0;
+                if !processed.is_empty() {
+                    let uk_refs: Vec<&str> = unique_keys.iter().map(|s| s.as_str()).collect();
+                    n = dl.upsert_rows(&table, &processed, &uk_refs).await;
+                }
+                dl.mark_done(&table, &date).await;
+
+                n
+            }
+        }).await
+    }
+
+    /// Download Dragon-Tiger list daily detail (龙虎榜每日交易明细).
+    /// Unique key includes `reason`: a stock can be listed under multiple
+    /// trigger reasons the same day (verified duplicate ts_code+trade_date
+    /// rows via a live API probe call — not assumed from documentation).
+    pub async fn download_top_list(&self, start_date: &str, incremental: bool) -> usize {
+        self.download_by_trade_date(
+            "top_list", "a_top_list", &["ts_code", "trade_date", "reason"],
+            start_date, incremental, Some("ts_code"), true,
+        ).await
+    }
+
+    /// Download Dragon-Tiger list institutional/seat detail (龙虎榜机构成交明细).
+    /// Unique key includes `exalter` (席位名) + `reason`: (ts_code, trade_date)
+    /// alone is NOT unique — the same seat can carry multiple rows per stock
+    /// per day, one per trigger reason (verified via a live API probe call).
+    pub async fn download_top_inst(&self, start_date: &str, incremental: bool) -> usize {
+        self.download_by_trade_date(
+            "top_inst", "a_top_inst", &["ts_code", "trade_date", "exalter", "reason"],
+            start_date, incremental, Some("ts_code"), true,
+        ).await
+    }
+
+    /// Download margin trading summary by exchange (融资融券交易汇总).
+    /// Market-wide: one row per (trade_date, exchange_id), no per-stock
+    /// dimension, so `only_ticker` filtering does not apply.
+    pub async fn download_margin(&self, start_date: &str, incremental: bool) -> usize {
+        self.download_by_trade_date(
+            "margin", "a_margin", &["trade_date", "exchange_id"],
+            start_date, incremental, None, true,
+        ).await
+    }
+
+    /// Download margin trading detail by stock (融资融券交易明细).
+    pub async fn download_margin_detail(&self, start_date: &str, incremental: bool) -> usize {
+        self.download_by_trade_date(
+            "margin_detail", "a_margin_detail", &["ts_code", "trade_date"],
+            start_date, incremental, Some("ts_code"), true,
+        ).await
+    }
+
+    /// Download Shanghai/Shenzhen-Hong Kong Stock Connect northbound/southbound
+    /// flow (沪深港通资金流向). Market-wide: one row per trade_date, no
+    /// per-stock dimension.
+    pub async fn download_moneyflow_hsgt(&self, start_date: &str, incremental: bool) -> usize {
+        self.download_by_trade_date(
+            "moneyflow_hsgt", "a_moneyflow_hsgt", &["trade_date"],
+            start_date, incremental, None, true,
+        ).await
+    }
+
+
+    /// Download financial/event table (per ts_code, concurrent).
+    ///
+    /// `staleness_field` drives the incremental-mode staleness check via
+    /// `get_ticker_latest`: financial tables use `end_date` (reporting
+    /// period), event tables (forecast/express/stk_holdertrade/repurchase/
+    /// share_float) use their disclosure/event date column instead, since
+    /// they have no `end_date` concept staleness can key off consistently
+    /// (share_float has none at all).
+    ///
+    /// `restricted`: forecast/express/stk_holdertrade/repurchase/share_float
+    /// all hit 40203 "频率超限" immediately at the account's general 500/min
+    /// rate under the default MAX_CONCURRENT=10 (observed via a live backfill
+    /// attempt, 2026-08-30) — same per-interface throughput cap symptom as
+    /// top_list/margin (see `RESTRICTED_RATE_LIMIT` doc comment). Route them
+    /// through the slower-paced client; existing income/balancesheet/
+    /// cashflow/fina_indicator have run cleanly unrestricted and stay so.
+    async fn download_financial_table(&self, api_name: &str, table: &str, unique_keys: &[&str], incremental: bool, staleness_field: &str, restricted: bool) -> usize {
         let ts_codes = self.get_all_ts_codes().await;
 
         let pending: Vec<String> = if incremental {
-            let latest = self.get_ticker_latest(table, "end_date").await;
+            let latest = self.get_ticker_latest(table, staleness_field).await;
             let today = chrono::Local::now().format("%Y%m%d").to_string();
             ts_codes.into_iter().filter(|t| {
                 match latest.get(t) {
@@ -373,7 +555,11 @@ impl TushareDownloader {
             let table = table.clone();
             let unique_keys = unique_keys.clone();
             async move {
-                let data = dl.tushare_call(&api_name, &json!({"ts_code": &ts_code})).await;
+                let data = if restricted {
+                    dl.tushare_call_restricted(&api_name, &json!({"ts_code": &ts_code})).await
+                } else {
+                    dl.tushare_call(&api_name, &json!({"ts_code": &ts_code})).await
+                };
                 let mut n = 0;
                 if !data.is_empty() {
                     let uk_refs: Vec<&str> = unique_keys.iter().map(|s| s.as_str()).collect();
@@ -389,22 +575,55 @@ impl TushareDownloader {
 
     pub async fn download_income(&self, incremental: bool) -> usize {
         self.download_financial_table("income", "a_financial_income",
-            &["ts_code", "end_date", "report_type"], incremental).await
+            &["ts_code", "end_date", "report_type"], incremental, "end_date", false).await
     }
 
     pub async fn download_balancesheet(&self, incremental: bool) -> usize {
         self.download_financial_table("balancesheet", "a_financial_balance",
-            &["ts_code", "end_date", "report_type"], incremental).await
+            &["ts_code", "end_date", "report_type"], incremental, "end_date", false).await
     }
 
     pub async fn download_cashflow(&self, incremental: bool) -> usize {
         self.download_financial_table("cashflow", "a_financial_cashflow",
-            &["ts_code", "end_date", "report_type"], incremental).await
+            &["ts_code", "end_date", "report_type"], incremental, "end_date", false).await
     }
 
     pub async fn download_fina_indicator(&self, incremental: bool) -> usize {
         self.download_financial_table("fina_indicator", "a_financial_indicator",
-            &["ts_code", "end_date"], incremental).await
+            &["ts_code", "end_date"], incremental, "end_date", false).await
+    }
+
+    /// Download earnings forecast (业绩预告). Event-driven factor input.
+    pub async fn download_forecast(&self, incremental: bool) -> usize {
+        self.download_financial_table("forecast", "a_forecast",
+            &["ts_code", "ann_date", "end_date"], incremental, "ann_date", true).await
+    }
+
+    /// Download earnings express (业绩快报). Event-driven factor input.
+    pub async fn download_express(&self, incremental: bool) -> usize {
+        self.download_financial_table("express", "a_express",
+            &["ts_code", "ann_date", "end_date"], incremental, "ann_date", true).await
+    }
+
+    /// Download shareholder increase/decrease disclosures (股东增减持).
+    /// Event-driven factor input.
+    pub async fn download_stk_holdertrade(&self, incremental: bool) -> usize {
+        self.download_financial_table("stk_holdertrade", "a_stk_holdertrade",
+            &["ts_code", "ann_date", "holder_name", "in_de", "change_vol"], incremental, "ann_date", true).await
+    }
+
+    /// Download share buyback disclosures (股票回购). Event-driven factor input.
+    pub async fn download_repurchase(&self, incremental: bool) -> usize {
+        self.download_financial_table("repurchase", "a_repurchase",
+            &["ts_code", "ann_date", "proc"], incremental, "ann_date", true).await
+    }
+
+    /// Download restricted-share unlock schedule (限售股解禁). Event-driven
+    /// factor input. Staleness keyed off `float_date` (only date column this
+    /// table has consistently populated — `ann_date` can be null).
+    pub async fn download_share_float(&self, incremental: bool) -> usize {
+        self.download_financial_table("share_float", "a_share_float",
+            &["ts_code", "float_date", "holder_name", "share_type"], incremental, "float_date", true).await
     }
 
     /// Download industry classification (Shenwan).
@@ -683,6 +902,16 @@ impl TushareDownloader {
         total += self.download_cashflow(false).await;
         total += self.download_fina_indicator(false).await;
         total += self.download_commodity(false).await;
+        total += self.download_top_list(start_date, false).await;
+        total += self.download_top_inst(start_date, false).await;
+        total += self.download_margin(start_date, false).await;
+        total += self.download_margin_detail(start_date, false).await;
+        total += self.download_moneyflow_hsgt(start_date, false).await;
+        total += self.download_forecast(false).await;
+        total += self.download_express(false).await;
+        total += self.download_stk_holdertrade(false).await;
+        total += self.download_repurchase(false).await;
+        total += self.download_share_float(false).await;
         info!("Tushare download_all total: {total}");
         total
     }
@@ -701,6 +930,16 @@ impl TushareDownloader {
         total += self.download_index_daily("20200101").await;
         total += self.download_macro().await;
         total += self.download_commodity(true).await;
+        total += self.download_top_list("20200101", true).await;
+        total += self.download_top_inst("20200101", true).await;
+        total += self.download_margin("20200101", true).await;
+        total += self.download_margin_detail("20200101", true).await;
+        total += self.download_moneyflow_hsgt("20200101", true).await;
+        total += self.download_forecast(true).await;
+        total += self.download_express(true).await;
+        total += self.download_stk_holdertrade(true).await;
+        total += self.download_repurchase(true).await;
+        total += self.download_share_float(true).await;
         info!("Tushare update_all total: {total}");
         total
     }

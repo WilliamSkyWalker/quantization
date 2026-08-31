@@ -263,6 +263,8 @@ mod tests {
             trading_days: vec![date],
             index_prices: FxHashMap::default(),
             ts_codes: vec![code.to_string()],
+            top_list: FxHashMap::default(),
+            margin_detail: FxHashMap::default(),
         };
         c.daily.insert(code.to_string(), vec![(date, b)]);
         c.basics.insert(code.to_string(), AStockInfo {

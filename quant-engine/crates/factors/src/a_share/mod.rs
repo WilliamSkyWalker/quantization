@@ -9,4 +9,5 @@
 
 pub mod cache;
 pub mod factors;
+pub mod factors_v2;
 pub mod universe;

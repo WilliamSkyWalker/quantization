@@ -73,6 +73,30 @@ pub struct AStockInfo {
     pub free_share: Option<f64>,      // 万股
 }
 
+/// One trading day's aggregated Dragon-Tiger-List (龙虎榜) activity for a
+/// stock. Tushare can emit 2-3 rows per stock per day (one per trigger
+/// `reason`); this is the SUM of net_amount/l_buy/l_sell/amount across all
+/// of that day's reasons, and the amount-weighted mean of `net_rate` (since
+/// net_rate is already a ratio — summing ratios across reasons would be
+/// wrong, so it's weighted by each row's own `amount`).
+#[derive(Debug, Clone)]
+pub struct ALhbDay {
+    pub net_amount: f64,
+    pub l_buy: f64,
+    pub l_sell: f64,
+    pub amount: f64,    // sum of that day's per-reason `amount` fields
+    pub net_rate: f64,  // amount-weighted mean of net_rate across the day's rows
+}
+
+/// One trading day's margin (融资融券) detail for a stock. All values raw
+/// yuan (元) — see `crates/factors/src/a_share/factors_v2.rs` for the unit
+/// derivation vs. `ABar::amount` (thousand yuan).
+#[derive(Debug, Clone)]
+pub struct AMarginDay {
+    pub rzye: f64,   // 融资余额
+    pub rzmre: f64,  // 今日融资买入额
+}
+
 /// Central A-share data cache.
 pub struct AShareCache {
     /// Daily prices: ts_code → sorted Vec<(date, ABar)>
@@ -89,6 +113,10 @@ pub struct AShareCache {
     pub index_prices: FxHashMap<String, Vec<(NaiveDate, f64)>>,
     /// All ts_codes
     pub ts_codes: Vec<String>,
+    /// Dragon-Tiger-List (龙虎榜) daily aggregates: ts_code → sorted Vec<(date, ALhbDay)>.
+    pub top_list: FxHashMap<String, Vec<(NaiveDate, ALhbDay)>>,
+    /// Margin trading detail: ts_code → sorted Vec<(date, AMarginDay)>.
+    pub margin_detail: FxHashMap<String, Vec<(NaiveDate, AMarginDay)>>,
 }
 
 impl AShareCache {
@@ -179,6 +207,46 @@ impl AShareCache {
         let sum: f64 = bars.iter().map(|b| b.amount).sum();
         sum / bars.len() as f64
     }
+
+    /// Last `n` Dragon-Tiger-List (龙虎榜) entries for `ts_code` on or before
+    /// `date`. Unlike `get_bars_before`, this is NOT a trading-day-count
+    /// window — LHB appearance is sparse (most days have zero rows for a
+    /// given stock), so this returns the last `n` entries that *exist*,
+    /// however far back in calendar time they fall.
+    pub fn lhb_days_before(&self, ts_code: &str, date: NaiveDate, n: usize) -> Vec<(NaiveDate, &ALhbDay)> {
+        let days = match self.top_list.get(ts_code) { Some(d) => d, None => return vec![] };
+        let end = days.partition_point(|(d, _)| *d <= date);
+        let start = if end >= n { end - n } else { 0 };
+        days[start..end].iter().map(|(d, v)| (*d, v)).collect()
+    }
+
+    /// Count of distinct trading days (per `trading_days`, not calendar days)
+    /// in the trailing `n` trading days ending at `date` (inclusive) on
+    /// which `ts_code` has at least one Dragon-Tiger-List entry.
+    pub fn lhb_appearance_count(&self, ts_code: &str, date: NaiveDate, n: usize) -> usize {
+        let end = self.trading_days.partition_point(|d| *d <= date);
+        let start = if end >= n { end - n } else { 0 };
+        if start >= end { return 0; }
+        let window_start = self.trading_days[start];
+        let window_end = self.trading_days[end - 1];
+
+        match self.top_list.get(ts_code) {
+            Some(days) => days.iter()
+                .filter(|(d, _)| *d >= window_start && *d <= window_end)
+                .count(),
+            None => 0,
+        }
+    }
+
+    /// Last `n` margin-detail (融资融券) entries for `ts_code` on or before
+    /// `date`. Margin detail has ~1 row per trading day per stock, so this
+    /// mirrors `get_bars_before`'s trading-day-count windowing semantics.
+    pub fn margin_days_before(&self, ts_code: &str, date: NaiveDate, n: usize) -> Vec<(NaiveDate, &AMarginDay)> {
+        let days = match self.margin_detail.get(ts_code) { Some(d) => d, None => return vec![] };
+        let end = days.partition_point(|(d, _)| *d <= date);
+        let start = if end >= n { end - n } else { 0 };
+        days[start..end].iter().map(|(d, v)| (*d, v)).collect()
+    }
 }
 
 #[cfg(test)]
@@ -213,6 +281,8 @@ mod tests {
             trading_days: Vec::new(),
             index_prices: FxHashMap::default(),
             ts_codes: Vec::new(),
+            top_list: FxHashMap::default(),
+            margin_detail: FxHashMap::default(),
         };
 
         assert_eq!(
@@ -243,6 +313,8 @@ mod tests {
             trading_days: Vec::new(),
             index_prices: FxHashMap::default(),
             ts_codes: Vec::new(),
+            top_list: FxHashMap::default(),
+            margin_detail: FxHashMap::default(),
         };
 
         assert!(cache.industry_on(&code, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()).is_none());

@@ -1,4 +1,5 @@
 pub mod a_strategy;
+pub mod a_strategy_v2;
 pub mod analysis;
 pub mod optimizer;
 pub mod rolling_ic;

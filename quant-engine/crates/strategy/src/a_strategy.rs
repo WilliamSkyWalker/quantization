@@ -3,6 +3,16 @@
 //! 29 factors across 7 categories, equal-weight within categories,
 //! differentiated category weights (quality 1.3, value 0.7, etc).
 //! Long-only, equal-weight portfolio, monthly rebalance.
+//!
+//! ⚠️ ARCHIVED (v1, financial-driven) — 2026-08-30.
+//! Frozen at git tag `a-share-strategy-v1-financial-archive` (see tag message
+//! for full diagnosis: backtest 2021-2026 total return -32.36%, Sharpe -0.41;
+//! known issues include a backwards AMIHUD_ILLIQ direction, unenforced
+//! industry/single-name weight caps, and a de facto small/micro-cap
+//! concentration from the SIZE factor). Superseded by a sentiment-driven v2
+//! design (see TODO `download-a-share-sentiment-data` and successors). This
+//! module is kept functional for reference/rollback — do not extend it with
+//! new factors; build v2 alongside instead.
 
 use std::collections::HashMap;
 
@@ -16,8 +26,8 @@ use quant_factors::a_share::cache::AShareCache;
 use quant_factors::a_share::factors::{all_factors, AFactorResult};
 use quant_factors::a_share::universe::{AUniverseFilter, get_a_clean_universe};
 
-type FactorValues = Vec<(&'static str, &'static str, i8, AFactorResult)>;
-type ScoreDetails = FxHashMap<String, (f64, FxHashMap<String, f64>)>;
+pub(crate) type FactorValues = Vec<(&'static str, &'static str, i8, AFactorResult)>;
+pub(crate) type ScoreDetails = FxHashMap<String, (f64, FxHashMap<String, f64>)>;
 
 /// A-share regime detection — trend + volatility composite.
 ///
@@ -211,7 +221,7 @@ pub fn compute_scores_detail(
     results
 }
 
-fn category_weights(
+pub(crate) fn category_weights(
     strategy: &AShareStrategyConfig,
     regime_overrides: Option<&HashMap<String, f64>>,
 ) -> HashMap<String, f64> {
@@ -235,7 +245,7 @@ fn category_weights(
         .collect()
 }
 
-fn aggregate_score_details(
+pub(crate) fn aggregate_score_details(
     factor_values: &FactorValues,
     universe: Option<&FxHashSet<String>>,
     category_weights: &HashMap<String, f64>,

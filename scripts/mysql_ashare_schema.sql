@@ -26,6 +26,11 @@ DROP TABLE IF EXISTS a_watchlist;
 DROP TABLE IF EXISTS a_selection_result;
 DROP TABLE IF EXISTS a_factor_snapshot;
 DROP TABLE IF EXISTS import_progress;
+DROP TABLE IF EXISTS a_top_list;
+DROP TABLE IF EXISTS a_top_inst;
+DROP TABLE IF EXISTS a_margin;
+DROP TABLE IF EXISTS a_margin_detail;
+DROP TABLE IF EXISTS a_moneyflow_hsgt;
 
 -- 2. CREATE TABLE
 
@@ -825,6 +830,86 @@ CREATE TABLE import_progress (
   UNIQUE KEY uq_import_progress_table_ticker (table_name, ticker)
 );
 
+-- Sentiment/behavior data (v2 strategy). Field names verified via live Tushare
+-- API probe calls on 2026-08-30 — see scripts/mysql_add_a_share_sentiment_tables.sql
+-- for the standalone additive migration and rationale.
+
+CREATE TABLE a_top_list (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  trade_date DATE NOT NULL,
+  ts_code VARCHAR(20) NOT NULL,
+  name VARCHAR(100) NULL,
+  `close` DOUBLE NULL,
+  pct_change DOUBLE NULL,
+  turnover_rate DOUBLE NULL,
+  amount DOUBLE NULL,
+  l_sell DOUBLE NULL,
+  l_buy DOUBLE NULL,
+  l_amount DOUBLE NULL,
+  net_amount DOUBLE NULL,
+  net_rate DOUBLE NULL,
+  amount_rate DOUBLE NULL,
+  float_values DOUBLE NULL,
+  reason VARCHAR(200) NOT NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+CREATE TABLE a_top_inst (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  trade_date DATE NOT NULL,
+  ts_code VARCHAR(20) NOT NULL,
+  exalter VARCHAR(300) NOT NULL,
+  buy DOUBLE NULL,
+  buy_rate DOUBLE NULL,
+  sell DOUBLE NULL,
+  sell_rate DOUBLE NULL,
+  net_buy DOUBLE NULL,
+  side VARCHAR(10) NULL,
+  reason VARCHAR(200) NOT NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+CREATE TABLE a_margin (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  trade_date DATE NOT NULL,
+  exchange_id VARCHAR(20) NOT NULL,
+  rzye DOUBLE NULL,
+  rzmre DOUBLE NULL,
+  rzche DOUBLE NULL,
+  rqye DOUBLE NULL,
+  rqmcl DOUBLE NULL,
+  rzrqye DOUBLE NULL,
+  rqyl DOUBLE NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+CREATE TABLE a_margin_detail (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  trade_date DATE NOT NULL,
+  ts_code VARCHAR(20) NOT NULL,
+  rzye DOUBLE NULL,
+  rqye DOUBLE NULL,
+  rzmre DOUBLE NULL,
+  rqyl DOUBLE NULL,
+  rzche DOUBLE NULL,
+  rqchl DOUBLE NULL,
+  rqmcl DOUBLE NULL,
+  rzrqye DOUBLE NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+CREATE TABLE a_moneyflow_hsgt (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  trade_date DATE NOT NULL,
+  ggt_ss DOUBLE NULL,
+  ggt_sz DOUBLE NULL,
+  hgt DOUBLE NULL,
+  sgt DOUBLE NULL,
+  north_money DOUBLE NULL,
+  south_money DOUBLE NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
 -- 3. UNIQUE INDEXES (对应 models Meta.unique_together)
 
 CREATE UNIQUE INDEX uq_a_daily_price_ts_code_trade_date ON a_daily_price (ts_code, trade_date);
@@ -839,6 +924,11 @@ CREATE UNIQUE INDEX uq_a_commodity_price_ts_code_trade_date ON a_commodity_price
 CREATE UNIQUE INDEX uq_a_insider_transaction_ts_code_change_date_holder_name_hol ON a_insider_transaction (ts_code, change_date, holder_name, holder_type);
 CREATE UNIQUE INDEX uq_a_research_report_info_code ON a_research_report (info_code);
 CREATE UNIQUE INDEX uq_a_trade_cal_exchange_cal_date ON a_trade_cal (exchange, cal_date);
+CREATE UNIQUE INDEX uq_a_top_list_ts_code_trade_date_reason ON a_top_list (ts_code, trade_date, reason);
+CREATE UNIQUE INDEX uq_a_top_inst_ts_code_trade_date_exalter_reason ON a_top_inst (ts_code, trade_date, exalter, reason);
+CREATE UNIQUE INDEX uq_a_margin_trade_date_exchange_id ON a_margin (trade_date, exchange_id);
+CREATE UNIQUE INDEX uq_a_margin_detail_ts_code_trade_date ON a_margin_detail (ts_code, trade_date);
+CREATE UNIQUE INDEX uq_a_moneyflow_hsgt_trade_date ON a_moneyflow_hsgt (trade_date);
 
 -- 4. 查询加速索引
 

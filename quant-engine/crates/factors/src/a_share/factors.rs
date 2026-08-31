@@ -2,6 +2,11 @@
 //!
 //! Each function takes (date, cache) → HashMap<ts_code, f64>.
 //! Convention: higher value = more desirable (before direction flip in scoring).
+//!
+//! ⚠️ ARCHIVED (v1, financial-driven) — 2026-08-30. Frozen at git tag
+//! `a-share-strategy-v1-financial-archive`. See `a_strategy.rs` module doc
+//! for the full archive rationale. Kept functional for reference/rollback;
+//! new sentiment-driven work should live in a separate v2 module.
 
 use std::collections::HashMap;
 use chrono::NaiveDate;

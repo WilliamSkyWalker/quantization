@@ -52,6 +52,25 @@
 | FMP press / sec_filing / revenue_segment 下载 | 中等 | ⏳ | 表已存在，下载逻辑没写。NLP 时再做 |
 | 政策爬虫 Python → Rust 迁移 | 1-2 周 | ⏳ | 优先级低于实盘 |
 
+## 🟣 P0.5 — A 股舆情/事件/新闻驱动转型（当前主线，另一会话）
+
+> 用户判断 A 股涨跌"财务驱动"权重有限（牛短熊长、情绪驱动强），要求把选股逻辑从财务驱动转向舆情/事件驱动。
+> 已封存旧财务驱动选股逻辑，回测引擎接入新的空选股逻辑（新类，与旧逻辑并存）。
+
+| 任务 | 工作量 | 状态 | 备注 |
+|------|------|------|------|
+| 龙虎榜/两融情绪数据下载（top_list/top_inst/margin/margin_detail/moneyflow_hsgt）| — | ✅ | 2020-2026 全量回补完成 |
+| 情绪因子实现+IC/FM验证（LHB/margin 4 个因子）| — | ✅ | **负面结论**：仅 LHB_APPEARANCE_FREQ_20D 显著但方向与预设相反（需 direction=-1）；MARGIN_BAL_CHG_20D 方向也反且FM控制后不显著；其余2个纯噪声。情绪代理指标路线基本走不通 |
+| 结构化事件数据下载器（forecast/express/stk_holdertrade/repurchase/share_float）| 1 天 | ✅ | 2015-2026全量回补完成：forecast 12.7万行/express 2.7万行/holdertrade 17.2万行/repurchase 5.8万行/share_float 419万行（共5表）。news/anns接口无权限保持不可用 |
+| 事件驱动因子实现（PEAD/股东增减持/回购强度/解禁压力）| — | ⏳ | 依赖上一项回补完成（已完成），下一步实现因子并重新跑IC/FM验证，不能凭学术假设方向直接上线 |
+| **个股新闻原文抓取管道（东财新闻聚合接口）**| 0.5 天 | ✅ | 案例分析（合力科技/比亚迪）证实新闻/题材驱动能解释结构化数据解释不了的核心异动。技术方案：Python独立脚本（不进Rust workspace）+ MySQL新表`a_news_raw`/`a_news_fetch_state`。已探测接口限制：单关键词硬上限~1000条、不支持日期区间参数、需用公司全称（代码搜索误召回严重）、深市A/B后缀股需去尾字母fallback。**全市场5212只股票 backfill 已完成，150万条入库**，脚本位于`scripts/news_fetch_pipeline.py`。财联社官方私有API（带签名保护）已确认不碰——技术保护措施规避红线 |
+| **宏观新闻/政策利率抓取（新闻联播 + 央行RRR/LPR）**| 0.3 天 | 🔄 | 东财搜索接口对宏观关键词（"商务部公告"等）是模糊匹配非精确检索，验证发现结果经常文不对题，不可靠。改用：①AkShare `news_cctv`（新闻联播官方文字稿，2016-02-03至今全文，公开无认证）②AkShare `macro_china_reserve_requirement_ratio`/`macro_china_lpr`（结构化PIT数据，公布/生效日期+调整前后数值，已验证准确）。新表`a_macro_news_raw`/`a_macro_rate_history`。新闻联播全量回补**后台跑中**，RRR(110条)/LPR(1622条)已跑完。脚本`scripts/macro_news_fetch.py`。工信部/商务部具体公告原文暂无可靠源，列为待办 |
+| 工信部/商务部政策公告原文抓取 | 待定 | ⏳ | 需单独探测政府官网公开公告列表页（miit.gov.cn/mofcom.gov.cn），东财搜索/AkShare均无覆盖，暂缓 |
+| 新闻定时增量抓取上 cron（个股新闻 + 宏观新闻联播/利率）| 0.5 天 | ⏳ | 用户要求盘前/盘中/盘后各一次（7点/13点/20点），配置crontab分别跑`news_fetch_pipeline.py --mode incremental`和`macro_news_fetch.py --mode incremental` |
+| 新闻文本情感打分（NLP）| 待定 | ⏳ | 抓取管道验证后再决定：词典法 vs 金融BERT微调，是否需要追加付费Tushare news/anns（~2000元/年）或Finlight（$99+/月，自带实体+情感标签） |
+| 动态估值分位数 regime overlay（替代硬编码4000点）| 中等 | ⏳ | 已用DB数据核实"4000点魔咒"是经验区间非铁律（2025-11已破4000，2026年新高4242）。待舆情/事件工作完成后排期，扩展现有`detect_a_regime`框架 |
+| 因子类别权重从财务驱动转向舆情驱动（config.toml category_weights）| 小 | ⏳ | 依赖事件/新闻因子验证出正向IC，否则只是把权重压到空因子上 |
+
 ## ⚪ P5 — 工程收尾
 
 | 任务 | 工作量 | 状态 | 备注 |

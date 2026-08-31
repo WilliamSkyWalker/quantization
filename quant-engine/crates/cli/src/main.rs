@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use quant_core::config::Config;
@@ -198,6 +198,12 @@ enum Commands {
         /// Output directory.
         #[arg(long, default_value = "../output/factor_analysis")]
         output: PathBuf,
+
+        /// Which A-share factor set to analyze: `v1` (frozen financial-driven,
+        /// default) or `v2` (sentiment-driven, LHB/margin-based). Ignored for
+        /// US market.
+        #[arg(long, default_value = "v1")]
+        factor_set: String,
     },
 
     /// 美股 Alpaca paper / live 交易
@@ -317,11 +323,12 @@ fn main() {
             cache_dir,
             workers: _,
             output,
+            factor_set,
         } => {
             match cli.market {
                 Market::Cn => {
                     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-                    rt.block_on(cmd_analyze_cn(&_config, &start, &end, &output));
+                    rt.block_on(cmd_analyze_cn(&_config, &start, &end, &output, &factor_set));
                 }
                 Market::Us => cmd_analyze(&cache_dir, &start, &end, &output),
             }
@@ -771,7 +778,7 @@ async fn build_a_share_cache(
     start: chrono::NaiveDate,
     end: chrono::NaiveDate,
 ) -> quant_factors::a_share::cache::AShareCache {
-    use quant_factors::a_share::cache::{AShareCache, ABar, AFinIndicator, AIndustry, AStockInfo};
+    use quant_factors::a_share::cache::{AShareCache, ABar, AFinIndicator, AIndustry, AStockInfo, ALhbDay, AMarginDay};
     use rustc_hash::FxHashMap;
 
     info!("Loading a_daily_price [{}, {}]...", start, end);
@@ -916,6 +923,76 @@ async fn build_a_share_cache(
         Err(e) => { warn!("Failed to load index prices: {e}"); }
     }
 
+    info!("Loading a_top_list (龙虎榜每日交易明细) [{}, {}]...", start, end);
+    let mut top_list: FxHashMap<String, Vec<(chrono::NaiveDate, ALhbDay)>> = FxHashMap::default();
+    match quant_db::queries::a_read::get_a_top_list(pool, start, end).await {
+        Ok(rows) => {
+            info!("Loaded {} a_top_list rows", rows.len());
+            // Aggregate same-day multi-reason rows: sum net_amount/l_buy/l_sell/amount,
+            // amount-weighted mean of net_rate (net_rate is already a ratio; summing
+            // ratios across reasons would double-count, so weight by each row's amount).
+            let mut by_day: FxHashMap<(String, chrono::NaiveDate), (f64, f64, f64, f64, f64)> = FxHashMap::default();
+            for r in rows {
+                let key = (r.ts_code.clone(), r.trade_date);
+                let net_amount = r.net_amount.unwrap_or(0.0);
+                let l_buy = r.l_buy.unwrap_or(0.0);
+                let l_sell = r.l_sell.unwrap_or(0.0);
+                let amount = r.amount.unwrap_or(0.0);
+                let net_rate = r.net_rate.unwrap_or(f64::NAN);
+                let entry = by_day.entry(key).or_insert((0.0, 0.0, 0.0, 0.0, 0.0));
+                entry.0 += net_amount;
+                entry.1 += l_buy;
+                entry.2 += l_sell;
+                entry.3 += amount;
+                // entry.4 accumulates the amount-weighted net_rate numerator.
+                if net_rate.is_finite() {
+                    entry.4 += net_rate * amount;
+                }
+            }
+            for ((ts_code, date), (net_amount, l_buy, l_sell, amount, weighted_net_rate)) in by_day {
+                let net_rate = if amount.abs() > 1e-9 {
+                    weighted_net_rate / amount
+                } else {
+                    debug!("a_top_list {ts_code} {date}: zero total amount, falling back to unweighted net_rate");
+                    f64::NAN
+                };
+                top_list.entry(ts_code).or_default().push((date, ALhbDay {
+                    net_amount, l_buy, l_sell, amount, net_rate,
+                }));
+            }
+            for v in top_list.values_mut() {
+                v.sort_by_key(|(d, _)| *d);
+            }
+            info!("Aggregated a_top_list into {} tickers' daily entries", top_list.len());
+        }
+        Err(e) => { warn!("Failed to load a_top_list: {e}"); }
+    }
+
+    info!("Loading a_margin_detail (融资融券交易明细) [{}, {}]...", start, end);
+    let mut margin_detail: FxHashMap<String, Vec<(chrono::NaiveDate, AMarginDay)>> = FxHashMap::default();
+    match quant_db::queries::a_read::get_a_margin_detail(pool, start, end).await {
+        Ok(rows) => {
+            info!("Loaded {} a_margin_detail rows", rows.len());
+            for r in rows {
+                let entry = AMarginDay {
+                    rzye: r.rzye.unwrap_or(f64::NAN),
+                    rzmre: r.rzmre.unwrap_or(f64::NAN),
+                };
+                let bucket = margin_detail.entry(r.ts_code.clone()).or_default();
+                if bucket.last().is_some_and(|(d, _)| *d == r.trade_date) {
+                    warn!("Duplicate a_margin_detail row for {} {} — keeping last write", r.ts_code, r.trade_date);
+                    bucket.pop();
+                }
+                bucket.push((r.trade_date, entry));
+            }
+            for v in margin_detail.values_mut() {
+                v.sort_by_key(|(d, _)| *d);
+            }
+            info!("Aggregated a_margin_detail into {} tickers' daily entries", margin_detail.len());
+        }
+        Err(e) => { warn!("Failed to load a_margin_detail: {e}"); }
+    }
+
     AShareCache {
         daily,
         financials,
@@ -924,6 +1001,8 @@ async fn build_a_share_cache(
         trading_days,
         index_prices,
         ts_codes,
+        top_list,
+        margin_detail,
     }
 }
 
@@ -1104,9 +1183,11 @@ async fn cmd_analyze_cn(
     start_str: &str,
     end_str: &str,
     output_dir: &PathBuf,
+    factor_set: &str,
 ) {
     use chrono::Datelike;
-    use quant_factors::a_share::factors::all_factors;
+    use quant_factors::a_share::factors::{all_factors, AFactorDef};
+    use quant_factors::a_share::factors_v2::all_factors_v2;
     use quant_factors::a_share::universe::{AUniverseFilter, get_a_clean_universe};
     use quant_strategy::analysis::{compute_ic_panel_a, fama_macbeth_a};
 
@@ -1126,8 +1207,12 @@ async fn cmd_analyze_cn(
     let cache = build_a_share_cache(&pool, load_start, load_end).await;
     pool.close().await;
 
-    let factors = all_factors();
-    info!("{} A-share factors registered", factors.len());
+    let factors: Vec<AFactorDef> = match factor_set {
+        "v1" => all_factors(),
+        "v2" => all_factors_v2(),
+        other => panic!("Unknown --factor-set '{other}', expected 'v1' or 'v2'"),
+    };
+    info!("{} A-share factors registered (factor_set={factor_set})", factors.len());
 
     let rebalance_dates: Vec<chrono::NaiveDate> = {
         let mut dates = Vec::new();
@@ -1183,7 +1268,7 @@ async fn cmd_analyze_cn(
     let ic_summaries = compute_ic_panel_a(&factor_panel, &cache, 21);
 
     println!("\n{}", "=".repeat(90));
-    println!("A-SHARE FACTOR ANALYSIS: {} to {} ({} months)", start, end, rebalance_dates.len());
+    println!("A-SHARE FACTOR ANALYSIS [{factor_set}]: {} to {} ({} months)", start, end, rebalance_dates.len());
     println!("{}", "=".repeat(90));
 
     println!(
@@ -1222,7 +1307,7 @@ async fn cmd_analyze_cn(
     println!("\n> Harvey-Liu-Zhu (2016): |t| > 3.0 for statistical significance.");
 
     std::fs::create_dir_all(output_dir).ok();
-    let csv_path = output_dir.join(format!("a_ic_summary_{start}_{end}.csv"));
+    let csv_path = output_dir.join(format!("a_ic_summary_{factor_set}_{start}_{end}.csv"));
     let mut csv = String::from("factor,n_months,mean_ic,std_ic,icir,t_stat,pct_positive\n");
     for s in &ic_summaries {
         csv.push_str(&format!(
@@ -1232,7 +1317,7 @@ async fn cmd_analyze_cn(
     }
     std::fs::write(&csv_path, csv).ok();
 
-    let fm_path = output_dir.join(format!("a_fama_macbeth_{start}_{end}.csv"));
+    let fm_path = output_dir.join(format!("a_fama_macbeth_{factor_set}_{start}_{end}.csv"));
     let mut fm_csv = String::from("factor,n_months,mean_gamma,std_gamma,nw_t_stat\n");
     for s in &fm_summaries {
         fm_csv.push_str(&format!(
@@ -1269,7 +1354,6 @@ fn cmd_backtest(
     if matches!(market, Market::Cn) {
         use chrono::Datelike;
         use quant_backtest::a_engine::{run_backtest as a_run_backtest, ACostConfig};
-        use quant_strategy::a_strategy;
 
         if no_short {
             warn!("--no-short: A 股策略本就是 long-only，flag 已忽略");
@@ -1348,8 +1432,11 @@ fn cmd_backtest(
         );
 
         // === Generate monthly signals ===
+        // NOTE: switched from the archived v1 (a_strategy::generate_signals,
+        // financial-driven) to the v2 stub (a_strategy_v2::generate_signals_v2,
+        // sentiment-driven, currently empty). See a_strategy_v2.rs doc comment.
         let t0 = std::time::Instant::now();
-        let signals = a_strategy::generate_signals(
+        let signals = quant_strategy::a_strategy_v2::generate_signals_v2(
             &cache,
             config.a_share.strategy.max_holdings,
             config.a_share.strategy.min_select_score,
@@ -2131,11 +2218,23 @@ fn cmd_download(
                         "index" => { dl.download_index_daily(&start).await; }
                         "macro" => { dl.download_macro().await; }
                         "commodity" => { dl.download_commodity(incremental).await; }
+                        "top_list" => { dl.download_top_list(&start, incremental).await; }
+                        "top_inst" => { dl.download_top_inst(&start, incremental).await; }
+                        "margin" => { dl.download_margin(&start, incremental).await; }
+                        "margin_detail" => { dl.download_margin_detail(&start, incremental).await; }
+                        "moneyflow_hsgt" => { dl.download_moneyflow_hsgt(&start, incremental).await; }
+                        "forecast" => { dl.download_forecast(incremental).await; }
+                        "express" => { dl.download_express(incremental).await; }
+                        "stk_holdertrade" => { dl.download_stk_holdertrade(incremental).await; }
+                        "repurchase" => { dl.download_repurchase(incremental).await; }
+                        "share_float" => { dl.download_share_float(incremental).await; }
                         "all" => { dl.download_all(&start).await; }
                         other => {
                             eprintln!("Unknown Tushare target: {other}");
                             eprintln!("Available: stock_list, trade_cal, daily_price, income, balance,");
-                            eprintln!("  cashflow, indicator, industry, index, macro, commodity, all");
+                            eprintln!("  cashflow, indicator, industry, index, macro, commodity,");
+                            eprintln!("  top_list, top_inst, margin, margin_detail, moneyflow_hsgt,");
+                            eprintln!("  forecast, express, stk_holdertrade, repurchase, share_float, all");
                             std::process::exit(1);
                         }
                     }
@@ -2229,6 +2328,11 @@ const DB_STATUS_TABLES: &[DbStatusTable] = &[
     DbStatusTable { name: "a_financial_indicator",     market: "cn", date_col: Some("ann_date") }, // no f_ann_date
     DbStatusTable { name: "a_insider_transaction",     market: "cn", date_col: Some("ann_date") },
     DbStatusTable { name: "a_research_report",         market: "cn", date_col: Some("publish_date") },
+    DbStatusTable { name: "a_top_list",                market: "cn", date_col: Some("trade_date") },
+    DbStatusTable { name: "a_top_inst",                market: "cn", date_col: Some("trade_date") },
+    DbStatusTable { name: "a_margin",                  market: "cn", date_col: Some("trade_date") },
+    DbStatusTable { name: "a_margin_detail",           market: "cn", date_col: Some("trade_date") },
+    DbStatusTable { name: "a_moneyflow_hsgt",          market: "cn", date_col: Some("trade_date") },
     // ── shared ──────────────────────────────────────────────────────────
     DbStatusTable { name: "import_progress",           market: "shared", date_col: None },
 ];

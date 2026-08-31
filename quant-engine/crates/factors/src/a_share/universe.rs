@@ -177,6 +177,8 @@ mod tests {
             trading_days: vec![],
             index_prices: FxHashMap::default(),
             ts_codes: vec![],
+            top_list: FxHashMap::default(),
+            margin_detail: FxHashMap::default(),
         }
     }
 

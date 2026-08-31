@@ -286,6 +286,7 @@ mod tests {
             industry: FxHashMap::default(), basics: FxHashMap::default(),
             trading_days: vec![d()], index_prices: FxHashMap::default(),
             ts_codes: vec![],
+            top_list: FxHashMap::default(), margin_detail: FxHashMap::default(),
         };
         for (code, ind, b) in specs {
             c.ts_codes.push(code.to_string());
