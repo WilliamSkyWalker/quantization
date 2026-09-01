@@ -196,7 +196,34 @@ DataCache 启动时一次性加载到内存（约 1-2GB），后续因子计算/
 
 ---
 
-## 十、数据流（Rust 版）
+## 十、A 股新闻/政策舆情抓取（Python 独立脚本，运行中）
+
+与上面"已归档"的 20 爬虫体系不同，这是 A 股舆情/事件驱动转型（TODO.md P0.5）新增的三条独立管道，**不进 Rust workspace**，直接写 MySQL（`quant-engine/env.json` 的 `quant.{ENV}` 配置，非 PostgreSQL）：
+
+| 脚本 | 数据源 | 目标表 | 说明 |
+|------|--------|--------|------|
+| `scripts/news_fetch_pipeline.py` | 东方财富新闻搜索接口 | `a_news_raw` / `a_news_fetch_state` | 个股新闻原文，按公司全称检索（代码检索误召回严重），单关键词硬上限~1000条，不支持日期区间参数。全市场 5212 只股票 backfill 已完成，150 万条入库 |
+| `scripts/macro_news_fetch.py` | AkShare `news_cctv`（新闻联播）+ `macro_china_reserve_requirement_ratio`/`macro_china_lpr`（RRR/LPR） | `a_macro_news_raw` / `a_macro_rate_history` | 东财搜索对宏观关键词是模糊匹配不可靠，改用 AkShare 结构化/全文接口。**已知缺口**：`a_macro_news_raw` 存在 2021-10-25~2026-08-27 约 5 年数据缺失（backfill 曾被 WSL 重启中断），RRR/LPR 表完整 |
+| `scripts/gov_policy_fetch.py` | 工信部 (MIIT) / 商务部 (MOFCOM) 官网公告列表页 | `a_gov_policy_raw` | 政策公告原文抓取，backfill 已完成 5390 条（MIIT 3075 + MOFCOM 2315） |
+
+**运行模式**：三个脚本均支持 `--mode backfill`（全量补齐，自带去重）和 `--mode incremental`（增量抓取）。
+
+**定时任务（crontab，2026-09-01 配置）**：
+
+```
+# 个股新闻: 盘前/盘中/盘后各抓一次（每天含周末）
+0 9,13,16 * * *  cd /home/william/quantization && PATH=/home/william/.pyenv/shims:/usr/local/bin:/usr/bin:$PATH python3 scripts/news_fetch_pipeline.py --mode incremental >> logs/news_fetch_pipeline.log 2>&1
+# 宏观新闻(新闻联播+RRR/LPR): 每日一次
+30 7 * * *  cd /home/william/quantization && PATH=/home/william/.pyenv/shims:/usr/local/bin:/usr/bin:$PATH python3 scripts/macro_news_fetch.py --mode incremental >> logs/macro_news_fetch.log 2>&1
+# 政策公告(工信部/商务部): 每日一次
+0 8 * * *  cd /home/william/quantization && PATH=/home/william/.pyenv/shims:/usr/local/bin:/usr/bin:$PATH python3 scripts/gov_policy_fetch.py --mode incremental >> logs/gov_policy_fetch.log 2>&1
+```
+
+**已知教训（2026-09-01 修复）**：三个脚本的 `load_db_config()` 曾凭记忆假设 `env.json` 顶层有 `mysql`/`database` 键，实际结构是 `{"ENV": "test", "quant": {"test": {host,port,user,password,database}, "prod": {...}}}`（与 `quant_core::env::load()` 一致）。旧代码读不到配置会静默退化为 `root`+空密码连接失败，导致三条管道实际从未真正跑通增量抓取。已修复为正确解析 `env_cfg["ENV"]` → `quant_cfg[active_env]`。
+
+---
+
+## 十一、数据流（Rust 版）
 
 ```
 FMP / FRED / Tushare API

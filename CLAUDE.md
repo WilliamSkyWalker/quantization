@@ -7,7 +7,7 @@ Claude Code 编码规范。**所有代码变更必须遵守，无例外。**
 ## 🔴 P0 — 绝对不可违反（违反 = 立即返工）
 
 1. **先读后写** — 接到任务第一步是读代码，不是写代码。修改任何文件前必须完整阅读。修改函数前全局搜索所有调用方。
-2. **不猜测** — 不假设变量类型、API 返回值、函数参数、列名。去看定义、查文档、调一次 API 确认。不确定就问用户。**[违反 5 次：2026-04-21 预加载列名 lobbying(year→date)/employee(date→filing_date)/esg(fiscal_year 当日期查)/revenue_segment(segment→segment_name)/dark_pool(short_volume→otc_short)]**
+2. **不猜测** — 不假设变量类型、API 返回值、函数参数、列名。去看定义、查文档、调一次 API 确认。不确定就问用户。**[违反 6 次：2026-04-21 预加载列名 lobbying(year→date)/employee(date→filing_date)/esg(fiscal_year 当日期查)/revenue_segment(segment→segment_name)/dark_pool(short_volume→otc_short)；2026-09-01 三个新闻抓取脚本 `load_db_config()` 凭记忆假设 `env.json` 顶层有 `mysql`/`database` 键，未实际打开文件核对，导致静默退化为 root 空密码连接失败，三条管道从未真正跑通增量抓取]**
 3. **严禁凭记忆写 API 调用** — 必须查文档或调一次 API 看真实返回。Tushare/AkShare 文档可能过时，以实际返回为准。
 4. **严禁编造 import 路径** — 必须先确认项目目录结构和模块是否存在。
 5. **API 返回什么就存什么** — 不做字段过滤、不只映射"觉得有用的"列。col_map 必须覆盖 API 返回的每一列。写 model 前调一次 API 对比列数。
@@ -85,7 +85,7 @@ quantization/
 ├── doc/                           策略文档
 ├── output/                        回测输出（gitignore）
 ├── logs/                          运行时日志（gitignore）
-├── scripts/                       SQL migration（PostgreSQL DDL）
+├── scripts/                       SQL migration（PostgreSQL DDL）+ A股新闻/舆情抓取脚本（MySQL，独立于Rust workspace）
 └── legacy_python/                 ← 已废弃 Python + React 前端（不再使用）
 ```
 

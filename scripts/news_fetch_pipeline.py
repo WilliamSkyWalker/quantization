@@ -39,7 +39,9 @@ def load_db_config():
     if env_path.exists():
         with env_path.open() as f:
             env_cfg = json.load(f)
-        mysql_cfg = env_cfg.get("mysql") or env_cfg.get("database") or {}
+        active_env = env_cfg.get("ENV", "test")
+        quant_cfg = env_cfg.get("quant") or {}
+        mysql_cfg = quant_cfg.get(active_env) or {}
     return dict(
         host=os.getenv("DB_HOST", mysql_cfg.get("host", "127.0.0.1")),
         port=int(os.getenv("DB_PORT", mysql_cfg.get("port", 3306))),

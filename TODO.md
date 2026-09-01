@@ -64,9 +64,10 @@
 | 结构化事件数据下载器（forecast/express/stk_holdertrade/repurchase/share_float）| 1 天 | ✅ | 2015-2026全量回补完成：forecast 12.7万行/express 2.7万行/holdertrade 17.2万行/repurchase 5.8万行/share_float 419万行（共5表）。news/anns接口无权限保持不可用 |
 | 事件驱动因子实现（PEAD/股东增减持/回购强度/解禁压力）| — | ⏳ | 依赖上一项回补完成（已完成），下一步实现因子并重新跑IC/FM验证，不能凭学术假设方向直接上线 |
 | **个股新闻原文抓取管道（东财新闻聚合接口）**| 0.5 天 | ✅ | 案例分析（合力科技/比亚迪）证实新闻/题材驱动能解释结构化数据解释不了的核心异动。技术方案：Python独立脚本（不进Rust workspace）+ MySQL新表`a_news_raw`/`a_news_fetch_state`。已探测接口限制：单关键词硬上限~1000条、不支持日期区间参数、需用公司全称（代码搜索误召回严重）、深市A/B后缀股需去尾字母fallback。**全市场5212只股票 backfill 已完成，150万条入库**，脚本位于`scripts/news_fetch_pipeline.py`。财联社官方私有API（带签名保护）已确认不碰——技术保护措施规避红线 |
-| **宏观新闻/政策利率抓取（新闻联播 + 央行RRR/LPR）**| 0.3 天 | 🔄 | 东财搜索接口对宏观关键词（"商务部公告"等）是模糊匹配非精确检索，验证发现结果经常文不对题，不可靠。改用：①AkShare `news_cctv`（新闻联播官方文字稿，2016-02-03至今全文，公开无认证）②AkShare `macro_china_reserve_requirement_ratio`/`macro_china_lpr`（结构化PIT数据，公布/生效日期+调整前后数值，已验证准确）。新表`a_macro_news_raw`/`a_macro_rate_history`。新闻联播全量回补**后台跑中**，RRR(110条)/LPR(1622条)已跑完。脚本`scripts/macro_news_fetch.py`。工信部/商务部具体公告原文暂无可靠源，列为待办 |
-| 工信部/商务部政策公告原文抓取 | 待定 | ⏳ | 需单独探测政府官网公开公告列表页（miit.gov.cn/mofcom.gov.cn），东财搜索/AkShare均无覆盖，暂缓 |
-| 新闻定时增量抓取上 cron（个股新闻 + 宏观新闻联播/利率）| 0.5 天 | ⏳ | 用户要求盘前/盘中/盘后各一次（7点/13点/20点），配置crontab分别跑`news_fetch_pipeline.py --mode incremental`和`macro_news_fetch.py --mode incremental` |
+| **宏观新闻/政策利率抓取（新闻联播 + 央行RRR/LPR）**| 0.3 天 | ⚠️ | 东财搜索接口对宏观关键词（"商务部公告"等）是模糊匹配非精确检索，验证发现结果经常文不对题，不可靠。改用：①AkShare `news_cctv`（新闻联播官方文字稿，2016-02-03至今全文，公开无认证）②AkShare `macro_china_reserve_requirement_ratio`/`macro_china_lpr`（结构化PIT数据，公布/生效日期+调整前后数值，已验证准确）。新表`a_macro_news_raw`/`a_macro_rate_history`。脚本`scripts/macro_news_fetch.py`。RRR(1732条)/LPR完整。**已知缺口：`a_macro_news_raw` 2021-10-25~2026-08-27约5年数据缺失（backfill被WSL重启中断），待重新执行`--mode backfill`补齐** |
+| 工信部/商务部政策公告原文抓取 | 待定 | ✅ | `scripts/gov_policy_fetch.py`，backfill 已完成 5390 条（MIIT 3075 + MOFCOM 2315，覆盖至2026-08-27） |
+| **三个新闻脚本 DB 配置 bug 修复** | — | ✅ | 2026-09-01 发现 `load_db_config()` 凭记忆假设 `env.json` 顶层有 `mysql`/`database` 键，实际结构是 `{"ENV":..,"quant":{env:{...}}}`，导致三个脚本静默连接失败退化为 root 空密码，**三条管道此前从未真正跑通增量抓取**。已修复三个脚本并验证连接成功，尚未 commit |
+| 新闻定时增量抓取上 cron（个股新闻 + 宏观新闻联播/利率 + 政策公告）| 0.5 天 | ✅ | 2026-09-01 配置完成：个股新闻每天09:00/13:00/16:00（含周末）、宏观新闻每天07:30、政策公告每天08:00，均为`--mode incremental` |
 | 新闻文本情感打分（NLP）| 待定 | ⏳ | 抓取管道验证后再决定：词典法 vs 金融BERT微调，是否需要追加付费Tushare news/anns（~2000元/年）或Finlight（$99+/月，自带实体+情感标签） |
 | 动态估值分位数 regime overlay（替代硬编码4000点）| 中等 | ⏳ | 已用DB数据核实"4000点魔咒"是经验区间非铁律（2025-11已破4000，2026年新高4242）。待舆情/事件工作完成后排期，扩展现有`detect_a_regime`框架 |
 | 因子类别权重从财务驱动转向舆情驱动（config.toml category_weights）| 小 | ⏳ | 依赖事件/新闻因子验证出正向IC，否则只是把权重压到空因子上 |

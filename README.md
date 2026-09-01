@@ -247,9 +247,11 @@ NVDA 530× / CELH 472× / TSLA 239× / AVGO 119× / AXON 106× / NFLX 90× / MPW
 - **Regime 切换：** 四维复合（趋势+VIX+利差+拥挤度）+ Credit Veto
 - **回测预加载：** `preload_for_backtest()` 一次性加载到内存，因子计算全部从内存过滤
 
-## 舆情管道（Legacy Python，已归档）
+## 舆情管道
 
-`legacy_python/sentiment/scrapers/` 下 11 个中国政府网站爬虫 + CCTV新闻联播（AKShare）+ 巨潮公告 + 3 个 Twitter/X 美国政策爬虫 + Polymarket 预测市场桥接，共 20 个爬虫。当前 Rust 策略（v25）不依赖 sentiment 因子（POLYMARKET_SENT 全 0、IC 接近噪声）。后续如需 NLP sentiment 再决定是否迁移。
+**Legacy Python（已归档，20 爬虫）**：`legacy_python/sentiment/scrapers/` 下 11 个中国政府网站爬虫 + CCTV新闻联播（AKShare）+ 巨潮公告 + 3 个 Twitter/X 美国政策爬虫 + Polymarket 预测市场桥接。当前 Rust 策略（v25）不依赖 sentiment 因子（POLYMARKET_SENT 全 0、IC 接近噪声）。后续如需 NLP sentiment 再决定是否迁移。
+
+**A 股新闻/事件驱动管道（运行中，独立 Python 脚本 + MySQL，不进 Rust workspace）**：`scripts/news_fetch_pipeline.py`（个股新闻，东财接口，150万条已backfill）、`scripts/macro_news_fetch.py`（新闻联播+RRR/LPR，`a_macro_news_raw`存在5年历史缺口待补）、`scripts/gov_policy_fetch.py`（工信部/商务部政策公告，5390条已backfill）。三个脚本均已配 crontab 定时增量抓取，详见 `doc/DATA_SOURCES.md` 第十节。
 
 ## 开发历史
 

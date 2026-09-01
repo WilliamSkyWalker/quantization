@@ -24,3 +24,4 @@ cache_backup_*.tar.zst
 /.qoder/settings.local.json
 /error.log
 doc/sipuix1.0.31/
+doc/sipuix1.0.42/
