@@ -42,24 +42,40 @@ impl ApiClient {
         }
     }
 
+    /// Shared by clones. Every network attempt, including retries, uses this gate.
+    async fn wait_for_slot(&self) {
+        loop {
+            let wait = {
+                let mut last = self.last_request.lock().await;
+                let now = std::time::Instant::now();
+                let next = *last + Duration::from_millis(self.interval_ms);
+                if now >= next {
+                    *last = now;
+                    return;
+                }
+                next.duration_since(now)
+            };
+            // Do not hold the mutex while sleeping: throttle responses must be
+            // able to move the shared deadline while requests are queued.
+            sleep(wait).await;
+        }
+    }
+
+    /// Delay all clones after a provider throttle; queued requests re-check the gate.
+    pub async fn cooldown(&self, duration: Duration) {
+        let mut last = self.last_request.lock().await;
+        *last = (*last).max(std::time::Instant::now() + duration);
+    }
+
     /// GET JSON with rate limiting and retry (429 / 5xx).
     pub async fn get_json(&self, url: &str) -> Result<Value, String> {
         let _permit = self.semaphore.acquire().await.map_err(|e| e.to_string())?;
-
-        // Rate limit: wait if too soon since last request
-        {
-            let mut last = self.last_request.lock().await;
-            let elapsed = last.elapsed().as_millis() as u64;
-            if elapsed < self.interval_ms {
-                sleep(Duration::from_millis(self.interval_ms - elapsed)).await;
-            }
-            *last = std::time::Instant::now();
-        }
 
         let backoff_waits = [5, 10, 20, 30, 60];
         let max_retries = 5;
 
         for attempt in 0..max_retries {
+            self.wait_for_slot().await;
             let resp = match self.client.get(url).send().await {
                 Ok(r) => r,
                 Err(e) => {
@@ -113,19 +129,11 @@ impl ApiClient {
     pub async fn post_json(&self, url: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
         let _permit = self.semaphore.acquire().await.map_err(|e| e.to_string())?;
 
-        {
-            let mut last = self.last_request.lock().await;
-            let elapsed = last.elapsed().as_millis() as u64;
-            if elapsed < self.interval_ms {
-                sleep(Duration::from_millis(self.interval_ms - elapsed)).await;
-            }
-            *last = std::time::Instant::now();
-        }
-
         let backoff_waits = [5, 10, 20, 30, 60];
         let max_retries = 5;
 
         for attempt in 0..max_retries {
+            self.wait_for_slot().await;
             let resp = match self.client.post(url).json(body).send().await {
                 Ok(r) => r,
                 Err(e) => {
@@ -191,5 +199,24 @@ impl Clone for ApiClient {
             interval_ms: self.interval_ms,
             last_request: self.last_request.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cloned_clients_share_spacing_and_cooldown() {
+        let client = ApiClient::new(3000, 2); // 20ms per request
+        let other = client.clone();
+        client.wait_for_slot().await;
+        let start = std::time::Instant::now();
+        other.wait_for_slot().await;
+        assert!(start.elapsed() >= Duration::from_millis(20));
+        client.cooldown(Duration::from_millis(100)).await;
+        let start = std::time::Instant::now();
+        other.wait_for_slot().await;
+        assert!(start.elapsed() >= Duration::from_millis(100));
     }
 }

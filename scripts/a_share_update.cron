@@ -1,0 +1,4 @@
+# A-share data refresh, host timezone must be Asia/Shanghai.
+# Evening refresh and next-morning catch-up, including weekends for announcements.
+30 18 * * * /bin/bash /home/william/quantization/scripts/update_a_share.sh
+0 7 * * * /bin/bash /home/william/quantization/scripts/update_a_share.sh

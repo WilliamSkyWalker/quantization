@@ -6,17 +6,19 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use serde_json::{json, Value};
 use sqlx::MySqlPool;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
+use sqlx::Acquire;
 use tracing::{info, warn};
 
 use crate::http::ApiClient;
 use crate::progress::ticker_progress;
 
 const MAX_CONCURRENT: usize = 10;
+const WRITE_ATTEMPTS: usize = 3;
 
 /// A handful of Tushare endpoints (top_list, top_inst, margin, margin_detail,
 /// moneyflow_hsgt — all "sensitive"/龙虎榜-adjacent interfaces) enforce a lower
@@ -36,17 +38,38 @@ pub struct TushareDownloader {
     pub pool: MySqlPool,
     /// When set, all per-ticker methods only process this ts_code (e.g. "000001.SZ").
     pub only_ticker: Option<String>,
+    replay_from: Option<chrono::NaiveDate>,
+    failed: Arc<AtomicBool>,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl TushareDownloader {
     pub fn new(token: String, pool: MySqlPool, rate_limit: u32) -> Self {
         Self {
             token,
-            client: ApiClient::new(rate_limit, MAX_CONCURRENT),
-            restricted_client: ApiClient::new(RESTRICTED_RATE_LIMIT, RESTRICTED_MAX_CONCURRENT),
+            client: ApiClient::new(safe_tushare_rate(rate_limit), MAX_CONCURRENT),
+            restricted_client: ApiClient::new(safe_tushare_rate(rate_limit), RESTRICTED_MAX_CONCURRENT),
             pool,
             only_ticker: None,
+            replay_from: None,
+            failed: Arc::new(AtomicBool::new(false)),
+            write_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    pub fn has_failed(&self) -> bool {
+        self.failed.load(Ordering::SeqCst)
+    }
+
+    fn fail(&self, message: impl std::fmt::Display) {
+        self.failed.store(true, Ordering::SeqCst);
+        tracing::error!("Tushare update stopped: {message}");
+    }
+
+    /// Re-fetch market-wide daily tables from this date to repair old gaps.
+    pub fn with_replay_from(mut self, date: Option<chrono::NaiveDate>) -> Self {
+        self.replay_from = date;
+        self
     }
 
     pub fn with_ticker(mut self, ticker: Option<&str>) -> Self {
@@ -74,19 +97,30 @@ impl TushareDownloader {
     }
 
     async fn tushare_call_with_client(&self, api_name: &str, params: &Value, restricted: bool) -> Vec<Value> {
+        if self.has_failed() {
+            warn!("Skipping {api_name}: an earlier operation failed");
+            return Vec::new();
+        }
         const MAX_RETRIES: u32 = 5;
         let mut attempt = 0u32;
         loop {
+            if self.has_failed() {
+                warn!("Cancelling {api_name} retry: update has failed");
+                return Vec::new();
+            }
             match self.tushare_call_once(api_name, params, restricted).await {
                 Ok(rows) => return rows,
                 Err(error) if error.contains("40203") && attempt < MAX_RETRIES => {
                     attempt += 1;
-                    let backoff_secs = 2u64.pow(attempt); // 2, 4, 8, 16, 32s
-                    warn!("Tushare {api_name}: rate-limited, retry {attempt}/{MAX_RETRIES} in {backoff_secs}s");
-                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                    // A short per-worker backoff keeps the shared minute window full.
+                    // Stop both client queues for a complete provider window instead.
+                    let cooldown = std::time::Duration::from_secs(65);
+                    self.client.cooldown(cooldown).await;
+                    self.restricted_client.cooldown(cooldown).await;
+                    warn!("Tushare {api_name}: rate-limited; pausing shared request queues for 65s (retry {attempt}/{MAX_RETRIES})");
                 }
                 Err(error) => {
-                    warn!("Tushare {api_name}: {error}");
+                    self.fail(format!("{api_name}: {error}"));
                     return Vec::new();
                 }
             }
@@ -115,14 +149,28 @@ impl TushareDownloader {
     async fn get_done_tickers(&self, table: &str) -> HashSet<String> {
         sqlx::query_scalar::<_, String>(
             "SELECT ticker FROM import_progress WHERE table_name = ?"
-        ).bind(table).fetch_all(&self.pool).await.unwrap_or_default().into_iter().collect()
+        ).bind(table).fetch_all(&self.pool).await.unwrap_or_else(|e| {
+            self.fail(format!("Cannot read progress for {table}: {e}"));
+            Vec::new()
+        }).into_iter().collect()
     }
 
     async fn mark_done(&self, table: &str, ticker: &str) {
-        sqlx::query(
+        if self.has_failed() {
+            warn!("Not marking {table}/{ticker} complete: update failed");
+            return;
+        }
+        // A filtered stock probe must never mark the full market date complete.
+        if self.only_ticker.is_some() && ticker.len() == 8 && ticker.bytes().all(|b| b.is_ascii_digit()) {
+            info!("Not marking market date {table}/{ticker} complete for a single-stock run");
+            return;
+        }
+        if let Err(error) = sqlx::query(
             "INSERT INTO import_progress (table_name, ticker, completed_at) \
              VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE completed_at = NOW()"
-        ).bind(table).bind(ticker).execute(&self.pool).await.ok();
+        ).bind(table).bind(ticker).execute(&self.pool).await {
+            self.fail(format!("Cannot mark {table}/{ticker} complete: {error}"));
+        }
     }
 
     async fn get_all_ts_codes(&self) -> Vec<String> {
@@ -130,8 +178,11 @@ impl TushareDownloader {
             return vec![t.clone()];
         }
         sqlx::query_scalar::<_, String>(
-            "SELECT ts_code FROM a_stock_basic"
-        ).fetch_all(&self.pool).await.unwrap_or_default()
+            "SELECT DISTINCT ts_code FROM a_stock_basic ORDER BY ts_code"
+        ).fetch_all(&self.pool).await.unwrap_or_else(|e| {
+            self.fail(format!("Cannot read stock list: {e}"));
+            Vec::new()
+        })
     }
 
     async fn get_table_columns(&self, table: &str) -> HashSet<String> {
@@ -139,26 +190,40 @@ impl TushareDownloader {
             "SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = '{table}'"
         );
         let rows: Vec<(String,)> = sqlx::query_as(&sql)
-            .fetch_all(&self.pool).await.unwrap_or_default();
+            .fetch_all(&self.pool).await.unwrap_or_else(|e| {
+                self.fail(format!("Cannot read {table} metadata: {e}"));
+                Vec::new()
+            });
         rows.into_iter().map(|(c,)| c).collect()
     }
 
     async fn get_ticker_latest(&self, table: &str, date_field: &str) -> std::collections::HashMap<String, String> {
         let sql = format!(
-            "SELECT ts_code, CAST(MAX({date_field}) AS CHAR) as latest FROM {table} GROUP BY ts_code"
+            "SELECT ts_code, DATE_FORMAT(MAX({date_field}), '%Y%m%d') as latest FROM {table} GROUP BY ts_code"
         );
         let rows: Vec<(String, Option<String>)> = sqlx::query_as(&sql)
-            .fetch_all(&self.pool).await.unwrap_or_default();
+            .fetch_all(&self.pool).await.unwrap_or_else(|e| {
+                self.fail(format!("Cannot read latest dates for {table}: {e}"));
+                Vec::new()
+            });
         rows.into_iter()
             .filter_map(|(t, d)| d.map(|d| (t, d.trim().to_string())))
             .collect()
     }
 
     async fn upsert_rows(&self, table: &str, rows: &[Value], unique_keys: &[&str]) -> usize {
-        if rows.is_empty() { return 0; }
-        let first = match rows[0].as_object() { Some(m) => m, None => return 0 };
+        let _write_guard = self.write_lock.lock().await;
+        if self.has_failed() || rows.is_empty() { return 0; }
+        let first = match rows[0].as_object() {
+            Some(m) => m,
+            None => { self.fail(format!("Invalid row in {table}")); return 0; }
+        };
 
         let db_columns = self.get_table_columns(table).await;
+        if self.has_failed() || db_columns.is_empty() {
+            self.fail(format!("No database columns available for {table}"));
+            return 0;
+        }
         // created_at / updated_at 由 DB trigger 自动维护（quant.set_updated_at），
         // 应用层一律不写。
         let columns: Vec<String> = first.keys()
@@ -168,7 +233,10 @@ impl TushareDownloader {
                     && (db_columns.is_empty() || db_columns.contains(k))
             })
             .cloned().collect();
-        if columns.is_empty() { return 0; }
+        if columns.is_empty() {
+            self.fail(format!("No writable columns for {table}"));
+            return 0;
+        }
 
         // API corrections can repeat a natural key within one batch. Keep the
         // final occurrence so the inserted value matches the latest payload.
@@ -181,8 +249,7 @@ impl TushareDownloader {
             .collect::<Vec<_>>().join(", ");
 
         let chunk_size = 50;
-        let mut total = 0usize;
-        let mut error_count = 0usize;
+        let mut statements = Vec::new();
 
         for chunk in deduped.chunks(chunk_size) {
             let mut values_clauses = Vec::with_capacity(chunk.len());
@@ -203,14 +270,101 @@ impl TushareDownloader {
                     values_clauses.join(","))
             };
 
-            match sqlx::query(&sql).execute(&self.pool).await {
-                Ok(r) => total += r.rows_affected() as usize,
-                Err(e) => {
-                    error_count += 1;
-                    if error_count <= 3 { tracing::error!("Upsert {table} failed: {e}"); }
-                    if error_count == 3 { tracing::error!("Upsert {table}: suppressing further errors"); }
+            statements.push(sql);
+        }
+        // One API batch is atomic: failed chunks cannot advance MAX(date).
+        for attempt in 1..=WRITE_ATTEMPTS {
+            match self.write_batch(&statements).await {
+                Ok(total) => return total,
+                Err(error) if retryable_write_error(&error) && attempt < WRITE_ATTEMPTS => {
+                    warn!("{table}: retrying rolled-back batch after lock conflict ({attempt}/{WRITE_ATTEMPTS}): {error}");
+                    tokio::time::sleep(std::time::Duration::from_secs(attempt as u64)).await;
+                }
+                Err(error) => {
+                    self.fail(format!("Upsert {table} failed; batch rolled back: {error}"));
+                    return 0;
                 }
             }
+        }
+        unreachable!("write attempts always return")
+    }
+
+    async fn write_batch(&self, statements: &[String]) -> Result<usize, sqlx::Error> {
+        let mut conn = self.pool.acquire().await?;
+        // Apply only to this transaction; do not alter global database settings.
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut *conn).await?;
+        let mut tx = conn.begin().await?;
+        let mut total = 0;
+        for sql in statements {
+            match sqlx::query(sql).execute(&mut *tx).await {
+                Ok(result) => total += result.rows_affected() as usize,
+                Err(error) => {
+                    tx.rollback().await?;
+                    return Err(error);
+                }
+            }
+        }
+        tx.commit().await?;
+        Ok(total)
+    }
+
+    async fn pending_trade_dates(&self, table: &str, start: &str, incremental: bool) -> Vec<String> {
+        let today = chrono::Utc::now().with_timezone(
+            &chrono::FixedOffset::east_opt(8 * 3600).unwrap()
+        ).date_naive();
+        let latest: Option<chrono::NaiveDate> = if incremental {
+            let sql = if self.only_ticker.is_some() && table != "a_margin" && table != "a_moneyflow_hsgt" {
+                format!("SELECT MAX(trade_date) FROM {table} WHERE ts_code = ?")
+            } else {
+                format!("SELECT MAX(trade_date) FROM {table}")
+            };
+            let mut query = sqlx::query_scalar(&sql);
+            if sql.contains('?') { query = query.bind(self.only_ticker.as_deref().unwrap()); }
+            match query.fetch_one(&self.pool).await {
+                Ok(date) => date,
+                Err(error) => {
+                    self.fail(format!("Cannot read latest date for {table}: {error}"));
+                    return Vec::new();
+                }
+            }
+        } else { None };
+        let latest = match (latest, self.replay_from) {
+            (Some(latest), Some(replay)) => Some(latest.min(replay)),
+            (None, Some(replay)) => Some(replay),
+            (latest, None) => latest,
+        };
+        // Replay the last date to repair interrupted old non-transactional batches.
+        let start = latest.map(|d| d.format("%Y%m%d").to_string()).unwrap_or_else(|| start.to_string());
+        let calendar = self.tushare_call("trade_cal", &json!({
+            "exchange": "SSE", "start_date": start,
+            "end_date": today.format("%Y%m%d").to_string(), "is_open": 1,
+        })).await;
+        let dates = calendar.iter().filter_map(|r| r.get("cal_date").and_then(Value::as_str)).collect();
+        let mut pending = match select_trade_dates(dates, latest, today) {
+            Ok(dates) => dates,
+            Err(error) => { self.fail(error); return Vec::new(); }
+        };
+        if !incremental {
+            let done = self.get_done_tickers(table).await;
+            pending.retain(|d| !done.contains(d));
+        }
+        info!("{table}: {} dates pending, first={:?}, last={:?}", pending.len(), pending.first(), pending.last());
+        pending
+    }
+
+    // Commit market dates in order. A failed earlier date must not be skipped
+    // on the next run because a later concurrent date advanced MAX(trade_date).
+    async fn run_dates<F, Fut>(&self, dates: Vec<String>, label: &str, task: F) -> usize
+    where F: Fn(TushareDownloader, String) -> Fut,
+          Fut: std::future::Future<Output = usize> {
+        let mut total = 0;
+        for date in dates {
+            if self.has_failed() {
+                warn!("Stopping {label} before {date}: previous operation failed");
+                break;
+            }
+            total += task(self.clone(), date).await;
         }
         total
     }
@@ -237,12 +391,15 @@ impl TushareDownloader {
             let task_fn = task_fn.clone();
             handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
+                if dl.has_failed() { return; }
                 let n = task_fn(dl, item).await;
                 total.fetch_add(n, Ordering::Relaxed);
                 pb.inc(1);
             }));
         }
-        for h in handles { h.await.ok(); }
+        for h in handles {
+            if let Err(error) = h.await { self.fail(format!("{label} worker failed: {error}")); }
+        }
         let t = total.load(Ordering::Relaxed);
         pb.finish_with_message(format!("{t} rows"));
         t
@@ -317,27 +474,9 @@ impl TushareDownloader {
         total
     }
 
-    /// Download daily prices (per trade_date, full market). Concurrent by date.
+    /// Download daily prices in chronological order, committing each market date atomically.
     pub async fn download_daily_prices(&self, start_date: &str, incremental: bool) -> usize {
-        let cal_data = self.tushare_call("trade_cal", &json!({
-            "exchange": "SSE", "start_date": start_date, "end_date": "20261231", "is_open": 1,
-        })).await;
-
-        let trade_dates: Vec<String> = cal_data.iter().filter_map(|v| {
-            v.get("cal_date").and_then(|d| d.as_str()).map(|s| s.to_string())
-        }).collect();
-
-        let pending: Vec<String> = if incremental {
-            // Find latest date in DB, only process after that
-            let latest: Option<String> = sqlx::query_scalar(
-                "SELECT CAST(MAX(trade_date) AS CHAR) FROM a_daily_price"
-            ).fetch_one(&self.pool).await.ok().flatten();
-            let cutoff = latest.unwrap_or_default();
-            trade_dates.into_iter().filter(|d| d.as_str() > cutoff.as_str()).collect()
-        } else {
-            let done = self.get_done_tickers("a_daily_price").await;
-            trade_dates.into_iter().filter(|d| !done.contains(d.as_str())).collect()
-        };
+        let pending = self.pending_trade_dates("a_daily_price", start_date, incremental).await;
 
         if pending.is_empty() {
             info!("All trade dates done for a_daily_price");
@@ -345,12 +484,17 @@ impl TushareDownloader {
         }
 
         let only = self.only_ticker.clone();
-        self.run_concurrent(pending, "A-Share Daily", move |dl, date| {
+        self.run_dates(pending, "A-Share Daily", move |dl, date| {
             let only = only.clone();
             async move {
             let daily = dl.tushare_call("daily", &json!({"trade_date": &date})).await;
             let basic = dl.tushare_call("daily_basic", &json!({"trade_date": &date})).await;
             let adj = dl.tushare_call("adj_factor", &json!({"trade_date": &date})).await;
+            if dl.has_failed() { return 0; }
+            if daily.is_empty() {
+                dl.fail(format!("daily returned no rows for open date {date}; retry later"));
+                return 0;
+            }
             let merged = merge_daily(&daily, &basic, &adj);
 
             // Filter to 沪深 A 股 + add is_limit_up/is_limit_down
@@ -399,24 +543,7 @@ impl TushareDownloader {
         ts_code_field: Option<&str>,
         restricted: bool,
     ) -> usize {
-        let cal_data = self.tushare_call("trade_cal", &json!({
-            "exchange": "SSE", "start_date": start_date, "end_date": "20261231", "is_open": 1,
-        })).await;
-
-        let trade_dates: Vec<String> = cal_data.iter().filter_map(|v| {
-            v.get("cal_date").and_then(|d| d.as_str()).map(|s| s.to_string())
-        }).collect();
-
-        let pending: Vec<String> = if incremental {
-            let latest: Option<String> = sqlx::query_scalar(
-                &format!("SELECT CAST(MAX(trade_date) AS CHAR) FROM {table}")
-            ).fetch_one(&self.pool).await.ok().flatten();
-            let cutoff = latest.unwrap_or_default();
-            trade_dates.into_iter().filter(|d| d.as_str() > cutoff.as_str()).collect()
-        } else {
-            let done = self.get_done_tickers(table).await;
-            trade_dates.into_iter().filter(|d| !done.contains(d.as_str())).collect()
-        };
+        let pending = self.pending_trade_dates(table, start_date, incremental).await;
 
         if pending.is_empty() {
             info!("All trade dates done for {table}");
@@ -430,7 +557,7 @@ impl TushareDownloader {
         let only = self.only_ticker.clone();
         let ts_code_field = ts_code_field.map(|s| s.to_string());
 
-        self.run_concurrent(pending, &label, move |dl, date| {
+        self.run_dates(pending, &label, move |dl, date| {
             let api_name = api_name.clone();
             let table = table.clone();
             let unique_keys = unique_keys.clone();
@@ -454,7 +581,11 @@ impl TushareDownloader {
                     let uk_refs: Vec<&str> = unique_keys.iter().map(|s| s.as_str()).collect();
                     n = dl.upsert_rows(&table, &processed, &uk_refs).await;
                 }
-                dl.mark_done(&table, &date).await;
+                if !processed.is_empty() {
+                    dl.mark_done(&table, &date).await;
+                } else {
+                    info!("{table}/{date}: no published rows; leaving date unmarked");
+                }
 
                 n
             }
@@ -514,41 +645,26 @@ impl TushareDownloader {
 
     /// Download financial/event table (per ts_code, concurrent).
     ///
-    /// `staleness_field` drives the incremental-mode staleness check via
-    /// `get_ticker_latest`: financial tables use `end_date` (reporting
-    /// period), event tables (forecast/express/stk_holdertrade/repurchase/
-    /// share_float) use their disclosure/event date column instead, since
-    /// they have no `end_date` concept staleness can key off consistently
-    /// (share_float has none at all).
-    ///
-    /// `restricted`: forecast/express/stk_holdertrade/repurchase/share_float
-    /// all hit 40203 "频率超限" immediately at the account's general 500/min
-    /// rate under the default MAX_CONCURRENT=10 (observed via a live backfill
-    /// attempt, 2026-08-30) — same per-interface throughput cap symptom as
-    /// top_list/margin (see `RESTRICTED_RATE_LIMIT` doc comment). Route them
-    /// through the slower-paced client; existing income/balancesheet/
-    /// cashflow/fina_indicator have run cleanly unrestricted and stay so.
-    async fn download_financial_table(&self, api_name: &str, table: &str, unique_keys: &[&str], incremental: bool, staleness_field: &str, restricted: bool) -> usize {
+    /// Successful per-stock fetches are checkpointed for 12 hours, including
+    /// empty successful responses. Failures never advance the checkpoint.
+    async fn download_financial_table(&self, api_name: &str, table: &str, unique_keys: &[&str], incremental: bool, _staleness_field: &str, restricted: bool) -> usize {
         let ts_codes = self.get_all_ts_codes().await;
 
-        let pending: Vec<String> = if incremental {
-            let latest = self.get_ticker_latest(table, staleness_field).await;
-            let today = chrono::Local::now().format("%Y%m%d").to_string();
-            ts_codes.into_iter().filter(|t| {
-                match latest.get(t) {
-                    Some(d) => d.as_str() < &today[..8], // stale if older than today
-                    None => true, // no data yet
-                }
-            }).collect()
-        } else {
-            let done = self.get_done_tickers(table).await;
-            ts_codes.into_iter().filter(|t| !done.contains(t)).collect()
-        };
+        // A financial report's period is not its fetch time. Persist successful
+        // fetch checkpoints, so a restart does not re-fetch every completed stock.
+        let done: HashSet<String> = if incremental {
+            match sqlx::query_scalar::<_, String>(
+                "SELECT ticker FROM import_progress WHERE table_name = ? AND completed_at >= NOW() - INTERVAL 12 HOUR"
+            ).bind(table).fetch_all(&self.pool).await {
+                Ok(rows) => rows.into_iter().collect(),
+                Err(error) => { self.fail(format!("Cannot read {table} checkpoints: {error}")); return 0; }
+            }
+        } else { self.get_done_tickers(table).await };
+        let pending: Vec<String> = ts_codes.into_iter().filter(|t| !done.contains(t)).collect();
 
         let api_name = api_name.to_string();
         let table = table.to_string();
         let unique_keys: Vec<String> = unique_keys.iter().map(|s| s.to_string()).collect();
-        let is_incremental = incremental;
 
         self.run_concurrent(pending, &format!("Tushare {api_name}"), move |dl, ts_code| {
             let api_name = api_name.clone();
@@ -565,9 +681,7 @@ impl TushareDownloader {
                     let uk_refs: Vec<&str> = unique_keys.iter().map(|s| s.as_str()).collect();
                     n = dl.upsert_rows(&table, &data, &uk_refs).await;
                 }
-                if !is_incremental {
-                    dl.mark_done(&table, &ts_code).await;
-                }
+                dl.mark_done(&table, &ts_code).await;
                 n
             }
         }).await
@@ -892,26 +1006,47 @@ impl TushareDownloader {
     pub async fn download_all(&self, start_date: &str) -> usize {
         let mut total = 0;
         total += self.download_stock_list().await;
+        if self.has_failed() { return total; }
         total += self.download_trade_cal().await;
+        if self.has_failed() { return total; }
         total += self.download_industry().await;
+        if self.has_failed() { return total; }
         total += self.download_index_daily(start_date).await;
+        if self.has_failed() { return total; }
         total += self.download_macro().await;
+        if self.has_failed() { return total; }
         total += self.download_daily_prices(start_date, false).await;
+        if self.has_failed() { return total; }
         total += self.download_income(false).await;
+        if self.has_failed() { return total; }
         total += self.download_balancesheet(false).await;
+        if self.has_failed() { return total; }
         total += self.download_cashflow(false).await;
+        if self.has_failed() { return total; }
         total += self.download_fina_indicator(false).await;
+        if self.has_failed() { return total; }
         total += self.download_commodity(false).await;
+        if self.has_failed() { return total; }
         total += self.download_top_list(start_date, false).await;
+        if self.has_failed() { return total; }
         total += self.download_top_inst(start_date, false).await;
+        if self.has_failed() { return total; }
         total += self.download_margin(start_date, false).await;
+        if self.has_failed() { return total; }
         total += self.download_margin_detail(start_date, false).await;
+        if self.has_failed() { return total; }
         total += self.download_moneyflow_hsgt(start_date, false).await;
+        if self.has_failed() { return total; }
         total += self.download_forecast(false).await;
+        if self.has_failed() { return total; }
         total += self.download_express(false).await;
+        if self.has_failed() { return total; }
         total += self.download_stk_holdertrade(false).await;
+        if self.has_failed() { return total; }
         total += self.download_repurchase(false).await;
+        if self.has_failed() { return total; }
         total += self.download_share_float(false).await;
+        if self.has_failed() { return total; }
         info!("Tushare download_all total: {total}");
         total
     }
@@ -920,26 +1055,47 @@ impl TushareDownloader {
     pub async fn update_all(&self) -> usize {
         let mut total = 0;
         total += self.download_stock_list().await;
+        if self.has_failed() { return total; }
         total += self.download_trade_cal().await;
+        if self.has_failed() { return total; }
         total += self.download_industry().await;
+        if self.has_failed() { return total; }
         total += self.download_daily_prices("20200101", true).await;
+        if self.has_failed() { return total; }
         total += self.download_income(true).await;
+        if self.has_failed() { return total; }
         total += self.download_balancesheet(true).await;
+        if self.has_failed() { return total; }
         total += self.download_cashflow(true).await;
+        if self.has_failed() { return total; }
         total += self.download_fina_indicator(true).await;
+        if self.has_failed() { return total; }
         total += self.download_index_daily("20200101").await;
+        if self.has_failed() { return total; }
         total += self.download_macro().await;
+        if self.has_failed() { return total; }
         total += self.download_commodity(true).await;
+        if self.has_failed() { return total; }
         total += self.download_top_list("20200101", true).await;
+        if self.has_failed() { return total; }
         total += self.download_top_inst("20200101", true).await;
+        if self.has_failed() { return total; }
         total += self.download_margin("20200101", true).await;
+        if self.has_failed() { return total; }
         total += self.download_margin_detail("20200101", true).await;
+        if self.has_failed() { return total; }
         total += self.download_moneyflow_hsgt("20200101", true).await;
+        if self.has_failed() { return total; }
         total += self.download_forecast(true).await;
+        if self.has_failed() { return total; }
         total += self.download_express(true).await;
+        if self.has_failed() { return total; }
         total += self.download_stk_holdertrade(true).await;
+        if self.has_failed() { return total; }
         total += self.download_repurchase(true).await;
+        if self.has_failed() { return total; }
         total += self.download_share_float(true).await;
+        if self.has_failed() { return total; }
         info!("Tushare update_all total: {total}");
         total
     }
@@ -948,6 +1104,33 @@ impl TushareDownloader {
 // ═══════════════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════
+
+fn safe_tushare_rate(configured: u32) -> u32 {
+    // 200/min endpoints also apply to income and industry membership.
+    // Zero must not disable the provider cap.
+    if configured == 0 { RESTRICTED_RATE_LIMIT } else { configured.min(RESTRICTED_RATE_LIMIT) }
+}
+
+fn retryable_write_error(error: &sqlx::Error) -> bool {
+    error.as_database_error()
+        .and_then(|e| e.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>())
+        .is_some_and(|e| matches!(e.number(), 1205 | 1213))
+}
+
+fn select_trade_dates(dates: Vec<&str>, latest: Option<chrono::NaiveDate>, today: chrono::NaiveDate) -> Result<Vec<String>, String> {
+    let mut selected = Vec::new();
+    for value in dates {
+        let date = chrono::NaiveDate::parse_from_str(value, "%Y%m%d")
+            .or_else(|_| chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d"))
+            .map_err(|e| format!("Invalid trading date {value}: {e}"))?;
+        if date <= today && latest.is_none_or(|cutoff| date >= cutoff) {
+            selected.push(date.format("%Y%m%d").to_string());
+        }
+    }
+    selected.sort();
+    selected.dedup();
+    Ok(selected)
+}
 
 fn merge_daily(daily: &[Value], basic: &[Value], adj: &[Value]) -> Vec<Value> {
     use std::collections::HashMap;
@@ -1144,6 +1327,75 @@ fn to_sql_literal(val: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn provider_cap_cannot_be_disabled_or_exceeded() {
+        assert_eq!(safe_tushare_rate(500), 150);
+        assert_eq!(safe_tushare_rate(0), 150);
+        assert_eq!(safe_tushare_rate(60), 60);
+    }
+
+    #[test]
+    fn incremental_dates_normalize_sort_and_replay_boundary_without_future_dates() {
+        let latest = chrono::NaiveDate::from_ymd_opt(2026, 8, 28).unwrap();
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 26).unwrap();
+        let dates = select_trade_dates(vec![
+            "20260925", "20260820", "20260828", "2026-08-28", "20260928", "20260831",
+        ], Some(latest), today).unwrap();
+        assert_eq!(dates, ["20260828", "20260831", "20260925"]);
+        assert!(select_trade_dates(vec!["20260230"], None, today).is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_date_stops_later_dates_and_does_not_mark_progress() {
+        let pool = sqlx::mysql::MySqlPoolOptions::new()
+            .connect_lazy("mysql://test:test@127.0.0.1:1/test").unwrap();
+        let dl = TushareDownloader::new(String::new(), pool, 200);
+        let visited = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = visited.clone();
+        dl.run_dates(vec!["20260828".into(), "20260831".into()], "test", move |dl, date| {
+            let captured = captured.clone();
+            async move {
+                captured.lock().unwrap().push(date);
+                dl.fail("simulated API or SQL failure");
+                0
+            }
+        }).await;
+        assert_eq!(*visited.lock().unwrap(), ["20260828"]);
+        assert!(dl.clone().has_failed());
+        // A failed run must return before touching this unreachable database.
+        tokio::time::timeout(std::time::Duration::from_millis(100),
+            dl.mark_done("a_daily_price", "20260828")).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires QUANT_TEST_DATABASE_URL; uses session-local temporary tables"]
+    async fn mysql_batch_rolls_back_on_failure_and_classifies_lock_conflicts() {
+        let url = std::env::var("QUANT_TEST_DATABASE_URL").expect("test DB URL");
+        let pool = sqlx::mysql::MySqlPoolOptions::new().max_connections(1).connect(&url).await.unwrap();
+        sqlx::query("CREATE TEMPORARY TABLE quant_update_test (id INT PRIMARY KEY, value INT NOT NULL) ENGINE=InnoDB")
+            .execute(&pool).await.unwrap();
+        let dl = TushareDownloader::new(String::new(), pool.clone(), 200);
+        let error = dl.write_batch(&[
+            "INSERT INTO quant_update_test VALUES (1, 1)".into(),
+            "INSERT INTO quant_update_test VALUES (2, NULL)".into(),
+        ]).await.unwrap_err();
+        assert!(!retryable_write_error(&error));
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quant_update_test").fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 0, "earlier chunks must roll back");
+        assert_eq!(dl.write_batch(&["INSERT INTO quant_update_test VALUES (1, 1)".into()]).await.unwrap(), 1);
+        // Exercise the same MySQL error-number path as a lock timeout/deadlock.
+        for number in [1205, 1213] {
+            // MySQL SIGNAL is unavailable through the prepared-statement protocol.
+            let error = sqlx::raw_sql(&format!(
+                "SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = {number}, MESSAGE_TEXT = 'test lock conflict'"
+            )).execute(&pool).await.unwrap_err();
+            assert!(retryable_write_error(&error));
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quant_update_test").fetch_one(&pool).await.unwrap();
+            assert_eq!(count, 1);
+        }
+        pool.close().await;
+    }
 
     #[test]
     fn decodes_every_tushare_field_without_filtering() {

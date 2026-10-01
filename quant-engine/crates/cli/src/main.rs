@@ -156,6 +156,9 @@ enum Commands {
         market: String,
     },
 
+    /// Check database connectivity with SELECT 1 (five-second timeout).
+    DbPing,
+
     /// Download data from external APIs into MySQL.
     Download {
         /// Data source: tushare, fmp, quiver, fred.
@@ -173,6 +176,10 @@ enum Commands {
         /// Incremental update (only fetch new data).
         #[arg(long)]
         incremental: bool,
+
+        /// Tushare daily tables: replay from YYYY-MM-DD to repair interrupted imports.
+        #[arg(long, requires = "incremental")]
+        replay_from: Option<chrono::NaiveDate>,
 
         /// Only process this ticker (for testing).
         #[arg(long)]
@@ -303,8 +310,13 @@ fn main() {
         Commands::DbStatus { market } => {
             cmd_db_status(&_config, &market);
         }
-        Commands::Download { source, target, start_year, incremental, ticker } => {
-            cmd_download(&_config, &source, &target, start_year, incremental, ticker.as_deref());
+        Commands::DbPing => {
+            if !cmd_db_ping(&_config) {
+                std::process::exit(1);
+            }
+        }
+        Commands::Download { source, target, start_year, incremental, ticker, replay_from } => {
+            cmd_download(&_config, &source, &target, start_year, incremental, ticker.as_deref(), replay_from);
         }
         Commands::Backtest {
             start,
@@ -2072,6 +2084,23 @@ fn cmd_backtest(
     info!("NAV saved to {}", nav_path.display());
 }
 
+fn cmd_db_ping(config: &quant_core::config::Config) -> bool {
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    rt.block_on(async {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let pool = quant_db::pool::create_pool(&config.database.url(), &config.database.schema, 1).await?;
+            let result = sqlx::query("SELECT 1").execute(&pool).await;
+            pool.close().await;
+            result.map(|_| ())
+        }).await;
+        match result {
+            Ok(Ok(())) => { println!("Database online"); true }
+            Ok(Err(error)) => { eprintln!("Database unavailable: {error}"); false }
+            Err(_) => { eprintln!("Database check timed out after 5 seconds"); false }
+        }
+    })
+}
+
 fn cmd_download(
     config: &quant_core::config::Config,
     source: &str,
@@ -2079,6 +2108,7 @@ fn cmd_download(
     start_year: i32,
     incremental: bool,
     ticker: Option<&str>,
+    replay_from: Option<chrono::NaiveDate>,
 ) {
     let db_url = config.database.url();
     let schema = &config.database.schema;
@@ -2201,7 +2231,7 @@ fn cmd_download(
                     .ok().and_then(|s| s.parse().ok()).unwrap_or(200);
                 let dl = quant_download::a_tushare::TushareDownloader::new(
                     ts_token, pool.clone(), rate_limit,
-                ).with_ticker(ticker.as_deref());
+                ).with_ticker(ticker).with_replay_from(replay_from);
                 let start = format!("{start_year}0101");
                 if incremental && target == "all" {
                     dl.update_all().await;
@@ -2238,6 +2268,11 @@ fn cmd_download(
                             std::process::exit(1);
                         }
                     }
+                }
+                if dl.has_failed() {
+                    pool.close().await;
+                    eprintln!("A-share update failed; inspect errors above before retrying.");
+                    std::process::exit(1);
                 }
             }
             "fred" => {
