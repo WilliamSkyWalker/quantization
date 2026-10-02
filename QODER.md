@@ -1,9 +1,11 @@
 # Project Memory
 
+通用工作约束以根目录 [ANGRNTS.md](ANGRNTS.md) 为准。仅测试脚本可用 Python，其余实现一律使用 Rust；独立任务默认受控并发。下方历史记录不构成例外。
+
 ## Infrastructure
 - **MySQL runs in Docker** (not system service). Start with `docker start <container>` not `sudo service mysql start`
 - Local MySQL access is configured through `quant-engine/env.json`; never commit credentials or connection-specific commands.
-- Database: MySQL, accessed via sqlx in Rust (not PostgreSQL as CLAUDE.md says — migrated to MySQL)
+- Database: MySQL, accessed via sqlx in Rust.
 - Config: `quant-engine/config.toml` + env vars from `quant-engine/env.json`
 
 ## Project Structure
@@ -13,13 +15,9 @@
 - **Factor analysis output**: `output/factor_analysis/`
 - **Data cache**: `cache/` (parquet for US, MySQL-only for A-share)
 
-## Critical Rules (from CLAUDE.md)
-1. **先读后写** — Read code before writing. Search all callers before modifying functions.
-2. **不猜测** — Don't assume types/APIs/columns. Check definitions, docs, or run API.
-3. **严禁凭记忆写 API** — Must check docs or run API. Tushare/AkShare docs may be outdated.
-4. **每次修改后验证** — `cargo build --release` + smoke test + `SELECT COUNT(*)` to confirm DB.
-5. **禁止静默失败** — Every `return/continue/break` must have logger.
-6. **立即更新文档** — Update CLAUDE.md/README/doc/*.md after code changes.
+## Critical Rules
+
+Read and follow [ANGRNTS.md](ANGRNTS.md) before starting work. It defines language restrictions, bounded concurrency, data integrity, validation, authorization, and documentation requirements. Do not reintroduce Python tooling or serial-only API rules from historical notes.
 
 ## A-Share System
 - **39 factors** across 7 categories (as of 2026-08-28)
