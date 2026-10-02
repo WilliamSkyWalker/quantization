@@ -1427,44 +1427,38 @@ fn cmd_backtest(
             bm_rows,
         );
 
-        // Trim trading_days + benchmark to backtest window. Per-stock daily and
-        // financials are date-keyed independently and stay intact for lookback.
-        cache.trading_days.retain(|d| *d >= start && *d <= end);
-        if let Some(s) = cache.index_prices.get_mut(&benchmark_code) {
-            s.retain(|(d, _)| *d >= start && *d <= end);
-        }
-        if cache.trading_days.is_empty() {
-            eprintln!("No trading days in [{}, {}] — check a_trade_cal SSE coverage.", start, end);
+        // Preserve the full calendar/index history until lagged factors and regime
+        // have been computed; trim only the engine's execution window afterwards.
+        let execution_days: Vec<_> = cache.trading_days.iter().copied()
+            .filter(|d| *d >= start && *d <= end).collect();
+        if execution_days.is_empty() {
+            eprintln!("No trading days in [{start}, {end}]");
             std::process::exit(1);
         }
-        info!("Backtest window: {} trading days [{}, {}]",
-            cache.trading_days.len(),
-            cache.trading_days.first().unwrap(),
-            cache.trading_days.last().unwrap(),
-        );
-
-        // === Generate monthly signals ===
-        // NOTE: switched from the archived v1 (a_strategy::generate_signals,
-        // financial-driven) to the v2 stub (a_strategy_v2::generate_signals_v2,
-        // sentiment-driven, currently empty). See a_strategy_v2.rs doc comment.
+        info!("Backtest window: {} trading days [{}, {}]", execution_days.len(),
+            execution_days.first().unwrap(), execution_days.last().unwrap());
         let t0 = std::time::Instant::now();
-        let signals = quant_strategy::a_strategy_v2::generate_signals_v2(
-            &cache,
+        let signals = quant_strategy::a_strategy_v2::generate_signals_v2_for_dates(
+            &cache, &execution_days,
             config.a_share.strategy.max_holdings,
             config.a_share.strategy.min_select_score,
             Some(&config.a_share.universe),
             &config.a_share.strategy,
             Some(&config.a_share.regime),
         );
-        info!(
-            "Signal generation: {:.1}s ({} monthly signals)",
-            t0.elapsed().as_secs_f64(),
-            signals.len(),
-        );
-
-        if signals.is_empty() {
-            eprintln!("No signals generated — check universe filter / factor coverage.");
-            return;
+        info!("Signal generation: {:.1}s ({} rebalance signals)",
+            t0.elapsed().as_secs_f64(), signals.len());
+        if signals.values().all(|weights| weights.is_empty()) {
+            eprintln!("No nonempty v2 signals — check universe / factor coverage / configuration.");
+            std::process::exit(1);
+        }
+        cache.trading_days = execution_days;
+        if let Some(series) = cache.index_prices.get_mut(&benchmark_code) {
+            series.retain(|(d, _)| *d >= start && *d <= end);
+        }
+        if cache.index_prices.get(&benchmark_code).is_none_or(|s| s.len() != cache.trading_days.len()) {
+            eprintln!("Incomplete benchmark coverage in backtest window");
+            std::process::exit(1);
         }
 
         // === Dump holdings @ first/middle/last rebalance ===
@@ -1558,6 +1552,31 @@ fn cmd_backtest(
                 prev_bm = bm;
             }
         }
+
+        std::fs::create_dir_all(output_dir).expect("create backtest output directory");
+        let mut nav_csv = String::from("date,strategy_nav,benchmark_nav\n");
+        let bm: std::collections::BTreeMap<_, _> = result.benchmark_nav.iter().copied().collect();
+        for (date, nav) in &result.nav {
+            nav_csv.push_str(&format!("{date},{nav:.10},{:.10}\n", bm[date]));
+        }
+        std::fs::write(output_dir.join("nav.csv"), nav_csv).expect("write NAV");
+        std::fs::write(output_dir.join("rebalance_signals.json"),
+            serde_json::to_string_pretty(&signals).unwrap()).expect("write rebalance signals");
+        let summary = serde_json::json!({
+            "strategy": "a_share_v2_money_flow_baseline", "start": start_str, "end": end_str,
+            "benchmark": benchmark_code, "total_return": result.total_return,
+            "annual_return": result.annual_return, "annual_volatility": result.annual_volatility,
+            "sharpe_ratio": result.sharpe_ratio, "max_drawdown": result.max_drawdown,
+            "total_trades": result.total_trades, "annual_turnover": result.annual_turnover,
+            "benchmark_return": result.benchmark_nav.last().map(|(_, n)| n - 1.0),
+            "signal_count": signals.len(), "trading_days": result.nav.len(),
+            "factor_lag_trading_days": 1, "execution": "next_trading_day_open",
+            "rebalance_interval": config.a_share.strategy.rebalance_interval,
+            "max_holdings": config.a_share.strategy.max_holdings,
+        });
+        std::fs::write(output_dir.join("summary.json"),
+            serde_json::to_string_pretty(&summary).unwrap()).expect("write summary");
+        info!("A-share NAV, signals and summary saved to {}", output_dir.display());
 
         // === Export last-rebalance signal ===
         if export_signals {

@@ -499,7 +499,7 @@ impl Default for AShareStrategyConfig {
             weight_temperature: 2.0,
             rebalance_interval: 10,
             rebalance_min_interval: 5,
-            min_valid_categories: 4,
+            min_valid_categories: 1,
             missing_factor_threshold: 0.20,
             missing_factor_max_penalty: 0.5,
             turnover_penalty_lambda: 0.15,

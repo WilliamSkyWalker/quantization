@@ -49,7 +49,8 @@ pub fn all_factors_v2() -> Vec<AFactorDef> {
             compute: |date, cache| {
                 let mut r = AFactorResult::new();
                 for code in cache.active_codes_on(date) {
-                    let days = cache.lhb_days_before(code, date, 5);
+                    let days: Vec<_> = cache.lhb_days_before(code, date, 5).into_iter()
+                        .filter(|(d, _)| in_trading_window(cache, date, *d, 5)).collect();
                     if days.is_empty() { continue; }
                     let vals: Vec<f64> = days.iter()
                         .map(|(_, v)| v.net_rate)
@@ -78,7 +79,8 @@ pub fn all_factors_v2() -> Vec<AFactorDef> {
             compute: |date, cache| {
                 let mut r = AFactorResult::new();
                 for code in cache.active_codes_on(date) {
-                    let days = cache.margin_days_before(code, date, 21);
+                    let days: Vec<_> = cache.margin_days_before(code, date, 21).into_iter()
+                        .filter(|(d, _)| in_trading_window(cache, date, *d, 21)).collect();
                     if days.len() < 21 { continue; }
                     let earliest = days.first().unwrap().1.rzye;
                     let latest = days.last().unwrap().1.rzye;
@@ -94,7 +96,8 @@ pub fn all_factors_v2() -> Vec<AFactorDef> {
             compute: |date, cache| {
                 let mut r = AFactorResult::new();
                 for code in cache.active_codes_on(date) {
-                    let days = cache.margin_days_before(code, date, 5);
+                    let days: Vec<_> = cache.margin_days_before(code, date, 5).into_iter()
+                        .filter(|(d, _)| in_trading_window(cache, date, *d, 5)).collect();
                     if days.is_empty() { continue; }
                     let mut ratios: Vec<f64> = Vec::new();
                     for (d, m) in &days {
@@ -115,6 +118,12 @@ pub fn all_factors_v2() -> Vec<AFactorDef> {
                 r
             }},
     ]
+}
+
+fn in_trading_window(cache: &super::cache::AShareCache, date: chrono::NaiveDate,
+    observation: chrono::NaiveDate, n: usize) -> bool {
+    let end = cache.trading_days.partition_point(|d| *d <= date);
+    end > 0 && observation >= cache.trading_days[end.saturating_sub(n)] && observation <= date
 }
 
 #[cfg(test)]

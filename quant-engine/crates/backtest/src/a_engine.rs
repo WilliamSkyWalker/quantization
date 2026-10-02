@@ -77,7 +77,7 @@ pub type APortfolioSignal = FxHashMap<String, f64>;
 /// T+1 execution: signal on date D triggers trades at open on date D+1.
 ///
 /// `universe_cfg`: when `Some`, on each rebalance day the engine recomputes
-/// the clean universe (ST/suspended/IPO/micro-cap/illiquid filtered) and
+/// the previous trading day's clean universe (avoids same-day close lookahead) and
 /// drops any signal weights pointing to codes outside it. Held positions
 /// already get force-liquidated when they fall out of `target_weights`
 /// (handled by `a_exec::plan_orders`), so this filter only blocks new
@@ -115,8 +115,34 @@ pub fn run_backtest(
     let universe_filter = universe_cfg.map(AUniverseFilter::from_config);
     let mut total_dropped = 0usize;
 
-    for &today in trading_days {
-        let q = crate::a_exec::CachedQuotes { cache, date: today };
+    for (day_idx, &today) in trading_days.iter().enumerate() {
+        // A return-preserving share adjustment models reinvested distributions
+        // and splits from adj_factor; it is not a cash-dividend ledger.
+        for (code, shares) in positions.iter_mut() {
+            let Some(bars) = cache.daily.get(code) else { continue; };
+            let Ok(pos) = bars.binary_search_by_key(&today, |(d, _)| *d) else { continue; };
+            if pos == 0 { continue; }
+            let previous = bars[pos - 1].1.adj_factor;
+            let current = bars[pos].1.adj_factor;
+            let open = bars[pos].1.open;
+            if previous > 0.0 && previous.is_finite() && current > 0.0 && current.is_finite()
+                && (current / previous - 1.0).abs() > 1e-10 && open.is_finite() && open > 0.0 {
+                let adjusted = *shares as f64 * (current / previous);
+                *shares = adjusted.floor() as i64;
+                cash += (adjusted - *shares as f64) * open;
+            }
+        }
+        let q = OpeningQuotes { cache,
+            bars: positions.keys().chain(pending_signal.into_iter().flat_map(|s| s.keys()))
+                .filter_map(|code| cache.get_bar(code, today).map(|bar| {
+                    let mut open = bar.clone();
+                    open.high = bar.open;
+                    open.low = bar.open;
+                    open.close = bar.open;
+                    open.pct_chg = if bar.pre_close > 0.0 { (bar.open / bar.pre_close - 1.0) * 100.0 } else { 0.0 };
+                    (code.clone(), open)
+                })).collect(),
+        };
 
         // === T+1 execution: execute yesterday's pending signal ===
         if let Some(target_weights) = pending_signal.take() {
@@ -125,7 +151,7 @@ pub fn run_backtest(
             // they won't appear in target_weights.)
             let owned_weights;
             let effective_weights: &APortfolioSignal = if let Some(f) = universe_filter.as_ref() {
-                let universe = get_a_clean_universe(today, cache, f);
+                let universe = get_a_clean_universe(trading_days[day_idx.saturating_sub(1)], cache, f);
                 let filtered: APortfolioSignal = target_weights.iter()
                     .filter(|(c, _)| universe.contains(c.as_str()))
                     .map(|(c, w)| (c.clone(), *w))
@@ -141,7 +167,7 @@ pub fn run_backtest(
                 target_weights
             };
 
-            let total_value = crate::a_exec::portfolio_value(&positions, &q, cash);
+            let total_value = marked_value(&positions, cache, today, cash, true);
             let orders = crate::a_exec::plan_orders(&positions, effective_weights, total_value, &q, config);
             let fills = crate::a_exec::execute_orders(&orders, &mut positions, &mut cash, &q, config);
             for f in &fills {
@@ -157,7 +183,7 @@ pub fn run_backtest(
         }
 
         // === Daily NAV ===
-        let nav = crate::a_exec::portfolio_value(&positions, &q, cash) / config.initial_capital;
+        let nav = marked_value(&positions, cache, today, cash, false) / config.initial_capital;
         nav_series.push((today, nav));
 
         // Benchmark NAV
@@ -190,6 +216,30 @@ pub fn run_backtest(
         total_trades,
         annual_turnover: stats.6,
     }
+}
+
+// Quotes visible at the open; limit checks must not inspect the day's high/close.
+struct OpeningQuotes<'a> {
+    cache: &'a AShareCache,
+    bars: FxHashMap<String, ABar>,
+}
+impl crate::a_exec::QuoteSource for OpeningQuotes<'_> {
+    fn bar(&self, code: &str) -> Option<&ABar> { self.bars.get(code) }
+    fn is_st(&self, code: &str) -> bool { self.cache.is_st(code) }
+}
+
+fn marked_value(positions: &FxHashMap<String, i64>, cache: &AShareCache,
+    date: NaiveDate, cash: f64, at_open: bool) -> f64 {
+    cash + positions.iter().map(|(code, shares)| {
+        let price = cache.daily.get(code).and_then(|bars| {
+            let end = bars.partition_point(|(d, _)| *d <= date);
+            if end == 0 { return None; }
+            let (d, bar) = &bars[end - 1];
+            let p = if at_open && *d == date { bar.open } else { bar.close };
+            Some(p)
+        }).unwrap_or(0.0);
+        *shares as f64 * price
+    }).sum::<f64>()
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -387,4 +437,46 @@ mod tests {
         assert_eq!(cost.market_rules.main_board_limit, 0.10);
         assert_eq!(cost.market_rules.bse_limit, 0.30);
     }
+    fn execution_fixture() -> AShareCache {
+        let dates: Vec<_> = (1..=4).map(|n| NaiveDate::from_ymd_opt(2024, 1, n).unwrap()).collect();
+        let bars = dates.iter().map(|d| {
+            let mut bar = make_bar(0.0, 10.0, 10.0, 10.0, 10.0);
+            bar.pre_close = 10.0; bar.vol = 1000.0;
+            (*d, bar)
+        }).collect();
+        AShareCache { daily: [("000001.SZ".into(), bars)].into_iter().collect(),
+            financials: FxHashMap::default(), industry: FxHashMap::default(),
+            basics: FxHashMap::default(), trading_days: dates.clone(),
+            index_prices: [("BM".into(), dates.iter().map(|d| (*d, 100.0)).collect())].into_iter().collect(),
+            ts_codes: vec!["000001.SZ".into()], top_list: FxHashMap::default(), margin_detail: FxHashMap::default() }
+    }
+
+    #[test]
+    fn opening_size_does_not_use_same_day_close() {
+        let mut cache = execution_fixture();
+        let dates = cache.trading_days.clone();
+        let signals = [(dates[0], [("000001.SZ".into(), 0.5)].into_iter().collect()),
+            (dates[1], [("000001.SZ".into(), 0.5)].into_iter().collect())].into_iter().collect();
+        let cost = ACostConfig::default();
+        let original = run_backtest(&signals, &cache, &cost, "BM", None);
+        cache.daily.get_mut("000001.SZ").unwrap()[2].1.close = 30.0;
+        let changed = run_backtest(&signals, &cache, &cost, "BM", None);
+        assert_eq!(original.total_trades, changed.total_trades);
+        assert_eq!(original.nav.last(), changed.nav.last(), "only intraday mark changes, not opening trades");
+    }
+
+    #[test]
+    fn suspended_positions_keep_value_and_splits_preserve_returns() {
+        let mut cache = execution_fixture();
+        let dates = cache.trading_days.clone();
+        let signals = [(dates[0], [("000001.SZ".into(), 0.5)].into_iter().collect())].into_iter().collect();
+        let cost = ACostConfig::default();
+        let original = run_backtest(&signals, &cache, &cost, "BM", None);
+        let bars = cache.daily.get_mut("000001.SZ").unwrap();
+        bars.remove(2); // missing quote after purchase
+        bars[2].1.open = 5.0; bars[2].1.close = 5.0; bars[2].1.adj_factor = 2.0;
+        let changed = run_backtest(&signals, &cache, &cost, "BM", None);
+        assert_eq!(original.nav, changed.nav);
+    }
+
 }
