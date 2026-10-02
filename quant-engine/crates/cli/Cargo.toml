@@ -8,6 +8,7 @@ name = "quant"
 path = "src/main.rs"
 
 [dependencies]
+quant-research = { path = "../research" }
 quant-core = { path = "../core" }
 quant-db = { path = "../db" }
 quant-download = { path = "../download" }

@@ -29,13 +29,13 @@ impl ApiClient {
         Self::with_dns_override(calls_per_minute, max_concurrent, None)
     }
 
-    pub(crate) fn with_dns_override(
+    pub fn with_dns_override(
         calls_per_minute: u32,
         max_concurrent: usize,
         dns_override: Option<(&str, std::net::IpAddr)>,
     ) -> Self {
         let interval_ms = if calls_per_minute > 0 {
-            60_000 / calls_per_minute as u64
+            60_000u64.div_ceil(calls_per_minute as u64)
         } else {
             0
         };
@@ -103,7 +103,7 @@ impl ApiClient {
             if status == 429 {
                 let wait = backoff_waits[attempt.min(backoff_waits.len() - 1)];
                 warn!("Rate limited (429), waiting {wait}s (attempt {}/{})", attempt + 1, max_retries);
-                sleep(Duration::from_secs(wait)).await;
+                self.cooldown(Duration::from_secs(wait)).await;
                 continue;
             }
             if status >= 500 {
@@ -162,7 +162,7 @@ impl ApiClient {
             if status == 429 {
                 let wait = backoff_waits[attempt.min(backoff_waits.len() - 1)];
                 warn!("Rate limited (429), waiting {wait}s");
-                sleep(Duration::from_secs(wait)).await;
+                self.cooldown(Duration::from_secs(wait)).await;
                 continue;
             }
             if status >= 500 {
@@ -224,6 +224,11 @@ impl Clone for ApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_spacing_rounds_up_to_respect_provider_quota() {
+        assert_eq!(ApiClient::new(119, 4).interval_ms, 505);
+    }
 
     #[tokio::test]
     async fn cloned_clients_share_spacing_and_cooldown() {

@@ -4,7 +4,7 @@
 
 > **2026-04-30 重大变更**：所有 Python 代码 + React 前端已归档到 [`legacy_python/`](legacy_python/)，不再维护。生产策略全部迁移到 Rust [`quant-engine/`](quant-engine/)。原因：Python 引擎多个 bug 未修，Rust v25 已达机构级 alpha (α=13.28%, t=3.40, Sharpe 0.99)。
 
-## 系统架构（Rust 单栈，9 crates）
+## 系统架构（Rust 单栈，10 crates）
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -17,8 +17,9 @@
 │  │ quant-strategy  scoring + MVO + regime │  │
 │  │ quant-backtest  回测引擎 + FF5 回归    │  │
 │  │ quant-download  FMP / FRED / Tushare   │  │
+│  │ quant-research  A 股全市场资金行为研究 │  │
 │  │ quant-trading   纸面 + 实盘交易（A 股）│  │
-│  │ quant-db        PostgreSQL pool + ORM  │  │
+│  │ quant-db        MySQL pool + sqlx      │  │
 │  └────────────────────────────────────────┘  │
 └──────────────────────────────────────────────┘
 
@@ -59,6 +60,18 @@ quant backtest --start 2012-01-01 --end 2025-12-31 \
 quant --market cn factors --date 2025-12-31     # A 股因子
 quant --market cn trade --date 2025-12-31 --signals signals.json   # A 股纸面交易
 
+# === A 股全市场资金行为研究（独立于 v2 组合策略） ===
+./target/release/quant --market cn flow-research --stage all --workers 0
+# 默认按买入日开盘价买入；--entry-price daily-range-two-thirds 可复现全天区间 2/3 估算口径
+# fetch：复用逐日 gzip 原始缓存，仅下载缺失日期；analyze：读取缓存及 MySQL 后计算
+# 默认预热 2023-10-01 起，研究/验证/复核分别为 2024/2025/2026（截至 09-30）
+
+# === A 股分钟线按需查询（不连接 MySQL，默认仅内存） ===
+./target/release/quant --market cn minutes --mode history --codes 600000.SH \
+  --start 2026-09-30T09:00:00 --end 2026-09-30T16:00:00
+./target/release/quant --market cn minutes --mode realtime --codes 600000.SH,000001.SZ
+# 历史片段可显式加 --cache-dir ../cache/a_minutes；--json 输出完整原始响应
+
 # === DB 状态 ===
 quant db-status
 
@@ -92,6 +105,8 @@ quant db-status
 - `[risk_controls]`: vol_targeting / dd_response 参数
 
 ## A股因子体系（Rust 实现 `quant-engine/crates/factors/src/a_share/`，下表为旧 Python 30 因子参考）
+
+全市场资金行为实验使用 `quant-research`，衡量成交活跃度、净买卖压力、持续性、价格反应和风险，不以龙虎榜或融资资格筛选股票。下载由 Tokio 有界并发和共享限流控制，计算使用 Rayon（自动最多 8 个线程）；复用已有原始 gzip，直接读取 MySQL，不依赖 Python/pickle，也不写入数据库。输出为逐年因子事件统计，不是组合净值或已验证的交易策略。固定研究口径和命令见 [A 股研究说明](doc/A_SHARE_STRATEGY.md#全市场资金行为指标实验2026-10-02)。
 
 | 大类 | 权重 | 因子 |
 |---|---|---|
@@ -361,8 +376,9 @@ quant-engine/
 │   ├── strategy/   scoring + MVO (Clarabel QP) + 滚动IC + Regime
 │   ├── backtest/   T+0 回测引擎 + FF5 回归 + margin call
 │   ├── download/   FMP / FRED / Tushare 下载器
+│   ├── research/   全市场资金行为指标 + 事件检验（Rust 并发）
 │   ├── trading/    A 股纸面 + 掘金实盘
-│   ├── db/         PostgreSQL pool + sqlx
+│   ├── db/         MySQL pool + sqlx
 │   └── cli/        CLI 入口 `quant`
 ```
 

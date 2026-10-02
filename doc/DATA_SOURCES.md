@@ -106,7 +106,38 @@ cd quant-engine
 ./target/release/quant --market cn download --source tushare --target all --incremental
 ```
 
+### 全市场个股资金流研究缓存（2026-10-02）
+
+`quant-research` 通过 [Tushare `moneyflow`](https://tushare.pro/document/2?doc_id=170) 读取沪深个股资金流，不要求上龙虎榜或属于融资标的。该研究入口独立于上述数据库下载 target；资金流完整原始响应保存到本地 gzip，不写入数据库。
+
+```bash
+cd quant-engine
+./target/release/quant --market cn flow-research --stage fetch
+./target/release/quant --market cn flow-research --stage analyze --workers 0
+# 一次执行下载和分析：--stage all
+```
+
+- 默认日期：2023-10-01 至 2026-09-30；缓存 `cache/a_flow_research/moneyflow_YYYYMMDD.json.gz`（项目根目录下），含日期、获取时间、完整 `fields` 和 `items`，保留全部大小单买卖量/金额及净流入字段。
+- 已有 726 个交易日、3,739,562 行原始缓存可直接复用。Rust 校验后跳过已完成日期，仅下载缺失日期，不依赖旧 Python 程序或 pickle 文件。
+- Tokio 最多 4 个并发请求，共享最多 120 次/分钟额度；若 `TUSHARE_RATE_LIMIT` 更低则采用较低值。所有重试共享限速和限流冷却，成功校验后原子写入；空响应、重复唯一键、日期不符和达到 6000 行疑似截断均报错。
+- 唯一键：`ts_code` + `trade_date`。`net_mf_amount` 及分单金额单位为万元；行情 `amount` 为千元，计算时都转换成元。净流入采用供应商原始字段，不用大小单买卖金额相减替代；缺失值不补零。
+- 行情、复权因子、换手率、流通市值、交易日历、上市/退市日期及申万一级历史行业成员从现有 MySQL 只读加载，数据库连接上限 4。Rayon 共享加载结果并行计算，`--workers 0` 自动选择最多 8 个线程。
+- 当前默认 `--entry-price open`，按买入日开盘价买入，结果输出到 `output/a_flow_research_2024_20260930/`；`--entry-price daily-range-two-thirds` 可复现全天区间 `low + (high-low)*2/3` 估算口径，输出到 `output/a_flow_research_2024_20260930_range2of3/`。固定 2024 研究、2025 验证、2026 截至 9 月复核；详情见 [研究口径](A_SHARE_STRATEGY.md#全市场资金行为指标实验2026-10-02)。原始下载覆盖与因子收益有效性分别核验，输出属于事件统计；全天区间成交价是事后假设，不是分钟级或组合回测。
+- `run_config.json` 固定实际请求日期范围和缓存路径，改变参数须使用新的 `--output`；只在 `run_state.json` 的 `status` 为 `complete` 时读取整套分析结果。
+
 ---
+
+### 分钟线按需查询（不入库）
+
+Rust `quant --market cn minutes` 只针对候选股和持仓查询，不需要 MySQL。`--mode history` 对应 [stk_mins](https://tushare.pro/document/2?doc_id=370)，`realtime` 对应 [rt_min](https://tushare.pro/document/2?doc_id=374)，`today` 对应 [rt_min_daily](https://tushare.pro/document/2?doc_id=457)。历史时间参数采用上海本地时间，例如 `--start 2026-09-30T09:00:00 --end 2026-09-30T16:00:00`；`--freq` 支持 1、5、15、30、60。
+
+默认只在内存保留原始响应，摘要列出请求、行数、首末行情时间、数据年龄及是否为上海当天。`--json` 输出全部原始字段，日志输出到 stderr。历史查询可显式指定 `--cache-dir ../cache/a_minutes` 保存已完成历史片段的 gzip；实时查询不使用磁盘缓存。缺失权限明确失败，不能把错误当成空行情或无限重试。
+
+2026-10-02 使用现有凭据实测：`stk_mins` 返回 600000.SH 在 2026-09-30 的 241 行 1 分钟数据（包含 09:30）；`rt_min` 返回一行 2026-09-30 15:00 的行情，额外包含 `freq` 字段；`rt_min_daily` 返回 40203 无权限，尚未验证其成功响应。官方文档虽称实时分钟权限包含当日累计接口，本账号实际响应不一致，以实测为准。休市时获取到旧时间戳不能当作当前行情。
+
+随后多股票查询收到 `stk_mins` 的具体限制：`频率超限(1次/小时)`。因此首次成功只证明能取得一次样本，不能据此认定已获得正式持续访问额度。该限制与文档中的正式分钟额度不同；小时、日、月和试用额度错误会立即返回，不按 65 秒间隔反复重试。现有凭据暂不适合批量历史分钟回测，历史片段缓存仍可离线复用。原始成功及失败响应已作为测试样本，覆盖真实字段与缓存回放。最终 release CLI 实测实时双股票查询返回 2 行且 stdout 为完整 JSON；历史小时额度错误约 0.55 秒即返回失败。新增 10 项分钟模块测试及 2 项 CLI 测试通过，包括真实 241 行历史响应的离线缓存回放。
+
+分钟成交量单位是股，成交额单位是元，接口没有分钟净流入字段。盘中 K 线可能仍在变化；该命令只提供行情，不确认当前 K 线已经结束，也不生成买卖信号。实时数据发布延迟、K 线时间戳代表起点还是终点，需在交易时段核验后才能接入入场判定。
 
 ## 五、Fama-French 5 因子（免费）
 

@@ -72,6 +72,46 @@ enum AlpacaAction {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Query A-share minute bars on demand; no database connection or writes.
+    Minutes {
+        #[arg(long, default_value = "history", value_parser = ["history", "realtime", "today"])]
+        mode: String,
+        #[arg(long, value_delimiter = ',', required = true)]
+        codes: Vec<String>,
+        #[arg(long, default_value = "1")]
+        freq: u32,
+        /// Shanghai local time, e.g. 2026-09-30T09:00:00 (history only).
+        #[arg(long)]
+        start: Option<chrono::NaiveDateTime>,
+        #[arg(long)]
+        end: Option<chrono::NaiveDateTime>,
+        /// Opt-in gzip cache for completed historical slices only.
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+        /// Print full raw API responses rather than a compact summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Whole-market A-share money-flow data and factor event research.
+    FlowResearch {
+        #[arg(long, default_value = "all", value_parser = ["fetch", "analyze", "all"])]
+        stage: String,
+        #[arg(long, default_value = "2023-10-01")]
+        start: chrono::NaiveDate,
+        #[arg(long, default_value = "2026-09-30")]
+        end: chrono::NaiveDate,
+        #[arg(long, default_value = "../cache/a_flow_research")]
+        cache_dir: PathBuf,
+        /// Defaults to a separate directory for each entry-price assumption.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// open | daily-range-two-thirds (full-day OHLC proxy, not intraday timing).
+        #[arg(long, default_value = "open")]
+        entry_price: quant_research::a_execution_price::EntryPriceModel,
+        /// Rayon workers (0: available CPUs, capped at 8).
+        #[arg(long, default_value = "0")]
+        workers: usize,
+    },
     /// Validate parquet cache files (schema + row counts).
     Validate {
         /// Path to cache directory.
@@ -267,6 +307,7 @@ fn main() {
         _ => "trace",
     };
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter)),
         )
@@ -284,6 +325,50 @@ fn main() {
     };
 
     match cli.command {
+        Commands::Minutes { mode, codes, freq, start, end, cache_dir, json } => {
+            if !matches!(cli.market, Market::Cn) {
+                eprintln!("minutes requires --market cn");
+                std::process::exit(1);
+            }
+            let request = quant_research::a_minutes::MinuteRequest {
+                mode: match mode.as_str() {
+                    "history" => quant_research::a_minutes::Mode::History,
+                    "realtime" => quant_research::a_minutes::Mode::Realtime,
+                    _ => quant_research::a_minutes::Mode::Today,
+                },
+                codes, frequency: freq, start, end, cache_dir,
+            };
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            let result = rt.block_on(async {
+                let client = quant_research::a_minutes::MinuteClient::from_env().await?;
+                client.query(&request).await
+            });
+            match result {
+                Ok(response) => {
+                    let value = serde_json::to_value(response).expect("minute response serialization");
+                    let output = if json { value } else { minute_summary(&value) };
+                    println!("{}", serde_json::to_string_pretty(&output).expect("minute JSON"));
+                }
+                Err(error) => {
+                    eprintln!("Minute query failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::FlowResearch {stage, start, end, cache_dir, output, workers, entry_price} => {
+            if !matches!(cli.market, Market::Cn) {
+                eprintln!("flow-research requires --market cn");
+                std::process::exit(1);
+            }
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            let output = output.unwrap_or_else(|| PathBuf::from(if entry_price.uses_full_day_range() {
+                "../output/a_flow_research_2024_20260930_range2of3"
+            } else { "../output/a_flow_research_2024_20260930" }));
+            if let Err(error) = rt.block_on(quant_research::run(&_config, &stage, &cache_dir, &output, start, end, workers, entry_price)) {
+                eprintln!("Money-flow research failed: {error}");
+                std::process::exit(1);
+            }
+        }
         Commands::Validate { cache_dir } => {
             cmd_validate(&cache_dir);
         }
@@ -360,6 +445,98 @@ fn main() {
         Commands::ExportParquet { output_dir, table } => {
             cmd_export_parquet(&_config, &output_dir, &table);
         }
+    }
+}
+
+fn minute_summary(response: &serde_json::Value) -> serde_json::Value {
+    use chrono::{FixedOffset, TimeZone, Utc};
+    let offset = FixedOffset::east_opt(8 * 3600).unwrap();
+    let now = Utc::now();
+    let chunks = response["chunks"].as_array().map(|chunks| chunks.iter().map(|chunk| {
+        let fields = chunk["payload"]["data"]["fields"].as_array();
+        let time_index = fields.and_then(|fields| fields.iter().position(|f| f == "trade_time" || f == "time"));
+        let rows = chunk["payload"]["data"]["items"].as_array();
+        let code_index = fields.and_then(|fields| fields.iter().position(|f| f == "ts_code" || f == "code"));
+        let mut symbols = std::collections::BTreeMap::<&str, &str>::new();
+        for row in rows.into_iter().flatten() {
+            if let (Some(code), Some(time)) = (
+                code_index.and_then(|i| row.get(i)).and_then(|v| v.as_str()),
+                time_index.and_then(|i| row.get(i)).and_then(|v| v.as_str()),
+            ) {
+                symbols.entry(code).and_modify(|last| *last = (*last).max(time)).or_insert(time);
+            }
+        }
+        let missing_codes: Vec<_> = chunk["params"]["ts_code"].as_str().unwrap_or("").split(',')
+            .filter(|code| !symbols.contains_key(code)).collect();
+        let symbol_summary: Vec<_> = symbols.iter().map(|(code, time)| {
+            let latest = chrono::NaiveDateTime::parse_from_str(time, "%Y-%m-%d %H:%M:%S").ok()
+                .and_then(|t| offset.from_local_datetime(&t).single());
+            serde_json::json!({"code":code,"last_bar":time,
+                "last_bar_age_seconds":latest.map(|t| now.signed_duration_since(t).num_seconds()),
+                "last_bar_is_today_shanghai":latest.map(|t| t.date_naive() == now.with_timezone(&offset).date_naive())})
+        }).collect();
+        let mut times: Vec<_> = rows.into_iter().flatten().filter_map(|row| {
+            row.get(time_index?).and_then(|v| v.as_str())
+        }).collect();
+        times.sort_unstable();
+        let last = times.last().copied();
+        let latest = last.and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok())
+            .and_then(|t| offset.from_local_datetime(&t).single());
+        serde_json::json!({"api":chunk["api_name"],"params":chunk["params"],"observed_at":chunk["observed_at"],
+            "symbols":symbol_summary,"missing_codes":missing_codes,
+            "rows":rows.map(Vec::len).unwrap_or(0),"first_bar":times.first(),"last_bar":last,
+            "last_bar_age_seconds":latest.map(|t| now.signed_duration_since(t).num_seconds()),
+            "last_bar_is_today_shanghai":latest.map(|t| t.date_naive() == now.with_timezone(&offset).date_naive())})
+    }).collect::<Vec<_>>()).unwrap_or_default();
+    serde_json::json!({"rows":response["row_count"],"cache_hits":response["cache_hits"],"chunks":chunks,
+        "timezone":"Asia/Shanghai","volume_unit":"shares","amount_unit":"CNY",
+        "note":"Raw quotes only; live bar completion and freshness must be checked before use. No trading signal generated."})
+}
+
+#[cfg(test)]
+mod minute_cli_tests {
+    use super::*;
+
+    #[test]
+    fn flow_research_defaults_to_open_and_accepts_range_proxy() {
+        let cli = Cli::try_parse_from(["quant", "--market", "cn", "flow-research"]).unwrap();
+        match cli.command {
+            Commands::FlowResearch {entry_price, output, ..} => {
+                assert_eq!(entry_price, quant_research::a_execution_price::EntryPriceModel::Open);
+                assert!(output.is_none());
+            }
+            _ => panic!("wrong command"),
+        }
+        let cli = Cli::try_parse_from(["quant", "--market", "cn", "flow-research", "--entry-price", "daily-range-two-thirds"]).unwrap();
+        assert!(matches!(cli.command, Commands::FlowResearch {entry_price:quant_research::a_execution_price::EntryPriceModel::DailyRangeTwoThirds, ..}));
+    }
+
+    #[test]
+    fn minute_cli_accepts_multiple_codes_and_shanghai_time() {
+        let cli = Cli::try_parse_from(["quant", "--market", "cn", "minutes", "--codes", "600000.SH,000001.SZ",
+            "--start", "2026-09-30T09:00:00", "--end", "2026-09-30T16:00:00"]).unwrap();
+        match cli.command {
+            Commands::Minutes { codes, start, cache_dir, .. } => {
+                assert_eq!(codes, ["600000.SH", "000001.SZ"]);
+                assert_eq!(start.unwrap().to_string(), "2026-09-30 09:00:00");
+                assert!(cache_dir.is_none());
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn minute_summary_reports_missing_symbols_and_old_quotes() {
+        let response = serde_json::json!({"row_count":2,"cache_hits":0,"chunks":[{
+            "api_name":"rt_min", "params":{"ts_code":"600000.SH,000001.SZ"},
+            "payload":{"data":{"fields":["ts_code","time"],"items":[
+                ["600000.SH","2000-01-04 10:02:00"],["600000.SH","2000-01-04 10:01:00"]]}}
+        }]});
+        let summary = minute_summary(&response);
+        assert_eq!(summary["chunks"][0]["first_bar"], "2000-01-04 10:01:00");
+        assert_eq!(summary["chunks"][0]["last_bar"], "2000-01-04 10:02:00");
+        assert_eq!(summary["chunks"][0]["missing_codes"][0], "000001.SZ");
+        assert_eq!(summary["chunks"][0]["symbols"][0]["last_bar_is_today_shanghai"], false);
     }
 }
 

@@ -1,0 +1,1 @@
+{"code":0,"data":{"count":1,"fields":["ts_code","freq","time","open","close","high","low","vol","amount"],"has_more":false,"items":[["600000.SH","1MIN","2026-09-30 15:00:00",9.48,9.48,9.48,9.48,1491300.0,14137524]]},"detail":"...","msg":"","request_id":"052cd135-d9c8-4ede-a8d0-3df02c21f488"}

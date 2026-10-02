@@ -1,0 +1,17 @@
+[package]
+name = "quant-research"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+quant-core = { path = "../core" }
+quant-db = { path = "../db" }
+quant-download = { path = "../download" }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = { workspace = true }
+tracing = { workspace = true }
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "mysql", "chrono"] }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
