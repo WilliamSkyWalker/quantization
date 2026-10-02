@@ -45,10 +45,14 @@ pub struct TushareDownloader {
 
 impl TushareDownloader {
     pub fn new(token: String, pool: MySqlPool, rate_limit: u32) -> Self {
+        let ip = std::env::var("QUANT_TUSHARE_API_IP").ok().map(|value| {
+            value.parse::<std::net::IpAddr>().expect("QUANT_TUSHARE_API_IP must be an IP address")
+        });
+        let dns_override = ip.map(|ip| ("api.tushare.pro", ip));
         Self {
             token,
-            client: ApiClient::new(safe_tushare_rate(rate_limit), MAX_CONCURRENT),
-            restricted_client: ApiClient::new(safe_tushare_rate(rate_limit), RESTRICTED_MAX_CONCURRENT),
+            client: ApiClient::with_dns_override(safe_tushare_rate(rate_limit), MAX_CONCURRENT, dns_override),
+            restricted_client: ApiClient::with_dns_override(safe_tushare_rate(rate_limit), RESTRICTED_MAX_CONCURRENT, dns_override),
             pool,
             only_ticker: None,
             replay_from: None,

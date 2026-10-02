@@ -26,16 +26,26 @@ impl ApiClient {
     /// `calls_per_minute`: max requests per minute (converted to interval).
     /// `max_concurrent`: max simultaneous in-flight requests.
     pub fn new(calls_per_minute: u32, max_concurrent: usize) -> Self {
+        Self::with_dns_override(calls_per_minute, max_concurrent, None)
+    }
+
+    pub(crate) fn with_dns_override(
+        calls_per_minute: u32,
+        max_concurrent: usize,
+        dns_override: Option<(&str, std::net::IpAddr)>,
+    ) -> Self {
         let interval_ms = if calls_per_minute > 0 {
             60_000 / calls_per_minute as u64
         } else {
             0
         };
+        let mut builder = Client::builder().timeout(Duration::from_secs(60));
+        if let Some((host, ip)) = dns_override {
+            // Override only DNS; retain the original hostname for TLS and HTTP.
+            builder = builder.resolve(host, std::net::SocketAddr::new(ip, 0));
+        }
         Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(60))
-                .build()
-                .expect("Failed to build HTTP client"),
+            client: builder.build().expect("Failed to build HTTP client"),
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
             interval_ms,
             last_request: Arc::new(tokio::sync::Mutex::new(std::time::Instant::now())),
@@ -79,9 +89,10 @@ impl ApiClient {
             let resp = match self.client.get(url).send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    warn!("HTTP error (attempt {}/{}): {e}", attempt + 1, max_retries);
+                    let detail = request_error_detail(e);
+                    warn!("HTTP error (attempt {}/{}): {detail}", attempt + 1, max_retries);
                     if attempt + 1 == max_retries {
-                        return Err(format!("HTTP failed after {max_retries} retries: {e}"));
+                        return Err(format!("HTTP failed after {max_retries} attempts: {detail}"));
                     }
                     sleep(Duration::from_secs(2u64.pow(attempt as u32))).await;
                     continue;
@@ -137,9 +148,10 @@ impl ApiClient {
             let resp = match self.client.post(url).json(body).send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    warn!("HTTP POST error (attempt {}/{}): {e}", attempt + 1, max_retries);
+                    let detail = request_error_detail(e);
+                    warn!("HTTP POST error (attempt {}/{}): {detail}", attempt + 1, max_retries);
                     if attempt + 1 == max_retries {
-                        return Err(format!("POST failed after {max_retries} retries: {e}"));
+                        return Err(format!("POST failed after {max_retries} attempts: {detail}"));
                     }
                     sleep(Duration::from_secs(2u64.pow(attempt as u32))).await;
                     continue;
@@ -189,6 +201,13 @@ impl ApiClient {
         }
         url
     }
+}
+
+fn request_error_detail(error: reqwest::Error) -> String {
+    // URLs may carry API keys. Debug includes the source chain without the URL.
+    let timeout = error.is_timeout();
+    let connect = error.is_connect();
+    format!("timeout={timeout}, connect={connect}, {:?}", error.without_url())
 }
 
 impl Clone for ApiClient {
