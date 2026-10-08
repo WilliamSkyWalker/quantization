@@ -127,6 +127,10 @@ cd quant-engine
 
 ---
 
+### 低价小市值上涨案例
+
+`quant --market cn low-price-cases` 复用上述 MySQL 日线及完整资金流 gzip，不请求新数据、不写数据库。价格使用 `close * adj_factor` 比较历史涨跌；筛选时的名义股价和流通市值取上涨窗口起点，`circ_mv` 万元除以 10,000 转为亿元。资金流占比为 `net_mf_amount * 10 / amount`。资金流缺失保留空值；未来 20 个交易日价格不完整时，后续表现保留空值。明细与图表输出到 `output/a_low_price_cases_20260930/`，仅在 `run_state.json` 为 `complete` 时读取整套结果。
+
 ### 分钟线按需查询（不入库）
 
 Rust `quant --market cn minutes` 只针对候选股和持仓查询，不需要 MySQL。`--mode history` 对应 [stk_mins](https://tushare.pro/document/2?doc_id=370)，`realtime` 对应 [rt_min](https://tushare.pro/document/2?doc_id=374)，`today` 对应 [rt_min_daily](https://tushare.pro/document/2?doc_id=457)。历史时间参数采用上海本地时间，例如 `--start 2026-09-30T09:00:00 --end 2026-09-30T16:00:00`；`--freq` 支持 1、5、15、30、60。

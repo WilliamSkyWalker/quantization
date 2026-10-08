@@ -118,6 +118,13 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Historical low-price, small-float-cap rally case studies (not trading signals).
+    LowPriceCases {
+        #[arg(long, default_value = "../cache/a_flow_research")]
+        cache_dir: PathBuf,
+        #[arg(long, default_value = "../output/a_low_price_cases_20260930")]
+        output: PathBuf,
+    },
     /// Whole-market A-share money-flow data and factor event research.
     FlowResearch {
         #[arg(long, default_value = "all", value_parser = ["fetch", "analyze", "all"])]
@@ -412,6 +419,19 @@ fn main() {
                     eprintln!("Minute query failed: {error}");
                     std::process::exit(1);
                 }
+            }
+        }
+        Commands::LowPriceCases { cache_dir, output } => {
+            if !matches!(cli.market, Market::Cn) {
+                eprintln!("low-price-cases requires --market cn");
+                std::process::exit(1);
+            }
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            if let Err(error) = rt.block_on(quant_research::a_low_price_cases::run(
+                &_config, &cache_dir, &output,
+            )) {
+                eprintln!("Low-price case study failed: {error}");
+                std::process::exit(1);
             }
         }
         Commands::FlowResearch {stage, start, end, cache_dir, output, workers, entry_price} => {

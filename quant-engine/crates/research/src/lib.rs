@@ -1,5 +1,6 @@
 //! A-share whole-market money-flow research, separate from portfolio execution.
 pub mod a_execution_price;
+pub mod a_low_price_cases;
 pub mod a_minutes;
 pub mod a_pair_validation;
 pub mod a_universal;

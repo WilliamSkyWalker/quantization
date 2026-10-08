@@ -66,6 +66,10 @@ quant --market cn trade --date 2025-12-31 --signals signals.json   # A 股纸面
 # fetch：复用逐日 gzip 原始缓存，仅下载缺失日期；analyze：读取缓存及 MySQL 后计算
 # 默认预热 2023-10-01 起，研究/验证/复核分别为 2024/2025/2026（截至 09-30）
 
+# 低价小市值上涨案例：只读现有数据，输出逐日走势图及完整样本 JSON
+./target/release/quant --market cn low-price-cases
+# output/a_low_price_cases_20260930/report.html；历史案例复盘，不是交易信号
+
 # === A 股分钟线按需查询（不连接 MySQL，默认仅内存） ===
 ./target/release/quant --market cn minutes --mode history --codes 600000.SH \
   --start 2026-09-30T09:00:00 --end 2026-09-30T16:00:00
