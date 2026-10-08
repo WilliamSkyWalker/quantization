@@ -72,6 +72,32 @@ enum AlpacaAction {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Frozen rolling A-share pair selection validation, read-only MySQL.
+    PairValidation {
+        #[arg(long, default_value = "../output/a_pair_validation_v4")]
+        output: PathBuf,
+        #[arg(long, default_value = "../cache/a_pair_validation_v1")]
+        cache_dir: PathBuf,
+    },
+    /// A-share two-asset Cover universal-portfolio experiment (read-only DB).
+    UniversalBacktest {
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_value = "600036.SH:600900.SH,600030.SH:600028.SH,600519.SH:000858.SZ"
+        )]
+        pairs: Vec<String>,
+        #[arg(long, default_value = "2020-01-01")]
+        start: chrono::NaiveDate,
+        #[arg(long, default_value = "2026-09-30")]
+        end: chrono::NaiveDate,
+        #[arg(long, default_value = "1000000")]
+        capital: f64,
+        #[arg(long, default_value = "101")]
+        grid: usize,
+        #[arg(long, default_value = "../output/a_universal_2020_20260930")]
+        output: PathBuf,
+    },
     /// Query A-share minute bars on demand; no database connection or writes.
     Minutes {
         #[arg(long, default_value = "history", value_parser = ["history", "realtime", "today"])]
@@ -325,6 +351,39 @@ fn main() {
     };
 
     match cli.command {
+        Commands::PairValidation { output, cache_dir } => {
+            if !matches!(cli.market, Market::Cn) {
+                eprintln!("pair-validation requires --market cn");
+                std::process::exit(1);
+            }
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            if let Err(e) = rt.block_on(quant_research::a_pair_validation::run(
+                &_config, &cache_dir, &output,
+            )) {
+                eprintln!("Pair validation failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::UniversalBacktest {
+            pairs,
+            start,
+            end,
+            capital,
+            grid,
+            output,
+        } => {
+            if !matches!(cli.market, Market::Cn) {
+                eprintln!("universal-backtest requires --market cn");
+                std::process::exit(1);
+            }
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            if let Err(e) = rt.block_on(quant_research::a_universal::run(
+                &_config, &pairs, start, end, &output, capital, grid,
+            )) {
+                eprintln!("Universal backtest failed: {e}");
+                std::process::exit(1);
+            }
+        }
         Commands::Minutes { mode, codes, freq, start, end, cache_dir, json } => {
             if !matches!(cli.market, Market::Cn) {
                 eprintln!("minutes requires --market cn");

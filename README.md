@@ -77,6 +77,8 @@ quant db-status
 
 ```
 
+Cover 通用组合／配对再平衡研究已于 2026-10-08 **封存并停止开发**，不纳入生产策略。源码和历史复现入口保留，结果及封存范围见 [研究档案](doc/UNIVERSAL_PORTFOLIO.md)。
+
 ## 配置
 
 配置文件 `quant-engine/env.json`（mercury 标准）。CLI 启动时 `quant_core::env::load()` 自动加载，搜索 `./env.json` → `../env.json` → `../../env.json`，按顶层 `ENV`（`test`/`prod`）字段拍平到 process env vars。**已存在的 process env 优先**——k8s/docker 用 `-e VAR=...` 注入可覆盖文件值。Docker build 设 `QUANT_BUILDING=1` 跳过加载。

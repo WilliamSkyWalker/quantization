@@ -1,0 +1,637 @@
+{
+  "full_year_metrics": {
+    "daily_double_cost": {
+      "annualized_252_sessions": -0.004451718866400056,
+      "max_drawdown": -0.5168106071300729,
+      "total_return": -0.017009806044099074
+    },
+    "daily_ideal": {
+      "annualized_252_sessions": 0.01883287336362227,
+      "max_drawdown": -0.5044715363235772,
+      "total_return": 0.07437963955096016
+    },
+    "daily_net": {
+      "annualized_252_sessions": 0.009490883513065596,
+      "max_drawdown": -0.5023504501574207,
+      "total_return": 0.03699033740754376
+    },
+    "hold_double_cost": {
+      "annualized_252_sessions": 0.009289529053261303,
+      "max_drawdown": -0.5075836794160689,
+      "total_return": 0.03619521578979423
+    },
+    "hold_ideal": {
+      "annualized_252_sessions": 0.015447841837793908,
+      "max_drawdown": -0.5150540472653902,
+      "total_return": 0.06071848560583093
+    },
+    "hold_net": {
+      "annualized_252_sessions": 0.01363732022652675,
+      "max_drawdown": -0.5022780317327535,
+      "total_return": 0.053464650320371954
+    },
+    "monthly_net": {
+      "annualized_252_sessions": 0.013824687846116124,
+      "max_drawdown": -0.49706319552891365,
+      "total_return": 0.05421362882462355
+    },
+    "universal_net": {
+      "annualized_252_sessions": 0.010699738119450686,
+      "max_drawdown": -0.5038810116033008,
+      "total_return": 0.04177343652538479
+    }
+  },
+  "protocol": {
+    "capital": "10 sleeves of CNY100000, total CNY1000000, reset annually; concatenated normalized annual curves are a research index, not continuous-capital lot-accurate trading",
+    "costs": {
+      "commission_buy": 0.00075,
+      "commission_sell": 0.00075,
+      "lot": 100,
+      "minimum_commission": 5.0,
+      "slippage": 0.001,
+      "stamp_tax": 0.001
+    },
+    "evaluation_full_years": [
+      2022,
+      2023,
+      2024,
+      2025
+    ],
+    "ideal": "Fractional frictionless first test open to close, thereafter close-to-close; rebalance at closes; same-period hold comparator; ideal universal has exact expert-mixture identity",
+    "limits": [
+      "Historical forward validation, not a pristine unseen holdout: earlier research has viewed portions of 2022-2026.",
+      "Current stored historical prices may omit delisted firms; no current-survivor filter does not prove source completeness.",
+      "Historical ST/limit prices unavailable: pair-wide conservative 4.5% opening gate; no same-day high/low lookahead.",
+      "Adjustment factors proxy reinvested total return via synthetic shares, not full corporate-action accounting.",
+      "Missing quotes stay stale and block pair trading; terminal missing or in-window delisting flagged, retained in denominators, and blocks a positive verdict.",
+      "Annual terminal liquidation is an estimated close-value cost, not guaranteed executable fills; no market impact; fixed configured stamp tax throughout.",
+      "Only four full forward years; correlated pairs; secondary strategies and 2026 are descriptive, not independent confirmations."
+    ],
+    "partial_diagnostic_end": "2026-09-30",
+    "random": "100 deterministic shuffled matchings of 10 disjoint pairs from same yearly universe; seed 20261008 + year*1000 + sample",
+    "secondary_selection": "Rank by mean Jensen log-diversification gap, same disjoint-pair rule; diagnostic only",
+    "selection": "Rank all pairs by two-year net daily 50/50 log wealth minus maximum net single-asset log wealth; greedily take 10 disjoint pairs even when scores negative. No future eligibility check.",
+    "train_years": 2,
+    "training_score_execution": "Same open execution and estimated terminal liquidation charge as forward tests; no full-period optimum fitting",
+    "universal": "101 equal-prior experts, seeded using only preceding two years; previous-close weights executed at next open; no test-window reset/optimization",
+    "universe": "Each cutoff: SH60/SZ00 main-board stocks, first/last training quotes, >=95% valid training OHLC/pre_close/volume/adj_factor coverage, mean training amount >=100000 thousand CNY, last training price <=100 CNY. Top 60 by mean two-year amount, code tie-break; no current listing/status/industry filter.",
+    "verdict": "Primary daily net selected strategy: >0 total paired log excess over hold, positive in >=3/4 full years, 95% moving-block bootstrap lower bound >0 (3-month blocks, 2000 draws), paired log excess above 95th percentile of 100 random matchings, no selected terminal-data risks. Universal evaluated separately with same hurdles. Otherwise NOT SUPPORTED; not proof of impossibility.",
+    "version": 1
+  },
+  "universal_ideal": {
+    "annualized_252_sessions": 0.01780443149472699,
+    "max_drawdown": -0.5077641836870501,
+    "total_return": 0.07021541555780786
+  },
+  "verdicts": [
+    {
+      "annual_log_excess_95pct_block_bootstrap": [
+        -0.023818517245472973,
+        0.012176566124079052
+      ],
+      "cumulative_paired_log_excess": -0.015761787814637353,
+      "full_years": 4,
+      "method": "daily_net",
+      "positive_full_years": 2,
+      "random_excess_percentile": 0.48,
+      "random_log_excess_median": -0.014711858037611433,
+      "random_log_excess_p05": -0.0439429540633145,
+      "random_log_excess_p95": 0.008377200484572243,
+      "supported": false,
+      "terminal_risks": 1
+    },
+    {
+      "annual_log_excess_95pct_block_bootstrap": [
+        -0.016459792470155516,
+        0.008364142989794345
+      ],
+      "cumulative_paired_log_excess": -0.011159910854013922,
+      "full_years": 4,
+      "method": "universal_net",
+      "positive_full_years": 2,
+      "random_excess_percentile": 0.49,
+      "random_log_excess_median": -0.010979403482474306,
+      "random_log_excess_p05": -0.03923181655773962,
+      "random_log_excess_p95": 0.01463758959131482,
+      "supported": false,
+      "terminal_risks": 1
+    }
+  ],
+  "years": [
+    {
+      "all_pair_win_rate": 0.6389830508474577,
+      "all_terminal_risks": 0,
+      "candidate_pairs": 1770,
+      "divergence_selector_returns": {
+        "daily_double_cost": -0.2640441547770175,
+        "daily_ideal": -0.2489381796287652,
+        "daily_net": -0.25392189983869096,
+        "hold_double_cost": -0.2667823489080997,
+        "hold_ideal": -0.26808693498645675,
+        "hold_net": -0.2637948739722089,
+        "monthly_net": -0.24688011785486585,
+        "universal_net": -0.24750850606492658
+      },
+      "returns": {
+        "daily_double_cost": -0.26960929425831537,
+        "daily_ideal": -0.2598974633632236,
+        "daily_net": -0.2577725714209751,
+        "hold_double_cost": -0.2713242419344055,
+        "hold_ideal": -0.27631261160610776,
+        "hold_net": -0.26838495044186694,
+        "monthly_net": -0.2575421572884673,
+        "universal_net": -0.26263569769713213
+      },
+      "selected_daily_fills": 1308,
+      "selected_missing_pair_days": 0,
+      "selected_pair_win_rate": 0.9,
+      "selected_pairs": [
+        {
+          "correlation": -0.02125865924797394,
+          "first": "000831.SZ",
+          "relative_vol": 0.8628093609780099,
+          "second": "002030.SZ",
+          "training_score": 0.14453480839494134
+        },
+        {
+          "correlation": 0.2784298007013505,
+          "first": "600460.SH",
+          "relative_vol": 0.7456936153284283,
+          "second": "002074.SZ",
+          "training_score": 0.11220785555611285
+        },
+        {
+          "correlation": 0.004363354355965047,
+          "first": "600196.SH",
+          "relative_vol": 0.7800816134003482,
+          "second": "000723.SZ",
+          "training_score": 0.10014967594181946
+        },
+        {
+          "correlation": 0.3822011468272472,
+          "first": "600438.SH",
+          "relative_vol": 0.6795651859138462,
+          "second": "002407.SZ",
+          "training_score": 0.0816787680886503
+        },
+        {
+          "correlation": 0.25364669324552314,
+          "first": "000625.SZ",
+          "relative_vol": 0.7391117395198611,
+          "second": "600392.SH",
+          "training_score": 0.07907701210587995
+        },
+        {
+          "correlation": 0.17049000892253302,
+          "first": "002714.SZ",
+          "relative_vol": 0.661694627497799,
+          "second": "600584.SH",
+          "training_score": 0.07678112619718307
+        },
+        {
+          "correlation": 0.19642741597861185,
+          "first": "601012.SH",
+          "relative_vol": 0.7321631990527918,
+          "second": "601919.SH",
+          "training_score": 0.07533502578104123
+        },
+        {
+          "correlation": 0.15700723852788864,
+          "first": "002241.SZ",
+          "relative_vol": 0.736714724998658,
+          "second": "600893.SH",
+          "training_score": 0.06398389578435962
+        },
+        {
+          "correlation": 0.22769603273009967,
+          "first": "002475.SZ",
+          "relative_vol": 0.643827276474246,
+          "second": "600143.SH",
+          "training_score": 0.06368568248579635
+        },
+        {
+          "correlation": 0.19396888979678895,
+          "first": "600031.SH",
+          "relative_vol": 0.6360014291412971,
+          "second": "002385.SZ",
+          "training_score": 0.06257308911996573
+        }
+      ],
+      "selected_terminal_risks": 0,
+      "universe_size": 60,
+      "year": 2022
+    },
+    {
+      "all_pair_win_rate": 0.33163841807909605,
+      "all_terminal_risks": 0,
+      "candidate_pairs": 1770,
+      "divergence_selector_returns": {
+        "daily_double_cost": -0.18259832118885266,
+        "daily_ideal": -0.16477944205281025,
+        "daily_net": -0.16772030700202534,
+        "hold_double_cost": -0.1654754035641688,
+        "hold_ideal": -0.16506893550907176,
+        "hold_net": -0.1615790346848559,
+        "monthly_net": -0.15511932266530815,
+        "universal_net": -0.17729664361310393
+      },
+      "returns": {
+        "daily_double_cost": -0.1288384439716379,
+        "daily_ideal": -0.11121518571719702,
+        "daily_net": -0.11886749136312846,
+        "hold_double_cost": -0.11234123868683665,
+        "hold_ideal": -0.10953503123291575,
+        "hold_net": -0.10832822953245391,
+        "monthly_net": -0.1094706093012906,
+        "universal_net": -0.11417697389336401
+      },
+      "selected_daily_fills": 1161,
+      "selected_missing_pair_days": 0,
+      "selected_pair_win_rate": 0.4,
+      "selected_pairs": [
+        {
+          "correlation": 0.04724488262832873,
+          "first": "002176.SZ",
+          "relative_vol": 0.9436411224044484,
+          "second": "002432.SZ",
+          "training_score": 0.1928948061822878
+        },
+        {
+          "correlation": 0.2798954835464056,
+          "first": "000831.SZ",
+          "relative_vol": 0.84129138644593,
+          "second": "601127.SH",
+          "training_score": 0.16816762175093694
+        },
+        {
+          "correlation": 0.4766443398455061,
+          "first": "002241.SZ",
+          "relative_vol": 0.5185396663567933,
+          "second": "603501.SH",
+          "training_score": 0.15648806246910815
+        },
+        {
+          "correlation": 0.02236954608407974,
+          "first": "002407.SZ",
+          "relative_vol": 0.8317014029606363,
+          "second": "002603.SZ",
+          "training_score": 0.14467834396834264
+        },
+        {
+          "correlation": 0.03889574291045204,
+          "first": "603799.SH",
+          "relative_vol": 0.6900706880108927,
+          "second": "601166.SH",
+          "training_score": 0.12179495470247707
+        },
+        {
+          "correlation": 0.2758034974713817,
+          "first": "601919.SH",
+          "relative_vol": 0.716093100158456,
+          "second": "002709.SZ",
+          "training_score": 0.11607411330878915
+        },
+        {
+          "correlation": 0.11489951759252759,
+          "first": "002466.SZ",
+          "relative_vol": 0.7668841010994157,
+          "second": "601669.SH",
+          "training_score": 0.11036352443068284
+        },
+        {
+          "correlation": 0.16076721746505832,
+          "first": "000333.SZ",
+          "relative_vol": 0.5691965807268411,
+          "second": "600745.SH",
+          "training_score": 0.10960437510119092
+        },
+        {
+          "correlation": -0.023871319446766463,
+          "first": "000002.SZ",
+          "relative_vol": 0.698454252329594,
+          "second": "002074.SZ",
+          "training_score": 0.10251948732487194
+        },
+        {
+          "correlation": 0.032903897689767765,
+          "first": "002714.SZ",
+          "relative_vol": 0.714848102679274,
+          "second": "002497.SZ",
+          "training_score": 0.09742694657487788
+        }
+      ],
+      "selected_terminal_risks": 0,
+      "universe_size": 60,
+      "year": 2023
+    },
+    {
+      "all_pair_win_rate": 0.5305084745762711,
+      "all_terminal_risks": 0,
+      "candidate_pairs": 1770,
+      "divergence_selector_returns": {
+        "daily_double_cost": 0.10485214073065885,
+        "daily_ideal": 0.1365577744332782,
+        "daily_net": 0.11949367440822911,
+        "hold_double_cost": 0.12488725372341158,
+        "hold_ideal": 0.13808744435800469,
+        "hold_net": 0.12957921050011434,
+        "monthly_net": 0.12899849244604078,
+        "universal_net": 0.14055207935776037
+      },
+      "returns": {
+        "daily_double_cost": 0.11856631927825756,
+        "daily_ideal": 0.14601851512236408,
+        "daily_net": 0.13419475271705594,
+        "hold_double_cost": 0.12051133535054737,
+        "hold_ideal": 0.13183369166458458,
+        "hold_net": 0.1251308277921852,
+        "monthly_net": 0.13451709801638367,
+        "universal_net": 0.13163467149861452
+      },
+      "selected_daily_fills": 1100,
+      "selected_missing_pair_days": 0,
+      "selected_pair_win_rate": 0.8,
+      "selected_pairs": [
+        {
+          "correlation": 0.07159837894259846,
+          "first": "002230.SZ",
+          "relative_vol": 0.7235805644207781,
+          "second": "002432.SZ",
+          "training_score": 0.13154212401238216
+        },
+        {
+          "correlation": 0.1668841142354715,
+          "first": "002466.SZ",
+          "relative_vol": 0.5581738901446176,
+          "second": "600196.SH",
+          "training_score": 0.1311800694922343
+        },
+        {
+          "correlation": 0.06241376871168703,
+          "first": "002603.SZ",
+          "relative_vol": 0.7502726636066557,
+          "second": "002738.SZ",
+          "training_score": 0.12049513766410136
+        },
+        {
+          "correlation": 0.1707010418244262,
+          "first": "601127.SH",
+          "relative_vol": 0.7626235088499613,
+          "second": "600536.SH",
+          "training_score": 0.11815575039149129
+        },
+        {
+          "correlation": 0.17088704412408293,
+          "first": "000977.SZ",
+          "relative_vol": 0.7261122278981097,
+          "second": "600418.SH",
+          "training_score": 0.11728709758642906
+        },
+        {
+          "correlation": 0.09333838211104711,
+          "first": "603259.SH",
+          "relative_vol": 0.6073278336399044,
+          "second": "601360.SH",
+          "training_score": 0.09927051044757366
+        },
+        {
+          "correlation": 0.34550342880003865,
+          "first": "002261.SZ",
+          "relative_vol": 0.68858284651927,
+          "second": "603000.SH",
+          "training_score": 0.08771445390721455
+        },
+        {
+          "correlation": 0.544482380306613,
+          "first": "002241.SZ",
+          "relative_vol": 0.44037991048626934,
+          "second": "600745.SH",
+          "training_score": 0.07567563346944331
+        },
+        {
+          "correlation": 0.1658357518833134,
+          "first": "000625.SZ",
+          "relative_vol": 0.6463096272916276,
+          "second": "603019.SH",
+          "training_score": 0.06534692861149603
+        },
+        {
+          "correlation": 0.27698276700942576,
+          "first": "601888.SH",
+          "relative_vol": 0.5335477499273251,
+          "second": "002459.SZ",
+          "training_score": 0.05513167430313297
+        }
+      ],
+      "selected_terminal_risks": 0,
+      "universe_size": 60,
+      "year": 2024
+    },
+    {
+      "all_pair_win_rate": 0.5734463276836158,
+      "all_terminal_risks": 59,
+      "candidate_pairs": 1770,
+      "divergence_selector_returns": {
+        "daily_double_cost": 0.47268603102135165,
+        "daily_ideal": 0.5216353291671498,
+        "daily_net": 0.4919684430131297,
+        "hold_double_cost": 0.505179502588379,
+        "hold_ideal": 0.5332805118128241,
+        "hold_net": 0.510889586448533,
+        "monthly_net": 0.4945438190255296,
+        "universal_net": 0.493983981796424
+      },
+      "returns": {
+        "daily_double_cost": 0.38112665515136657,
+        "daily_ideal": 0.4252059175954428,
+        "daily_net": 0.39800541016794044,
+        "hold_double_cost": 0.4297001509742042,
+        "hold_ideal": 0.4542855095876934,
+        "hold_net": 0.4352557485216815,
+        "monthly_net": 0.4053921538101162,
+        "universal_net": 0.4094119867030832
+      },
+      "selected_daily_fills": 1499,
+      "selected_missing_pair_days": 22,
+      "selected_pair_win_rate": 0.6,
+      "selected_pairs": [
+        {
+          "correlation": -0.08978343717618797,
+          "first": "601398.SH",
+          "relative_vol": 0.824268130033585,
+          "second": "002229.SZ",
+          "training_score": 0.24075952013780486
+        },
+        {
+          "correlation": 0.27072412150563735,
+          "first": "000158.SZ",
+          "relative_vol": 0.8047574614574866,
+          "second": "603083.SH",
+          "training_score": 0.12595694558734052
+        },
+        {
+          "correlation": 0.2984078824028651,
+          "first": "000977.SZ",
+          "relative_vol": 0.6870698364019733,
+          "second": "600895.SH",
+          "training_score": 0.1150852949048347
+        },
+        {
+          "correlation": 0.32265020019354446,
+          "first": "601138.SH",
+          "relative_vol": 0.6644979233896612,
+          "second": "002456.SZ",
+          "training_score": 0.10521489345659893
+        },
+        {
+          "correlation": 0.23316851838417932,
+          "first": "603019.SH",
+          "relative_vol": 0.7220975062935598,
+          "second": "002085.SZ",
+          "training_score": 0.09535024071694764
+        },
+        {
+          "correlation": 0.2600338227019414,
+          "first": "600733.SH",
+          "relative_vol": 0.68804241103474,
+          "second": "603000.SH",
+          "training_score": 0.08543445351174792
+        },
+        {
+          "correlation": 0.3506427177575455,
+          "first": "002261.SZ",
+          "relative_vol": 0.700613099648027,
+          "second": "600418.SH",
+          "training_score": 0.0838150165808297
+        },
+        {
+          "correlation": 0.08079550971216405,
+          "first": "601360.SH",
+          "relative_vol": 0.6411500378407257,
+          "second": "601899.SH",
+          "training_score": 0.07788329172266875
+        },
+        {
+          "correlation": 0.46157548597873566,
+          "first": "002049.SZ",
+          "relative_vol": 0.44980552290488834,
+          "second": "002460.SZ",
+          "training_score": 0.06325117489886674
+        },
+        {
+          "correlation": 0.5149594574228824,
+          "first": "000938.SZ",
+          "relative_vol": 0.5045514817201252,
+          "second": "000066.SZ",
+          "training_score": 0.054898289379011554
+        }
+      ],
+      "selected_terminal_risks": 1,
+      "universe_size": 60,
+      "year": 2025
+    },
+    {
+      "all_pair_win_rate": 0.5785310734463277,
+      "all_terminal_risks": 0,
+      "candidate_pairs": 1770,
+      "divergence_selector_returns": {
+        "daily_double_cost": -0.13688781620746737,
+        "daily_ideal": -0.12176205154439135,
+        "daily_net": -0.12869233854168038,
+        "hold_double_cost": -0.1201279803115165,
+        "hold_ideal": -0.10645298547290294,
+        "hold_net": -0.11613660741224141,
+        "monthly_net": -0.15134785462014144,
+        "universal_net": -0.12658059696362456
+      },
+      "returns": {
+        "daily_double_cost": -0.18995385094409456,
+        "daily_ideal": -0.15398742018307632,
+        "daily_net": -0.17912668886016836,
+        "hold_double_cost": -0.15283602840194754,
+        "hold_ideal": -0.1294601901280551,
+        "hold_net": -0.1489218846010376,
+        "monthly_net": -0.18838046399185193,
+        "universal_net": -0.16408796484227306
+      },
+      "selected_daily_fills": 1163,
+      "selected_missing_pair_days": 3,
+      "selected_pair_win_rate": 0.5,
+      "selected_pairs": [
+        {
+          "correlation": 0.25867647715334713,
+          "first": "000158.SZ",
+          "relative_vol": 0.758137571875704,
+          "second": "002131.SZ",
+          "training_score": 0.13356075536841405
+        },
+        {
+          "correlation": 0.17886794507510861,
+          "first": "002261.SZ",
+          "relative_vol": 0.6617343907370876,
+          "second": "601600.SH",
+          "training_score": 0.09963027990880818
+        },
+        {
+          "correlation": 0.175093321063909,
+          "first": "601899.SH",
+          "relative_vol": 0.6316845167485765,
+          "second": "002402.SZ",
+          "training_score": 0.08640146368582358
+        },
+        {
+          "correlation": 0.24099882547375678,
+          "first": "002463.SZ",
+          "relative_vol": 0.7318948680458744,
+          "second": "002085.SZ",
+          "training_score": 0.08578892940200723
+        },
+        {
+          "correlation": 0.32082884928988326,
+          "first": "002460.SZ",
+          "relative_vol": 0.597203789088511,
+          "second": "601689.SH",
+          "training_score": 0.07846173487476739
+        },
+        {
+          "correlation": 0.2904932205175745,
+          "first": "603259.SH",
+          "relative_vol": 0.5865748687267118,
+          "second": "600733.SH",
+          "training_score": 0.07769665293823137
+        },
+        {
+          "correlation": 0.3453810132171915,
+          "first": "002241.SZ",
+          "relative_vol": 0.5509441089988905,
+          "second": "000066.SZ",
+          "training_score": 0.06457518708707921
+        },
+        {
+          "correlation": 0.3432718114999214,
+          "first": "002600.SZ",
+          "relative_vol": 0.620878911896869,
+          "second": "600895.SH",
+          "training_score": 0.06162706950497226
+        },
+        {
+          "correlation": 0.4128513669047464,
+          "first": "002384.SZ",
+          "relative_vol": 0.6680089521852457,
+          "second": "600580.SH",
+          "training_score": 0.06101256187863516
+        },
+        {
+          "correlation": -0.12135844377969404,
+          "first": "601288.SH",
+          "relative_vol": 0.5959291621464112,
+          "second": "002195.SZ",
+          "training_score": 0.05392781689580709
+        }
+      ],
+      "selected_terminal_risks": 0,
+      "universe_size": 60,
+      "year": 2026
+    }
+  ]
+}

@@ -2680,6 +2680,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "flate2",
+ "quant-backtest",
  "quant-core",
  "quant-db",
  "quant-download",

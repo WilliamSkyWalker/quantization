@@ -1,0 +1,37 @@
+{
+  "capital": "10 sleeves of CNY100000, total CNY1000000, reset annually; concatenated normalized annual curves are a research index, not continuous-capital lot-accurate trading",
+  "costs": {
+    "commission_buy": 0.00075,
+    "commission_sell": 0.00075,
+    "lot": 100,
+    "minimum_commission": 5.0,
+    "slippage": 0.001,
+    "stamp_tax": 0.001
+  },
+  "evaluation_full_years": [
+    2022,
+    2023,
+    2024,
+    2025
+  ],
+  "ideal": "Fractional frictionless first test open to close, thereafter close-to-close; rebalance at closes; same-period hold comparator; ideal universal has exact expert-mixture identity",
+  "limits": [
+    "Historical forward validation, not a pristine unseen holdout: earlier research has viewed portions of 2022-2026.",
+    "Current stored historical prices may omit delisted firms; no current-survivor filter does not prove source completeness.",
+    "Historical ST/limit prices unavailable: pair-wide conservative 4.5% opening gate; no same-day high/low lookahead.",
+    "Adjustment factors proxy reinvested total return via synthetic shares, not full corporate-action accounting.",
+    "Missing quotes stay stale and block pair trading; terminal missing or in-window delisting flagged, retained in denominators, and blocks a positive verdict.",
+    "Annual terminal liquidation is an estimated close-value cost, not guaranteed executable fills; no market impact; fixed configured stamp tax throughout.",
+    "Only four full forward years; correlated pairs; secondary strategies and 2026 are descriptive, not independent confirmations."
+  ],
+  "partial_diagnostic_end": "2026-09-30",
+  "random": "100 deterministic shuffled matchings of 10 disjoint pairs from same yearly universe; seed 20261008 + year*1000 + sample",
+  "secondary_selection": "Rank by mean Jensen log-diversification gap, same disjoint-pair rule; diagnostic only",
+  "selection": "Rank all pairs by two-year net daily 50/50 log wealth minus maximum net single-asset log wealth; greedily take 10 disjoint pairs even when scores negative. No future eligibility check.",
+  "train_years": 2,
+  "training_score_execution": "Same open execution and estimated terminal liquidation charge as forward tests; no full-period optimum fitting",
+  "universal": "101 equal-prior experts, seeded using only preceding two years; previous-close weights executed at next open; no test-window reset/optimization",
+  "universe": "Each cutoff: SH60/SZ00 main-board stocks, first/last training quotes, >=95% valid training OHLC/pre_close/volume/adj_factor coverage, mean training amount >=100000 thousand CNY, last training price <=100 CNY. Top 60 by mean two-year amount, code tie-break; no current listing/status/industry filter.",
+  "verdict": "Primary daily net selected strategy: >0 total paired log excess over hold, positive in >=3/4 full years, 95% moving-block bootstrap lower bound >0 (3-month blocks, 2000 draws), paired log excess above 95th percentile of 100 random matchings, no selected terminal-data risks. Universal evaluated separately with same hurdles. Otherwise NOT SUPPORTED; not proof of impossibility.",
+  "version": 1
+}

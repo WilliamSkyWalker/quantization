@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 quant-core = { path = "../core" }
+quant-backtest = { path = "../backtest" }
 quant-db = { path = "../db" }
 quant-download = { path = "../download" }
 chrono = { workspace = true }

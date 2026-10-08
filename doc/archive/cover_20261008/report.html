@@ -1,0 +1,42 @@
+<!doctype html><html lang=zh-CN><meta charset=utf-8><title>A 股滚动配对验证</title><style>body{font:16px system-ui;max-width:1200px;margin:40px auto;padding:20px;color:#123}table{border-collapse:collapse;width:100%;margin:20px 0}td,th{padding:10px;text-align:right;border-bottom:1px solid #ddd}th{background:#edf3fa}p{line-height:1.7}pre{white-space:pre-wrap;background:#f1f4f8;padding:20px}</style><h1>A 股滚动配对验证</h1><p>此前两年筛选，下一年验证。2022–2025 为四个完整年度；2026 截至 9 月仅作诊断。每年从历史成交额前 60 名合格主板股票中选 10 组不重复股票对，每组 10 万元，年度重置。含整手、佣金、最低费用、固定税率、滑点及估算期末清仓成本；跨年净值为标准化研究指数。</p><p><a href=protocol.json>预先固定的研究规则</a> · <a href=report.json>完整数据与股票名单</a> · <a href=summary.csv>年度汇总</a> · <a href=curves.csv>每日组合净值</a></p><h2>daily_net: 未通过预设检验（不支持稳定优势）</h2><p>正超额年度 2/4；相对随机配对的超额百分位 48%；年化对数超额 95% 区块自助区间 [-2.38%, 1.22%]。终点数据风险 1 组。</p><h2>universal_net: 未通过预设检验（不支持稳定优势）</h2><p>正超额年度 2/4；相对随机配对的超额百分位 49%；年化对数超额 95% 区块自助区间 [-1.65%, 0.84%]。终点数据风险 1 组。</p><table><tr><th>年度</th><th>每日等权净收益</th><th>通用组合净收益</th><th>每21日等权净收益</th><th>等权持有净收益</th><th>每日等权优于持有的配对占比</th></tr><tr><td>2022</td><td>-25.78%</td><td>-26.26%</td><td>-25.75%</td><td>-26.84%</td><td>90%</td></tr><tr><td>2023</td><td>-11.89%</td><td>-11.42%</td><td>-10.95%</td><td>-10.83%</td><td>40%</td></tr><tr><td>2024</td><td>13.42%</td><td>13.16%</td><td>13.45%</td><td>12.51%</td><td>80%</td></tr><tr><td>2025</td><td>39.80%</td><td>40.94%</td><td>40.54%</td><td>43.53%</td><td>60%</td></tr><tr><td>2026</td><td>-17.91%</td><td>-16.41%</td><td>-18.84%</td><td>-14.89%</td><td>50%</td></tr></table><h2>局限</h2><p>本实验是历史向前验证，不是从未看过的数据。未按当前上市状态过滤，但原始库退市历史可能不完整。复权因子近似公司行动；缺报价采用旧估值，开盘偏离前收4.5%暂停整对交易；终点缺报价或区间退市保留并标记，禁止据此宣称通过。实际队列成交、精确历史ST、股息税和市场冲击未完整建模。四个完整年份的统计证据有限，辅助指标不能代替主检验。</p><h2>完整年度汇总</h2><pre>{
+  "daily_double_cost": {
+    "annualized_252_sessions": -0.004451718866400056,
+    "max_drawdown": -0.5168106071300729,
+    "total_return": -0.017009806044099074
+  },
+  "daily_ideal": {
+    "annualized_252_sessions": 0.01883287336362227,
+    "max_drawdown": -0.5044715363235772,
+    "total_return": 0.07437963955096016
+  },
+  "daily_net": {
+    "annualized_252_sessions": 0.009490883513065596,
+    "max_drawdown": -0.5023504501574207,
+    "total_return": 0.03699033740754376
+  },
+  "hold_double_cost": {
+    "annualized_252_sessions": 0.009289529053261303,
+    "max_drawdown": -0.5075836794160689,
+    "total_return": 0.03619521578979423
+  },
+  "hold_ideal": {
+    "annualized_252_sessions": 0.015447841837793908,
+    "max_drawdown": -0.5150540472653902,
+    "total_return": 0.06071848560583093
+  },
+  "hold_net": {
+    "annualized_252_sessions": 0.01363732022652675,
+    "max_drawdown": -0.5022780317327535,
+    "total_return": 0.053464650320371954
+  },
+  "monthly_net": {
+    "annualized_252_sessions": 0.013824687846116124,
+    "max_drawdown": -0.49706319552891365,
+    "total_return": 0.05421362882462355
+  },
+  "universal_net": {
+    "annualized_252_sessions": 0.010699738119450686,
+    "max_drawdown": -0.5038810116033008,
+    "total_return": 0.04177343652538479
+  }
+}</pre></html>
