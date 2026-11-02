@@ -3,6 +3,7 @@ pub mod a_execution_price;
 pub mod a_low_price_cases;
 pub mod a_minutes;
 pub mod a_pair_validation;
+pub mod a_relative_selection;
 pub mod a_universal;
 pub mod analysis;
 pub mod data;

@@ -1,0 +1,189 @@
+{
+  "annual_relative_returns": {
+    "2022": -0.006300755850900175,
+    "2023": 0.006487359400898729,
+    "2024": 0.01266999922649692,
+    "2025": -0.014837329176629055,
+    "2026": 0.007882880162822792
+  },
+  "data": {
+    "calendar_days": 1393,
+    "first": "2021-01-04",
+    "last": "2026-09-30",
+    "max_target_control_error": 1.7999924467604345e-15,
+    "maximum_universe": 796,
+    "minimum_universe": 789,
+    "missing_industry_start_rows": 0,
+    "monthly_signals": 57,
+    "rows": 4394164,
+    "stocks": 3367
+  },
+  "double_cost_primary_relative_CAGR": -0.005232036529699169,
+  "elapsed_seconds": 8,
+  "limitations": [
+    "historical intervals previously inspected, not a pristine holdout",
+    "historical ST unavailable; conservative open gate is only a proxy",
+    "delisted-stock database coverage not independently certified",
+    "industry membership effective dates are not vendor publication timestamps",
+    "adjustment-factor share conversion is not an exact corporate-action cash ledger",
+    "target exposure neutrality can drift through rounding, blocked fills and subsequent returns",
+    "day bars cannot establish executable auction volume; costs/capacity are assumptions",
+    "IC uses available endpoint quotes only and may have missing-label bias; IC is not portfolio P&L"
+  ],
+  "primary_endpoint_stale_positions": 8,
+  "primary_positive_years": 2,
+  "primary_relative_CAGR": -0.0005751901379936752,
+  "primary_relative_CAGR_block95CI": [
+    -0.007668356191963044,
+    0.006424721628839336
+  ],
+  "primary_relative_total": -0.00220993385360424,
+  "simulations": [
+    {
+      "annual_returns": {
+        "2022": -0.1423425905634519,
+        "2023": -0.03491576817986408,
+        "2024": 0.11483919116940333,
+        "2025": 0.18792640985687736,
+        "2026": -0.027352116000917137
+      },
+      "blocked_orders_full": 4207,
+      "capacity_capped_orders_full": 0,
+      "corporate_action_approximations_full": 6185,
+      "delisting_writeoffs_full": 0,
+      "fees_full": 0.0,
+      "full_total_return": 0.06619459185131005,
+      "gross_turnover_full": 8.207028410221348,
+      "mean_cash_weight_full": 0.11812951350003706,
+      "name": "benchmark_0x",
+      "primary_CAGR": 0.02416866666980555,
+      "primary_max_drawdown": -0.2745884994803992,
+      "primary_total_return": 0.09617736222034012,
+      "stale_holding_days_full": 1884,
+      "terminal_stale_weight_full": 0.0050647415033531476,
+      "trades_full": 24920
+    },
+    {
+      "annual_returns": {
+        "2022": -0.14520680084156545,
+        "2023": -0.02415965728690017,
+        "2024": 0.13454051435955394,
+        "2025": 0.17438994092847615,
+        "2026": -0.017965740114125994
+      },
+      "blocked_orders_full": 1919,
+      "capacity_capped_orders_full": 0,
+      "corporate_action_approximations_full": 6127,
+      "delisting_writeoffs_full": 0,
+      "fees_full": 0.0,
+      "full_total_return": 0.09143731489814866,
+      "gross_turnover_full": 16.778633081911813,
+      "mean_cash_weight_full": 0.11532115562209917,
+      "name": "selection_0x",
+      "primary_CAGR": 0.027849671949519372,
+      "primary_max_drawdown": -0.26495525312355406,
+      "primary_total_return": 0.11140451966002574,
+      "stale_holding_days_full": 1884,
+      "terminal_stale_weight_full": 0.00533735279203242,
+      "trades_full": 37038
+    },
+    {
+      "annual_returns": {
+        "2022": -0.14778210855504537,
+        "2023": -0.03885733826211535,
+        "2024": 0.11039254795041153,
+        "2025": 0.18124876411530466,
+        "2026": -0.03303009894388631
+      },
+      "blocked_orders_full": 4284,
+      "capacity_capped_orders_full": 0,
+      "corporate_action_approximations_full": 6182,
+      "delisting_writeoffs_full": 0,
+      "fees_full": 157866.63517160126,
+      "full_total_return": 0.03888951605887292,
+      "gross_turnover_full": 8.191403307222254,
+      "mean_cash_weight_full": 0.12000654512542827,
+      "name": "benchmark_1x",
+      "primary_CAGR": 0.01883204251895676,
+      "primary_max_drawdown": -0.2824418746784133,
+      "primary_total_return": 0.07437627057906293,
+      "stale_holding_days_full": 1884,
+      "terminal_stale_weight_full": 0.005149248228333117,
+      "trades_full": 24690
+    },
+    {
+      "annual_returns": {
+        "2022": -0.15315172542080902,
+        "2023": -0.03262206037988524,
+        "2024": 0.12446122067405141,
+        "2025": 0.16372218736263977,
+        "2026": -0.025407591092804327
+      },
+      "blocked_orders_full": 1913,
+      "capacity_capped_orders_full": 0,
+      "corporate_action_approximations_full": 6119,
+      "delisting_writeoffs_full": 0,
+      "fees_full": 258715.97662370594,
+      "full_total_return": 0.04476498238054494,
+      "gross_turnover_full": 16.763157269231353,
+      "mean_cash_weight_full": 0.1171268560018889,
+      "name": "selection_1x",
+      "primary_CAGR": 0.01824602037582812,
+      "primary_max_drawdown": -0.2791544581007739,
+      "primary_total_return": 0.07200197008720122,
+      "stale_holding_days_full": 1884,
+      "terminal_stale_weight_full": 0.00532970198456729,
+      "trades_full": 36867
+    },
+    {
+      "annual_returns": {
+        "2022": -0.15342050678323882,
+        "2023": -0.042957532123407804,
+        "2024": 0.10477260033552649,
+        "2025": 0.1748692990441516,
+        "2026": -0.036915055518745965
+      },
+      "blocked_orders_full": 4233,
+      "capacity_capped_orders_full": 0,
+      "corporate_action_approximations_full": 6178,
+      "delisting_writeoffs_full": 0,
+      "fees_full": 311985.04461785534,
+      "full_total_return": 0.012805375270079411,
+      "gross_turnover_full": 8.157536140679067,
+      "mean_cash_weight_full": 0.12086981942264013,
+      "name": "benchmark_2x",
+      "primary_CAGR": 0.013176991324016285,
+      "primary_max_drawdown": -0.29055061043081865,
+      "primary_total_return": 0.05162621539640644,
+      "stale_holding_days_full": 1884,
+      "terminal_stale_weight_full": 0.005043614622047028,
+      "trades_full": 24428
+    },
+    {
+      "annual_returns": {
+        "2022": -0.16107296289111994,
+        "2023": -0.041008642141633356,
+        "2024": 0.1132872795374511,
+        "2025": 0.15068119024897575,
+        "2026": -0.03207909480588922
+      },
+      "blocked_orders_full": 1926,
+      "capacity_capped_orders_full": 0,
+      "corporate_action_approximations_full": 6108,
+      "delisting_writeoffs_full": 0,
+      "fees_full": 510098.43668274715,
+      "full_total_return": -0.0024354320943021923,
+      "gross_turnover_full": 16.672433313678013,
+      "mean_cash_weight_full": 0.11997971125352701,
+      "name": "selection_2x",
+      "primary_CAGR": 0.007876012294358192,
+      "primary_max_drawdown": -0.2924455294984307,
+      "primary_total_return": 0.030626120949048152,
+      "stale_holding_days_full": 1884,
+      "terminal_stale_weight_full": 0.00540033815686732,
+      "trades_full": 36550
+    }
+  ],
+  "status": "complete",
+  "verdict": "no_robust_net_edge"
+}

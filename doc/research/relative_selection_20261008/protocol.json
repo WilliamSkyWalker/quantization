@@ -1,0 +1,33 @@
+{
+  "benchmark": "same-universe monthly equal weight, identical costs/gates/lots/capital; NOT CSI index tracking",
+  "corporate_actions": "adj_factor ratio synthetic share credits, fractional part cashed at open; approximate total-return ledger",
+  "costs": {
+    "commission_each_side": 0.0003,
+    "minimum_commission_CNY": 5,
+    "multipliers": [
+      0,
+      1,
+      2
+    ],
+    "sell_tax_conservative_all_dates": 0.001,
+    "slippage_each_side": 0.001
+  },
+  "diagnostic": "2026-01-01..2026-09-30",
+  "execution": "month end close signal, next session open, monthly only, 100-share buy lots, sells before buys, CNY10m, no leverage, no forced terminal liquidation",
+  "historical_data_previously_seen": true,
+  "liquidity": "orders capped at 1% of prior20-day mean turnover; no current-day high/low/volume used; opening directional 4.5% gate due to missing historical ST; blocked remainder not retried until next scheduled rebalance",
+  "missing": "missing quotes cannot trade; carry last mark; delisted holdings written off on recorded delisting date; report stale and coverage gaps",
+  "model": "equal weight of three cross-sectional centered percentile ranks, residualized on historical industry indicators + log float cap + log 20-day mean CNY amount; no fitted parameters or winner selection",
+  "pass": "primary relative CAGR>0, >=3 of 4 positive annual relative returns, 3-month-block bootstrap 95% lower bound>0, double-cost relative CAGR>0, no primary terminal stale holdings; support is provisional because survivor/ST/corporate-action/PIT gaps remain",
+  "primary": "2022-01-01..2025-12-31",
+  "signals": [
+    "negative close-to-close 5 session return",
+    "adjusted close(t-5)/close(t-120)-1",
+    "negative population stdev of 20 daily log returns"
+  ],
+  "uncertainty": "2000 deterministic circular block bootstraps of primary monthly log relative returns; not a correction for previous strategy exploration",
+  "universe": "SH60/SZ00, listed >=365 calendar days, 121 consecutive valid adjusted closes, 20-day mean amount >=CNY20m, historical industry known, top800 float cap then remove industries with <5 names",
+  "version": 1,
+  "warmup": "2021",
+  "weights": "(1 + 0.8 * composite / max(abs(composite))) / N; exact target industry, log cap, log liquidity neutrality vs same-universe equal weight"
+}

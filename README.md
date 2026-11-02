@@ -2,6 +2,8 @@
 
 覆盖数据采集、因子计算、组合构建、风控、回测、模拟交易、舆情爬取和报告生成。
 
+2026-10-08 新增 A 股月频相对选股研究：`cd quant-engine && ./target/release/quant --market cn relative-selection`。固定反转、动量、低波动三信号，控制历史行业、流通市值和流动性，与相同股票池等权基准比较。2022—2025 年扣费年化 1.82%，基准 1.88%，**未通过优势检验**。详见 [A 股策略文档](doc/A_SHARE_STRATEGY.md)。
+
 > **2026-04-30 重大变更**：所有 Python 代码 + React 前端已归档到 [`legacy_python/`](legacy_python/)，不再维护。生产策略全部迁移到 Rust [`quant-engine/`](quant-engine/)。原因：Python 引擎多个 bug 未修，Rust v25 已达机构级 alpha (α=13.28%, t=3.40, Sharpe 0.99)。
 
 ## 系统架构（Rust 单栈，10 crates）

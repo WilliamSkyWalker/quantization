@@ -1,0 +1,20 @@
+[
+  {
+    "mean_partial_rank_ic": 0.02821316774001938,
+    "mean_raw_rank_ic": 0.04249493585253434,
+    "primary_complete_months": 47,
+    "signal": "reversal_5"
+  },
+  {
+    "mean_partial_rank_ic": -0.019279568916284913,
+    "mean_raw_rank_ic": -0.05917117253949097,
+    "primary_complete_months": 47,
+    "signal": "momentum_120_skip5"
+  },
+  {
+    "mean_partial_rank_ic": 0.04223004982039248,
+    "mean_raw_rank_ic": 0.10486821633060711,
+    "primary_complete_months": 47,
+    "signal": "low_vol_20"
+  }
+]

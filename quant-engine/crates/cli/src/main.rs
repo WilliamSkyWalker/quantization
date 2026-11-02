@@ -72,6 +72,13 @@ enum AlpacaAction {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Frozen monthly risk-controlled relative selection research (read-only DB).
+    RelativeSelection {
+        #[arg(long, default_value = "../output/a_relative_selection_v2")]
+        output: PathBuf,
+        #[arg(long, default_value = "../cache/a_relative_selection_v1")]
+        cache_dir: PathBuf,
+    },
     /// Frozen rolling A-share pair selection validation, read-only MySQL.
     PairValidation {
         #[arg(long, default_value = "../output/a_pair_validation_v4")]
@@ -358,6 +365,19 @@ fn main() {
     };
 
     match cli.command {
+        Commands::RelativeSelection { output, cache_dir } => {
+            if !matches!(cli.market, Market::Cn) {
+                eprintln!("relative-selection requires --market cn");
+                std::process::exit(1);
+            }
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            if let Err(e) = rt.block_on(quant_research::a_relative_selection::run(
+                &_config, &cache_dir, &output,
+            )) {
+                eprintln!("Relative selection failed: {e}");
+                std::process::exit(1);
+            }
+        }
         Commands::PairValidation { output, cache_dir } => {
             if !matches!(cli.market, Market::Cn) {
                 eprintln!("pair-validation requires --market cn");
